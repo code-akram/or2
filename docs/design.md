@@ -216,6 +216,50 @@ Consequences for `or2-core`:
 **M4: agent features.** Quick replies, opt-in notifications, image paste (SFTP upload + path), voice.
 **Later.** tmux control mode, embedded ZeroTier, chat view, diff viewer, port-forward preview.
 
+### M1 implementation checklist
+
+Work through the remaining stages in order. Checked items are verified setup, not a completed
+SSH terminal. Keep the two-crate architecture and the Kotlin/Rust boundaries above.
+
+Completed foundation:
+- [x] Configure shared user-local JDK, Android SDK/NDK and Gradle tooling.
+- [x] Build the Rust/Android scaffold and generated UniFFI bootstrap contract with dependency locks.
+- [x] Verify Rust checks, Android builds, JVM native tests and the phone native-library smoke test.
+
+**1. Host and key entry**
+- [ ] Add Compose host/key entry and persist host settings in Room; no storage in Rust.
+- [ ] Support Ed25519 generation and OpenSSH key import, including passphrase-protected keys.
+- [ ] Encrypt private keys with a hardware-backed Android Keystore key behind biometric unlock;
+  decrypt only at connect time and hand them to Rust. Keep credentials out of logs and the repo.
+
+**2. SSH connection and session lifecycle**
+- [ ] Add direct TCP through the `Transport` trait and russh key authentication in `or2-core`.
+- [ ] Show the host fingerprint for explicit first-use confirmation, persist trust in Kotlin,
+  and reject changed host keys until explicitly approved. Keep agent forwarding off.
+- [ ] Open a PTY shell and expose real session, resize, input, output and error handling through
+  `or2-ffi`; test failures as well as successful connections, with no success-returning stubs.
+- [ ] Tie session ownership to the app lifecycle for M1, with explicit disconnect and cleanup.
+
+**3. Terminal rendering and input**
+- [ ] Integrate the pinned libghostty-vt engine in `or2-core`; keep terminal state in Rust and
+  expose changed-row snapshots through UniFFI. Preserve the M0 spike until its findings land.
+- [ ] Draw snapshots with hardware-accelerated Android Canvas and a glyph cache; instrument
+  frame times. Handle cursor, styles, alternate screen, wide characters and terminal resizing.
+- [ ] Wire Android IME and the keys row through the terminal key encoder to SSH input; add
+  scrolling and selection. Test text composition and control/navigation keys on the phone.
+
+**4. End-to-end phone acceptance**
+- [ ] Run Rust and native contract tests, Android builds and lint using [the build workflow](build.md).
+- [ ] On the phone, add a host/key, confirm its fingerprint and use an interactive SSH shell;
+  verify typing, keys row, resize, scrolling, Unicode and a full-screen terminal application.
+- [ ] Verify rejected/changed host keys, authentication failure, connection loss and disconnect
+  produce clear states without silently trusting a host or leaking credentials.
+- [ ] Record results and remaining limitations; mark M1 complete only after the usable-shell
+  acceptance passes. Install or change host authorization only with explicit user approval.
+
+Mosh, tmux/herdr integration and the foreground service remain M2/M3 work. Release signing is
+not configured by the scaffold; M1 development uses the debug APK.
+
 ## Decisions
 
 | Decision | Choice | Why |
