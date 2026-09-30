@@ -1,0 +1,14 @@
+[package]
+name = "herdr-ssh-spike"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "=1.0.100"
+russh = "=0.63.3"
+serde_json = "=1.0.145"
+tokio = { version = "=1.47.1", features = ["macros", "rt-multi-thread", "io-util", "time"] }

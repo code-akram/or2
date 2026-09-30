@@ -1,0 +1,11 @@
+[package]
+name = "ghostty-android-spike"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "8953a740bc378cec3e07e1f6ca949f0595eab19b" }
+portable-pty = "0.9.0"

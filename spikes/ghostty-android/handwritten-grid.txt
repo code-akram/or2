@@ -1,0 +1,13 @@
+before alt screen:
+base                
+  RED 界  😀          
+                    
+                    
+                    
+
+after returning:
+base                
+  RED 界  😀          
+                    
+                    
+                    

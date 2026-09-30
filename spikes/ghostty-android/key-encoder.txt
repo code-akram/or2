@@ -1,0 +1,3 @@
+Ctrl+C: [3]
+ArrowUp: [27, 91, 65]
+Enter: [13]

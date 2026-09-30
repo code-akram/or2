@@ -1,0 +1,10 @@
+[package]
+name = "or2-mosh-spike"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mosh-rs = { git = "https://github.com/wilsonglasser/mosh-rs", rev = "90b37125f5e4a598be91dec37d23921b6865276e" }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
