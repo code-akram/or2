@@ -14,13 +14,30 @@ fun TerminalGrid.position(x: Float, y: Float, cellWidth: Float, cellHeight: Floa
 }
 
 /** Captures the displayed rows, so arriving output cannot silently change what Copy copies. */
-class TerminalSelection(val rows: List<ResolvedRow>, val columns: Int, val anchor: CellPosition) {
-    var end = anchor
+class TerminalSelection(
+    val rows: List<ResolvedRow>, val columns: Int, val anchor: CellPosition,
+    private val initialEnd: CellPosition = anchor,
+) {
+    var end = initialEnd
+
+    companion object {
+        fun word(rows: List<ResolvedRow>, columns: Int, position: CellPosition): TerminalSelection {
+            val cells = rows[position.row].cells
+            fun blank(column: Int) = cells[column].width != CellWidth.SPACER_TAIL && cells[column].text.isBlank()
+            var first = position.column
+            var last = position.column
+            if (!blank(first)) {
+                while (first > 0 && !blank(first - 1)) first--
+                while (last < columns - 1 && !blank(last + 1)) last++
+            }
+            return TerminalSelection(rows, columns, CellPosition(first, position.row), CellPosition(last, position.row))
+        }
+    }
 
     fun range(row: Int): IntRange? {
         fun index(position: CellPosition) = position.row * columns + position.column
         val first = minOf(index(anchor), index(end))
-        val last = maxOf(index(anchor), index(end))
+        val last = maxOf(index(initialEnd), index(end)) // Drag extends, rather than truncates, the initial word.
         if (row !in first / columns..last / columns) return null
         var startColumn = if (row == first / columns) first % columns else 0
         var endColumn = if (row == last / columns) last % columns else columns - 1

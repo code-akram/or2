@@ -1,5 +1,6 @@
 package io.github.code_akram.or2.terminal
 
+import android.content.ClipboardManager
 import android.graphics.RectF
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Column
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -54,6 +56,7 @@ fun TerminalScreen(
         var ctrl by remember { mutableStateOf(false) }
         var alt by remember { mutableStateOf(false) }
         var selecting by remember { mutableStateOf(false) }
+        var pendingPaste by remember { mutableStateOf<String?>(null) }
         DisposableEffect(view) {
             view.onInputChanged = { ctrl = view.input.ctrl; alt = view.input.alt }
             view.onSelectionChanged = { selecting = view.selection != null }
@@ -87,23 +90,47 @@ fun TerminalScreen(
                             TerminalButton(label, modifier = keyModifier(label)) { view.input.key(key) }
                         }
                     }
-                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).heightIn(min = 48.dp)) {
-                        TerminalButton("Keyboard") { view.showKeyboard() }
-                        TerminalButton("Bottom") { view.jumpToBottom() }
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).onGloballyPositioned {
+                        view.actionRowBounds = it.unclippedBoundsInRoot()
+                    }) {
+                        // These actions stay fixed even when navigation/symbol extras scroll.
+                        fun actionModifier(label: String) = Modifier.onGloballyPositioned {
+                            view.actionBounds[label] = it.unclippedBoundsInRoot()
+                        }
                         if (selecting) {
-                            TerminalButton("Copy") { view.copySelection() }
-                            TerminalButton("Clear") { view.clearSelection() }
+                            TerminalButton("Copy", modifier = actionModifier("Copy")) { view.copySelection() }
+                            TerminalButton("Clear", modifier = actionModifier("Clear")) { view.clearSelection() }
                         }
-                        listOf("Home" to TerminalKey.Home, "End" to TerminalKey.End,
-                            "PgUp" to TerminalKey.PageUp, "PgDn" to TerminalKey.PageDown).forEach { (label, key) ->
-                            TerminalButton(label) { view.input.key(key) }
+                        TerminalButton("Paste", modifier = actionModifier("Paste")) {
+                            val text = context.getSystemService(ClipboardManager::class.java).primaryClip
+                                ?.getItemAt(0)?.text?.toString().orEmpty()
+                            if (pasteNeedsConfirmation(text)) pendingPaste = text else view.input.paste(text)
                         }
-                        listOf("/", "-", "|", "~", "_", "$", "&", "*", "{", "}", "(", ")", "[", "]", "=", ";", "'", "\"").forEach { symbol ->
-                            TerminalButton(symbol) { view.input.key(TerminalKey.Character(symbol)) }
+                        Row(Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
+                            TerminalButton("Keyboard") { view.showKeyboard() }
+                            TerminalButton("Bottom") { view.jumpToBottom() }
+                            listOf("Home" to TerminalKey.Home, "End" to TerminalKey.End,
+                                "PgUp" to TerminalKey.PageUp, "PgDn" to TerminalKey.PageDown).forEach { (label, key) ->
+                                TerminalButton(label) { view.input.key(key) }
+                            }
+                            listOf("/", "-", "|", "~", "_", "$", "&", "*", "{", "}", "(", ")", "[", "]", "=", ";", "'", "\"").forEach { symbol ->
+                                TerminalButton(symbol) { view.input.key(TerminalKey.Character(symbol)) }
+                            }
                         }
                     }
                 }
             }
+        }
+        pendingPaste?.let { text ->
+            AlertDialog(
+                onDismissRequest = { pendingPaste = null },
+                title = { Text("Paste ${pasteLineCount(text)} lines?") },
+                text = { Text("They will run as typed.") },
+                confirmButton = { TerminalButton("Paste") { pendingPaste = null; view.input.paste(text) } },
+                dismissButton = { TerminalButton("Cancel") { pendingPaste = null } },
+                containerColor = Color(0xff101018), titleContentColor = Color(0xffd8e8ff),
+                textContentColor = Color(0xffd8e8ff),
+            )
         }
     }
 }

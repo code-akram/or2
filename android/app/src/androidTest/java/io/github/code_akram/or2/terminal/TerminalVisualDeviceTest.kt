@@ -33,7 +33,7 @@ class TerminalVisualDeviceTest {
         fail("Terminal frame or Window metrics did not arrive")
     }
 
-    private fun assertPrimaryKeysFitWithoutScrolling(view: TerminalView) {
+    private fun assertFixedKeysFitWithoutScrolling(view: TerminalView) {
         val rowBounds = checkNotNull(view.primaryKeyRowBounds) { "Essential keys row not laid out" }
         val labels = listOf("Esc", "Tab", "Ctrl", "Alt", "←", "↓", "↑", "→")
         assertEquals(labels.toSet(), view.primaryKeyBounds.keys)
@@ -51,6 +51,15 @@ class TerminalVisualDeviceTest {
             right = bounds.right
         }
         assertEquals(rowBounds.right, right, 1f)
+        val actionRow = checkNotNull(view.actionRowBounds)
+        var next = actionRow.left
+        val actions = if (view.selection == null) listOf("Paste") else listOf("Copy", "Clear", "Paste")
+        actions.forEach { label ->
+            val bounds = view.actionBounds.getValue(label)
+            assertTrue("$label must remain visible", bounds.width() > 0 && actionRow.contains(bounds))
+            assertEquals("$label must be at the start, outside the extras scroller", next, bounds.left, 1f)
+            next = bounds.right
+        }
     }
 
     private fun capture(scenario: ActivityScenario<TerminalProbeActivity>, name: String) {
@@ -62,7 +71,7 @@ class TerminalVisualDeviceTest {
         scenario.onActivity { activity ->
             activity.window.decorView.getWindowVisibleDisplayFrame(bounds)
             val view = activity.terminalView()!!
-            assertPrimaryKeysFitWithoutScrolling(view) // Direct layout reads stay on the UI thread.
+            assertFixedKeysFitWithoutScrolling(view) // Direct layout reads stay on the UI thread.
             val position = IntArray(2)
             view.getLocationOnScreen(position)
             bounds.top = position[1] // Exclude system status and debug toolbar; retain terminal + keys.

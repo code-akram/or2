@@ -38,6 +38,27 @@ class TerminalSelectionTest {
         assertEquals("界e\u0301\nab", selection.text())
     }
 
+    @Test fun wordSelectionIncludesWideTailsAndCombiningMarksThenExtendsInEitherDirection() {
+        val cells = listOf(
+            ResolvedCell("a", CellWidth.NARROW, style), ResolvedCell("", CellWidth.NARROW, style),
+            ResolvedCell("界", CellWidth.WIDE, style), ResolvedCell("", CellWidth.SPACER_TAIL, style),
+            ResolvedCell("e\u0301", CellWidth.NARROW, style), ResolvedCell("!", CellWidth.NARROW, style),
+            ResolvedCell(" ", CellWidth.NARROW, style), ResolvedCell("z", CellWidth.NARROW, style),
+        )
+        val rows = listOf(ResolvedRow(cells, false))
+        val selection = TerminalSelection.word(rows, 8, CellPosition(3, 0)) // Finger is on the wide tail.
+        assertEquals(2..5, selection.range(0))
+        assertEquals("界e\u0301!", selection.text())
+        selection.end = CellPosition(4, 0) // Moving inside the word must not truncate it.
+        assertEquals("界e\u0301!", selection.text())
+        selection.end = CellPosition(7, 0)
+        assertEquals("界e\u0301! z", selection.text())
+        selection.end = CellPosition(0, 0)
+        assertEquals("a 界e\u0301!", selection.text())
+        assertEquals("", TerminalSelection.word(rows, 8, CellPosition(1, 0)).text())
+        assertEquals("z", TerminalSelection.word(rows, 8, CellPosition(7, 0)).text())
+    }
+
     @Test fun dragAfterLargerFullFrameStillClampsAndCopiesTheSmallSnapshot() {
         fun frame(lines: List<String>) = TerminalFrame(1u, lines[0].length.toUShort(), lines.size.toUShort(),
             true, listOf(style), lines.mapIndexed { index, line ->
