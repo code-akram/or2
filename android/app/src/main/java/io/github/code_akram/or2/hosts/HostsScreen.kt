@@ -25,7 +25,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.data.HostRecord
 import io.github.code_akram.or2.data.KeyRecord
@@ -102,6 +104,8 @@ private fun HostDialog(previous: HostRecord?, keys: List<KeyRecord>, dismiss: ()
                 Column(Modifier.selectableGroup()) {
                     keys.forEach { key ->
                         Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                            .testTag("host-key:${key.id}")
+                            .semantics(mergeDescendants = true) {}
                             .selectable(selected = keyId == key.id, role = Role.RadioButton, onClick = { keyId = key.id }),
                             verticalAlignment = Alignment.CenterVertically) {
                             RadioButton(selected = keyId == key.id, onClick = null)

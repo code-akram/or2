@@ -8,6 +8,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -15,6 +19,7 @@ import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -43,6 +48,9 @@ class EntryUiDeviceTest {
 
     private val fixtureKey = KeyRecord("fixture-key", "Fixture key", "test", "public", "fingerprint", "", byteArrayOf(), byteArrayOf())
 
+    private fun keyChoice(key: KeyRecord) = compose.onNodeWithTag("host-key:${key.id}")
+        .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.RadioButton))
+
     private fun fillHostFields() {
         compose.onNodeWithText("Label").performScrollTo().performTextInput("Fixture")
         compose.onNodeWithText("Hostname").performScrollTo().performTextInput("fixture.invalid")
@@ -59,13 +67,13 @@ class EntryUiDeviceTest {
             }
         }
         compose.onNodeWithText("Add host").performClick()
-        compose.onNodeWithText("Fixture key").performScrollTo().assertIsSelected()
+        keyChoice(fixtureKey).performScrollTo().assertIsSelected()
         compose.onNodeWithText("Choose a key").assertDoesNotExist()
         fillHostFields()
         compose.onNodeWithText("Save").assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(fixtureKey.id, saved!!.keyId) }
         compose.onNodeWithText("Edit").performClick()
-        compose.onNodeWithText("Fixture key").performScrollTo().assertIsNotSelected()
+        keyChoice(fixtureKey).performScrollTo().assertIsNotSelected()
         compose.onNodeWithText("Choose a key").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Save").assertIsNotEnabled()
         compose.onNodeWithText("Cancel").performClick()
@@ -74,20 +82,21 @@ class EntryUiDeviceTest {
     @Test
     fun multipleKeysNeedAnExplicitChoiceAndExposeTheSelectedRadioState() {
         var saved: HostRecord? = null
-        val second = fixtureKey.copy(id = "second-key", label = "Second key")
+        // Duplicate labels must not make the test target a different choice.
+        val second = fixtureKey.copy(id = "second-key")
         compose.runOnUiThread {
             compose.activity.setContent {
                 MaterialTheme { HostsScreen(emptyList(), listOf(fixtureKey, second), false, { host, _ -> saved = host }, {}, {}) }
             }
         }
         compose.onNodeWithText("Add host").performClick()
-        compose.onNodeWithText("Fixture key").performScrollTo().assertIsNotSelected()
-        compose.onNodeWithText("Second key").performScrollTo().assertIsNotSelected()
+        keyChoice(fixtureKey).performScrollTo().assertIsNotSelected()
+        keyChoice(second).performScrollTo().assertIsNotSelected()
         fillHostFields()
         compose.onNodeWithText("Choose a key").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Save").assertIsNotEnabled()
-        compose.onNodeWithText("Second key").performScrollTo().performClick().assertIsSelected()
-        compose.onNodeWithText("Fixture key").assertIsNotSelected()
+        keyChoice(second).performScrollTo().performClick().assertIsSelected()
+        keyChoice(fixtureKey).assertIsNotSelected()
         compose.onNodeWithText("Choose a key").assertDoesNotExist()
         compose.onNodeWithText("Save").assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(second.id, saved!!.keyId) }
