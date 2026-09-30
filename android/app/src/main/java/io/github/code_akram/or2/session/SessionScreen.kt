@@ -2,19 +2,26 @@ package io.github.code_akram.or2.session
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.code_akram.or2.ffi.SessionState
@@ -37,11 +44,26 @@ fun SessionScreen(holder: SessionHolder, busy: Boolean, approve: (ActiveSession,
         val state by displayed.state.collectAsStateWithLifecycle()
         val handle by displayed.handle.collectAsStateWithLifecycle()
         val hasConnected by displayed.hasConnected.collectAsStateWithLifecycle()
-        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(displayed.host.label, style = MaterialTheme.typography.titleLarge)
-            Text(sessionMessage(state))
-            Button(onClick = { if (state is SessionState.Closed) holder.dismiss() else holder.disconnect() }) {
-                Text(if (state is SessionState.Closed) "Close session" else "Disconnect")
+        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(if (hasConnected) 0.dp else 12.dp)) {
+            if (hasConnected) {
+                Surface(color = MaterialTheme.colorScheme.surface) {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(displayed.host.label, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(sessionMessage(state), style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        TextButton(onClick = { if (state is SessionState.Closed) holder.dismiss() else holder.disconnect() }) {
+                            Text(if (state is SessionState.Closed) "Close" else "Disconnect")
+                        }
+                    }
+                }
+            } else {
+                Text(displayed.host.label, style = MaterialTheme.typography.titleLarge)
+                Text(sessionMessage(state))
+                Button(onClick = { if (state is SessionState.Closed) holder.dismiss() else holder.disconnect() }) {
+                    Text(if (state is SessionState.Closed) "Close session" else "Disconnect")
+                }
             }
             // Keep the borrowed handle composed through Closed so its final frame stays visible.
             if (hasConnected) handle?.let { TerminalScreen(it, displayed.state, displayed.frameReady, Modifier.weight(1f)) }
