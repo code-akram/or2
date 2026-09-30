@@ -67,16 +67,19 @@ opens sockets.
   `ClientKeyMaterial { private_key, public_key: PublicKeyInfo }`.
 - `private_key` is the storage form: an unencrypted OpenSSH private key with LF line endings.
   Kotlin encrypts it with a hardware-backed Keystore key behind biometric unlock, decrypts it
-  only to build a `ConnectRequest`, and zero-fills its `ByteArray` after the call returns.
+  only to build a `ConnectRequest`, and zero-fills its `ByteArray` after the call returns or throws.
   A passphrase is needed only at import.
 - Import accepts OpenSSH-format Ed25519, ECDSA (P-256/384/521) and RSA keys. Errors:
   `Malformed`, `UnsupportedFormat` (PEM/PKCS#8; convert with `ssh-keygen -p`),
   `PassphraseRequired`, `WrongPassphrase`, `UnsupportedAlgorithm` (DSA, `sk-*`).
 - `PublicKeyInfo.openssh` is the `authorized_keys` line; `fingerprint` is `SHA256:…` exactly as
   `ssh-keygen -l -E sha256` prints it.
-- Kotlin zero-fills every private-key `ByteArray` it holds as soon as it is done with it: the
-  imported file bytes, `ClientKeyMaterial.private_key` after encrypting it, and the decrypted
-  bytes after building a `ConnectRequest`.
+- Kotlin zero-fills every private-key `ByteArray` it holds, in a `finally`, once Rust no longer
+  needs it: the imported file bytes after `import_private_key` returns or throws,
+  `ClientKeyMaterial.private_key` after encrypting it, and the decrypted bytes after the
+  synchronous `connect` (or probe) call returns or throws. The generated `ConnectRequest` keeps
+  a reference to the array rather than a copy, so wiping it after constructing the request but
+  before the call would erase the key before UniFFI serializes it.
 - Never log, print or string-format `ClientKeyMaterial` or `ConnectRequest`. They are
   generated Kotlin data classes whose `toString()` is not redacted: it prints the private key
   bytes (`Arrays.toString`). Only the Rust `Debug` implementations are redacted.
