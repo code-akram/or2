@@ -72,6 +72,11 @@ class FrameTimings(private val capacity: Int = 240) {
         count = (count + 1).coerceAtMost(capacity)
     }
 
+    fun clear() {
+        next = 0
+        count = 0
+    }
+
     fun percentile(percent: Int): Double {
         if (count == 0) return 0.0
         val sorted = samples.take(count).sorted()

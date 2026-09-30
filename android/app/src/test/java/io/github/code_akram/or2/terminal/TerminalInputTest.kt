@@ -50,10 +50,11 @@ class TerminalInputTest {
         assertEquals(TerminalKey.Enter, keys.last().key)
     }
 
-    @Test fun deletesBecomeBackspacesAndRejectNegativeLengths() {
+    @Test fun backwardAndForwardDeletionAreDistinctAndRejectNegativeLengths() {
         assertTrue(input.deleteSurrounding(2, 1))
-        assertEquals(List(3) { TerminalKey.Backspace }, keys.map { it.key })
+        assertEquals(listOf(TerminalKey.Backspace, TerminalKey.Backspace, TerminalKey.Delete), keys.map { it.key })
         assertFalse(input.deleteSurrounding(-1, 0))
+        assertFalse(input.deleteSurrounding(0, -1))
         assertEquals(3, keys.size)
     }
 

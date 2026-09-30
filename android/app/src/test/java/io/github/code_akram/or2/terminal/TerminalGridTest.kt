@@ -51,5 +51,9 @@ class TerminalGridTest {
         listOf(99, 1, 2, 3).forEach { timings.record(it * 1_000_000L) }
         assertEquals(2.0, timings.percentile(50), 0.0)
         assertEquals(3.0, timings.percentile(95), 0.0)
+        timings.clear()
+        assertEquals(0, timings.count)
+        timings.record(10_000_000L)
+        assertEquals(10.0, timings.percentile(95), 0.0)
     }
 }

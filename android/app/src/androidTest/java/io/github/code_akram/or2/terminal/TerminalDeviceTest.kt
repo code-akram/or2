@@ -98,7 +98,14 @@ class TerminalDeviceTest {
             view.bind(session)
             view.sessionState(SessionState.Connected)
             assertEquals(1, session.snapshots)
-            val connection = view.onCreateInputConnection(EditorInfo())
+            val defaultInfo = EditorInfo()
+            val connection = view.onCreateInputConnection(defaultInfo)
+            assertEquals(InputType.TYPE_TEXT_VARIATION_NORMAL, defaultInfo.inputType and InputType.TYPE_MASK_VARIATION)
+            view.directLatinInput = true
+            val comparisonInfo = EditorInfo()
+            view.onCreateInputConnection(comparisonInfo)
+            assertEquals(InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD, comparisonInfo.inputType and InputType.TYPE_MASK_VARIATION)
+            view.directLatinInput = false
             connection.setComposingText("not sent", 1)
             connection.finishComposingText()
             assertTrue(session.texts.isEmpty())

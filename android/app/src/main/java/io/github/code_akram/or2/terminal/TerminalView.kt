@@ -24,7 +24,6 @@ import io.github.code_akram.or2.ffi.CellStyle
 import io.github.code_akram.or2.ffi.CellWidth
 import io.github.code_akram.or2.ffi.CursorShape
 import io.github.code_akram.or2.ffi.KeyModifiers
-import io.github.code_akram.or2.ffi.SessionException
 import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.Underline
@@ -35,8 +34,12 @@ import kotlin.math.ceil
 class TerminalView(context: Context) : View(context) {
     val grid = TerminalGrid()
     val applyTimings = FrameTimings()
+    /** CPU display-list recording only; Window frame metrics measure the render pipeline. */
     val drawTimings = FrameTimings()
     var showTimings = false
+    // Prepared for debug IME comparison only. Production keeps composition-capable text mode
+    // until the default phone IME's single-letter latency has been tested.
+    internal var directLatinInput = false
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.MONOSPACE
@@ -53,8 +56,8 @@ class TerminalView(context: Context) : View(context) {
     var onInputChanged: () -> Unit = {}
     var onSelectionChanged: () -> Unit = {}
     val input = TerminalInput(
-        { text -> sessionCall { sendText(text) } },
-        { key -> sessionCall { sendKey(key) } },
+        { text -> clearSelection(); sessionCall { sendText(text) } },
+        { key -> clearSelection(); sessionCall { sendKey(key) } },
         { invalidate(); onInputChanged() },
     )
     var selection: TerminalSelection? = null
@@ -88,7 +91,7 @@ class TerminalView(context: Context) : View(context) {
             return true
         }
     })
-    private var session: SessionInterface? = null
+    private val session = TerminalSession()
     private var connected = false
     private var lastSize: GridSize? = null
     private var framePending = false
@@ -104,7 +107,7 @@ class TerminalView(context: Context) : View(context) {
     private val frameCallback = Choreographer.FrameCallback {
         framePending = false
         val start = System.nanoTime()
-        session?.takeFrame()?.let { frame ->
+        session.takeFrame()?.let { frame ->
             if (grid.apply(frame)) {
                 requestedFull = false
                 cursorVisible = true
@@ -123,41 +126,28 @@ class TerminalView(context: Context) : View(context) {
     }
 
     fun bind(session: SessionInterface) {
-        check(this.session == null || this.session === session) { "A terminal view belongs to one session" }
-        this.session = session
+        this.session.bind(session)
         resizeSession()
     }
 
     fun sessionState(state: SessionState) {
-        connected = state == SessionState.Connected
+        connected = !session.gone && state == SessionState.Connected
         if (connected && !grid.hasGrid) requestSnapshot()
     }
 
     private fun requestSnapshot() {
-        if (!connected || requestedFull) return
+        if (!connected || session.gone || requestedFull) return
         if (sessionCall { requestFullFrame() }) requestedFull = true
     }
 
     fun frameReady() {
-        if (!framePending && isAttachedToWindow) {
+        if (!session.gone && !framePending && isAttachedToWindow) {
             framePending = true
             Choreographer.getInstance().postFrameCallback(frameCallback)
         }
     }
 
-    internal fun sessionCall(block: SessionInterface.() -> Unit): Boolean {
-        val handle = session ?: return false
-        return try {
-            handle.block()
-            true
-        } catch (_: SessionException.NotConnected) {
-            false
-        } catch (_: SessionException.Closed) {
-            false
-        } catch (_: SessionException.InvalidKey) {
-            false
-        }
-    }
+    internal fun sessionCall(block: SessionInterface.() -> Unit): Boolean = session.call(block)
 
     fun showKeyboard() {
         requestFocus()
@@ -169,7 +159,9 @@ class TerminalView(context: Context) : View(context) {
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
         // Text + multiline retains CJK/dead-key composition. NO_SUGGESTIONS and omission of
         // AUTO_CORRECT prevent command rewriting; password types would break some IMEs.
-        outAttrs.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        outAttrs.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+            InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
+            if (directLatinInput) InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD else InputType.TYPE_TEXT_VARIATION_NORMAL
         outAttrs.imeOptions = EditorInfo.IME_ACTION_NONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI or
             EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
         outAttrs.initialSelStart = 0

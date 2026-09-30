@@ -52,7 +52,7 @@ class TerminalInput(
     fun deleteSurrounding(before: Int, after: Int): Boolean {
         if (before < 0 || after < 0) return false
         repeat(before) { key(TerminalKey.Backspace) }
-        repeat(after) { key(TerminalKey.Backspace) }
+        repeat(after) { key(TerminalKey.Delete) }
         return true
     }
 }
