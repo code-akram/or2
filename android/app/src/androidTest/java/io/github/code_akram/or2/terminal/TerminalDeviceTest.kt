@@ -9,6 +9,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
+import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
@@ -113,13 +114,14 @@ class TerminalDeviceTest {
             view.sessionState(SessionState.Connected)
             assertEquals(1, session.snapshots)
             val defaultInfo = EditorInfo()
-            val connection = view.onCreateInputConnection(defaultInfo)
+            view.onCreateInputConnection(defaultInfo)
             assertEquals(InputType.TYPE_TEXT_VARIATION_NORMAL, defaultInfo.inputType and InputType.TYPE_MASK_VARIATION)
             view.directLatinInput = true
             val comparisonInfo = EditorInfo()
             view.onCreateInputConnection(comparisonInfo)
             assertEquals(InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD, comparisonInfo.inputType and InputType.TYPE_MASK_VARIATION)
             view.directLatinInput = false
+            val connection = view.onCreateInputConnection(EditorInfo())
             connection.setComposingText("finished", 1)
             assertTrue(session.texts.isEmpty())
             connection.finishComposingText()
@@ -147,6 +149,54 @@ class TerminalDeviceTest {
             connection.closeConnection()
             connection.finishComposingText()
             assertEquals(listOf("finished"), session.texts)
+        }
+    }
+
+    @Test fun pasteRetiresComposingEditorAndFreshCompositionCommitsAfterLiteralText() {
+        instrumentation.runOnMainSync {
+            val view = TerminalView(instrumentation.targetContext)
+            val session = RecordingSession()
+            view.bind(session)
+            val old = view.onCreateInputConnection(EditorInfo()) as TerminalInputConnection
+            old.setComposingText("にほん", 1)
+            val editable = old.getEditable()
+            BaseInputConnection.setComposingSpans(editable)
+            assertEquals(0, BaseInputConnection.getComposingSpanStart(editable))
+            assertEquals(3, BaseInputConnection.getComposingSpanEnd(editable))
+            view.input.toggleCtrl()
+            view.input.toggleAlt()
+            view.paste("")
+            assertEquals("にほん", editable.toString())
+            assertEquals("にほん", view.input.composing)
+            assertTrue(session.texts.isEmpty())
+            view.paste("echo pasted\n")
+            assertEquals("", editable.toString())
+            assertEquals(-1, BaseInputConnection.getComposingSpanStart(editable))
+            assertEquals(-1, BaseInputConnection.getComposingSpanEnd(editable))
+            assertEquals(0, editable.getSpans(0, editable.length, Any::class.java).size)
+            assertEquals("", view.input.composing)
+            assertEquals(listOf("echo pasted\n"), session.texts)
+            assertTrue(view.input.ctrl)
+            assertTrue(view.input.alt)
+            assertFalse(old.setComposingText("にほんご", 1))
+            assertFalse(old.setComposingRegion(0, 0))
+            assertFalse(old.commitText("日本語", 1))
+            assertFalse(old.finishComposingText())
+            assertFalse(old.deleteSurroundingText(1, 0))
+            assertFalse(old.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER)))
+            assertEquals(listOf("echo pasted\n"), session.texts)
+            assertTrue(session.keys.isEmpty())
+            view.input.toggleCtrl()
+            view.input.toggleAlt()
+            val fresh = view.onCreateInputConnection(EditorInfo())
+            assertTrue(fresh.setComposingText("あたらしい", 1))
+            old.closeConnection() // An asynchronous close must not erase the fresh overlay.
+            assertEquals("あたらしい", view.input.composing)
+            assertTrue(fresh.commitText("新しい", 1))
+            fresh.finishComposingText()
+            assertEquals(listOf("echo pasted\n", "新しい"), session.texts)
+            assertTrue(session.keys.isEmpty())
+            assertEquals("", view.input.composing)
         }
     }
 
