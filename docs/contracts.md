@@ -43,6 +43,10 @@ document and the tests together, and bumping `API_VERSION` in `or2-ffi` when an 
   concurrently for one session, and in order. They must return quickly (post to the main or
   render thread). A Kotlin `Exception` from a callback is ignored and does not affect the
   session; a Kotlin `Error` is not caught by the generated code, so do not throw one.
+- Callbacks can begin before the factory (`connect`, or `contract_probe_session` today) has
+  returned and before Kotlin has stored the `Session`. Listeners must not assume the handle is
+  already assigned: record or post the event and defer work that needs the handle (for
+  example `take_frame()` or `approve_host_key()`) until it is available.
 - The initial state is `Connecting` and is not delivered as a change. `Closed` is delivered
   exactly once and last; Rust then releases the listener, which breaks the reference cycle
   through Kotlin. If the driver ends without closing, the handle reports
@@ -70,9 +74,16 @@ opens sockets.
   `PassphraseRequired`, `WrongPassphrase`, `UnsupportedAlgorithm` (DSA, `sk-*`).
 - `PublicKeyInfo.openssh` is the `authorized_keys` line; `fingerprint` is `SHA256:…` exactly as
   `ssh-keygen -l -E sha256` prints it.
-- Rust zeroizes its copies (`Zeroizing`, `ssh-key` zeroize-on-drop) and redacts `Debug`.
-  Known limits: UniFFI copies byte arrays through a buffer it frees without zeroing, and a
-  passphrase is a JVM `String` that cannot be wiped.
+- Kotlin zero-fills every private-key `ByteArray` it holds as soon as it is done with it: the
+  imported file bytes, `ClientKeyMaterial.private_key` after encrypting it, and the decrypted
+  bytes after building a `ConnectRequest`.
+- Never log, print or string-format `ClientKeyMaterial` or `ConnectRequest`. They are
+  generated Kotlin data classes whose `toString()` is not redacted: it prints the private key
+  bytes (`Arrays.toString`). Only the Rust `Debug` implementations are redacted.
+- Rust zeroizes the key inputs it receives (`Zeroizing`) and parsed keys (`ssh-key`
+  zeroize-on-drop). Known limits: the outgoing `ClientKeyMaterial.private_key` buffer and
+  UniFFI's marshaling buffers are freed without being wiped, and a passphrase is a JVM `String`
+  that cannot be wiped.
 
 ## Host-key trust
 
@@ -141,6 +152,11 @@ The renderer pulls; Rust never queues frames.
 flag (soft-wrapped into the next row). `TerminalCell`: `text` (one grapheme cluster; empty for
 blanks and tails), `width` (`NARROW`, `WIDE` head spanning two columns, `SPACER_TAIL` with no
 text) and `style` (index into `styles`).
+
+Style indices are scoped to their own frame's `styles` table. When applying a delta, resolve
+each changed cell's style through that delta's table; rows the delta does not contain keep the
+styles they were resolved with earlier. Never reinterpret a cached row's indices through a
+later frame's table.
 
 Colours are `0x00RRGGBB` and fully resolved: default colours, palette, inverse and invisible
 are applied in Rust, so Kotlin draws `foreground` on `background`. `CellStyle` keeps `bold`,

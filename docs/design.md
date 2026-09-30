@@ -242,7 +242,8 @@ Completed foundation:
 - [x] Define resize, committed-text, key and scroll input semantics.
 - [x] Round-trip the records, errors, callbacks and lifecycle between Rust and Kotlin on the JVM
   with the contract probe; bump the FFI API to version 2.
-- [ ] Run the extended `NativeDeviceTest` on the phone (callbacks from Rust threads on ART).
+- [x] Run the extended `NativeDeviceTest` on the phone (callbacks from Rust threads on ART):
+  `am instrument` reported OK (3 tests) on the OnePlus 10 Pro, Android 16 (API 36).
 
 **1. Host and key entry** (lane B)
 - [ ] Add Compose host/key entry and persist host settings in Room; no storage in Rust.
