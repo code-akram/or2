@@ -4,13 +4,18 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -18,7 +23,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.data.HostRecord
 import io.github.code_akram.or2.data.KeyRecord
@@ -77,7 +84,7 @@ private fun HostDialog(previous: HostRecord?, keys: List<KeyRecord>, dismiss: ()
     var hostname by remember { mutableStateOf(previous?.hostname ?: "") }
     var port by remember { mutableStateOf(previous?.port?.toString() ?: "22") }
     var username by remember { mutableStateOf(previous?.username ?: "") }
-    var keyId by remember { mutableStateOf(previous?.keyId) }
+    var keyId by remember { mutableStateOf(if (previous == null) keys.singleOrNull()?.id else previous.keyId) }
     val hostnameError = hostFieldError(hostname)
     val usernameError = hostFieldError(username)
     AlertDialog(onDismissRequest = dismiss, title = { Text(if (previous == null) "Add host" else "Edit host") },
@@ -90,9 +97,17 @@ private fun HostDialog(previous: HostRecord?, keys: List<KeyRecord>, dismiss: ()
                 OutlinedTextField(username, { username = it }, label = { Text("Username") }, singleLine = true,
                     isError = usernameError != null, supportingText = { usernameError?.let { Text(it) } })
                 Text("SSH key")
+                if (keys.none { it.id == keyId }) Text("Choose a key", color = MaterialTheme.colorScheme.error)
                 if (keys.isEmpty()) Text("Generate or import a key on the Keys tab first.")
-                keys.forEach { key ->
-                    TextButton(onClick = { keyId = key.id }) { Text((if (keyId == key.id) "✓ " else "") + key.label) }
+                Column(Modifier.selectableGroup()) {
+                    keys.forEach { key ->
+                        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                            .selectable(selected = keyId == key.id, role = Role.RadioButton, onClick = { keyId = key.id }),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(selected = keyId == key.id, onClick = null)
+                            Text(key.label)
+                        }
+                    }
                 }
                 if (previous != null) Text("Changing the hostname or port clears previous host-key trust.")
             }

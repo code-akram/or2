@@ -9,17 +9,25 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextInput
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import io.github.code_akram.or2.AppScaffold
 import io.github.code_akram.or2.MainActivity
 import io.github.code_akram.or2.data.HostRecord
+import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.data.TrustStore
 import io.github.code_akram.or2.ffi.*
+import io.github.code_akram.or2.hosts.HostsScreen
 import io.github.code_akram.or2.terminal.TerminalView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
@@ -29,9 +37,61 @@ import org.junit.Assert.assertSame
 import org.junit.Rule
 import org.junit.Test
 
-/** Render trust states without connecting to any host or modifying the production database. */
+/** Render entry/trust states without connecting to any host or modifying the production database. */
 class EntryUiDeviceTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+
+    private val fixtureKey = KeyRecord("fixture-key", "Fixture key", "test", "public", "fingerprint", "", byteArrayOf(), byteArrayOf())
+
+    private fun fillHostFields() {
+        compose.onNodeWithText("Label").performScrollTo().performTextInput("Fixture")
+        compose.onNodeWithText("Hostname").performScrollTo().performTextInput("fixture.invalid")
+        compose.onNodeWithText("Username").performScrollTo().performTextInput("fixture-user")
+    }
+
+    @Test
+    fun newHostPreselectsTheOnlyKeyButEditingDoesNotChangeAnEmptyReference() {
+        var saved: HostRecord? = null
+        val previous = HostRecord(7, "Existing fixture", "fixture.invalid", 22, "fixture-user", null)
+        compose.runOnUiThread {
+            compose.activity.setContent {
+                MaterialTheme { HostsScreen(listOf(previous), listOf(fixtureKey), false, { host, _ -> saved = host }, {}, {}) }
+            }
+        }
+        compose.onNodeWithText("Add host").performClick()
+        compose.onNodeWithText("Fixture key").performScrollTo().assertIsSelected()
+        compose.onNodeWithText("Choose a key").assertDoesNotExist()
+        fillHostFields()
+        compose.onNodeWithText("Save").assertIsEnabled().performClick()
+        compose.runOnIdle { assertEquals(fixtureKey.id, saved!!.keyId) }
+        compose.onNodeWithText("Edit").performClick()
+        compose.onNodeWithText("Fixture key").performScrollTo().assertIsNotSelected()
+        compose.onNodeWithText("Choose a key").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Save").assertIsNotEnabled()
+        compose.onNodeWithText("Cancel").performClick()
+    }
+
+    @Test
+    fun multipleKeysNeedAnExplicitChoiceAndExposeTheSelectedRadioState() {
+        var saved: HostRecord? = null
+        val second = fixtureKey.copy(id = "second-key", label = "Second key")
+        compose.runOnUiThread {
+            compose.activity.setContent {
+                MaterialTheme { HostsScreen(emptyList(), listOf(fixtureKey, second), false, { host, _ -> saved = host }, {}, {}) }
+            }
+        }
+        compose.onNodeWithText("Add host").performClick()
+        compose.onNodeWithText("Fixture key").performScrollTo().assertIsNotSelected()
+        compose.onNodeWithText("Second key").performScrollTo().assertIsNotSelected()
+        fillHostFields()
+        compose.onNodeWithText("Choose a key").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Save").assertIsNotEnabled()
+        compose.onNodeWithText("Second key").performScrollTo().performClick().assertIsSelected()
+        compose.onNodeWithText("Fixture key").assertIsNotSelected()
+        compose.onNodeWithText("Choose a key").assertDoesNotExist()
+        compose.onNodeWithText("Save").assertIsEnabled().performClick()
+        compose.runOnIdle { assertEquals(second.id, saved!!.keyId) }
+    }
 
     @Test
     fun firstUseTrustIsExplicitAndRejectWorks() {
