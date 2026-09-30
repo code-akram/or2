@@ -345,6 +345,19 @@ impl Session {
     }
 }
 
+/// Validates synchronously; networking and all callbacks run on Rust-owned threads.
+#[uniffi::export]
+pub fn connect(
+    request: ConnectRequest,
+    listener: Box<dyn SessionListener>,
+) -> Result<Arc<Session>, ConnectError> {
+    let request = request.validate()?;
+    Ok(Session::new(or2_core::ssh::connect(
+        request,
+        Arc::new(ListenerObserver(listener)),
+    )))
+}
+
 #[uniffi::export]
 impl Session {
     pub fn state(&self) -> SessionState {

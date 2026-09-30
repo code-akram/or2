@@ -34,7 +34,7 @@ pub enum TerminalError {
 }
 
 /// Bumped whenever an exported signature or record changes shape.
-pub const API_VERSION: u32 = 2;
+pub const API_VERSION: u32 = 3;
 
 #[uniffi::export]
 pub fn build_info() -> BuildInfo {

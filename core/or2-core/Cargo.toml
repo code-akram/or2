@@ -8,7 +8,7 @@ license.workspace = true
 rand.workspace = true
 russh.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "net", "sync"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 zeroize.workspace = true
 
 [dev-dependencies]
