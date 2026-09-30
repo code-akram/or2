@@ -1,8 +1,10 @@
-# M1 scaffold: build and verify
+# M1 Android app: build and verify
 
-The scaffold is a Compose app loading `or2-ffi` through generated UniFFI Kotlin/JNA bindings.
-It shows native build information, not an SSH terminal. `or2-core` remains free of Android,
-UniFFI and persistence dependencies. The M0 spikes remain standalone and unchanged.
+The Compose app loads `or2-ffi` through generated UniFFI Kotlin/JNA bindings. Host settings,
+encrypted key records and trusted host keys live in Room. `or2-core` remains free of Android,
+UniFFI and persistence dependencies. The production connector calls the real API-3 `connect`
+export; the contract probe is used only by tests. The session screen embeds the Canvas terminal
+with IME and keys-row input, keeping the final displayed frame visible through `Closed`.
 
 ## Shared user-local toolchain
 
@@ -20,6 +22,7 @@ without changing shell startup files; existing `JAVA_HOME`, `ANDROID_HOME` and
 | Android NDK | r30 / 30.0.16248370 | `$ANDROID_HOME/android-ndk-r30` |
 | Gradle | 8.13 | `$HOME/.local/share/gradle/gradle-8.13` |
 | Rust / cargo-ndk | 1.98.1 / 4.1.2 | Existing runner installation |
+| Zig | 0.16.0 | Existing runner installation (`zig` on `PATH`) |
 
 `ANDROID_HOME` defaults to `$HOME/.local/share/android`. The SDK's
 `ndk/30.0.16248370` symlink points to the existing r30 installation, so Gradle and cargo-ndk
@@ -76,7 +79,21 @@ Gradle 8.13 otherwise writes a redundant record that fails its next locked resol
 The actual JVM `kotlin-stdlib` remains present and strictly locked. No runtime classpath or
 dependency group is exempted from locking.
 
-The JVM tests load the real host `.so` with desktop JNA; they do not mock Rust. Device tests
+Room 2.8.3 uses KSP 2.2.21-2.0.4 with Kotlin 2.2.21; generated DAO implementations are build
+outputs. Maven resolves the additional AndroidX biometric/fragment/lifecycle and coroutine
+artifacts without extra system tooling. To deliberately refresh all resolvable configuration
+locks after a dependency change, run `:app:dependencies --write-locks`, then the full build
+command above with `--write-locks`, then again **without** `--write-locks` to verify strict
+resolution. Do not exempt KSP configurations from locking.
+
+The native JVM contract tests load the real host `.so` with desktop JNA. Holder/ViewModel tests
+use fakes to exercise callbacks before handle assignment, persist-before-approve, expired
+prompts, disconnect-versus-destruction, display disposal, factory cancellation, and private-array
+wipe timing. `SessionHolderNativeTest` uses the real production connector and a disposable
+loopback OpenSSH fixture for first-use trust, trusted reconnect, changed-key rejection and
+retained closed handles; it skips when `/usr/bin/sshd` is unavailable. No home SSH files or
+system sshd settings are read or modified. Key-operation tests use
+real key exports and AES-GCM on the JVM (not Android Keystore). Device tests
 load the packaged arm64 `.so` with Android JNA. Both cover the bootstrap geometry and errors,
 key generation/import errors, and a `contract_probe_session` lifecycle whose listener callbacks
 arrive on Rust threads (see [contracts](contracts.md)). On the JVM, `SessionContractTest` also
@@ -85,6 +102,11 @@ covers host-key prompts, frames, input echoes, resize, scroll and disconnect, an
 in a temporary directory; it is skipped (reported as such) when `ssh-keygen` is not on `PATH`.
 The runtime Rust library does not enable the host-only `bindgen` feature. russh's `aws-lc-sys`
 builds for the host and arm64 with the NDK toolchain; no system CMake was needed on this runner.
+
+The pinned libghostty-vt dependency builds the terminal engine with Zig 0.16.0 on the host and
+for Android arm64. Install that Zig version on `PATH` for a fresh setup and check `zig version`
+before building. The dependency's Rust build script drives Zig; no checked-in terminal binary
+or Kotlin protocol implementation is used.
 
 Debug artifacts:
 - `android/app/build/outputs/apk/debug/app-debug.apk`
@@ -103,6 +125,46 @@ adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am instrument -w io
 adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am start -W -n io.github.code_akram.or2/.MainActivity
 ```
 
-This verifies the native bridge, key exports and probe-session callbacks on the phone, not SSH,
-IME, terminal rendering, key storage, background sessions or the broader v0 acceptance test.
-Those remain later implementation work.
+Run ADB only after receiving an explicit device slot. An unplugged phone is expected to be
+absent; do not modify the bridge, tunnel or security settings. Compile instrumented tests on
+Arch with `assembleDebugAndroidTest` while the phone is unavailable.
+
+`PersistenceDeviceTest` uses an in-memory database: trust replacement, endpoint-change trust
+clearing, stale-destination rejection, and foreign-key cleanup. `VaultDeviceTest` creates and
+deletes a disposable Keystore alias: it verifies hardware security level, per-use strong
+biometric policy, non-exportability and rejection without authentication (skips if strong
+biometrics are not enrolled). `EntryUiDeviceTest` displays first-use/changed-key dialogs using
+fake public-key metadata without a network or production DB writes, and checks the integrated
+session screen retains the same terminal view and final grid through `Closed` until dismissal.
+`TerminalDeviceTest` covers IME composition, keys, selection, resize and remount snapshots;
+`TerminalVisualDeviceTest` captures renderer fixtures and reports frame timings.
+
+Manual phone checks still required:
+- Hosts: empty/list/add/edit/delete; changing address or port clears trust.
+- Keys: Ed25519 generate; system-picker import, encrypted-file passphrase retry and format errors;
+  copy/share the public line; delete and reselection on hosts.
+- Biometric CryptoObject encrypt/decrypt success and cancellation; missing enrollment and
+  enrollment invalidation must produce clear recovery messages. Never change enrollment or
+  device security settings just to test these without separate user authorization.
+- Activity recreation must keep established sessions; disconnect shows `Closed`, and "Close
+  session" releases the handle after the renderer leaves composition.
+- First-use and prominent changed-key warnings, previous fingerprints and closed/error states.
+  Use test fixtures, not real hosts, until separately authorized.
+- Integrated terminal IME show/hide geometry, committed/composing text, keys row, selection,
+  scrolling, recreation and final-frame retention; collect apply/draw and Window frame timings.
+- Capture representative screenshots and inspect them; visual verification and successful
+  biometric round trips remain **pending phone**, not proved by compilation or JVM tests.
+
+The vault accepts only StrongBox or TEE AES-256-GCM keys, prefers StrongBox when available,
+requires BIOMETRIC_STRONG per operation and invalidates on new enrollment. No software or
+device-credential fallback is allowed. Invalidated records remain for explanation/deletion;
+re-import or generate a new SSH key to recover. Private keys are never exported or backed up:
+`allowBackup=false` and cloud/device-transfer extraction rules exclude all app data.
+Session ownership is application-scoped in M1, not a foreground service; process death ends it.
+Disconnect leaves the active handle and final frame readable under `Closed`; "Close session"
+or connecting elsewhere retires it. A session-screen display lease delays native `close()`
+until the old screen leaves composition, then yields a main-loop turn for terminal disposal.
+Activity recreation/navigation alone does not retire sessions. MainActivity uses
+`adjustResize`; the root adds IME padding on host/key forms but not the session tab, where
+TerminalScreen owns IME insets.
+This does not prove SSH/IME/terminal acceptance or the broader v0 background-session test.
