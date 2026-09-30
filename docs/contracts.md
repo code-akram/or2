@@ -134,7 +134,11 @@ connecting to `ConnectionLost`.
 Synchronous method errors (`SessionError`): `NotConnected` (input before `Connected`), `Closed`,
 `NoHostKeyPrompt`, `HostKeyMismatch`, `EmptyDimension`, `InvalidKey`. `resize` is allowed from
 `Connecting` on (latest wins; the PTY opens at that size). Input, `scroll` and
-`request_full_frame` require `Connected`. The input queue is unbounded; it carries user input only.
+`request_full_frame` require `Connected`. The user-input queue is unbounded. Replies the terminal
+generates for the host (for example to cursor-position or colour queries) are coalesced per
+output batch and limited to 64 KiB queued or in flight; exceeding that closes the session with
+`Failed { Protocol }` rather than dropping replies or growing without bound. Reading and
+writing run concurrently, so a large paste never blocks output.
 
 ## Frames
 
@@ -180,6 +184,9 @@ use `cell.fg_color()`/`bg_color()` falling back to the terminal colours, swap fo
 foreground to background for invisible; resolve palette underline colours; report a cursor at
 a wide tail at its head column; take scrollback from `Terminal::scrollbar()`. libghostty
 objects are `!Send`: keep each terminal on one thread and pass bytes to it over channels.
+Default colour changes (OSC 10/11, reverse screen) republish every row. The grid size is owned
+by Kotlin's `resize`: DECCOLM 80/132-column switching is unsupported, so any native geometry
+change is reverted to the requested size and followed by a full frame.
 
 ## Input and resize
 
