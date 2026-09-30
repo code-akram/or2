@@ -19,3 +19,4 @@ bindgen = ["uniffi/cli"]
 or2-core.workspace = true
 thiserror.workspace = true
 uniffi.workspace = true
+zeroize.workspace = true

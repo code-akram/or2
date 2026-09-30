@@ -80,21 +80,19 @@ Start with two crates. Split a module into its own crate only once its interface
 ### M1 scaffold contract
 
 `core/` is a two-crate Rust edition-2024 workspace, separate from the M0 spikes.
-`or2-core` owns validated terminal geometry; `or2-ffi` converts it to UniFFI records and errors.
-Kotlin imports only generated `io.github.code_akram.or2.ffi` bindings. UniFFI 0.32.2 generates
-bindings from the host library; Gradle cross-builds and packages the Android arm64 library at
-API 34. Generated sources and native libraries are build outputs, not checked-in copies.
+`or2-core` owns the domain types and behaviour; `or2-ffi` converts them to UniFFI records,
+errors, objects and callbacks. Kotlin imports only generated `io.github.code_akram.or2.ffi`
+bindings. UniFFI 0.32.2 generates bindings from the host library; Gradle cross-builds and
+packages the Android arm64 library at API 34. Generated sources and native libraries are build
+outputs, not checked-in copies.
 
-The implemented bootstrap API is:
-- `build_info()`: version, FFI API version 1, minimum Android API 34, and `Renderer::Canvas`.
-- `terminal_size(columns: u16, rows: u16)`: preserves the dimensions, computes a `u32` cell
-  count, and returns `TerminalError::EmptyDimension` when either dimension is zero.
-
-This proves the native-library loading, record/enum conversion, unsigned values and error mapping
-on the JVM and Android. It is not a terminal emulator or SSH connection API. Add real session,
-input and changed-row snapshot exports with their implementations; no success-returning stubs.
-The scaffold has no networking, persistence, keys, foreground service or protocol implementation.
-See [build instructions](build.md) for the shared toolchain and verification commands.
+The shared M1 contracts (transport, key material, host-key trust, session lifecycle and
+callbacks, changed-row frames, input) are defined in [contracts](contracts.md), which also
+separates what is implemented from lane work. FFI API version 2 exports `build_info`,
+`terminal_size`, key generation and import, the `Session` object with its `SessionListener`,
+and `contract_probe_session`, a test fixture that drives a real `Session` without a network.
+There is deliberately no `connect` export until the SSH session works; no success-returning
+stubs. See [build instructions](build.md) for the shared toolchain and verification commands.
 
 ### Transport
 
@@ -218,32 +216,56 @@ Consequences for `or2-core`:
 
 ### M1 implementation checklist
 
-Work through the remaining stages in order. Checked items are verified setup, not a completed
-SSH terminal. Keep the two-crate architecture and the Kotlin/Rust boundaries above.
+Checked items are verified work, not a completed SSH terminal. Keep the two-crate architecture
+and the Kotlin/Rust boundaries above. Stage 0 is the gate for parallel work: once it is complete,
+stages 1–3 run as three lanes against [the shared contracts](contracts.md). Lane A owns `core/`;
+lane B owns Room, Keystore, the host/key/trust screens and the app-scoped session holder; lane C
+owns the terminal view (Canvas renderer, IME, keys row). Changes to `or2-ffi` exports, the
+contracts or shared navigation (`MainActivity`) are coordinated. Stage 4 needs all three.
 
 Completed foundation:
 - [x] Configure shared user-local JDK, Android SDK/NDK and Gradle tooling.
 - [x] Build the Rust/Android scaffold and generated UniFFI bootstrap contract with dependency locks.
 - [x] Verify Rust checks, Android builds, JVM native tests and the phone native-library smoke test.
 
-**1. Host and key entry**
+**0. Shared contract gate** (before the lanes split)
+- [x] Define the `Transport` trait and `DirectTcp`; prove a transport stream drives russh's
+  `connect_stream`.
+- [x] Implement key material: Ed25519 generation, OpenSSH import with passphrase, the unencrypted
+  storage form Kotlin encrypts, typed errors; verify against `ssh-keygen`.
+- [x] Settle host-key trust: Kotlin-persisted keys in the request, first-use/changed prompts, and
+  approval bound to the presented fingerprint.
+- [x] Implement the session lifecycle contract: states, close reasons, errors, commands,
+  listener threading/ordering/release, disconnect and drop semantics, via a handle/driver split.
+- [x] Define changed-row frames (styles, cursor, wide cells, scrollback, full/delta resync) and
+  the notify-once pull mailbox that provides backpressure.
+- [x] Define resize, committed-text, key and scroll input semantics.
+- [x] Round-trip the records, errors, callbacks and lifecycle between Rust and Kotlin on the JVM
+  with the contract probe; bump the FFI API to version 2.
+- [ ] Run the extended `NativeDeviceTest` on the phone (callbacks from Rust threads on ART).
+
+**1. Host and key entry** (lane B)
 - [ ] Add Compose host/key entry and persist host settings in Room; no storage in Rust.
-- [ ] Support Ed25519 generation and OpenSSH key import, including passphrase-protected keys.
+- [ ] Offer Ed25519 generation and OpenSSH import, including passphrase-protected keys, using
+  the `or2-ffi` key exports.
 - [ ] Encrypt private keys with a hardware-backed Android Keystore key behind biometric unlock;
   decrypt only at connect time and hand them to Rust. Keep credentials out of logs and the repo.
 
-**2. SSH connection and session lifecycle**
-- [ ] Add direct TCP through the `Transport` trait and russh key authentication in `or2-core`.
+**2. SSH connection and session lifecycle** (lane A: `core/`; trust UI in lane B)
+- [ ] Add russh key authentication over `DirectTcp` in `or2-core`, with connect timeout and
+  keepalive mapped to the contract's failures.
 - [ ] Show the host fingerprint for explicit first-use confirmation, persist trust in Kotlin,
   and reject changed host keys until explicitly approved. Keep agent forwarding off.
-- [ ] Open a PTY shell and expose real session, resize, input, output and error handling through
-  `or2-ffi`; test failures as well as successful connections, with no success-returning stubs.
-- [ ] Tie session ownership to the app lifecycle for M1, with explicit disconnect and cleanup.
+- [ ] Open a PTY shell and export `connect` driving the session contract through `or2-ffi`; test
+  failures as well as successful connections, with no success-returning stubs.
+- [ ] Tie session ownership to the app lifecycle for M1 (lane B's app-scoped holder), with
+  explicit disconnect and cleanup.
 
-**3. Terminal rendering and input**
+**3. Terminal rendering and input** (engine in lane A; Canvas, IME and keys row in lane C)
 - [ ] Integrate the pinned libghostty-vt engine in `or2-core`; keep terminal state in Rust and
-  expose changed-row snapshots through UniFFI. Preserve the M0 spike until its findings land.
-- [ ] Draw snapshots with hardware-accelerated Android Canvas and a glyph cache; instrument
+  publish changed-row frames through the session driver. Preserve the M0 spike until its
+  findings land.
+- [ ] Draw frames with hardware-accelerated Android Canvas and a glyph cache; instrument
   frame times. Handle cursor, styles, alternate screen, wide characters and terminal resizing.
 - [ ] Wire Android IME and the keys row through the terminal key encoder to SSH input; add
   scrolling and selection. Test text composition and control/navigation keys on the phone.

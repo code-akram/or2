@@ -77,9 +77,14 @@ The actual JVM `kotlin-stdlib` remains present and strictly locked. No runtime c
 dependency group is exempted from locking.
 
 The JVM tests load the real host `.so` with desktop JNA; they do not mock Rust. Device tests
-load the packaged arm64 `.so` with Android JNA. Both test enum/record conversion, asymmetric
-geometry, unsigned values beyond signed/u16 ranges, and exception mapping for either zero axis.
-The runtime Rust library does not enable the host-only `bindgen` feature.
+load the packaged arm64 `.so` with Android JNA. Both cover the bootstrap geometry and errors,
+key generation/import errors, and a `contract_probe_session` lifecycle whose listener callbacks
+arrive on Rust threads (see [contracts](contracts.md)). On the JVM, `SessionContractTest` also
+covers host-key prompts, frames, input echoes, resize, scroll and disconnect, and
+`KeyContractTest` checks generated and imported keys against `ssh-keygen` using throwaway keys
+in a temporary directory; it is skipped (reported as such) when `ssh-keygen` is not on `PATH`.
+The runtime Rust library does not enable the host-only `bindgen` feature. russh's `aws-lc-sys`
+builds for the host and arm64 with the NDK toolchain; no system CMake was needed on this runner.
 
 Debug artifacts:
 - `android/app/build/outputs/apk/debug/app-debug.apk`
@@ -98,5 +103,6 @@ adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am instrument -w io
 adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am start -W -n io.github.code_akram.or2/.MainActivity
 ```
 
-This verifies the bootstrap native bridge, not SSH, IME, terminal rendering, key storage,
-background sessions or the broader v0 acceptance test. Those remain later implementation work.
+This verifies the native bridge, key exports and probe-session callbacks on the phone, not SSH,
+IME, terminal rendering, key storage, background sessions or the broader v0 acceptance test.
+Those remain later implementation work.

@@ -2,6 +2,11 @@
 
 uniffi::setup_scaffolding!();
 
+pub mod frame;
+pub mod keys;
+pub mod probe;
+pub mod session;
+
 #[derive(Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Renderer {
     Canvas,
@@ -28,11 +33,14 @@ pub enum TerminalError {
     EmptyDimension,
 }
 
+/// Bumped whenever an exported signature or record changes shape.
+pub const API_VERSION: u32 = 2;
+
 #[uniffi::export]
 pub fn build_info() -> BuildInfo {
     BuildInfo {
         version: env!("CARGO_PKG_VERSION").into(),
-        api_version: 1,
+        api_version: API_VERSION,
         minimum_android_sdk: 34,
         renderer: Renderer::Canvas,
     }

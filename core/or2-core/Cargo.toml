@@ -3,3 +3,13 @@ name = "or2-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+rand.workspace = true
+russh.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "sync"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync"] }

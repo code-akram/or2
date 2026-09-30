@@ -9,5 +9,9 @@ license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
 or2-core = { path = "or2-core" }
-thiserror = "=2.0.17"
+rand = { version = "=0.10.3", features = ["thread_rng"] }
+russh = "=0.63.3"
+thiserror = "=2.0.21"
+tokio = "=1.47.1"
 uniffi = "=0.32.2"
+zeroize = "=1.9.0"
