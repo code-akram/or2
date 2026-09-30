@@ -91,7 +91,7 @@ jq '(.schemas.success_response | walk(if type == "string" then \
   herdr-api.schema.json >"$S/success.schema.json"
 cargo typify -B -o "$S/generated_success.rs" "$S/success.schema.json"
 
-export ANDROID_NDK_HOME=/home/akram/.local/share/android/android-ndk-r30
+export ANDROID_NDK_HOME=$HOME/.local/share/android/android-ndk-r30
 cargo ndk -t arm64-v8a --platform 31 build --release
 file target/aarch64-linux-android/release/libherdr_ssh_spike.so
 "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \

@@ -39,14 +39,14 @@ The harness starts and records its own daemon PID, connects directly (no SSH), t
 resize, and forced source-port roaming, then kills that exact PID even when an assertion panics.
 
 ```sh
-cd /home/akram/code/or2/spikes/mosh-rs
+cd spikes/mosh-rs
 cargo run --bin interop
 cargo test
 cargo clippy --all-targets -- -D warnings
-ANDROID_NDK_HOME=/home/akram/.local/share/android/android-ndk-r30 \
+ANDROID_NDK_HOME=$HOME/.local/share/android/android-ndk-r30 \
   cargo ndk -t arm64-v8a --platform 31 build --release --lib
 file target/aarch64-linux-android/release/libor2_mosh_spike.so
-/home/akram/.local/share/android/android-ndk-r30/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf \
+$HOME/.local/share/android/android-ndk-r30/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf \
   -d target/aarch64-linux-android/release/libor2_mosh_spike.so | grep NEEDED
 ```
 

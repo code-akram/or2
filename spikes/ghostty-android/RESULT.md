@@ -24,7 +24,7 @@ git -C ghostty-source checkout 22d13172cde98a0a4dda05d3d6a3fcb0dd8ed018
 export GHOSTTY_SOURCE_DIR="$PWD/ghostty-source"
 cargo run --release
 
-export ANDROID_NDK_HOME=/home/akram/.local/share/android/android-ndk-r30
+export ANDROID_NDK_HOME=$HOME/.local/share/android/android-ndk-r30
 cargo ndk -t arm64-v8a --platform 31 build --release
 
 SO=target/aarch64-linux-android/release/libghostty_android_spike.so

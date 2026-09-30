@@ -205,4 +205,4 @@ Consequences for `or2-core`:
 | mosh | mosh-rs, vendored later | Only candidate verified against stock mosh-server 1.4.0 |
 | Persistence | Room (Kotlin) | Idiomatic Android; Rust stays storage-free |
 | Rendering | Canvas first | Simplest; GPU path kept open behind the same FFI |
-| Package ID | `io.github.codeakram.or2` | Change if a domain is preferred |
+| Package ID | `io.github.code_akram.or2` | Change if a domain is preferred |

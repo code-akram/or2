@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
         format!("--session {} ", args[2])
     };
     let command = format!(
-        "PATH=/home/akram/.local/bin:/usr/local/bin:/usr/bin:/bin herdr {session_arg}status server"
+        "PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin herdr {session_arg}status server"
     );
     let status = exec(&handle, &command).await?;
     let socket = status
