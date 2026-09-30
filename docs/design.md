@@ -246,39 +246,68 @@ Completed foundation:
   `am instrument` reported OK (3 tests) on the OnePlus 10 Pro, Android 16 (API 36).
 
 **1. Host and key entry** (lane B)
-- [ ] Add Compose host/key entry and persist host settings in Room; no storage in Rust.
-- [ ] Offer Ed25519 generation and OpenSSH import, including passphrase-protected keys, using
-  the `or2-ffi` key exports.
-- [ ] Encrypt private keys with a hardware-backed Android Keystore key behind biometric unlock;
+- [x] Add Compose host/key entry and persist host settings in Room; no storage in Rust.
+- [x] Offer Ed25519 generation and OpenSSH import, including passphrase-protected keys, using
+  the `or2-ffi` key exports. (Import and passphrase errors are verified by JVM tests against
+  `ssh-keygen` and by device tests; phone acceptance used an app-generated key.)
+- [x] Encrypt private keys with a hardware-backed Android Keystore key behind biometric unlock;
   decrypt only at connect time and hand them to Rust. Keep credentials out of logs and the repo.
 
 **2. SSH connection and session lifecycle** (lane A: `core/`; trust UI in lane B)
-- [ ] Add russh key authentication over `DirectTcp` in `or2-core`, with connect timeout and
+- [x] Add russh key authentication over `DirectTcp` in `or2-core`, with connect timeout and
   keepalive mapped to the contract's failures.
-- [ ] Show the host fingerprint for explicit first-use confirmation, persist trust in Kotlin,
-  and reject changed host keys until explicitly approved. Keep agent forwarding off.
-- [ ] Open a PTY shell and export `connect` driving the session contract through `or2-ffi`; test
+- [x] Show the host fingerprint for explicit first-use confirmation, persist trust in Kotlin,
+  and reject changed host keys until explicitly approved. Keep agent forwarding off. (A real
+  changed host key is covered by Rust fixture and device UI tests, not by the phone session.)
+- [x] Open a PTY shell and export `connect` driving the session contract through `or2-ffi`; test
   failures as well as successful connections, with no success-returning stubs.
-- [ ] Tie session ownership to the app lifecycle for M1 (lane B's app-scoped holder), with
+- [x] Tie session ownership to the app lifecycle for M1 (lane B's app-scoped holder), with
   explicit disconnect and cleanup.
 
 **3. Terminal rendering and input** (engine in lane A; Canvas, IME and keys row in lane C)
-- [ ] Integrate the pinned libghostty-vt engine in `or2-core`; keep terminal state in Rust and
+- [x] Integrate the pinned libghostty-vt engine in `or2-core`; keep terminal state in Rust and
   publish changed-row frames through the session driver. Preserve the M0 spike until its
   findings land.
-- [ ] Draw frames with hardware-accelerated Android Canvas and a glyph cache; instrument
+- [x] Draw frames with hardware-accelerated Android Canvas and a glyph cache; instrument
   frame times. Handle cursor, styles, alternate screen, wide characters and terminal resizing.
-- [ ] Wire Android IME and the keys row through the terminal key encoder to SSH input; add
+- [x] Wire Android IME and the keys row through the terminal key encoder to SSH input; add
   scrolling and selection. Test text composition and control/navigation keys on the phone.
 
 **4. End-to-end phone acceptance**
-- [ ] Run Rust and native contract tests, Android builds and lint using [the build workflow](build.md).
-- [ ] On the phone, add a host/key, confirm its fingerprint and use an interactive SSH shell;
+- [x] Run Rust and native contract tests, Android builds and lint using [the build workflow](build.md).
+- [x] On the phone, add a host/key, confirm its fingerprint and use an interactive SSH shell;
   verify typing, keys row, resize, scrolling, Unicode and a full-screen terminal application.
-- [ ] Verify rejected/changed host keys, authentication failure, connection loss and disconnect
+- [x] Verify rejected/changed host keys, authentication failure, connection loss and disconnect
   produce clear states without silently trusting a host or leaking credentials.
-- [ ] Record results and remaining limitations; mark M1 complete only after the usable-shell
+- [x] Record results and remaining limitations; mark M1 complete only after the usable-shell
   acceptance passes. Install or change host authorization only with explicit user approval.
+
+**M1 result: complete (2026-09-30).** Final checks on the integrated tree: `cargo fmt`, 61 Rust
+tests (including OpenSSH interop) and Clippy with `-D warnings`; Gradle build, 57 JVM tests and
+lint with no errors; 20 instrumented tests on the OnePlus 10 Pro (Android 16). Real-SSH
+acceptance ran against a dedicated unprivileged test account on host B, created and authorized
+with the owner's explicit approval, using an app-generated Ed25519 key:
+- Biometric unlock and cancel; first-use host-key confirmation and rejection; authentication
+  failure; remote exit; connection loss (airplane mode); Disconnect keeping the last screen.
+- Typing through the default soft keyboard (single keys reach `vim` immediately), keys row
+  (Ctrl+C, arrows, history), live resize (`stty size` 22↔42 rows with the IME), scrollback,
+  `top`, `vim` alternate screen, Unicode and emoji, word selection, Copy and Paste (multi-line
+  paste asks first), full-screen session layout, and Back to Hosts without disconnecting.
+- Frame times on the phone at 55×42: frame apply p95 ≈ 12 ms; window total p50 ≈ 17 ms,
+  p95 ≈ 24 ms for full-screen redraws.
+
+Known M1 limitations:
+- A terminal view recreated after a session has closed cannot restore the last screen (it can
+  while connected).
+- Physical-keyboard keys bypass the IME, so hardware-keyboard CJK composition is unavailable;
+  soft-keyboard composition works.
+- No bracketed paste; multi-line paste is confirmed instead. DECCOLM column switching is
+  unsupported.
+- Worst-case full-screen redraws exceed a 60 Hz frame budget at p95; optimise later if it matters.
+- Sessions end with the app process, and a backgrounded app can lose its connection (observed
+  after several minutes in another app), until the M3 foreground service.
+- Before any release: ship licence notices for statically linked code, and make the build-time
+  Ghostty fetch reproducible offline (F-Droid).
 
 Mosh, tmux/herdr integration and the foreground service remain M2/M3 work. Release signing is
 not configured by the scaffold; M1 development uses the debug APK.
