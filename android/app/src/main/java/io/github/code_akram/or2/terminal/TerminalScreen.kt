@@ -1,5 +1,6 @@
 package io.github.code_akram.or2.terminal
 
+import android.graphics.RectF
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -24,6 +25,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -66,16 +70,21 @@ fun TerminalScreen(
             AndroidView(factory = { view }, modifier = Modifier.weight(1f).clipToBounds())
             Surface(color = Color(0xff101018), contentColor = Color(0xffd8e8ff)) {
                 Column {
-                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).onGloballyPositioned {
+                        view.primaryKeyRowBounds = it.unclippedBoundsInRoot()
+                    }.semantics {
                         contentDescription = "Terminal primary keys"
                     }) {
-                        TerminalButton("Esc", modifier = Modifier.weight(1f)) { view.input.key(TerminalKey.Escape) }
-                        TerminalButton("Tab", modifier = Modifier.weight(1f)) { view.input.key(TerminalKey.Tab) }
-                        TerminalButton("Ctrl", ctrl, Modifier.weight(1f)) { view.input.toggleCtrl() }
-                        TerminalButton("Alt", alt, Modifier.weight(1f)) { view.input.toggleAlt() }
+                        fun keyModifier(label: String) = Modifier.weight(1f).onGloballyPositioned {
+                            view.primaryKeyBounds[label] = it.unclippedBoundsInRoot()
+                        }
+                        TerminalButton("Esc", modifier = keyModifier("Esc")) { view.input.key(TerminalKey.Escape) }
+                        TerminalButton("Tab", modifier = keyModifier("Tab")) { view.input.key(TerminalKey.Tab) }
+                        TerminalButton("Ctrl", ctrl, keyModifier("Ctrl")) { view.input.toggleCtrl() }
+                        TerminalButton("Alt", alt, keyModifier("Alt")) { view.input.toggleAlt() }
                         listOf("←" to TerminalKey.ArrowLeft, "↓" to TerminalKey.ArrowDown,
                             "↑" to TerminalKey.ArrowUp, "→" to TerminalKey.ArrowRight).forEach { (label, key) ->
-                            TerminalButton(label, modifier = Modifier.weight(1f)) { view.input.key(key) }
+                            TerminalButton(label, modifier = keyModifier(label)) { view.input.key(key) }
                         }
                     }
                     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).heightIn(min = 48.dp)) {
@@ -97,6 +106,12 @@ fun TerminalScreen(
             }
         }
     }
+}
+
+// Position + measured size, not boundsInRoot(), so clipping cannot hide a partial key.
+private fun LayoutCoordinates.unclippedBoundsInRoot(): RectF {
+    val position = positionInRoot()
+    return RectF(position.x, position.y, position.x + size.width, position.y + size.height)
 }
 
 @Composable

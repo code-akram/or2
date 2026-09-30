@@ -7,6 +7,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Picture
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.text.InputType
 import android.util.LruCache
@@ -36,6 +37,9 @@ class TerminalView(context: Context) : View(context) {
     val applyTimings = FrameTimings()
     /** CPU display-list recording only; Window frame metrics measure the render pipeline. */
     val drawTimings = FrameTimings()
+    /** Main-thread, unclipped Compose layout bounds for content-free device diagnostics. */
+    internal var primaryKeyRowBounds: RectF? = null
+    internal val primaryKeyBounds = mutableMapOf<String, RectF>()
     var showTimings = false
     // Prepared for debug IME comparison only. Production keeps composition-capable text mode
     // until the default phone IME's single-letter latency has been tested.

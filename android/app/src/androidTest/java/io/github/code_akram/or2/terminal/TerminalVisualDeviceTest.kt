@@ -7,7 +7,6 @@ import android.graphics.Rect
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.SystemClock
-import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -34,43 +33,36 @@ class TerminalVisualDeviceTest {
         fail("Terminal frame or Window metrics did not arrive")
     }
 
-    private fun assertPrimaryKeysFitWithoutScrolling() {
-        fun find(node: AccessibilityNodeInfo, label: String): AccessibilityNodeInfo? {
-            if (node.contentDescription?.toString() == label || (node.isClickable && node.text?.toString() == label)) return node
-            for (index in 0 until node.childCount) {
-                node.getChild(index)?.let { child -> find(child, label)?.let { return it } }
-            }
-            return null
-        }
-        val root = checkNotNull(instrumentation.uiAutomation.rootInActiveWindow) { "Accessibility window unavailable" }
-        val row = checkNotNull(find(root, "Terminal primary keys")) { "Essential keys row unavailable" }
-        assertFalse("Essential keys must not scroll", row.isScrollable)
-        val rowBounds = Rect().also { row.getBoundsInScreen(it) }
+    private fun assertPrimaryKeysFitWithoutScrolling(view: TerminalView) {
+        val rowBounds = checkNotNull(view.primaryKeyRowBounds) { "Essential keys row not laid out" }
+        val labels = listOf("Esc", "Tab", "Ctrl", "Alt", "←", "↓", "↑", "→")
+        assertEquals(labels.toSet(), view.primaryKeyBounds.keys)
+        assertTrue("Essential keys row must be visible", rowBounds.width() > 0 && rowBounds.height() > 0)
+        assertEquals("Essential row must fit viewport without scrolling", view.width.toFloat(), rowBounds.width(), 1f)
         var right = rowBounds.left
-        listOf("Esc", "Tab", "Ctrl", "Alt", "←", "↓", "↑", "→").forEach { label ->
-            val node = checkNotNull(find(row, label)) { "$label unavailable in essential keys row" }
-            assertTrue("$label must be visible", node.isVisibleToUser)
-            val bounds = Rect().also { node.getBoundsInScreen(it) }
+        labels.forEach { label ->
+            val bounds = view.primaryKeyBounds.getValue(label)
+            assertTrue("$label must be visible", bounds.width() > 0 && bounds.height() > 0)
             assertTrue("$label ($bounds) must fit within $rowBounds", rowBounds.contains(bounds))
             // Containment alone could pass for a clipped partial button. Each must occupy
             // a full eighth of the row, including the right arrow, in both armed states.
-            assertTrue("$label must have a full cell", kotlin.math.abs(bounds.width() * 8 - rowBounds.width()) <= 8)
-            assertTrue("$label must follow the preceding key", kotlin.math.abs(bounds.left - right) <= 1)
+            assertEquals("$label must have a full cell", rowBounds.width() / 8, bounds.width(), 1f)
+            assertEquals("$label must follow the preceding key", right, bounds.left, 1f)
             right = bounds.right
         }
-        assertEquals(rowBounds.right, right)
+        assertEquals(rowBounds.right, right, 1f)
     }
 
     private fun capture(scenario: ActivityScenario<TerminalProbeActivity>, name: String) {
         // Settle Compose key state and hardware render submission before asking SurfaceFlinger.
         instrumentation.waitForIdleSync()
         SystemClock.sleep(100)
-        assertPrimaryKeysFitWithoutScrolling()
         val bounds = Rect()
         var compositionEdge: Point? = null
         scenario.onActivity { activity ->
             activity.window.decorView.getWindowVisibleDisplayFrame(bounds)
             val view = activity.terminalView()!!
+            assertPrimaryKeysFitWithoutScrolling(view) // Direct layout reads stay on the UI thread.
             val position = IntArray(2)
             view.getLocationOnScreen(position)
             bounds.top = position[1] // Exclude system status and debug toolbar; retain terminal + keys.
