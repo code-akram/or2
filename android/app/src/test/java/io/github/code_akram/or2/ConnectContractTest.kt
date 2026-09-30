@@ -3,7 +3,13 @@ package io.github.code_akram.or2
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.ConnectException
 import io.github.code_akram.or2.ffi.ConnectRequest
+import io.github.code_akram.or2.ffi.CellWidth
+import io.github.code_akram.or2.ffi.KeyInput
+import io.github.code_akram.or2.ffi.KeyModifiers
+import io.github.code_akram.or2.ffi.Session
 import io.github.code_akram.or2.ffi.SessionState
+import io.github.code_akram.or2.ffi.TerminalFrame
+import io.github.code_akram.or2.ffi.TerminalKey
 import io.github.code_akram.or2.ffi.connect
 import io.github.code_akram.or2.ffi.generateEd25519Key
 import java.net.InetAddress
@@ -15,6 +21,7 @@ import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 
@@ -60,13 +67,50 @@ class ConnectContractTest {
                 it.approveHostKey(prompt.presented.fingerprint)
                 listener.awaitState<SessionState.Authenticating>()
                 listener.awaitState<SessionState.Connected>()
+                val grid = mutableMapOf<Int, String>()
+                it.sendText("stty -echo; printf '\\033[2J\\033[H'; printf 'OR2-%s\\n' READY\n")
+                val first = awaitText(it, listener, grid, "OR2-READY")
+                assertEquals(93.toUShort(), first.columns)
+                assertEquals(37.toUShort(), first.rows)
+                it.resize(101u, 41u)
+                it.sendText("printf 'SIZE:'; stty size\n")
+                val resized = awaitText(it, listener, grid, "SIZE:41 101")
+                assertEquals(101.toUShort(), resized.columns)
+                assertEquals(41.toUShort(), resized.rows)
+                it.sendText("printf 'UTF-%s\\n' 'é界😀'\n")
+                awaitText(it, listener, grid, "UTF-é界😀")
+                it.sendText("printf 'KEY-%s\\n' ")
+                it.sendKey(KeyInput(TerminalKey.Character("a"), KeyModifiers(false, false, false, false)))
+                it.sendKey(KeyInput(TerminalKey.Enter, KeyModifiers(false, false, false, false)))
+                awaitText(it, listener, grid, "KEY-a")
                 it.sendText("exit 17\n")
                 val reason = listener.awaitState<SessionState.Closed>().reason
                 assertEquals(CloseReason.RemoteExited(17u), reason)
                 listener.assertNoMoreStates()
                 assertFalse(listener.overlapped)
+                assertTrue(listener.callbackThreads.none { thread -> thread == Thread.currentThread() })
             }
         }
+    }
+
+    private fun awaitText(
+        session: Session,
+        listener: RecordingListener,
+        grid: MutableMap<Int, String>,
+        expected: String,
+    ): TerminalFrame {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (System.nanoTime() < deadline) {
+            val frame = listener.awaitFrame(session, quiescent = false)
+            if (frame.full) grid.clear()
+            frame.changedRows.forEach { row ->
+                grid[row.index.toInt()] = row.cells.joinToString("") { cell ->
+                    if (cell.width == CellWidth.SPACER_TAIL) "" else cell.text.ifEmpty { " " }
+                }
+            }
+            if (grid.toSortedMap().values.joinToString("\n").contains(expected)) return frame
+        }
+        throw AssertionError("expected shell output did not arrive in terminal frames")
     }
 }
 
@@ -103,6 +147,7 @@ internal class OpenSshFixture : AutoCloseable {
                 PubkeyAuthentication yes
                 PrintMotd no
                 PrintLastLog no
+                SetEnv HOME=$directory HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR=$directory
                 LogLevel VERBOSE
                 """.trimIndent() + "\n",
             )

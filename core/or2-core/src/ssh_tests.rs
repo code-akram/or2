@@ -21,12 +21,16 @@ enum Mode {
     RejectAuth,
     RejectPty,
     RejectShell,
+    StallAuth,
+    StallPty,
+    StallShell,
 }
 
 struct Server {
     mode: Mode,
     client_key: russh::keys::PublicKey,
     observed: sync::Sender<String>,
+    stop: watch::Receiver<bool>,
 }
 
 impl server::Handler for Server {
@@ -37,6 +41,10 @@ impl server::Handler for Server {
         _: &str,
         key: &russh::keys::PublicKey,
     ) -> Result<server::Auth, Self::Error> {
+        if matches!(self.mode, Mode::StallAuth) {
+            let _ = self.stop.changed().await;
+            return Ok(server::Auth::reject());
+        }
         Ok(
             if !matches!(self.mode, Mode::RejectAuth) && key == &self.client_key {
                 server::Auth::Accept
@@ -71,6 +79,9 @@ impl server::Handler for Server {
         self.observed
             .send(format!("pty:{term}:{columns}:{rows}"))
             .unwrap();
+        if matches!(self.mode, Mode::StallPty) {
+            return Ok(());
+        }
         if matches!(self.mode, Mode::RejectPty) {
             session.channel_failure(channel)?;
         } else {
@@ -85,6 +96,9 @@ impl server::Handler for Server {
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
         self.observed.send("shell".into()).unwrap();
+        if matches!(self.mode, Mode::StallShell) {
+            return Ok(());
+        }
         if matches!(self.mode, Mode::RejectShell) {
             session.channel_failure(channel)?;
         } else {
@@ -124,6 +138,11 @@ impl server::Handler for Server {
                 session.exit_status_request(channel, 17)?;
                 session.close(channel)?;
             }
+            b"signal\r" => {
+                session.exit_signal_request(channel, russh::Sig::TERM, false, "", "")?;
+                session.eof(channel)?;
+                session.close(channel)?;
+            }
             b"lose\r" => return Err(russh::Error::Disconnect),
             _ => {
                 session.data(channel, bytes.to_vec())?;
@@ -139,6 +158,7 @@ struct Fixture {
     observed: sync::Receiver<String>,
     socket: sync::Receiver<std::net::TcpStream>,
     task: tokio::task::JoinHandle<()>,
+    stop: watch::Sender<bool>,
 }
 
 impl Fixture {
@@ -170,6 +190,7 @@ impl Fixture {
             });
             let (observed, received) = sync::channel();
             let (send_socket, socket) = sync::channel();
+            let (stop, stopping) = watch::channel(false);
             let task = tokio::spawn(async move {
                 let (socket, _) = listener.accept().await.unwrap();
                 let socket = socket.into_std().unwrap();
@@ -181,12 +202,17 @@ impl Fixture {
                     Server {
                         mode,
                         client_key,
-                        observed,
+                        observed: observed.clone(),
+                        stop: stopping,
                     },
                 )
                 .await
                 .unwrap();
-                let _ = session.await;
+                let result = session.await;
+                let _ = observed.send(format!(
+                    "server-end:{}",
+                    if result.is_ok() { "ok" } else { "lost" }
+                ));
             });
             Fixture {
                 request,
@@ -194,6 +220,7 @@ impl Fixture {
                 observed: received,
                 socket,
                 task,
+                stop,
             }
         })
     }
@@ -229,6 +256,10 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        self.stop.send_replace(true);
+        if let Ok(socket) = self.socket.try_recv() {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
         self.task.abort();
     }
 }
@@ -364,6 +395,84 @@ fn authentication_pty_and_shell_refusals_never_connect() {
             })
         );
     }
+}
+
+#[test]
+fn live_but_stalled_authentication_and_shell_setup_still_time_out() {
+    for mode in [Mode::StallAuth, Mode::StallPty, Mode::StallShell] {
+        let mut fixture = Fixture::new(mode);
+        let (_handle, states) = fixture.connect(vec![fixture.host.clone()]);
+        assert_eq!(state(&states), SessionState::Authenticating);
+        assert_eq!(
+            closed(&states),
+            CloseReason::Failed(SessionFailure::TimedOut)
+        );
+    }
+}
+
+#[test]
+fn remote_signal_is_a_shell_exit_not_connection_loss() {
+    let mut fixture = Fixture::new(Mode::Accept);
+    let (handle, states) = fixture.connect(vec![fixture.host.clone()]);
+    connected(&states);
+    handle.send_text("signal\n".into()).unwrap();
+    assert_eq!(
+        closed(&states),
+        CloseReason::RemoteExited { exit_status: None }
+    );
+}
+
+#[test]
+fn explicit_disconnect_flushes_an_ssh_disconnect_packet() {
+    let mut fixture = Fixture::new(Mode::Accept);
+    let (handle, states) = fixture.connect(vec![fixture.host.clone()]);
+    connected(&states);
+    assert!(fixture.observed().starts_with("pty:"));
+    assert_eq!(fixture.observed(), "shell");
+    handle.disconnect();
+    assert_eq!(closed(&states), CloseReason::Disconnected);
+    // russh server returns success for an SSH disconnect, but an error for raw transport EOF.
+    assert_eq!(fixture.observed(), "server-end:ok");
+}
+
+#[test]
+fn terminal_replies_return_to_the_real_ssh_channel() {
+    let mut fixture = Fixture::new(Mode::Accept);
+    let (handle, states) = fixture.connect(vec![fixture.host.clone()]);
+    connected(&states);
+    assert!(fixture.observed().starts_with("pty:"));
+    assert_eq!(fixture.observed(), "shell");
+    // The fixture echoes bytes; the DSR must cause Ghostty to send a cursor-position reply.
+    handle.send_text("\x1b[6n".into()).unwrap();
+    assert_eq!(fixture.observed(), "input:\x1b[6n");
+    assert_eq!(fixture.observed(), "input:\x1b[2;1R");
+    handle.disconnect();
+    assert_eq!(closed(&states), CloseReason::Disconnected);
+}
+
+#[test]
+fn refused_tcp_connection_keeps_the_io_error_kind_in_the_diagnostic() {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let key = ClientKey::generate_ed25519("");
+    let request = ConnectRequest::new(
+        &std::net::Ipv4Addr::LOCALHOST.to_string(),
+        port,
+        "fixture",
+        &key.to_stored(),
+        &[],
+        79,
+        23,
+    )
+    .unwrap();
+    let (sender, states) = sync::channel();
+    let _handle = start(request, Arc::new(Recorder(sender)), Duration::from_secs(2));
+    let CloseReason::Failed(SessionFailure::Unreachable(message)) = closed(&states) else {
+        panic!("expected refused TCP connection");
+    };
+    assert!(message.contains("ConnectionRefused"));
+    assert!(!message.contains("PRIVATE KEY"));
 }
 
 #[test]

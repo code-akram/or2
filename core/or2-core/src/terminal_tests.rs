@@ -1,0 +1,339 @@
+use super::*;
+
+fn engine(columns: u16, rows: u16) -> TerminalEngine {
+    TerminalEngine::new(TerminalSize::new(columns, rows).unwrap(), |_| {}).unwrap()
+}
+
+fn text(row: &Row) -> String {
+    row.cells()
+        .iter()
+        .map(|cell| {
+            if cell.text.is_empty() {
+                " "
+            } else {
+                &cell.text
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn resolved_styles_golden() {
+    let mut terminal = engine(12, 3);
+    terminal
+        .write(b"\x1b]10;#eeeeee\x07\x1b]11;#010203\x07\x1b]4;1;#123456\x07\x1b]4;2;#abcdef\x07");
+    terminal.write(b"\x1b[1;2;3;4:3;9;53;38;2;17;34;51;48;5;196;58;5;2mA\x1b[0m\x1b[31mP\x1b[0m\x1b[38;2;17;34;51;48;2;68;85;102;7mI\x1b[8mV\x1b[0mD");
+    let frame = terminal.frame().unwrap();
+    assert!(frame.is_full());
+    assert_eq!(frame.background().packed(), 0x010203);
+    let cells = frame.rows()[0].cells();
+    assert_eq!(cells[0].text, "A");
+    assert_eq!(
+        cells[0].style,
+        CellStyle {
+            foreground: Rgb::new(17, 34, 51),
+            background: Rgb::new(255, 0, 0),
+            underline_color: Some(Rgb::new(171, 205, 239)),
+            underline: Underline::Curly,
+            bold: true,
+            italic: true,
+            faint: true,
+            strikethrough: true,
+            overline: true,
+        }
+    );
+    assert_eq!(cells[1].text, "P");
+    assert_eq!(
+        cells[1].style,
+        CellStyle::plain(Rgb::new(18, 52, 86), Rgb::new(1, 2, 3))
+    );
+    assert_eq!(cells[2].text, "I");
+    assert_eq!(cells[2].style.foreground.packed(), 0x445566);
+    assert_eq!(cells[2].style.background.packed(), 0x112233);
+    assert_eq!(cells[3].text, "V");
+    assert_eq!(cells[3].style.foreground.packed(), 0x112233);
+    assert_eq!(cells[3].style.background.packed(), 0x112233);
+    assert_eq!(
+        cells[4].style,
+        CellStyle::plain(Rgb::new(238, 238, 238), Rgb::new(1, 2, 3))
+    );
+    // An OSC palette change is global: unchanged palette-indexed cells must redraw.
+    terminal.write(b"\x1b]4;1;#fedcba\x07");
+    let frame = terminal.frame().unwrap();
+    assert!(frame.is_full());
+    assert_eq!(
+        frame.rows()[0].cells()[1].style.foreground.packed(),
+        0xfedcba
+    );
+}
+
+#[test]
+fn wide_graphemes_cursor_tail_and_spacer_head_golden() {
+    let mut terminal = engine(9, 3);
+    terminal.write("a界😀e\u{301}\x1b[1;3H\x1b[6 q".as_bytes());
+    let frame = terminal.frame().unwrap();
+    let cells = frame.rows()[0].cells();
+    assert_eq!(
+        cells
+            .iter()
+            .take(6)
+            .map(|cell| (cell.text.as_str(), cell.width))
+            .collect::<Vec<_>>(),
+        [
+            ("a", CellWidth::Narrow),
+            ("界", CellWidth::Wide),
+            ("", CellWidth::SpacerTail),
+            ("😀", CellWidth::Wide),
+            ("", CellWidth::SpacerTail),
+            ("e\u{301}", CellWidth::Narrow),
+        ]
+    );
+    let cursor = frame.cursor().unwrap();
+    assert_eq!(
+        (
+            cursor.column,
+            cursor.row,
+            cursor.wide,
+            cursor.shape,
+            cursor.blinking
+        ),
+        (1, 0, true, CursorShape::Bar, false)
+    );
+    // Cursor-only movement must also inspect the wide cell on an otherwise clean row.
+    terminal.write(b"\x1b[1;4H");
+    let cursor = terminal.frame().unwrap().cursor().unwrap();
+    assert_eq!((cursor.column, cursor.wide), (3, true));
+    terminal.write(b"\x1b[?25l");
+    assert!(terminal.frame().unwrap().cursor().is_none());
+
+    let mut terminal = engine(4, 3);
+    terminal.write("abc界".as_bytes());
+    let frame = terminal.frame().unwrap();
+    assert_eq!(text(&frame.rows()[0]), "abc ");
+    assert!(frame.rows()[0].wrapped());
+    assert_eq!(frame.rows()[0].cells()[3].width, CellWidth::Narrow);
+    assert_eq!(frame.rows()[0].cells()[3].text, "");
+    assert_eq!(frame.rows()[1].cells()[0].width, CellWidth::Wide);
+}
+
+#[test]
+fn dirty_rows_are_consumed_and_resync_and_resize_are_full() {
+    let mut terminal = engine(8, 3);
+    assert!(terminal.frame().unwrap().is_full());
+    assert!(terminal.frame().unwrap().rows().is_empty());
+    terminal.write(b"\x1b[2;3HX");
+    let delta = terminal.frame().unwrap();
+    assert!(!delta.is_full());
+    // Moving the cursor dirties its old row as well as the new content row.
+    assert_eq!(
+        delta.rows().iter().map(Row::index).collect::<Vec<_>>(),
+        [0, 1]
+    );
+    assert_eq!(text(&delta.rows()[0]), "        ");
+    assert_eq!(text(&delta.rows()[1]), "  X     ");
+    assert!(terminal.frame().unwrap().rows().is_empty());
+    terminal.request_full_frame();
+    assert_eq!(terminal.frame().unwrap().rows().len(), 3);
+
+    let mut terminal = engine(8, 3);
+    terminal.write(b"abcdefghijk");
+    terminal.frame().unwrap();
+    terminal.resize(TerminalSize::new(5, 4).unwrap()).unwrap();
+    let frame = terminal.frame().unwrap();
+    assert!(frame.is_full());
+    assert_eq!(frame.size(), TerminalSize::new(5, 4).unwrap());
+    assert_eq!(
+        frame.rows().iter().map(text).collect::<Vec<_>>(),
+        ["abcde", "fghij", "k    ", "     "]
+    );
+    assert!(frame.rows()[0].wrapped() && frame.rows()[1].wrapped());
+    assert!(!frame.rows()[2].wrapped());
+    assert_eq!(
+        (frame.cursor().unwrap().column, frame.cursor().unwrap().row),
+        (1, 2)
+    );
+}
+
+#[test]
+fn alternate_screen_and_scrollback_golden() {
+    let mut terminal = engine(8, 3);
+    terminal.write(b"L0\r\nL1\r\nL2\r\nL3\r\nL4");
+    let frame = terminal.frame().unwrap();
+    assert_eq!(
+        frame.scrollback(),
+        Scrollback {
+            total_rows: 5,
+            offset: 2
+        }
+    );
+    assert_eq!(
+        frame.rows().iter().map(text).collect::<Vec<_>>(),
+        ["L2      ", "L3      ", "L4      "]
+    );
+    assert!(terminal.scroll(ViewportScroll::Top).unwrap().is_empty());
+    let frame = terminal.frame().unwrap();
+    assert_eq!(
+        frame.scrollback(),
+        Scrollback {
+            total_rows: 5,
+            offset: 0
+        }
+    );
+    assert_eq!(
+        frame.rows().iter().map(text).collect::<Vec<_>>(),
+        ["L0      ", "L1      ", "L2      "]
+    );
+    assert!(frame.cursor().is_none());
+    terminal.scroll(ViewportScroll::Delta(1)).unwrap();
+    assert_eq!(terminal.frame().unwrap().scrollback().offset, 1);
+    terminal.scroll(ViewportScroll::Bottom).unwrap();
+    assert_eq!(terminal.frame().unwrap().scrollback().offset, 2);
+    terminal.write(b"\x1b[?1049h\x1b[HALT\x1b[?1h");
+    let frame = terminal.frame().unwrap();
+    assert!(frame.is_full());
+    assert_eq!(text(&frame.rows()[0]), "ALT     ");
+    assert_eq!(
+        frame.scrollback(),
+        Scrollback {
+            total_rows: 3,
+            offset: 0
+        }
+    );
+    assert_eq!(
+        terminal.scroll(ViewportScroll::Delta(-2)).unwrap(),
+        b"\x1bOA\x1bOA"
+    );
+    assert_eq!(
+        terminal.scroll(ViewportScroll::Delta(1)).unwrap(),
+        b"\x1bOB"
+    );
+    terminal.write(b"\x1b[?1049l");
+    let frame = terminal.frame().unwrap();
+    assert!(frame.is_full());
+    assert_eq!(text(&frame.rows()[2]), "L4      ");
+}
+
+#[test]
+fn key_encoding_golden_uses_current_modes_and_shifted_us_physical_keys() {
+    let mut terminal = engine(80, 24);
+    let none = Modifiers::default();
+    let ctrl = Modifiers { ctrl: true, ..none };
+    let shift = Modifiers {
+        shift: true,
+        ..none
+    };
+    let alt = Modifiers { alt: true, ..none };
+    for (key, modifiers, expected) in [
+        (Key::Character("c".into()), ctrl, b"\x03".as_slice()),
+        (Key::Character("A".into()), shift, b"A"),
+        (Key::Character("!".into()), shift, b"!"),
+        (Key::Character("?".into()), shift, b"?"),
+        (Key::Character("[".into()), ctrl, b"\x1b"),
+        (Key::Character("i".into()), ctrl, b"\t"),
+        (Key::Character("m".into()), ctrl, b"\r"),
+        (
+            Key::Character("[".into()),
+            Modifiers { alt: true, ..ctrl },
+            b"\x1b\x1b",
+        ),
+        (Key::Character("a".into()), none, b"a"),
+        (Key::Character("x".into()), alt, b"\x1bx"),
+        (Key::Character("é".into()), none, "é".as_bytes()),
+        (Key::Enter, none, b"\r"),
+        (Key::Tab, none, b"\t"),
+        (Key::Backspace, none, b"\x7f"),
+        (Key::ArrowUp, none, b"\x1b[A"),
+        (Key::ArrowRight, none, b"\x1b[C"),
+        (Key::Function(1), none, b"\x1bOP"),
+        (Key::Function(5), none, b"\x1b[15~"),
+        (Key::Function(12), none, b"\x1b[24~"),
+    ] {
+        let input = KeyInput::new(key, modifiers).unwrap();
+        assert_eq!(terminal.encode_key(&input).unwrap(), expected, "{input:?}");
+    }
+    terminal.write(b"\x1b[?1h");
+    assert_eq!(
+        terminal
+            .encode_key(&KeyInput::new(Key::ArrowUp, none).unwrap())
+            .unwrap(),
+        b"\x1bOA"
+    );
+    terminal.write(b"\x1b[?1l");
+    assert_eq!(
+        terminal
+            .encode_key(&KeyInput::new(Key::ArrowUp, none).unwrap())
+            .unwrap(),
+        b"\x1b[A"
+    );
+}
+
+#[test]
+fn opted_in_key_protocols_keep_the_real_control_keys_and_can_be_disabled() {
+    let none = Modifiers::default();
+    let ctrl = Modifiers { ctrl: true, ..none };
+    let shift = Modifiers {
+        shift: true,
+        ..none
+    };
+    for (enable, disable, bracket, i, m, c, capital, bang, question) in [
+        (
+            b"\x1b[>1u".as_slice(),
+            b"\x1b[<u".as_slice(),
+            b"\x1b[91;5u".as_slice(),
+            b"\x1b[105;5u".as_slice(),
+            b"\x1b[109;5u".as_slice(),
+            b"\x1b[99;5u".as_slice(),
+            b"A".as_slice(),
+            b"!".as_slice(),
+            b"?".as_slice(),
+        ),
+        (
+            b"\x1b[>4;2m",
+            b"\x1b[>4;0m",
+            b"\x1b[27;5;91~",
+            b"\x1b[27;5;105~",
+            b"\x1b[27;5;109~",
+            b"\x03",
+            b"\x1b[27;2;65~",
+            b"!",
+            b"?",
+        ),
+    ] {
+        let mut terminal = engine(80, 24);
+        terminal.write(enable);
+        for (value, modifiers, expected) in [
+            ("[", ctrl, bracket),
+            ("i", ctrl, i),
+            ("m", ctrl, m),
+            ("c", ctrl, c),
+            ("A", shift, capital),
+            ("!", shift, bang),
+            ("?", shift, question),
+            ("a", none, b"a"),
+        ] {
+            let input = KeyInput::new(Key::Character(value.into()), modifiers).unwrap();
+            assert_eq!(terminal.encode_key(&input).unwrap(), expected, "{input:?}");
+        }
+        terminal.write(disable);
+        assert_eq!(
+            terminal
+                .encode_key(&KeyInput::new(Key::Character("[".into()), ctrl).unwrap())
+                .unwrap(),
+            b"\x1b"
+        );
+    }
+}
+
+#[test]
+fn terminal_queries_write_replies_back() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let replies = Rc::new(RefCell::new(Vec::new()));
+    let recorded = replies.clone();
+    let mut terminal = TerminalEngine::new(TerminalSize::new(80, 24).unwrap(), move |bytes| {
+        recorded.borrow_mut().extend_from_slice(bytes)
+    })
+    .unwrap();
+    terminal.write(b"\x1b[3;7H\x1b[6n");
+    assert_eq!(*replies.borrow(), b"\x1b[3;7R");
+}
