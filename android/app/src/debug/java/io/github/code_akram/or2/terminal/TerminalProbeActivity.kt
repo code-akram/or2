@@ -10,10 +10,15 @@ import android.view.Window
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
@@ -24,6 +29,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.ffi.ConnectRequest
 import io.github.code_akram.or2.ffi.CursorShape
 import io.github.code_akram.or2.ffi.Session
@@ -115,6 +122,20 @@ class TerminalProbeActivity : ComponentActivity() {
                     }
                     if (stats.isNotEmpty()) Text(stats)
                     TerminalScreen(session, state, frameFlow, Modifier.weight(1f))
+                }
+            }
+        }
+    }
+
+    /** Mirrors the session screen's Compose siblings, with visible margins for clip checks. */
+    fun showBoundsFixture() {
+        setContent {
+            MaterialTheme {
+                Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)
+                    .background(Color(0xff336699))) {
+                    Text("Compose session title above terminal", color = Color.White,
+                        modifier = Modifier.fillMaxWidth().height(64.dp))
+                    TerminalScreen(session, state, frameFlow, Modifier.weight(1f).padding(horizontal = 16.dp))
                 }
             }
         }

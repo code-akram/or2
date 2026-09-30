@@ -11,6 +11,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.code_akram.or2.ffi.CursorShape
+import io.github.code_akram.or2.ffi.TerminalCursor
 import java.io.File
 import org.junit.Assert.*
 import org.junit.Test
@@ -109,6 +110,70 @@ class TerminalVisualDeviceTest {
                 assertEquals("界😀e\u0301", view.selection!!.text())
             }
             capture(scenario, "selection")
+        }
+    }
+
+    @Test fun terminalCannotPaintOverComposeHeaderOrOutsideItsSideMargins() {
+        ActivityScenario.launch(TerminalProbeActivity::class.java).use { scenario ->
+            await(scenario) { _, view -> view.grid.hasGrid }
+            var oldWidth = 0
+            scenario.onActivity { activity ->
+                oldWidth = activity.terminalView()!!.width
+                activity.showBoundsFixture()
+            }
+            await(scenario) { _, view ->
+                val size = gridSize(view.width, view.height, view.cellWidth, view.cellHeight)
+                size != null && view.width < oldWidth && view.grid.hasGrid &&
+                    view.grid.columns == size.columns.toInt() && view.grid.rows.size == size.rows.toInt()
+            }
+            for (selecting in listOf(false, true)) {
+                val outside = mutableListOf<Point>()
+                var inside = Point()
+                var oldDraws = 0
+                scenario.onActivity { activity ->
+                    val view = activity.terminalView()!!
+                    oldDraws = view.drawTimings.count
+                    val size = gridSize(view.width, view.height, view.cellWidth, view.cellHeight)!!
+                    val columns = size.columns.toInt()
+                    val rows = size.rows.toInt()
+                    // A retained grid can temporarily exceed the viewport during resize.
+                    activity.display(terminalVisualFrame((columns + 4).toUShort(), (rows + 4).toUShort(), CursorShape.BAR)
+                        .copy(cursor = TerminalCursor((columns - 1).toUShort(), 1u, true, CursorShape.BLOCK, false, 0x66ccffu)))
+                    if (selecting) {
+                        view.beginSelection(CellPosition(0, 0))
+                        view.selection!!.end = CellPosition(columns + 3, rows + 3)
+                        view.invalidate()
+                    } else {
+                        view.input.compose("界😀".repeat(20)) // Must not escape past the right edge.
+                    }
+                    val position = IntArray(2)
+                    view.getLocationOnScreen(position)
+                    val inset = (8 * view.resources.displayMetrics.density).toInt()
+                    val y = position[1] + (view.cellHeight * 1.5f).toInt()
+                    outside += Point(position[0] + view.width / 2, position[1] - inset) // Compose header.
+                    outside += Point(position[0] - inset, y)
+                    outside += Point(position[0] + view.width + inset, y)
+                    inside = Point(position[0] + view.width / 2, position[1] + view.height / 2)
+                }
+                await(scenario) { _, view -> view.drawTimings.count > oldDraws }
+                instrumentation.waitForIdleSync()
+                SystemClock.sleep(100)
+                val screenshot = instrumentation.uiAutomation.takeScreenshot()
+                assertNotNull(screenshot)
+                val directory = File(instrumentation.targetContext.filesDir, "terminal-review").apply { mkdirs() }
+                val name = if (selecting) "bounds-selection" else "bounds-composition"
+                File(directory, "$name.png").outputStream().use {
+                    assertTrue(screenshot!!.compress(Bitmap.CompressFormat.PNG, 100, it))
+                }
+                try {
+                    outside.forEach { point ->
+                        assertEquals("$name painted outside terminal at $point", 0xff336699.toInt(), screenshot!!.getPixel(point.x, point.y))
+                    }
+                    assertNotEquals("Terminal itself must still be drawn", 0xff336699.toInt(), screenshot!!.getPixel(inside.x, inside.y))
+                } finally {
+                    screenshot!!.recycle()
+                }
+            }
         }
     }
 
