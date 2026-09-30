@@ -43,17 +43,27 @@ class SessionHolderTest {
     private class FakeSession(val events: MutableList<String> = mutableListOf()) : SessionInterface, AutoCloseable {
         var approved: String? = null
         var takes = 0
+        var destroyed = false
+        val lastFrame = TerminalFrame(1uL, 2u, 1u, true,
+            listOf(CellStyle(0xffffffu, 0u, null, Underline.NONE, false, false, false, false, false)),
+            listOf(TerminalRow(0u, false, listOf(TerminalCell("L", CellWidth.NARROW, 0u), TerminalCell("R", CellWidth.NARROW, 0u)))),
+            null, 0u, Scrollback(1uL, 0uL))
+        var pending: TerminalFrame? = lastFrame
         override fun approveHostKey(fingerprint: String) { approved = fingerprint; events += "approve" }
         override fun rejectHostKey() { events += "reject" }
         override fun disconnect() { events += "disconnect" }
-        override fun close() { events += "close" }
+        override fun close() { destroyed = true; events += "close" }
         override fun requestFullFrame() = Unit
         override fun resize(columns: UShort, rows: UShort) = Unit
         override fun scroll(scroll: ViewportScroll) = Unit
         override fun sendKey(input: KeyInput) = Unit
         override fun sendText(text: String) = Unit
         override fun state() = SessionState.Connecting
-        override fun takeFrame(): TerminalFrame? { takes++; return null }
+        override fun takeFrame(): TerminalFrame? {
+            check(!destroyed) { "Session object has already been destroyed" }
+            takes++
+            return pending.also { pending = null }
+        }
     }
 
     @Test
@@ -91,7 +101,9 @@ class SessionHolderTest {
         assertArrayEquals(ByteArray(3), bytes)
         assertEquals(0, fake.takes)
         holder.disconnect()
-        assertEquals(listOf("persist", "approve", "disconnect", "close"), store.events)
+        assertFalse(fake.destroyed)
+        holder.dismiss()
+        assertEquals(1, store.events.count { it == "close" })
     }
 
     @Test
@@ -120,7 +132,10 @@ class SessionHolderTest {
         val store = Store().apply { gate = CompletableDeferred() }
         val fake = FakeSession()
         val listeners = mutableListOf<SessionListener>()
-        val holder = SessionHolder(SessionConnector { _, listener -> listeners += listener; fake }, store, dispatcher, dispatcher)
+        val holder = SessionHolder(SessionConnector { _, listener ->
+            listeners += listener
+            if (listeners.size == 1) fake else FakeSession()
+        }, store, dispatcher, dispatcher)
         holder.connect(host, byteArrayOf(6))
         listeners[0].onStateChanged(prompt)
         val previous = holder.active.value!!
@@ -135,8 +150,8 @@ class SessionHolderTest {
         assertEquals(SessionState.Connecting, holder.active.value!!.state.value)
         assertTrue(holder.active.value!!.frameReady.replayCache.isEmpty())
         holder.reject(holder.active.value!!)
-        assertTrue(fake.events.contains("reject"))
-        holder.disconnect()
+        assertTrue((holder.active.value!!.handle.value as FakeSession).events.contains("reject"))
+        holder.dismiss()
     }
 
     @Test
@@ -186,5 +201,58 @@ class SessionHolderTest {
             assertNull(holder.active.value)
             assertEquals(listOf("disconnect", "close"), fake.events)
         } finally { release.countDown(); worker.close() }
+    }
+
+    @Test
+    fun disconnectClosedLastFrameDismissThenDisposeClosesExactlyOnce() = runTest {
+        val main = StandardTestDispatcher(testScheduler)
+        val worker = UnconfinedTestDispatcher(testScheduler)
+        val fake = FakeSession()
+        lateinit var listener: SessionListener
+        val holder = SessionHolder(SessionConnector { _, incoming -> listener = incoming; fake }, Store(), main, worker)
+        holder.connect(host, byteArrayOf(6, 3))
+        val displayed = holder.active.value!!
+        holder.attachDisplay(displayed)
+        holder.disconnect()
+        listener.onStateChanged(SessionState.Closed(CloseReason.Disconnected))
+        runCurrent()
+        assertSame(displayed, holder.active.value)
+        assertEquals(SessionState.Closed(CloseReason.Disconnected), displayed.state.value)
+        assertSame(fake, displayed.handle.value)
+        assertSame(fake.lastFrame, displayed.handle.value!!.takeFrame())
+        holder.dismiss()
+        assertNull(holder.active.value)
+        assertFalse(fake.destroyed) // Still in composition; a queued draw must not crash.
+        holder.detachDisplay(displayed)
+        assertFalse(fake.destroyed) // Terminal child disposal finishes on this main-loop turn.
+        runCurrent()
+        assertEquals(1, fake.events.count { it == "close" })
+        holder.dismiss()
+        runCurrent()
+        assertEquals(1, fake.events.count { it == "close" })
+        assertThrows(IllegalStateException::class.java) { fake.takeFrame() }
+    }
+
+    @Test
+    fun recreationRetainsHandleAndReplacementWaitsForOldDisplayDisposal() = runTest {
+        val main = StandardTestDispatcher(testScheduler)
+        val worker = UnconfinedTestDispatcher(testScheduler)
+        val sessions = mutableListOf<FakeSession>()
+        val holder = SessionHolder(SessionConnector { _, _ -> FakeSession().also { sessions += it } }, Store(), main, worker)
+        holder.connect(host, byteArrayOf(7))
+        val previous = holder.active.value!!
+        holder.attachDisplay(previous)
+        holder.detachDisplay(previous) // Activity recreation or navigation away, not dismissal.
+        runCurrent()
+        assertFalse(sessions[0].destroyed)
+        holder.attachDisplay(previous)
+        holder.connect(host.copy(id = 8), byteArrayOf(8))
+        assertFalse(sessions[0].destroyed)
+        assertSame(sessions[0].lastFrame, previous.handle.value!!.takeFrame())
+        holder.detachDisplay(previous)
+        runCurrent()
+        assertEquals(1, sessions[0].events.count { it == "close" })
+        holder.dismiss()
+        assertEquals(1, sessions[1].events.count { it == "close" })
     }
 }

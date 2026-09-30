@@ -18,19 +18,21 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 
 fun interface SessionConnector {
     fun connect(request: ConnectRequest, listener: SessionListener): SessionInterface
 }
-
-// Removed when lane A's real connect export is integrated. Never substitute the probe here.
-class ConnectionUnavailable : IllegalStateException("SSH connection is not available in this build.")
 
 class ActiveSession(val host: HostRecord) {
     internal val ready = CompletableDeferred<SessionInterface>()
     internal val mutableState = MutableStateFlow<SessionState>(SessionState.Connecting)
     internal val mutableFrames = MutableSharedFlow<Unit>(replay = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     internal val mutableHandle = MutableStateFlow<SessionInterface?>(null)
+    internal var displays = 0
+    internal var retired = false
+    internal var destroyed = false
+    internal var disconnectRequested = false
     val state = mutableState.asStateFlow()
     val frameReady = mutableFrames.asSharedFlow()
     val handle = mutableHandle.asStateFlow()
@@ -51,7 +53,7 @@ class SessionHolder(
     suspend fun connect(host: HostRecord, privateKey: ByteArray) {
         var attempt: ActiveSession? = null
         try {
-            disconnect()
+            dismiss()
             val keys = trust.trustedKeys(host.id)
             val current = ActiveSession(host)
             attempt = current
@@ -79,12 +81,13 @@ class SessionHolder(
                     privateKey.fill(0)
                 }
             }
-            // Disconnect may have happened while the synchronous factory was running.
-            if (mutableActive.value !== current) release(session)
+            // Disconnect/dismiss may have happened while the synchronous factory was running.
+            if (mutableActive.value !== current) retire(current)
+            else if (current.disconnectRequested) session.disconnect()
         } catch (error: Exception) {
             attempt?.ready?.completeExceptionally(error)
-            attempt?.mutableHandle?.value?.let(::release)
             if (mutableActive.value === attempt) mutableActive.value = null
+            attempt?.let(::retire)
             throw error
         } finally {
             privateKey.fill(0)
@@ -93,10 +96,10 @@ class SessionHolder(
 
     suspend fun approve(current: ActiveSession, prompt: SessionState.AwaitingHostKeyDecision) {
         val session = current.ready.await()
-        check(mutableActive.value === current && current.state.value == prompt) { "Host-key prompt has expired." }
+        check(mutableActive.value === current && !current.disconnectRequested && current.state.value == prompt) { "Host-key prompt has expired." }
         trust.replaceTrust(current.host, prompt.presented)
         // Persistence failure must never cause approval.
-        if (mutableActive.value === current && current.state.value == prompt) {
+        if (mutableActive.value === current && !current.disconnectRequested && current.state.value == prompt) {
             session.approveHostKey(prompt.presented.fingerprint)
         }
     }
@@ -108,12 +111,38 @@ class SessionHolder(
 
     fun disconnect() {
         val current = mutableActive.value ?: return
-        mutableActive.value = null
-        current.mutableHandle.value?.let(::release)
+        current.disconnectRequested = true
+        current.mutableHandle.value?.disconnect()
     }
 
-    private fun release(session: SessionInterface) {
-        session.disconnect()
-        (session as? AutoCloseable)?.close()
+    /** Retire ownership, but never destroy a handle still leased by a composed session screen. */
+    fun dismiss() {
+        val current = mutableActive.value ?: return
+        mutableActive.value = null
+        retire(current)
+    }
+
+    internal fun attachDisplay(current: ActiveSession) { current.displays++ }
+
+    internal fun detachDisplay(current: ActiveSession) {
+        check(current.displays > 0)
+        current.displays--
+        // Child terminal effects must finish disposal before native destruction.
+        scope.launch { yield(); closeRetired(current) }
+    }
+
+    private fun retire(current: ActiveSession) {
+        current.retired = true
+        current.disconnectRequested = true
+        current.mutableHandle.value?.disconnect()
+        closeRetired(current)
+    }
+
+    private fun closeRetired(current: ActiveSession) {
+        val session = current.mutableHandle.value ?: return
+        if (current.retired && current.displays == 0 && !current.destroyed) {
+            current.destroyed = true
+            (session as? AutoCloseable)?.close()
+        }
     }
 }

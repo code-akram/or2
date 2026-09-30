@@ -2,9 +2,9 @@
 
 The Compose app loads `or2-ffi` through generated UniFFI Kotlin/JNA bindings. Host settings,
 encrypted key records and trusted host keys live in Room. `or2-core` remains free of Android,
-UniFFI and persistence dependencies. The production connector is unavailable until the real
-`connect` export is integrated; the contract probe is used only by tests. Connected sessions
-show a placeholder until the terminal lane is integrated.
+UniFFI and persistence dependencies. The production connector calls the real API-3 `connect`
+export; the contract probe is used only by tests. Connected sessions show a placeholder until
+the terminal lane is integrated.
 
 ## Shared user-local toolchain
 
@@ -87,7 +87,11 @@ resolution. Do not exempt KSP configurations from locking.
 
 The native JVM contract tests load the real host `.so` with desktop JNA. Holder/ViewModel tests
 use fakes to exercise callbacks before handle assignment, persist-before-approve, expired
-prompts, cleanup, factory cancellation, and private-array wipe timing. Key-operation tests use
+prompts, disconnect-versus-destruction, display disposal, factory cancellation, and private-array
+wipe timing. `SessionHolderNativeTest` uses the real production connector and a disposable
+loopback OpenSSH fixture for first-use trust, trusted reconnect, changed-key rejection and
+retained closed handles; it skips when `/usr/bin/sshd` is unavailable. No home SSH files or
+system sshd settings are read or modified. Key-operation tests use
 real key exports and AES-GCM on the JVM (not Android Keystore). Device tests
 load the packaged arm64 `.so` with Android JNA. Both cover the bootstrap geometry and errors,
 key generation/import errors, and a `contract_probe_session` lifecycle whose listener callbacks
@@ -133,7 +137,8 @@ Manual phone checks still required:
 - Biometric CryptoObject encrypt/decrypt success and cancellation; missing enrollment and
   enrollment invalidation must produce clear recovery messages. Never change enrollment or
   device security settings just to test these without separate user authorization.
-- Activity recreation must keep established sessions; explicit disconnect releases them.
+- Activity recreation must keep established sessions; disconnect shows `Closed`, and "Close
+  session" releases the handle after the renderer leaves composition.
 - First-use and prominent changed-key warnings, previous fingerprints and closed/error states.
   Use test fixtures, not real hosts, until separately authorized.
 - Capture representative screenshots and inspect them; visual verification and successful
@@ -145,4 +150,10 @@ device-credential fallback is allowed. Invalidated records remain for explanatio
 re-import or generate a new SSH key to recover. Private keys are never exported or backed up:
 `allowBackup=false` and cloud/device-transfer extraction rules exclude all app data.
 Session ownership is application-scoped in M1, not a foreground service; process death ends it.
+Disconnect leaves the active handle and final frame readable under `Closed`; "Close session"
+or connecting elsewhere retires it. A session-screen display lease delays native `close()`
+until the old screen leaves composition, then yields a main-loop turn for terminal disposal.
+Activity recreation/navigation alone does not retire sessions. MainActivity uses
+`adjustResize`; the root adds IME padding on host/key forms but not the session tab, where
+TerminalScreen owns IME insets after integration.
 This does not prove SSH/IME/terminal acceptance or the broader v0 background-session test.

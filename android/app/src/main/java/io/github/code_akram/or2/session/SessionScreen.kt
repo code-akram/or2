@@ -10,6 +10,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -17,21 +18,29 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.code_akram.or2.ffi.SessionState
 
 @Composable
-fun SessionScreen(current: ActiveSession?, busy: Boolean, approve: (ActiveSession, SessionState.AwaitingHostKeyDecision) -> Unit,
-    reject: (ActiveSession) -> Unit, disconnect: () -> Unit) {
+fun SessionScreen(holder: SessionHolder, busy: Boolean, approve: (ActiveSession, SessionState.AwaitingHostKeyDecision) -> Unit,
+    reject: (ActiveSession) -> Unit) {
+    val current by holder.active.collectAsStateWithLifecycle()
     if (current == null) {
         Text("No active session. Choose Connect on a host to unlock its key.")
         return
     }
-    val state by current.state.collectAsStateWithLifecycle()
+    val displayed = current!!
+    DisposableEffect(displayed) {
+        holder.attachDisplay(displayed)
+        onDispose { holder.detachDisplay(displayed) }
+    }
+    val state by displayed.state.collectAsStateWithLifecycle()
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(current.host.label, style = MaterialTheme.typography.titleLarge)
+        Text(displayed.host.label, style = MaterialTheme.typography.titleLarge)
         Text(sessionMessage(state))
         if (state == SessionState.Connected) Text("Connected session. Terminal rendering will be integrated from lane C.")
-        Button(onClick = disconnect) { Text(if (state is SessionState.Closed) "Close session" else "Disconnect") }
+        Button(onClick = { if (state is SessionState.Closed) holder.dismiss() else holder.disconnect() }) {
+            Text(if (state is SessionState.Closed) "Close session" else "Disconnect")
+        }
     }
     (state as? SessionState.AwaitingHostKeyDecision)?.let { prompt ->
-        HostTrustDialog(prompt, busy, { approve(current, prompt) }, { reject(current) })
+        HostTrustDialog(prompt, busy, { approve(displayed, prompt) }, { reject(displayed) })
     }
 }
 

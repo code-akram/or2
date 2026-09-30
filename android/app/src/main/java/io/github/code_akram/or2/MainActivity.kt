@@ -47,7 +47,6 @@ import io.github.code_akram.or2.keys.importAndWipe
 import io.github.code_akram.or2.keys.keyErrorMessage
 import io.github.code_akram.or2.keys.readPrivateKey
 import io.github.code_akram.or2.keys.vaultErrorMessage
-import io.github.code_akram.or2.session.ConnectionUnavailable
 import io.github.code_akram.or2.session.SessionScreen
 import io.github.code_akram.or2.session.connectErrorMessage
 import io.github.code_akram.or2.session.sessionErrorMessage
@@ -86,7 +85,7 @@ class MainActivity : FragmentActivity() {
                     Column(
                         modifier = Modifier
                             .windowInsetsPadding(WindowInsets.safeDrawing)
-                            .imePadding()
+                            .then(if (tab == "Session") Modifier else Modifier.imePadding())
                             .padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
@@ -115,8 +114,8 @@ class MainActivity : FragmentActivity() {
                             "Keys" -> KeysScreen(keys, busy, { label, comment ->
                                 saveKey(label) { generateEd25519Key(comment) }
                             }, ::importKey, model::deleteKey)
-                            else -> SessionScreen(active, busy, { current, prompt -> operation { app.sessions.approve(current, prompt) } },
-                                { current -> operation { app.sessions.reject(current) } }, app.sessions::disconnect)
+                            else -> SessionScreen(app.sessions, busy, { current, prompt -> operation { app.sessions.approve(current, prompt) } },
+                                { current -> operation { app.sessions.reject(current) } })
                         }
                     }
                 }
@@ -135,7 +134,6 @@ class MainActivity : FragmentActivity() {
                     is KeyException -> keyErrorMessage(error)
                     is ConnectException -> connectErrorMessage(error)
                     is SessionException -> sessionErrorMessage(error)
-                    is ConnectionUnavailable -> "SSH connection is not available in this build. No connection was opened."
                     is VaultException, is GeneralSecurityException -> vaultErrorMessage(error)
                     else -> "Operation failed. No host-key approval was sent. Retry or reconnect if the prompt expired."
                 })
