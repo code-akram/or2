@@ -3,10 +3,12 @@ package io.github.code_akram.or2.terminal
 import android.content.ClipboardManager
 import android.os.SystemClock
 import android.text.InputType
+import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
@@ -199,6 +201,53 @@ class TerminalDeviceTest {
         }
     }
 
+    @Test fun hardwareKeysBypassImeExactlyOnceWithKeyboardShownAndHidden() {
+        ActivityScenario.launch(TerminalProbeActivity::class.java).use { scenario ->
+            await(scenario) { it.grid.hasGrid }
+            val session = RecordingSession()
+            scenario.onActivity { activity ->
+                val view = activity.terminalView()!!
+                view.bind(session)
+                view.requestFocus()
+                val now = SystemClock.uptimeMillis()
+                val raw = KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_B, 0)
+                assertTrue(view.dispatchKeyEventPreIme(raw))
+                assertTrue(view.dispatchKeyEventPreIme(KeyEvent.changeAction(raw, KeyEvent.ACTION_UP)))
+                assertEquals(listOf(TerminalKey.Character("b")), session.keys.map { it.key })
+                val soft = KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_Z, 0, 0,
+                    KeyCharacterMap.VIRTUAL_KEYBOARD, 0, KeyEvent.FLAG_SOFT_KEYBOARD)
+                assertFalse(view.dispatchKeyEventPreIme(soft))
+                view.onCreateInputConnection(EditorInfo()).sendKeyEvent(soft)
+                assertEquals(listOf(TerminalKey.Character("b"), TerminalKey.Character("z")), session.keys.map { it.key })
+                session.keys.clear()
+                view.showKeyboard()
+            }
+            await(scenario) { it.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true }
+            fun injectAndAssertOnce() {
+                KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD).getEvents("clear".toCharArray())
+                    .forEach { instrumentation.sendKeySync(it) }
+                instrumentation.waitForIdleSync()
+                SystemClock.sleep(200) // Also catch a delayed IME composition/commit echo.
+                scenario.onActivity {
+                    assertEquals("Hardware text must not be committed again by the IME", emptyList<String>(), session.texts)
+                    assertEquals("clear".map { TerminalKey.Character(it.toString()) }, session.keys.map { it.key })
+                    session.keys.clear()
+                }
+            }
+            injectAndAssertOnce()
+            scenario.onActivity { activity ->
+                val view = activity.terminalView()!!
+                activity.getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(view.windowToken, 0)
+            }
+            await(scenario) { it.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == false }
+            injectAndAssertOnce()
+            scenario.onActivity { activity ->
+                assertFalse("Hardware typing must not reopen the soft keyboard",
+                    activity.terminalView()!!.rootWindowInsets.isVisible(WindowInsets.Type.ime()))
+            }
+        }
+    }
+
     @Test fun longPressDragCopiesWideAndCombiningCellsAndDragScrolls() {
         ActivityScenario.launch(TerminalProbeActivity::class.java).use { scenario ->
             await(scenario) { it.grid.hasGrid }
@@ -215,6 +264,7 @@ class TerminalDeviceTest {
             scenario.onActivity { activity ->
                 val view = activity.window.decorView.terminal()!!
                 assertNotNull(view.selection)
+                assertEquals("R界😀e\u0301I", view.selection!!.text()) // Entire word, before any drag.
                 val move = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_MOVE,
                     view.cellWidth * 5.5f, view.cellHeight * 1.5f, 0)
                 view.dispatchTouchEvent(move)
@@ -223,11 +273,11 @@ class TerminalDeviceTest {
                     view.cellWidth * 5.5f, view.cellHeight * 1.5f, 0)
                 view.dispatchTouchEvent(up)
                 up.recycle()
-                assertEquals("界😀e\u0301", view.selection!!.text())
+                assertEquals("R界😀e\u0301I", view.selection!!.text())
                 view.requestFocus()
                 view.copySelection()
                 val clipboard = activity.getSystemService(ClipboardManager::class.java)
-                assertEquals("界😀e\u0301", clipboard.primaryClip!!.getItemAt(0).text.toString())
+                assertEquals("R界😀e\u0301I", clipboard.primaryClip!!.getItemAt(0).text.toString())
                 assertNull(view.selection)
                 val session = RecordingSession()
                 val gestureView = TerminalView(activity).apply { bind(session) }

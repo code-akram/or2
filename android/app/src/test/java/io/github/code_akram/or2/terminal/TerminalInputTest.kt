@@ -83,6 +83,30 @@ class TerminalInputTest {
         assertEquals(3, keys.size)
     }
 
+    @Test fun pasteIsLiteralAndEmptyPasteDoesNotDisturbComposition() {
+        input.compose("pending")
+        input.paste("")
+        assertEquals("pending", input.composing)
+        input.toggleCtrl()
+        input.paste("echo 界😀\n")
+        assertEquals(listOf("echo 界😀\n"), texts)
+        assertTrue(keys.isEmpty())
+        assertEquals("", input.composing)
+        assertTrue(input.ctrl) // Paste is not the next typed key; the modifier stays armed.
+    }
+
+    @Test fun pasteCountsLogicalLinesAndConfirmsAnyLineBreak() {
+        listOf(
+            Triple("", 0, false), Triple("echo x", 1, false), Triple("\n", 2, true),
+            Triple("echo x\n", 2, true), Triple("a\nb\nc", 3, true),
+            Triple("a\r\nb\r\n", 3, true), Triple("a\rb", 2, true),
+            Triple("a\n\rb", 3, true), Triple("界😀", 1, false),
+        ).forEach { (text, lines, confirm) ->
+            assertEquals(lines, pasteLineCount(text))
+            assertEquals(confirm, pasteNeedsConfirmation(text))
+        }
+    }
+
     @Test fun hardwareNavigationFunctionAndUnicodeMappingsAreDistinct() {
         assertEquals(TerminalKey.Delete, terminalKey(KeyEvent.KEYCODE_FORWARD_DEL, 0))
         assertEquals(TerminalKey.Backspace, terminalKey(KeyEvent.KEYCODE_DEL, 0))

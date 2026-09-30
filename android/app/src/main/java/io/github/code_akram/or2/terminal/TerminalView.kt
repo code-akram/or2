@@ -7,6 +7,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Picture
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.text.InputType
 import android.util.LruCache
@@ -36,9 +37,14 @@ class TerminalView(context: Context) : View(context) {
     val applyTimings = FrameTimings()
     /** CPU display-list recording only; Window frame metrics measure the render pipeline. */
     val drawTimings = FrameTimings()
+    /** Main-thread, unclipped Compose layout bounds for content-free device diagnostics. */
+    internal var primaryKeyRowBounds: RectF? = null
+    internal val primaryKeyBounds = mutableMapOf<String, RectF>()
+    internal var actionRowBounds: RectF? = null
+    internal val actionBounds = mutableMapOf<String, RectF>()
     var showTimings = false
-    // Prepared for debug IME comparison only. Production keeps composition-capable text mode
-    // until the default phone IME's single-letter latency has been tested.
+    // Debug comparison only. Production keeps composition-capable text mode; immediate
+    // single-letter delivery with the phone's default IME passed real-SSH acceptance.
     internal var directLatinInput = false
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -86,7 +92,7 @@ class TerminalView(context: Context) : View(context) {
             return true
         }
         override fun onLongPress(e: MotionEvent) {
-            beginSelection(position(e.x, e.y) ?: return)
+            beginSelection(position(e.x, e.y) ?: return, word = true)
         }
         override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
             if (selection == null) scrollPixels(distanceY)
@@ -191,6 +197,15 @@ class TerminalView(context: Context) : View(context) {
         return true // Releases are consumed but never sent to Rust.
     }
 
+    override fun dispatchKeyEventPreIme(event: KeyEvent): Boolean {
+        // Raw hardware/injected keys belong to the terminal, not to the IME's editor.
+        // ViewRootImpl stops dispatch when this returns true, so the same key cannot also
+        // become an IME commit and then reach onKeyDown as an unhandled fallback.
+        // IME-originated events retain their normal InputConnection/post-IME route.
+        if (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD == 0 && handleKey(event)) return true
+        return super.dispatchKeyEventPreIme(event)
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean = handleKey(event) || super.onKeyDown(keyCode, event)
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean = handleKey(event) || super.onKeyUp(keyCode, event)
 
@@ -211,9 +226,13 @@ class TerminalView(context: Context) : View(context) {
     private fun position(x: Float, y: Float): CellPosition? =
         grid.position(x, y, cellWidth, cellHeight, selection)
 
-    fun beginSelection(position: CellPosition) {
+    fun beginSelection(position: CellPosition, word: Boolean = false) {
         if (!grid.hasGrid) return
-        selection = TerminalSelection(grid.rows, grid.columns, position)
+        selection = if (word) {
+            TerminalSelection.word(selection?.rows ?: grid.rows, selection?.columns ?: grid.columns, position)
+        } else {
+            TerminalSelection(grid.rows, grid.columns, position)
+        }
         scroller.forceFinished(true)
         onSelectionChanged()
         invalidate()

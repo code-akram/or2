@@ -24,6 +24,13 @@ class TerminalInput(
     fun discardComposition() { composing = ""; changed() }
     fun finishComposition() { commit(composing) }
 
+    /** Clipboard paste is literal text, not a typed character with sticky modifiers. */
+    fun paste(text: String) {
+        if (text.isEmpty()) return
+        discardComposition()
+        sendText(text)
+    }
+
     fun commit(text: String) {
         discardComposition()
         if (text.isEmpty()) return
@@ -57,6 +64,18 @@ class TerminalInput(
         return true
     }
 }
+
+/** Logical lines, including a trailing empty line; CRLF is a single line break. */
+fun pasteLineCount(text: String): Int {
+    if (text.isEmpty()) return 0
+    var lines = 1
+    text.forEachIndexed { index, char ->
+        if (char == '\r' || (char == '\n' && (index == 0 || text[index - 1] != '\r'))) lines++
+    }
+    return lines
+}
+
+fun pasteNeedsConfirmation(text: String): Boolean = pasteLineCount(text) > 1
 
 /** Android constants are inlined so the mapping is also exercised in ordinary JVM tests. */
 fun terminalKey(keyCode: Int, unicode: Int): TerminalKey? = when (keyCode) {
