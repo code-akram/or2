@@ -45,12 +45,21 @@ class TerminalView(context: Context) : View(context) {
         typeface = Typeface.MONOSPACE
         textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 14f, resources.displayMetrics)
     }
+    private val baseTypeface = terminalTypeface(textPaint)
+    internal val fontHasMonospacedAdvances = textPaint.hasMonospacedAdvances()
+    private val typefaces = Array(4) { style ->
+        // The single file has no bold face. Request only italic from it and synthesize bold
+        // ourselves; Typeface.create(..., BOLD).isBold can describe a request, not a real face.
+        val resolvedStyle = if (baseTypeface != Typeface.MONOSPACE) style and Typeface.BOLD.inv() else style
+        if (resolvedStyle == Typeface.NORMAL) baseTypeface else Typeface.create(baseTypeface, resolvedStyle)
+    }
+    internal val boldUsesFake = !typefaces[Typeface.BOLD].isBold
     val cellWidth = ceil(textPaint.measureText("M"))
     val cellHeight = ceil(textPaint.fontMetrics.bottom - textPaint.fontMetrics.top)
     private val baseline = -textPaint.fontMetrics.top
     private data class Glyph(
         val text: String, val wide: Boolean, val foreground: UInt,
-        val bold: Boolean, val italic: Boolean, val faint: Boolean,
+        val bold: Boolean, val italic: Boolean, val faint: Boolean, val fakeBold: Boolean,
     )
     private val glyphs = LruCache<Glyph, Picture>(2048)
     var onInputChanged: () -> Unit = {}
@@ -326,10 +335,11 @@ class TerminalView(context: Context) : View(context) {
             grid.cursor?.let { cursor ->
                 val x = cursor.column.toInt() * cellWidth
                 val y = cursor.row.toInt() * cellHeight
-                textPaint.typeface = Typeface.MONOSPACE
+                textPaint.typeface = baseTypeface
+                textPaint.isFakeBoldText = false
                 textPaint.color = android.graphics.Color.WHITE
                 textPaint.alpha = 255
-                val w = textPaint.measureText(input.composing)
+                val w = textPaint.measureText(input.composing).coerceAtLeast(compositionCells(input.composing) * cellWidth)
                 paint.color = 0xff23405b.toInt()
                 canvas.drawRect(x, y, x + w, y + cellHeight, paint)
                 canvas.drawText(input.composing, x, y + baseline, textPaint)
@@ -342,7 +352,8 @@ class TerminalView(context: Context) : View(context) {
             paint.color = 0xdd000000.toInt()
             canvas.drawRect(0f, height - cellHeight, width.toFloat(), height.toFloat(), paint)
             textPaint.color = android.graphics.Color.WHITE
-            textPaint.typeface = Typeface.MONOSPACE
+            textPaint.typeface = baseTypeface
+            textPaint.isFakeBoldText = false
             textPaint.alpha = 255
             canvas.drawText("apply p95 %.2f · draw p95 %.2f ms".format(applyTimings.percentile(95), drawTimings.percentile(95)),
                 0f, height - cellHeight + baseline, textPaint)
@@ -352,23 +363,22 @@ class TerminalView(context: Context) : View(context) {
     private fun drawCell(canvas: Canvas, x: Float, y: Float, cell: ResolvedCell) {
         val w = cellWidth * if (cell.width == CellWidth.WIDE) 2 else 1
         if (cell.text.isNotEmpty()) {
+            val typeface = typefaces[(if (cell.style.bold) Typeface.BOLD else 0) or
+                (if (cell.style.italic) Typeface.ITALIC else 0)]
+            val fakeBold = cell.style.bold && !typeface.isBold
             val key = Glyph(cell.text, cell.width == CellWidth.WIDE, cell.style.foreground,
-                cell.style.bold, cell.style.italic, cell.style.faint)
+                cell.style.bold, cell.style.italic, cell.style.faint, fakeBold)
             val picture = glyphs[key] ?: Picture().also { picture ->
                 val glyphCanvas = picture.beginRecording(ceil(w).toInt(), ceil(cellHeight).toInt())
                 glyphCanvas.clipRect(0f, 0f, w, cellHeight)
-                textPaint.typeface = Typeface.create(Typeface.MONOSPACE, when {
-                    cell.style.bold && cell.style.italic -> Typeface.BOLD_ITALIC
-                    cell.style.bold -> Typeface.BOLD
-                    cell.style.italic -> Typeface.ITALIC
-                    else -> Typeface.NORMAL
-                })
+                textPaint.typeface = typeface
+                textPaint.isFakeBoldText = fakeBold
                 textPaint.color = cell.style.foreground.opaque()
                 textPaint.alpha = if (cell.style.faint) 128 else 255
                 val measured = textPaint.measureText(cell.text)
                 glyphCanvas.save()
                 if (measured > w) glyphCanvas.scale(w / measured, 1f)
-                glyphCanvas.drawText(cell.text, 0f, baseline, textPaint)
+                glyphCanvas.drawText(cell.text, ((w - measured) / 2).coerceAtLeast(0f), baseline, textPaint)
                 glyphCanvas.restore()
                 picture.endRecording()
                 glyphs.put(key, picture)

@@ -1,7 +1,10 @@
 package io.github.code_akram.or2.terminal
 
 import android.graphics.Bitmap
+import android.graphics.Paint
+import android.graphics.Point
 import android.graphics.Rect
+import android.graphics.Typeface
 import android.os.Bundle
 import android.os.SystemClock
 import androidx.test.core.app.ActivityScenario
@@ -34,12 +37,19 @@ class TerminalVisualDeviceTest {
         instrumentation.waitForIdleSync()
         SystemClock.sleep(100)
         val bounds = Rect()
+        var compositionEdge: Point? = null
         scenario.onActivity { activity ->
             activity.window.decorView.getWindowVisibleDisplayFrame(bounds)
             val view = activity.terminalView()!!
             val position = IntArray(2)
             view.getLocationOnScreen(position)
             bounds.top = position[1] // Exclude system status and debug toolbar; retain terminal + keys.
+            if (name == "composition-armed-keys") {
+                val cursor = view.grid.cursor!!
+                // e + combining acute is one cell, CJK and emoji each occupy two.
+                compositionEdge = Point(position[0] - bounds.left + ((cursor.column.toInt() + 5) * view.cellWidth).toInt() - 1,
+                    ((cursor.row.toInt() + 1) * view.cellHeight).toInt() - 1)
+            }
         }
         val screenshot = instrumentation.uiAutomation.takeScreenshot()
         assertNotNull("Hardware screenshot unavailable", screenshot)
@@ -47,6 +57,9 @@ class TerminalVisualDeviceTest {
             bounds.width().coerceAtMost(screenshot.width - bounds.left), bounds.height().coerceAtMost(screenshot.height - bounds.top))
         val directory = File(instrumentation.targetContext.filesDir, "terminal-review").apply { mkdirs() }
         File(directory, "$name.png").outputStream().use { assertTrue(cropped.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+        compositionEdge?.let { edge ->
+            assertEquals("Composition underline must cover all five cells", 0xff66ccff.toInt(), cropped.getPixel(edge.x, edge.y))
+        }
         cropped.recycle()
         screenshot.recycle()
     }
@@ -54,6 +67,24 @@ class TerminalVisualDeviceTest {
     @Test fun capturesProbeStylesWideCursorsCompositionKeysAndSelection() {
         ActivityScenario.launch(TerminalProbeActivity::class.java).use { scenario ->
             await(scenario) { _, view -> view.grid.hasGrid && view.grid.rows.size > 12 }
+            scenario.onActivity { activity ->
+                val file = File("/system/fonts/DroidSansMono.ttf")
+                if (file.isFile) {
+                    val probe = Paint().apply { textSize = 30f; typeface = Typeface.Builder(file).build() }
+                    if (probe.hasMonospacedAdvances()) {
+                        val view = activity.terminalView()!!
+                        assertTrue("Validated system font must be used", view.fontHasMonospacedAdvances)
+                        assertTrue("DroidSansMono needs synthetic bold", view.boldUsesFake)
+                    }
+                }
+                assertEquals(0, compositionCells(""))
+                assertEquals(1, compositionCells("e\u0301"))
+                assertEquals(5, compositionCells("e\u0301界😀"))
+                assertEquals(2, compositionCells("👩‍💻"))
+                assertEquals(2, compositionCells("🇴🇲"))
+                assertEquals(2, compositionCells("1\uFE0F\u20E3"))
+                assertEquals(1, compositionCells("©\uFE0E"))
+            }
             capture(scenario, "probe")
             CursorShape.entries.forEach { shape ->
                 scenario.onActivity { activity ->
