@@ -116,6 +116,31 @@ class SessionHolderTest {
     }
 
     @Test
+    fun terminalEligibilityRequiresConnectedAndSurvivesConflatedClosedButNotReplacement() = runTest {
+        val main = StandardTestDispatcher(testScheduler)
+        val worker = UnconfinedTestDispatcher(testScheduler)
+        val listeners = mutableListOf<SessionListener>()
+        val holder = SessionHolder(SessionConnector { _, listener -> listeners += listener; FakeSession() }, Store(), main, worker)
+        holder.connect(host, byteArrayOf(8))
+        val failed = holder.active.value!!
+        listeners[0].onStateChanged(SessionState.Authenticating)
+        listeners[0].onStateChanged(SessionState.Closed(CloseReason.Failed(SessionFailure.AuthenticationRejected)))
+        runCurrent()
+        assertNotNull(failed.handle.value)
+        assertFalse(failed.hasConnected.value) // A handle alone must not expose terminal controls.
+        holder.connect(host.copy(id = 8), byteArrayOf(9))
+        val connected = holder.active.value!!
+        listeners[1].onStateChanged(SessionState.Connected)
+        listeners[1].onStateChanged(SessionState.Closed(CloseReason.Disconnected))
+        runCurrent() // The UI may observe only Closed, but the holder must remember Connected.
+        assertEquals(SessionState.Closed(CloseReason.Disconnected), connected.state.value)
+        assertTrue(connected.hasConnected.value)
+        holder.connect(host.copy(id = 9), byteArrayOf(7))
+        assertFalse(holder.active.value!!.hasConnected.value)
+        holder.dismiss()
+    }
+
+    @Test
     fun persistenceFailureAndExpiredPromptNeverApprove() = runTest {
         val dispatcher = UnconfinedTestDispatcher(testScheduler)
         val store = Store().apply { fail = true }

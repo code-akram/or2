@@ -27,6 +27,7 @@ fun interface SessionConnector {
 class ActiveSession(val host: HostRecord) {
     internal val ready = CompletableDeferred<SessionInterface>()
     internal val mutableState = MutableStateFlow<SessionState>(SessionState.Connecting)
+    internal val mutableHasConnected = MutableStateFlow(false)
     internal val mutableFrames = MutableSharedFlow<Unit>(replay = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     internal val mutableHandle = MutableStateFlow<SessionInterface?>(null)
     internal var displays = 0
@@ -34,6 +35,7 @@ class ActiveSession(val host: HostRecord) {
     internal var destroyed = false
     internal var disconnectRequested = false
     val state = mutableState.asStateFlow()
+    val hasConnected = mutableHasConnected.asStateFlow()
     val frameReady = mutableFrames.asSharedFlow()
     val handle = mutableHandle.asStateFlow()
 }
@@ -60,7 +62,11 @@ class SessionHolder(
             mutableActive.value = current
             val listener = object : SessionListener {
                 override fun onStateChanged(state: SessionState) {
-                    scope.launch { current.mutableState.value = state }
+                    scope.launch {
+                        // Preserve a transient Connected even if the UI observes only Closed.
+                        if (state == SessionState.Connected) current.mutableHasConnected.value = true
+                        current.mutableState.value = state
+                    }
                 }
 
                 override fun onFrameReady() {

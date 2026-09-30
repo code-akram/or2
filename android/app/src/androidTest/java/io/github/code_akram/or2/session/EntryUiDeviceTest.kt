@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import io.github.code_akram.or2.MainActivity
@@ -53,6 +54,45 @@ class EntryUiDeviceTest {
         compose.onNodeWithText("presented-fingerprint").assertIsDisplayed()
         compose.onNodeWithText("Replace trust and connect").performClick()
         assertEquals("approve", decision)
+    }
+
+    @Test
+    fun authenticationRejectedBeforeConnectedHasNoTerminalOrKeyboardControls() {
+        val closed = SessionState.Closed(CloseReason.Failed(SessionFailure.AuthenticationRejected))
+        var frameTakes = 0
+        val session = object : SessionInterface, AutoCloseable {
+            override fun takeFrame(): TerminalFrame? { frameTakes++; return null }
+            override fun requestFullFrame() = Unit
+            override fun disconnect() = Unit
+            override fun close() = Unit
+            override fun resize(columns: UShort, rows: UShort) = Unit
+            override fun sendText(text: String) = Unit
+            override fun sendKey(input: KeyInput) = Unit
+            override fun scroll(scroll: ViewportScroll) = Unit
+            override fun state() = closed
+            override fun approveHostKey(fingerprint: String) = Unit
+            override fun rejectHostKey() = Unit
+        }
+        val store = object : TrustStore {
+            override suspend fun trustedKeys(hostId: Long) = emptyList<String>()
+            override suspend fun replaceTrust(host: HostRecord, presented: PublicKeyInfo) = Unit
+        }
+        val holder = SessionHolder(SessionConnector { _, listener ->
+            listener.onStateChanged(SessionState.Authenticating)
+            listener.onStateChanged(closed)
+            session
+        }, store, worker = Dispatchers.Unconfined)
+        compose.runOnUiThread {
+            runBlocking { holder.connect(HostRecord(1, "Fixture", "fixture.invalid", 22, "fixture", null), byteArrayOf(1)) }
+            compose.activity.setContent { MaterialTheme { SessionScreen(holder, false, { _, _ -> }, {}) } }
+        }
+        compose.onNodeWithText("Authentication rejected. Check the username and public-key authorization.").assertIsDisplayed()
+        compose.onNodeWithText("Close session").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Terminal").assertDoesNotExist()
+        compose.onNodeWithText("Keyboard").assertDoesNotExist()
+        compose.onNodeWithText("Esc").assertDoesNotExist()
+        compose.runOnIdle { assertEquals(0, frameTakes) }
+        compose.onNodeWithText("Close session").performClick()
     }
 
     @Test
