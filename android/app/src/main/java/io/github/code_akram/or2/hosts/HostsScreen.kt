@@ -61,9 +61,15 @@ fun HostsScreen(
     }
 }
 
+fun hostFieldError(value: String): String? = when {
+    value.isBlank() -> "Enter a value."
+    value.trim().any { it.isWhitespace() || it.isISOControl() } -> "Remove internal whitespace or control characters."
+    else -> null
+}
+
 fun validHost(label: String, hostname: String, port: String, username: String): Boolean =
-    label.isNotBlank() && hostname.isNotBlank() && hostname.none { it.isWhitespace() || it.isISOControl() } &&
-        port.toIntOrNull() in 1..65535 && username.isNotBlank() && username.none { it.isISOControl() }
+    label.isNotBlank() && hostFieldError(hostname) == null &&
+        port.toIntOrNull() in 1..65535 && hostFieldError(username) == null
 
 @Composable
 private fun HostDialog(previous: HostRecord?, keys: List<KeyRecord>, dismiss: () -> Unit, save: (HostRecord) -> Unit) {
@@ -72,13 +78,17 @@ private fun HostDialog(previous: HostRecord?, keys: List<KeyRecord>, dismiss: ()
     var port by remember { mutableStateOf(previous?.port?.toString() ?: "22") }
     var username by remember { mutableStateOf(previous?.username ?: "") }
     var keyId by remember { mutableStateOf(previous?.keyId) }
+    val hostnameError = hostFieldError(hostname)
+    val usernameError = hostFieldError(username)
     AlertDialog(onDismissRequest = dismiss, title = { Text(if (previous == null) "Add host" else "Edit host") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(label, { label = it }, label = { Text("Label") }, singleLine = true)
-                OutlinedTextField(hostname, { hostname = it }, label = { Text("Hostname") }, singleLine = true)
+                OutlinedTextField(hostname, { hostname = it }, label = { Text("Hostname") }, singleLine = true,
+                    isError = hostnameError != null, supportingText = { hostnameError?.let { Text(it) } })
                 OutlinedTextField(port, { port = it }, label = { Text("Port (1–65535)") }, singleLine = true)
-                OutlinedTextField(username, { username = it }, label = { Text("Username") }, singleLine = true)
+                OutlinedTextField(username, { username = it }, label = { Text("Username") }, singleLine = true,
+                    isError = usernameError != null, supportingText = { usernameError?.let { Text(it) } })
                 Text("SSH key")
                 if (keys.isEmpty()) Text("Generate or import a key on the Keys tab first.")
                 keys.forEach { key ->

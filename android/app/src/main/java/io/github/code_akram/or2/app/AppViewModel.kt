@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.code_akram.or2.data.AppDao
 import io.github.code_akram.or2.data.HostRecord
+import io.github.code_akram.or2.hosts.validHost
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -18,8 +19,13 @@ class AppViewModel(private val dao: AppDao, private val deleteVaultKey: (String)
     val message = mutableMessage.asStateFlow()
     fun message(text: String?) { mutableMessage.value = text }
 
-    fun saveHost(host: HostRecord, previous: HostRecord?) = action {
-        dao.saveHost(host, previous)
+    fun saveHost(host: HostRecord, previous: HostRecord?) {
+        val normalized = host.copy(hostname = host.hostname.trim(), username = host.username.trim())
+        if (!validHost(normalized.label, normalized.hostname, normalized.port.toString(), normalized.username)) {
+            message("Host not saved. Enter a label, a valid port, and a hostname and username without internal whitespace or control characters.")
+            return
+        }
+        action { dao.saveHost(normalized, previous) }
     }
 
     fun deleteHost(host: HostRecord) = action { dao.deleteHost(host.id) }

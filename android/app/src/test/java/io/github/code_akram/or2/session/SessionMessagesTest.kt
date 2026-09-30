@@ -1,6 +1,7 @@
 package io.github.code_akram.or2.session
 
 import io.github.code_akram.or2.ffi.*
+import io.github.code_akram.or2.hosts.hostFieldError
 import io.github.code_akram.or2.hosts.validHost
 import io.github.code_akram.or2.keys.keyErrorMessage
 import org.junit.Assert.*
@@ -44,7 +45,11 @@ class SessionMessagesTest {
         assertTrue(validHost("Label", "fixture.invalid", "1", "fixture"))
         assertTrue(validHost("Label", "fixture.invalid", "65535", "fixture"))
         for (port in listOf("0", "65536", "", "-1", "22x")) assertFalse(validHost("Label", "fixture.invalid", port, "fixture"))
+        assertTrue(validHost("Label", " fixture.invalid ", "22", " fixture "))
         assertFalse(validHost("Label", "bad address", "22", "fixture"))
+        assertFalse(validHost("Label", "fixture.invalid", "22", "bad name"))
         assertFalse(validHost("Label", "fixture.invalid", "22", "bad\nname"))
+        assertEquals("Remove internal whitespace or control characters.", hostFieldError("bad name"))
+        assertEquals("Enter a value.", hostFieldError(" \t"))
     }
 }

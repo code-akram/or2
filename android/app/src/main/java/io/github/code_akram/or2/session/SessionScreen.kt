@@ -13,6 +13,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -28,23 +29,26 @@ fun SessionScreen(holder: SessionHolder, busy: Boolean, approve: (ActiveSession,
         return
     }
     val displayed = current!!
-    DisposableEffect(displayed) {
-        holder.attachDisplay(displayed)
-        onDispose { holder.detachDisplay(displayed) }
-    }
-    val state by displayed.state.collectAsStateWithLifecycle()
-    val handle by displayed.handle.collectAsStateWithLifecycle()
-    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(displayed.host.label, style = MaterialTheme.typography.titleLarge)
-        Text(sessionMessage(state))
-        Button(onClick = { if (state is SessionState.Closed) holder.dismiss() else holder.disconnect() }) {
-            Text(if (state is SessionState.Closed) "Close session" else "Disconnect")
+    key(displayed) {
+        DisposableEffect(displayed) {
+            holder.attachDisplay(displayed)
+            onDispose { holder.detachDisplay(displayed) }
         }
-        // Keep the borrowed handle composed through Closed so its final frame stays visible.
-        handle?.let { TerminalScreen(it, displayed.state, displayed.frameReady, Modifier.weight(1f)) }
-    }
-    (state as? SessionState.AwaitingHostKeyDecision)?.let { prompt ->
-        HostTrustDialog(prompt, busy, { approve(displayed, prompt) }, { reject(displayed) })
+        val state by displayed.state.collectAsStateWithLifecycle()
+        val handle by displayed.handle.collectAsStateWithLifecycle()
+        val hasConnected by displayed.hasConnected.collectAsStateWithLifecycle()
+        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(displayed.host.label, style = MaterialTheme.typography.titleLarge)
+            Text(sessionMessage(state))
+            Button(onClick = { if (state is SessionState.Closed) holder.dismiss() else holder.disconnect() }) {
+                Text(if (state is SessionState.Closed) "Close session" else "Disconnect")
+            }
+            // Keep the borrowed handle composed through Closed so its final frame stays visible.
+            if (hasConnected) handle?.let { TerminalScreen(it, displayed.state, displayed.frameReady, Modifier.weight(1f)) }
+        }
+        (state as? SessionState.AwaitingHostKeyDecision)?.let { prompt ->
+            HostTrustDialog(prompt, busy, { approve(displayed, prompt) }, { reject(displayed) })
+        }
     }
 }
 
