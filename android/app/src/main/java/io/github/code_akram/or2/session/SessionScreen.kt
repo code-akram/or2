@@ -2,6 +2,7 @@ package io.github.code_akram.or2.session
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -16,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.code_akram.or2.ffi.SessionState
+import io.github.code_akram.or2.terminal.TerminalScreen
 
 @Composable
 fun SessionScreen(holder: SessionHolder, busy: Boolean, approve: (ActiveSession, SessionState.AwaitingHostKeyDecision) -> Unit,
@@ -31,13 +33,15 @@ fun SessionScreen(holder: SessionHolder, busy: Boolean, approve: (ActiveSession,
         onDispose { holder.detachDisplay(displayed) }
     }
     val state by displayed.state.collectAsStateWithLifecycle()
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    val handle by displayed.handle.collectAsStateWithLifecycle()
+    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(displayed.host.label, style = MaterialTheme.typography.titleLarge)
         Text(sessionMessage(state))
-        if (state == SessionState.Connected) Text("Connected session. Terminal rendering will be integrated from lane C.")
         Button(onClick = { if (state is SessionState.Closed) holder.dismiss() else holder.disconnect() }) {
             Text(if (state is SessionState.Closed) "Close session" else "Disconnect")
         }
+        // Keep the borrowed handle composed through Closed so its final frame stays visible.
+        handle?.let { TerminalScreen(it, displayed.state, displayed.frameReady, Modifier.weight(1f)) }
     }
     (state as? SessionState.AwaitingHostKeyDecision)?.let { prompt ->
         HostTrustDialog(prompt, busy, { approve(displayed, prompt) }, { reject(displayed) })
