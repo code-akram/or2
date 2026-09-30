@@ -7,6 +7,7 @@ import android.graphics.Rect
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -33,10 +34,38 @@ class TerminalVisualDeviceTest {
         fail("Terminal frame or Window metrics did not arrive")
     }
 
+    private fun assertPrimaryKeysFitWithoutScrolling() {
+        fun find(node: AccessibilityNodeInfo, label: String): AccessibilityNodeInfo? {
+            if (node.contentDescription?.toString() == label || (node.isClickable && node.text?.toString() == label)) return node
+            for (index in 0 until node.childCount) {
+                node.getChild(index)?.let { child -> find(child, label)?.let { return it } }
+            }
+            return null
+        }
+        val root = checkNotNull(instrumentation.uiAutomation.rootInActiveWindow) { "Accessibility window unavailable" }
+        val row = checkNotNull(find(root, "Terminal primary keys")) { "Essential keys row unavailable" }
+        assertFalse("Essential keys must not scroll", row.isScrollable)
+        val rowBounds = Rect().also { row.getBoundsInScreen(it) }
+        var right = rowBounds.left
+        listOf("Esc", "Tab", "Ctrl", "Alt", "←", "↓", "↑", "→").forEach { label ->
+            val node = checkNotNull(find(row, label)) { "$label unavailable in essential keys row" }
+            assertTrue("$label must be visible", node.isVisibleToUser)
+            val bounds = Rect().also { node.getBoundsInScreen(it) }
+            assertTrue("$label ($bounds) must fit within $rowBounds", rowBounds.contains(bounds))
+            // Containment alone could pass for a clipped partial button. Each must occupy
+            // a full eighth of the row, including the right arrow, in both armed states.
+            assertTrue("$label must have a full cell", kotlin.math.abs(bounds.width() * 8 - rowBounds.width()) <= 8)
+            assertTrue("$label must follow the preceding key", kotlin.math.abs(bounds.left - right) <= 1)
+            right = bounds.right
+        }
+        assertEquals(rowBounds.right, right)
+    }
+
     private fun capture(scenario: ActivityScenario<TerminalProbeActivity>, name: String) {
         // Settle Compose key state and hardware render submission before asking SurfaceFlinger.
         instrumentation.waitForIdleSync()
         SystemClock.sleep(100)
+        assertPrimaryKeysFitWithoutScrolling()
         val bounds = Rect()
         var compositionEdge: Point? = null
         scenario.onActivity { activity ->

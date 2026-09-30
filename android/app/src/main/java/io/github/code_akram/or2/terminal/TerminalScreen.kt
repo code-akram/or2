@@ -2,11 +2,14 @@ package io.github.code_akram.or2.terminal
 
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -20,7 +23,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
@@ -59,26 +64,30 @@ fun TerminalScreen(
         }
         Column(modifier = modifier.fillMaxSize().imePadding()) {
             AndroidView(factory = { view }, modifier = Modifier.weight(1f).clipToBounds())
-            Surface {
+            Surface(color = Color(0xff101018), contentColor = Color(0xffd8e8ff)) {
                 Column {
-                    Row(Modifier.horizontalScroll(rememberScrollState()).heightIn(min = 48.dp)) {
-                        TerminalButton("Esc") { view.input.key(TerminalKey.Escape) }
-                        TerminalButton("Tab") { view.input.key(TerminalKey.Tab) }
-                        TerminalButton("Ctrl", ctrl) { view.input.toggleCtrl() }
-                        TerminalButton("Alt", alt) { view.input.toggleAlt() }
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics {
+                        contentDescription = "Terminal primary keys"
+                    }) {
+                        TerminalButton("Esc", modifier = Modifier.weight(1f)) { view.input.key(TerminalKey.Escape) }
+                        TerminalButton("Tab", modifier = Modifier.weight(1f)) { view.input.key(TerminalKey.Tab) }
+                        TerminalButton("Ctrl", ctrl, Modifier.weight(1f)) { view.input.toggleCtrl() }
+                        TerminalButton("Alt", alt, Modifier.weight(1f)) { view.input.toggleAlt() }
                         listOf("←" to TerminalKey.ArrowLeft, "↓" to TerminalKey.ArrowDown,
-                            "↑" to TerminalKey.ArrowUp, "→" to TerminalKey.ArrowRight,
-                            "Home" to TerminalKey.Home, "End" to TerminalKey.End,
-                            "PgUp" to TerminalKey.PageUp, "PgDn" to TerminalKey.PageDown).forEach { (label, key) ->
-                            TerminalButton(label) { view.input.key(key) }
+                            "↑" to TerminalKey.ArrowUp, "→" to TerminalKey.ArrowRight).forEach { (label, key) ->
+                            TerminalButton(label, modifier = Modifier.weight(1f)) { view.input.key(key) }
                         }
                     }
-                    Row(Modifier.horizontalScroll(rememberScrollState()).heightIn(min = 48.dp)) {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).heightIn(min = 48.dp)) {
                         TerminalButton("Keyboard") { view.showKeyboard() }
                         TerminalButton("Bottom") { view.jumpToBottom() }
                         if (selecting) {
                             TerminalButton("Copy") { view.copySelection() }
                             TerminalButton("Clear") { view.clearSelection() }
+                        }
+                        listOf("Home" to TerminalKey.Home, "End" to TerminalKey.End,
+                            "PgUp" to TerminalKey.PageUp, "PgDn" to TerminalKey.PageDown).forEach { (label, key) ->
+                            TerminalButton(label) { view.input.key(key) }
                         }
                         listOf("/", "-", "|", "~", "_", "$", "&", "*", "{", "}", "(", ")", "[", "]", "=", ";", "'", "\"").forEach { symbol ->
                             TerminalButton(symbol) { view.input.key(TerminalKey.Character(symbol)) }
@@ -91,10 +100,13 @@ fun TerminalScreen(
 }
 
 @Composable
-private fun TerminalButton(label: String, selected: Boolean = false, action: () -> Unit) {
-    TextButton(onClick = action, modifier = Modifier.heightIn(min = 48.dp).semantics {
+private fun TerminalButton(label: String, selected: Boolean = false, modifier: Modifier = Modifier, action: () -> Unit) {
+    TextButton(onClick = action, modifier = modifier.heightIn(min = 48.dp).semantics {
         if (label == "Ctrl" || label == "Alt") stateDescription = if (selected) "Armed for next key" else "Off"
-    }) {
-        Text(if (selected) "$label ●" else label)
+    }, contentPadding = PaddingValues(horizontal = 4.dp), colors = ButtonDefaults.textButtonColors(
+        containerColor = if (selected) Color(0xff23405b) else Color.Transparent,
+        contentColor = if (selected) Color(0xff66ccff) else Color(0xffd8e8ff),
+    )) {
+        Text(label, maxLines = 1, softWrap = false)
     }
 }
