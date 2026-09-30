@@ -4,11 +4,18 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.activity.compose.setContent
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import io.github.code_akram.or2.AppScaffold
 import io.github.code_akram.or2.MainActivity
 import io.github.code_akram.or2.data.HostRecord
 import io.github.code_akram.or2.data.TrustStore
@@ -84,8 +91,11 @@ class EntryUiDeviceTest {
         }, store, worker = Dispatchers.Unconfined)
         compose.runOnUiThread {
             runBlocking { holder.connect(HostRecord(1, "Fixture", "fixture.invalid", 22, "fixture", null), byteArrayOf(1)) }
-            compose.activity.setContent { MaterialTheme { SessionScreen(holder, false, { _, _ -> }, {}) } }
+            compose.activity.setContent { AppScaffold(holder, "Session", {}) { SessionScreen(holder, false, { _, _ -> }, {}) } }
         }
+        compose.onNodeWithText("or2").assertIsDisplayed()
+        compose.onNodeWithText("Hosts").assertIsDisplayed()
+        compose.onNodeWithText("Keys").assertIsDisplayed()
         compose.onNodeWithText("Authentication rejected. Check the username and public-key authorization.").assertIsDisplayed()
         compose.onNodeWithText("Close session").assertIsDisplayed()
         compose.onNodeWithContentDescription("Terminal").assertDoesNotExist()
@@ -135,27 +145,64 @@ class EntryUiDeviceTest {
             listener.onStateChanged(SessionState.Connected)
             session
         }, store, worker = Dispatchers.Unconfined)
+        var tab by mutableStateOf("Session")
         compose.runOnUiThread {
             runBlocking { holder.connect(HostRecord(1, "Fixture", "fixture.invalid", 22, "fixture", null), byteArrayOf(1)) }
-            compose.activity.setContent { MaterialTheme { SessionScreen(holder, false, { _, _ -> }, {}) } }
-        }
-        var view: TerminalView? = null
-        compose.waitUntil(5_000) {
-            var ready = false
-            compose.runOnUiThread {
-                view = compose.activity.window.decorView.terminal()
-                ready = view?.grid?.hasGrid == true
+            compose.activity.setContent {
+                AppScaffold(holder, tab, { tab = it }) {
+                    if (tab == "Session") SessionScreen(holder, false, { _, _ -> }, {}) else Text("Hosts fixture")
+                }
             }
-            ready
         }
-        compose.onNodeWithText("Disconnect").performClick()
-        compose.onNodeWithText("Close session").assertIsDisplayed()
+        fun awaitTerminal(): TerminalView {
+            var view: TerminalView? = null
+            compose.waitUntil(5_000) {
+                var ready = false
+                compose.runOnUiThread {
+                    view = compose.activity.window.decorView.terminal()
+                    ready = view?.grid?.hasGrid == true
+                }
+                ready
+            }
+            return view!!
+        }
+        var view = awaitTerminal()
+        compose.onNodeWithText("or2").assertDoesNotExist()
+        compose.onNodeWithText("Hosts").assertDoesNotExist()
+        compose.onNodeWithText("Keys").assertDoesNotExist()
+        compose.onNodeWithText("• Session").assertDoesNotExist()
         compose.runOnIdle {
-            assertSame(view, compose.activity.window.decorView.terminal())
-            assertEquals("LR", view!!.grid.rows.single().cells.joinToString("") { it.text })
+            val insets = ViewCompat.getRootWindowInsets(view)!!.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            assertEquals(compose.activity.window.decorView.width - insets.left - insets.right, view.width)
+        }
+        val retained = holder.active.value
+        compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        compose.onNodeWithText("or2").assertIsDisplayed()
+        compose.onNodeWithText("• Hosts").assertIsDisplayed()
+        compose.onNodeWithText("Hosts fixture").assertIsDisplayed()
+        compose.runOnIdle {
+            assertSame(retained, holder.active.value)
+            assertEquals(SessionState.Connected, retained!!.state.value)
             assertFalse(destroyed)
         }
-        compose.onNodeWithText("Close session").performClick()
+        compose.onNodeWithText("Session").performClick()
+        view = awaitTerminal()
+        compose.onNodeWithText("or2").assertDoesNotExist()
+        compose.onNodeWithText("Disconnect").performClick()
+        compose.onNodeWithText("Close").assertIsDisplayed()
+        compose.onNodeWithText("Disconnected").assertIsDisplayed()
+        compose.onNodeWithText("or2").assertDoesNotExist()
+        compose.onNodeWithText("Keys").assertDoesNotExist()
+        compose.runOnIdle {
+            assertSame(view, compose.activity.window.decorView.terminal())
+            assertEquals("LR", view.grid.rows.single().cells.joinToString("") { it.text })
+            assertFalse(destroyed)
+        }
+        compose.onNodeWithText("Close").performClick()
+        compose.onNodeWithText("or2").assertIsDisplayed()
+        compose.onNodeWithText("Hosts").assertIsDisplayed()
+        compose.onNodeWithText("Keys").assertIsDisplayed()
+        compose.onNodeWithText("• Session").assertIsDisplayed()
         compose.onNodeWithText("No active session. Choose Connect on a host to unlock its key.").assertIsDisplayed()
         compose.waitUntil(5_000) {
             var closed = false

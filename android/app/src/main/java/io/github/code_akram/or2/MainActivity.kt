@@ -1,8 +1,9 @@
 package io.github.code_akram.or2
 
-import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -10,21 +11,31 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
+import androidx.core.view.WindowCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -47,6 +58,7 @@ import io.github.code_akram.or2.keys.importAndWipe
 import io.github.code_akram.or2.keys.keyErrorMessage
 import io.github.code_akram.or2.keys.readPrivateKey
 import io.github.code_akram.or2.keys.vaultErrorMessage
+import io.github.code_akram.or2.session.SessionHolder
 import io.github.code_akram.or2.session.SessionScreen
 import io.github.code_akram.or2.session.connectErrorMessage
 import io.github.code_akram.or2.session.sessionErrorMessage
@@ -58,6 +70,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.security.GeneralSecurityException
 import java.util.UUID
+import android.graphics.Color as AndroidColor
 
 class MainActivity : FragmentActivity() {
     private val app get() = application as Or2Application
@@ -67,8 +80,8 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT),
+            statusBarStyle = SystemBarStyle.light(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.light(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
         )
         model = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
@@ -80,44 +93,28 @@ class MainActivity : FragmentActivity() {
             val message by model.message.collectAsStateWithLifecycle()
             val active by app.sessions.active.collectAsStateWithLifecycle()
             var tab by rememberSaveable { mutableStateOf("Hosts") }
-            MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
-                    Column(
-                        modifier = Modifier
-                            .windowInsetsPadding(WindowInsets.safeDrawing)
-                            .then(if (tab == "Session") Modifier else Modifier.imePadding())
-                            .padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Text("or2", style = MaterialTheme.typography.headlineMedium)
-                        Row {
-                            listOf("Hosts", "Keys", "Session").forEach { name ->
-                                TextButton(onClick = { tab = name }) { Text(if (tab == name) "• $name" else name) }
-                            }
-                        }
-                        message?.let {
-                            Text(it, color = MaterialTheme.colorScheme.error)
-                            TextButton(onClick = { model.message(null) }) { Text("Dismiss") }
-                        }
-                        if (busy) Text("Waiting for authentication or operation…")
-                        when (tab) {
-                            "Hosts" -> HostsScreen(hosts, keys, busy, { host, previous ->
-                                if (active?.host?.id == host.id) app.sessions.disconnect()
-                                model.saveHost(host, previous)
-                            }, { host ->
-                                if (active?.host?.id == host.id) app.sessions.disconnect()
-                                model.deleteHost(host)
-                            }) { host ->
-                                tab = "Session"
-                                connectHost(host)
-                            }
-                            "Keys" -> KeysScreen(keys, busy, { label, comment ->
-                                saveKey(label) { generateEd25519Key(comment) }
-                            }, ::importKey, model::deleteKey)
-                            else -> SessionScreen(app.sessions, busy, { current, prompt -> operation { app.sessions.approve(current, prompt) } },
-                                { current -> operation { app.sessions.reject(current) } })
-                        }
+            AppScaffold(app.sessions, tab, { tab = it }) {
+                message?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = { model.message(null) }) { Text("Dismiss") }
+                }
+                if (busy) Text("Waiting for authentication or operation…")
+                when (tab) {
+                    "Hosts" -> HostsScreen(hosts, keys, busy, { host, previous ->
+                        if (active?.host?.id == host.id) app.sessions.disconnect()
+                        model.saveHost(host, previous)
+                    }, { host ->
+                        if (active?.host?.id == host.id) app.sessions.disconnect()
+                        model.deleteHost(host)
+                    }) { host ->
+                        tab = "Session"
+                        connectHost(host)
                     }
+                    "Keys" -> KeysScreen(keys, busy, { label, comment ->
+                        saveKey(label) { generateEd25519Key(comment) }
+                    }, ::importKey, model::deleteKey)
+                    else -> SessionScreen(app.sessions, busy, { current, prompt -> operation { app.sessions.approve(current, prompt) } },
+                        { current -> operation { app.sessions.reject(current) } })
                 }
             }
         }
@@ -181,6 +178,45 @@ class MainActivity : FragmentActivity() {
                 withContext(Dispatchers.Main) { app.sessions.connect(host, bytes) }
             } finally {
                 bytes.fill(0)
+            }
+        }
+    }
+}
+
+/** Shared navigation chrome; terminal sessions use only system-bar/cutout insets, not form padding. */
+@Composable
+fun AppScaffold(holder: SessionHolder, tab: String, selectTab: (String) -> Unit, content: @Composable () -> Unit) {
+    val current by holder.active.collectAsStateWithLifecycle()
+    val hasConnected = key(current) { current?.hasConnected?.collectAsStateWithLifecycle()?.value == true }
+    val terminalVisible = tab == "Session" && hasConnected
+    val activity = LocalActivity.current
+    val view = LocalView.current
+    SideEffect {
+        activity?.let {
+            val controller = WindowCompat.getInsetsController(it.window, view)
+            controller.isAppearanceLightStatusBars = !terminalVisible
+            controller.isAppearanceLightNavigationBars = !terminalVisible
+        }
+    }
+    BackHandler(enabled = tab == "Session") { selectTab("Hosts") }
+    MaterialTheme(colorScheme = if (terminalVisible) darkColorScheme(background = Color.Black, surface = Color(0xff101010)) else lightColorScheme()) {
+        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Column(
+                modifier = Modifier.fillMaxSize()
+                    .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout))
+                    .then(if (tab == "Session") Modifier else Modifier.imePadding())
+                    .then(if (terminalVisible) Modifier else Modifier.padding(16.dp)),
+                verticalArrangement = Arrangement.spacedBy(if (terminalVisible) 0.dp else 12.dp),
+            ) {
+                if (!terminalVisible) {
+                    Text("or2", style = MaterialTheme.typography.headlineMedium)
+                    Row {
+                        listOf("Hosts", "Keys", "Session").forEach { name ->
+                            TextButton(onClick = { selectTab(name) }) { Text(if (tab == name) "• $name" else name) }
+                        }
+                    }
+                }
+                content()
             }
         }
     }
