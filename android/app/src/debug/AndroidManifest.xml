@@ -1,0 +1,6 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity android:name="io.github.code_akram.or2.terminal.TerminalProbeActivity"
+            android:exported="true" android:windowSoftInputMode="adjustResize" />
+    </application>
+</manifest>
