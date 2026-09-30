@@ -32,8 +32,10 @@ class SessionHolderTest {
         var fail = false
         var persistedHost: HostRecord? = null
         var gate: CompletableDeferred<Unit>? = null
+        var replacements = 0
         override suspend fun trustedKeys(hostId: Long) = lines
         override suspend fun replaceTrust(host: HostRecord, presented: PublicKeyInfo) {
+            replacements++
             gate?.await()
             if (fail) error("storage failure")
             persistedHost = host
@@ -46,6 +48,7 @@ class SessionHolderTest {
         var approved: String? = null
         var takes = 0
         var destroyed = false
+        var nativeState: SessionState = SessionState.Connecting
         val lastFrame = TerminalFrame(1uL, 2u, 1u, true,
             listOf(CellStyle(0xffffffu, 0u, null, Underline.NONE, false, false, false, false, false)),
             listOf(TerminalRow(0u, false, listOf(TerminalCell("L", CellWidth.NARROW, 0u), TerminalCell("R", CellWidth.NARROW, 0u)))),
@@ -63,7 +66,7 @@ class SessionHolderTest {
         override fun scroll(scroll: ViewportScroll) = Unit
         override fun sendKey(input: KeyInput) = Unit
         override fun sendText(text: String) = Unit
-        override fun state() = SessionState.Connecting
+        override fun state() = nativeState
         override fun takeFrame(): TerminalFrame? {
             check(!destroyed) { "Session object has already been destroyed" }
             takes++
@@ -84,6 +87,7 @@ class SessionHolderTest {
             assertArrayEquals(byteArrayOf(9, 2, 5), request.privateKey) // Not wiped at construction.
             assertEquals(listOf("prior-line-one", "prior-line-two"), request.trustedHostKeys)
             assertEquals(2222.toUShort(), request.port)
+            fake.nativeState = prompt
             listener.onStateChanged(prompt)
             listener.onFrameReady()
             testScheduler.runCurrent() // Main processes callbacks while factory still hasn't returned.
@@ -119,6 +123,7 @@ class SessionHolderTest {
         lateinit var listener: SessionListener
         val holder = SessionHolder(SessionConnector { _, incoming -> listener = incoming; fake }, store, dispatcher, dispatcher)
         holder.connect(host, byteArrayOf(3, 8))
+        fake.nativeState = prompt
         listener.onStateChanged(prompt)
         val current = holder.active.value!!
         try { holder.approve(current, prompt); fail("Expected storage failure") } catch (_: IllegalStateException) { }
@@ -132,6 +137,35 @@ class SessionHolderTest {
     }
 
     @Test
+    fun nativeClosedBeforeQueuedCallbackNeverStartsTrustPersistence() = runTest {
+        val main = StandardTestDispatcher(testScheduler)
+        val worker = UnconfinedTestDispatcher(testScheduler)
+        val store = Store()
+        val fake = FakeSession()
+        lateinit var listener: SessionListener
+        val holder = SessionHolder(SessionConnector { _, incoming -> listener = incoming; fake }, store, main, worker)
+        holder.connect(host, byteArrayOf(4, 2))
+        fake.nativeState = prompt
+        listener.onStateChanged(prompt)
+        runCurrent()
+        val current = holder.active.value!!
+        val closed = SessionState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("Fixture closed")))
+        fake.nativeState = closed
+        listener.onStateChanged(closed) // Main delivery remains queued while Trust is tapped.
+        assertEquals(prompt, current.state.value)
+        assertEquals(closed, current.handle.value!!.state())
+        val failure = runCatching { holder.approve(current, prompt) }.exceptionOrNull()
+        assertEquals(0, store.replacements)
+        assertEquals(listOf("prior-line-one", "prior-line-two"), store.lines)
+        assertNull(fake.approved)
+        assertTrue(failure is IllegalStateException)
+        assertEquals("Host-key prompt has expired.", failure!!.message)
+        runCurrent()
+        assertEquals(closed, current.state.value)
+        holder.dismiss()
+    }
+
+    @Test
     fun closeDuringPersistenceAndReplacedSessionCallbacksAreIsolated() = runTest {
         val dispatcher = UnconfinedTestDispatcher(testScheduler)
         val store = Store().apply { gate = CompletableDeferred() }
@@ -142,12 +176,18 @@ class SessionHolderTest {
             if (listeners.size == 1) fake else FakeSession()
         }, store, dispatcher, dispatcher)
         holder.connect(host, byteArrayOf(6))
+        fake.nativeState = prompt
         listeners[0].onStateChanged(prompt)
         val previous = holder.active.value!!
         val approval = launch(start = CoroutineStart.UNDISPATCHED) { holder.approve(previous, prompt) }
-        holder.disconnect()
+        assertEquals(1, store.replacements) // Write began while both native and cached prompt were live.
+        fake.nativeState = SessionState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("Fixture closed")))
+        listeners[0].onStateChanged(fake.nativeState)
         store.gate!!.complete(Unit)
         approval.join()
+        assertEquals(host, store.persistedHost)
+        assertEquals(listOf(public.openssh), store.lines) // An already-started write still completes.
+        assertEquals(listOf("persist"), store.events)
         assertNull(fake.approved)
         holder.connect(host.copy(id = 8), byteArrayOf(7))
         listeners[0].onStateChanged(SessionState.Connected)

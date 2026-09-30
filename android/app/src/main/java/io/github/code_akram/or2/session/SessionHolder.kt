@@ -96,7 +96,9 @@ class SessionHolder(
 
     suspend fun approve(current: ActiveSession, prompt: SessionState.AwaitingHostKeyDecision) {
         val session = current.ready.await()
-        check(mutableActive.value === current && !current.disconnectRequested && current.state.value == prompt) { "Host-key prompt has expired." }
+        // Native state can already be Closed while its listener delivery is queued on main.
+        check(mutableActive.value === current && !current.disconnectRequested &&
+            current.state.value == prompt && session.state() == prompt) { "Host-key prompt has expired." }
         trust.replaceTrust(current.host, prompt.presented)
         // Persistence failure must never cause approval.
         if (mutableActive.value === current && !current.disconnectRequested && current.state.value == prompt) {
