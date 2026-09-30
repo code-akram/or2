@@ -9,9 +9,11 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.widget.FrameLayout
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import io.github.code_akram.or2.ffi.CursorShape
 import io.github.code_akram.or2.ffi.KeyInput
 import io.github.code_akram.or2.ffi.SessionException
 import io.github.code_akram.or2.ffi.SessionInterface
@@ -79,12 +81,22 @@ class TerminalDeviceTest {
         val scrolls = mutableListOf<ViewportScroll>()
         var error: SessionException? = null
         var snapshots = 0
+        var fullSnapshot: TerminalFrame? = null
+        var pending: TerminalFrame? = null
+        var deferSnapshot = false
+        var onFrameReady: () -> Unit = {}
+        private var sequence = 0uL
         override fun sendText(text: String) { error?.let { throw it }; texts += text }
         override fun sendKey(input: KeyInput) { error?.let { throw it }; keys += input }
+        // Deliberately no resize output: remount must recover via requestFullFrame, not resize.
         override fun resize(columns: UShort, rows: UShort) { sizes += GridSize(columns, rows) }
         override fun scroll(scroll: ViewportScroll) { error?.let { throw it }; scrolls += scroll }
-        override fun requestFullFrame() { snapshots++ }
-        override fun takeFrame(): TerminalFrame? = null
+        override fun requestFullFrame() {
+            snapshots++
+            if (!deferSnapshot) fullSnapshot?.let { publish(it.copy(sequence = ++sequence)) }
+        }
+        fun publish(frame: TerminalFrame) { pending = frame; onFrameReady() }
+        override fun takeFrame(): TerminalFrame? = pending.also { pending = null }
         override fun state(): SessionState = SessionState.Connected
         override fun approveHostKey(fingerprint: String) = Unit
         override fun rejectHostKey() = Unit
@@ -106,9 +118,11 @@ class TerminalDeviceTest {
             view.onCreateInputConnection(comparisonInfo)
             assertEquals(InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD, comparisonInfo.inputType and InputType.TYPE_MASK_VARIATION)
             view.directLatinInput = false
-            connection.setComposingText("not sent", 1)
-            connection.finishComposingText()
+            connection.setComposingText("finished", 1)
             assertTrue(session.texts.isEmpty())
+            connection.finishComposingText()
+            connection.finishComposingText()
+            assertEquals(listOf("finished"), session.texts)
             connection.deleteSurroundingText(2, 0)
             assertEquals(listOf(TerminalKey.Backspace, TerminalKey.Backspace), session.keys.map { it.key })
             val down = KeyEvent(0, 0, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_C, 0, KeyEvent.META_CTRL_ON or KeyEvent.META_ALT_ON)
@@ -124,8 +138,64 @@ class TerminalDeviceTest {
             connection.commitText("late", 1)
             connection.deleteSurroundingText(1, 0)
             view.jumpToBottom()
-            assertTrue(session.texts.isEmpty())
+            assertEquals(listOf("finished"), session.texts)
             assertEquals(3, session.keys.size)
+            session.error = null // A live session would accept text, but editor teardown must not send.
+            connection.setComposingText("discard on close", 1)
+            connection.closeConnection()
+            connection.finishComposingText()
+            assertEquals(listOf("finished"), session.texts)
+        }
+    }
+
+    @Test fun remountSameDrainedHandleRequestsFullFrameAndRejectsAnEarlyDelta() {
+        ActivityScenario.launch(TerminalProbeActivity::class.java).use { scenario ->
+            val snapshot = terminalVisualFrame(8u, 14u, CursorShape.BAR)
+            val session = RecordingSession().apply { fullSnapshot = snapshot }
+            lateinit var container: FrameLayout
+            lateinit var current: TerminalView
+            fun mount(activity: TerminalProbeActivity) {
+                current = TerminalView(activity).apply { bind(session) }
+                session.onFrameReady = current::frameReady
+                container.addView(current, FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+                current.sessionState(SessionState.Connected)
+            }
+            scenario.onActivity { activity ->
+                container = FrameLayout(activity)
+                activity.setContentView(container)
+                mount(activity)
+            }
+            await(scenario) { it.grid.hasGrid && it.grid.sequence == 1uL }
+            scenario.onActivity { activity ->
+                assertNull(session.pending) // Initial frame consumed; no further driver output.
+                assertEquals(1, session.snapshots)
+                container.removeAllViews()
+                mount(activity) // Reuses precisely the same connected handle, not another probe.
+                assertEquals(2, session.snapshots)
+            }
+            await(scenario) { it.grid.hasGrid && it.grid.sequence == 2uL }
+            scenario.onActivity { activity ->
+                assertNull(session.pending)
+                container.removeAllViews()
+                session.deferSnapshot = true
+                session.publish(snapshot.copy(sequence = 3u, full = false, changedRows = snapshot.changedRows.take(1)))
+                mount(activity)
+                assertEquals(3, session.snapshots)
+            }
+            await(scenario) { !it.grid.hasGrid && session.pending == null }
+            scenario.onActivity {
+                assertFalse(current.grid.hasGrid) // A delta must not manufacture a partial grid.
+                assertEquals(3, session.snapshots) // Already awaiting the requested full snapshot.
+                session.publish(snapshot.copy(sequence = 4u))
+            }
+            await(scenario) { it.grid.hasGrid && it.grid.sequence == 4uL }
+            scenario.onActivity {
+                assertEquals(8, current.grid.columns)
+                assertEquals(14, current.grid.rows.size)
+                assertEquals("e\u0301", current.grid.rows[11].cells[5].text)
+                assertEquals(3, session.snapshots)
+            }
         }
     }
 

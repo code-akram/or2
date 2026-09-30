@@ -80,7 +80,7 @@ fun TerminalScreen(
                             TerminalButton("Clear") { view.clearSelection() }
                         }
                         listOf("/", "-", "|", "~", "_", "$", "&", "*", "{", "}", "(", ")", "[", "]", "=", ";", "'", "\"").forEach { symbol ->
-                            TerminalButton(symbol) { view.input.commit(symbol) }
+                            TerminalButton(symbol) { view.input.key(TerminalKey.Character(symbol)) }
                         }
                     }
                 }

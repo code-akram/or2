@@ -107,7 +107,7 @@ class TerminalProbeActivity : ComponentActivity() {
                         TextButton(onClick = {
                             terminalView()?.let { view ->
                                 view.directLatinInput = !view.directLatinInput
-                                view.input.finishComposition()
+                                view.input.discardComposition()
                                 getSystemService(InputMethodManager::class.java).restartInput(view)
                                 stats = if (view.directLatinInput) "DEBUG visible-password IME: test Latin latency and CJK" else "Default composing text IME"
                             }
@@ -132,7 +132,7 @@ class TerminalProbeActivity : ComponentActivity() {
     fun display(frame: TerminalFrame) {
         terminalView()?.let { view ->
             view.clearSelection()
-            view.input.finishComposition()
+            view.input.discardComposition()
             val start = System.nanoTime()
             check(view.grid.apply(frame))
             view.applyTimings.record(System.nanoTime() - start)
@@ -149,7 +149,7 @@ class TerminalProbeActivity : ComponentActivity() {
     fun requestProbeFrame() {
         terminalView()?.let { view ->
             if (view.selection != null) view.clearSelection()
-            if (view.input.composing.isNotEmpty()) view.input.finishComposition()
+            if (view.input.composing.isNotEmpty()) view.input.discardComposition()
             view.sessionCall { requestFullFrame() }
         }
     }

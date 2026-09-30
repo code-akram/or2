@@ -71,7 +71,7 @@ class TerminalVisualDeviceTest {
             capture(scenario, "composition-armed-keys")
             scenario.onActivity { activity ->
                 val view = activity.terminalView()!!
-                view.input.finishComposition()
+                view.input.discardComposition()
                 view.beginSelection(CellPosition(2, 11))
                 view.selection!!.end = CellPosition(5, 11)
                 view.invalidate()

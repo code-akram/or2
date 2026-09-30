@@ -199,11 +199,8 @@ class TerminalView(context: Context) : View(context) {
         return gestures.onTouchEvent(event) || event.actionMasked == MotionEvent.ACTION_UP
     }
 
-    private fun position(x: Float, y: Float): CellPosition? {
-        if (!grid.hasGrid) return null
-        return CellPosition((x / cellWidth).toInt().coerceIn(0, grid.columns - 1),
-            (y / cellHeight).toInt().coerceIn(0, grid.rows.lastIndex))
-    }
+    private fun position(x: Float, y: Float): CellPosition? =
+        grid.position(x, y, cellWidth, cellHeight, selection)
 
     fun beginSelection(position: CellPosition) {
         if (!grid.hasGrid) return
@@ -259,7 +256,7 @@ class TerminalView(context: Context) : View(context) {
     override fun onDetachedFromWindow() {
         removeCallbacks(blink)
         scroller.forceFinished(true)
-        input.finishComposition()
+        input.discardComposition()
         Choreographer.getInstance().removeFrameCallback(frameCallback)
         framePending = false
         super.onDetachedFromWindow()

@@ -5,7 +5,7 @@ import io.github.code_akram.or2.ffi.KeyInput
 import io.github.code_akram.or2.ffi.KeyModifiers
 import io.github.code_akram.or2.ffi.TerminalKey
 
-/** IME composition has no path to the session until commitText is called. */
+/** Active IME composition stays local; explicit commit or finish sends it exactly once. */
 class TerminalInput(
     private val sendText: (String) -> Unit,
     private val sendKey: (KeyInput) -> Unit,
@@ -21,10 +21,11 @@ class TerminalInput(
     fun toggleCtrl() { ctrl = !ctrl; changed() }
     fun toggleAlt() { alt = !alt; changed() }
     fun compose(text: String) { composing = text; changed() }
-    fun finishComposition() { composing = ""; changed() }
+    fun discardComposition() { composing = ""; changed() }
+    fun finishComposition() { commit(composing) }
 
     fun commit(text: String) {
-        finishComposition()
+        discardComposition()
         if (text.isEmpty()) return
         if (!ctrl && !alt) {
             sendText(text)

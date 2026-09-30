@@ -43,7 +43,10 @@ internal class TerminalInputConnection(private val terminal: TerminalView) : Bas
     override fun sendKeyEvent(event: KeyEvent): Boolean = terminal.handleKey(event)
 
     override fun closeConnection() {
-        finishComposingText()
+        // BaseInputConnection.closeConnection calls finishComposingText. Empty both local
+        // buffers first, so editor teardown cannot commit pending text to a live session.
+        composition.clear()
+        terminal.input.discardComposition()
         super.closeConnection()
     }
 

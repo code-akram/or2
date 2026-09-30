@@ -4,6 +4,15 @@ import io.github.code_akram.or2.ffi.CellWidth
 
 data class CellPosition(val column: Int, val row: Int)
 
+/** Drag coordinates belong to the displayed snapshot, even if a larger live frame arrives. */
+fun TerminalGrid.position(x: Float, y: Float, cellWidth: Float, cellHeight: Float, selection: TerminalSelection?): CellPosition? {
+    val columns = selection?.columns ?: this.columns
+    val rowCount = selection?.rows?.size ?: rows.size
+    if (columns == 0 || rowCount == 0) return null
+    return CellPosition((x / cellWidth).toInt().coerceIn(0, columns - 1),
+        (y / cellHeight).toInt().coerceIn(0, rowCount - 1))
+}
+
 /** Captures the displayed rows, so arriving output cannot silently change what Copy copies. */
 class TerminalSelection(val rows: List<ResolvedRow>, val columns: Int, val anchor: CellPosition) {
     var end = anchor

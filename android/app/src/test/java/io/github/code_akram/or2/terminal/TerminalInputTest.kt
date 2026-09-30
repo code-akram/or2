@@ -21,9 +21,34 @@ class TerminalInputTest {
         input.commit("é界😀\n")
         assertEquals(listOf("é界😀\n"), texts)
         assertEquals("", input.composing)
-        input.compose("discarded")
         input.finishComposition()
-        assertEquals(1, texts.size)
+        assertEquals(listOf("é界😀\n"), texts) // commit followed by finish cannot duplicate.
+    }
+
+    @Test fun explicitFinishWithoutCommitSendsPendingTextOnce() {
+        input.compose("abc")
+        assertTrue(texts.isEmpty())
+        input.finishComposition()
+        input.finishComposition()
+        assertEquals(listOf("abc"), texts)
+        assertEquals("", input.composing)
+    }
+
+    @Test fun teardownDiscardsBeforeFinishAndNeverSends() {
+        input.compose("must not transmit")
+        input.discardComposition()
+        input.finishComposition() // BaseInputConnection closes by finishing after the discard.
+        assertTrue(texts.isEmpty())
+        assertTrue(keys.isEmpty())
+        assertEquals("", input.composing)
+    }
+
+    @Test fun symbolKeysUseKeyInputAndDoNotCommitActiveComposition() {
+        input.compose("pending")
+        input.key(TerminalKey.Character("/"))
+        assertEquals(TerminalKey.Character("/"), keys.single().key)
+        assertTrue(texts.isEmpty())
+        assertEquals("pending", input.composing)
     }
 
     @Test fun stickyModifiersAffectOnlyNextCharacterOrKeyAndMergeHardwareModifiers() {
