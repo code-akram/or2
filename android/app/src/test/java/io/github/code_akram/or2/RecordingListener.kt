@@ -51,12 +51,12 @@ class RecordingListener(private val throwAfterRecording: Boolean = false) : Sess
         assertNull(states.poll(QUIET_MILLIS, TimeUnit.MILLISECONDS))
     }
 
-    /** Waits for the ready signal, then takes the frame, as a renderer would on its next tick. */
-    fun awaitFrame(session: Session): TerminalFrame {
+    /** A live producer may publish again immediately after the take; only the probe is quiescent. */
+    fun awaitFrame(session: Session, quiescent: Boolean = true): TerminalFrame {
         assertNotNull("timed out waiting for a frame", frameReady.poll(TIMEOUT_SECONDS, TimeUnit.SECONDS))
         val frame = session.takeFrame()
         assertNotNull("frame ready but nothing to take", frame)
-        assertNull("one take drains the mailbox", session.takeFrame())
+        if (quiescent) assertNull("one take drains the mailbox", session.takeFrame())
         return frame!!
     }
 
