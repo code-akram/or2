@@ -63,8 +63,10 @@ class BiometricVault(private val context: Context) {
         if (info.securityLevel != KeyProperties.SECURITY_LEVEL_STRONGBOX &&
             info.securityLevel != KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT
         ) throw VaultException("Hardware-backed encryption is unavailable. Software key storage is not allowed.")
-        // Builder timeout 0 is per-use; KeyInfo represents per-use as -1, not 0.
-        check(info.isUserAuthenticationRequired && info.userAuthenticationValidityDurationSeconds == -1 &&
+        // Builder timeout 0 is per-use. Keystore2 reports 0 when AUTH_TIMEOUT is absent;
+        // older KeyInfo implementations report -1. Neither permits a timed unlock window.
+        val duration = info.userAuthenticationValidityDurationSeconds
+        check(info.isUserAuthenticationRequired && (duration == 0 || duration == -1) &&
             info.isUserAuthenticationRequirementEnforcedBySecureHardware &&
             info.userAuthenticationType == KeyProperties.AUTH_BIOMETRIC_STRONG &&
             info.isInvalidatedByBiometricEnrollment

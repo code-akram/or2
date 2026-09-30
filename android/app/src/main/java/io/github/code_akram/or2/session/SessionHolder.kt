@@ -132,6 +132,7 @@ class SessionHolder(
     }
 
     private fun retire(current: ActiveSession) {
+        if (current.destroyed) return
         current.retired = true
         current.disconnectRequested = true
         current.mutableHandle.value?.disconnect()

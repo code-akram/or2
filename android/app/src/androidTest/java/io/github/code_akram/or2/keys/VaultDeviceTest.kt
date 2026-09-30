@@ -1,5 +1,6 @@
 package io.github.code_akram.or2.keys
 
+import android.os.Bundle
 import androidx.biometric.BiometricManager
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -25,7 +26,11 @@ class VaultDeviceTest {
             val cipher = vault.createCipher(id)
             val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
             val key = store.getKey("or2.private.$id", null) as javax.crypto.SecretKey
-            vault.verifyHardware(key)
+            val duration = vault.verifyHardware(key).userAuthenticationValidityDurationSeconds
+            InstrumentationRegistry.getInstrumentation().sendStatus(2, Bundle().apply {
+                putString("stream", "Keystore per-use authentication validity: $duration seconds\n")
+            })
+            assertTrue("Expected per-use timeout, got $duration", duration == 0 || duration == -1)
             assertNull(key.encoded)
             assertThrows(Exception::class.java) { cipher.doFinal(bytes) }
         } finally { bytes.fill(0); vault.delete(id) }

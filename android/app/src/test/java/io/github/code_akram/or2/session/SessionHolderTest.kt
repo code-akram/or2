@@ -4,6 +4,7 @@ import io.github.code_akram.or2.data.HostRecord
 import io.github.code_akram.or2.data.TrustStore
 import io.github.code_akram.or2.ffi.*
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -18,6 +19,7 @@ import org.junit.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.CoroutineContext
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class SessionHolderTest {
@@ -51,7 +53,10 @@ class SessionHolderTest {
         var pending: TerminalFrame? = lastFrame
         override fun approveHostKey(fingerprint: String) { approved = fingerprint; events += "approve" }
         override fun rejectHostKey() { events += "reject" }
-        override fun disconnect() { events += "disconnect" }
+        override fun disconnect() {
+            check(!destroyed) { "Session object has already been destroyed" }
+            events += "disconnect"
+        }
         override fun close() { destroyed = true; events += "close" }
         override fun requestFullFrame() = Unit
         override fun resize(columns: UShort, rows: UShort) = Unit
@@ -254,5 +259,32 @@ class SessionHolderTest {
         assertEquals(1, sessions[0].events.count { it == "close" })
         holder.dismiss()
         assertEquals(1, sessions[1].events.count { it == "close" })
+    }
+
+    @Test
+    fun dismissAfterHandlePublicationBeforeConnectResumesDoesNotRetireDestroyedHandle() = runTest {
+        val main = StandardTestDispatcher(testScheduler)
+        val worker = object : CoroutineDispatcher() {
+            val tasks = ArrayDeque<Runnable>()
+            override fun dispatch(context: CoroutineContext, block: Runnable) { tasks.addLast(block) }
+        }
+        val fake = FakeSession()
+        val bytes = byteArrayOf(8, 3, 7)
+        val holder = SessionHolder(SessionConnector { _, _ -> fake }, Store(), main, worker)
+        val connecting = launch { holder.connect(host, bytes) }
+        runCurrent()
+        val current = holder.active.value!!
+        assertNull(current.handle.value)
+        worker.tasks.removeFirst().run() // Publishes handle; main continuation is queued, not resumed.
+        assertSame(fake, current.handle.value)
+        assertFalse(connecting.isCompleted)
+        holder.dismiss()
+        assertTrue(fake.destroyed)
+        runCurrent()
+        connecting.join()
+        assertNull(holder.active.value)
+        assertArrayEquals(ByteArray(3), bytes)
+        assertEquals(listOf("disconnect", "close"), fake.events)
+        assertThrows(IllegalStateException::class.java) { fake.disconnect() }
     }
 }
