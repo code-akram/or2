@@ -203,11 +203,18 @@ class TerminalDeviceTest {
 
     @Test fun hardwareKeysBypassImeExactlyOnceWithKeyboardShownAndHidden() {
         ActivityScenario.launch(TerminalProbeActivity::class.java).use { scenario ->
-            await(scenario) { it.grid.hasGrid }
             val session = RecordingSession()
             scenario.onActivity { activity ->
+                // The probe's view already owns its native session. Replace the test host,
+                // not that view's binding, and wait for the new editor to be laid out/focused.
+                activity.setContentView(TerminalView(activity).apply {
+                    bind(session)
+                    sessionState(SessionState.Connected)
+                })
+            }
+            await(scenario) { it.isAttachedToWindow && it.width > 0 && it.hasWindowFocus() }
+            scenario.onActivity { activity ->
                 val view = activity.terminalView()!!
-                view.bind(session)
                 view.requestFocus()
                 val now = SystemClock.uptimeMillis()
                 val raw = KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_B, 0)
