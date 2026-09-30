@@ -191,7 +191,8 @@ objects are `!Send`: keep each terminal on one thread and pass bytes to it over 
   PageDown, the arrows, `Function { number }` (1–12) and `Character { text }`: the unmodified
   character, e.g. `c` for Ctrl+C. Rust maps ASCII characters to US-layout physical keys and
   encodes everything with libghostty's encoder using the terminal's current modes. Only presses
-  are sent. IME `deleteSurroundingText` becomes Backspace keys.
+  are sent. IME `deleteSurroundingText(before, after)` becomes `before` Backspace keys and
+  `after` Delete keys.
 - `resize(columns, rows)`: Kotlin derives the grid from view size and cell metrics. Rust
   resizes the terminal and the PTY (`window-change`) and publishes a full frame.
 - `scroll(ViewportScroll)`: `Top`, `Bottom`, `Delta { rows }` (negative is up). Kotlin sends it
