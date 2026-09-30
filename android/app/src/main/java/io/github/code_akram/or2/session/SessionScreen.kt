@@ -1,0 +1,58 @@
+package io.github.code_akram.or2.session
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.code_akram.or2.ffi.SessionState
+
+@Composable
+fun SessionScreen(current: ActiveSession?, busy: Boolean, approve: (ActiveSession, SessionState.AwaitingHostKeyDecision) -> Unit,
+    reject: (ActiveSession) -> Unit, disconnect: () -> Unit) {
+    if (current == null) {
+        Text("No active session. Choose Connect on a host to unlock its key.")
+        return
+    }
+    val state by current.state.collectAsStateWithLifecycle()
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(current.host.label, style = MaterialTheme.typography.titleLarge)
+        Text(sessionMessage(state))
+        if (state == SessionState.Connected) Text("Connected session. Terminal rendering will be integrated from lane C.")
+        Button(onClick = disconnect) { Text(if (state is SessionState.Closed) "Close session" else "Disconnect") }
+    }
+    (state as? SessionState.AwaitingHostKeyDecision)?.let { prompt ->
+        HostTrustDialog(prompt, busy, { approve(current, prompt) }, { reject(current) })
+    }
+}
+
+@Composable
+fun HostTrustDialog(prompt: SessionState.AwaitingHostKeyDecision, busy: Boolean, approve: () -> Unit, reject: () -> Unit) {
+    val changed = prompt.previouslyTrusted.isNotEmpty()
+    AlertDialog(onDismissRequest = { if (!busy) reject() },
+        title = { Text(if (changed) "WARNING: HOST KEY CHANGED" else "Trust this host key?",
+            color = if (changed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(if (changed) "This may be an impersonation attack. Do not continue unless you independently verified the new key. Approving replaces ALL previous trusted keys."
+                else "First connection to this host. Verify this fingerprint through an independent trusted channel before approving.")
+                Text("Presented: ${prompt.presented.algorithm}")
+                Text(prompt.presented.fingerprint)
+                if (changed) {
+                    Text("Previously trusted fingerprints:")
+                    prompt.previouslyTrusted.forEach { Text("${it.algorithm}\n${it.fingerprint}") }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = approve, enabled = !busy) { Text(if (changed) "Replace trust and connect" else "Trust and connect") } },
+        dismissButton = { TextButton(onClick = reject, enabled = !busy) { Text("Reject") } })
+}

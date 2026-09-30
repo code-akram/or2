@@ -1,8 +1,10 @@
-# M1 scaffold: build and verify
+# M1 Android app: build and verify
 
-The scaffold is a Compose app loading `or2-ffi` through generated UniFFI Kotlin/JNA bindings.
-It shows native build information, not an SSH terminal. `or2-core` remains free of Android,
-UniFFI and persistence dependencies. The M0 spikes remain standalone and unchanged.
+The Compose app loads `or2-ffi` through generated UniFFI Kotlin/JNA bindings. Host settings,
+encrypted key records and trusted host keys live in Room. `or2-core` remains free of Android,
+UniFFI and persistence dependencies. The production connector is unavailable until the real
+`connect` export is integrated; the contract probe is used only by tests. Connected sessions
+show a placeholder until the terminal lane is integrated.
 
 ## Shared user-local toolchain
 
@@ -76,7 +78,17 @@ Gradle 8.13 otherwise writes a redundant record that fails its next locked resol
 The actual JVM `kotlin-stdlib` remains present and strictly locked. No runtime classpath or
 dependency group is exempted from locking.
 
-The JVM tests load the real host `.so` with desktop JNA; they do not mock Rust. Device tests
+Room 2.8.3 uses KSP 2.2.21-2.0.4 with Kotlin 2.2.21; generated DAO implementations are build
+outputs. Maven resolves the additional AndroidX biometric/fragment/lifecycle and coroutine
+artifacts without extra system tooling. To deliberately refresh all resolvable configuration
+locks after a dependency change, run `:app:dependencies --write-locks`, then the full build
+command above with `--write-locks`, then again **without** `--write-locks` to verify strict
+resolution. Do not exempt KSP configurations from locking.
+
+The native JVM contract tests load the real host `.so` with desktop JNA. Holder/ViewModel tests
+use fakes to exercise callbacks before handle assignment, persist-before-approve, expired
+prompts, cleanup, factory cancellation, and private-array wipe timing. Key-operation tests use
+real key exports and AES-GCM on the JVM (not Android Keystore). Device tests
 load the packaged arm64 `.so` with Android JNA. Both cover the bootstrap geometry and errors,
 key generation/import errors, and a `contract_probe_session` lifecycle whose listener callbacks
 arrive on Rust threads (see [contracts](contracts.md)). On the JVM, `SessionContractTest` also
@@ -103,6 +115,34 @@ adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am instrument -w io
 adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am start -W -n io.github.code_akram.or2/.MainActivity
 ```
 
-This verifies the native bridge, key exports and probe-session callbacks on the phone, not SSH,
-IME, terminal rendering, key storage, background sessions or the broader v0 acceptance test.
-Those remain later implementation work.
+Run ADB only after receiving an explicit device slot. An unplugged phone is expected to be
+absent; do not modify the bridge, tunnel or security settings. Compile instrumented tests on
+Arch with `assembleDebugAndroidTest` while the phone is unavailable.
+
+`PersistenceDeviceTest` uses an in-memory database: trust replacement, endpoint-change trust
+clearing, stale-destination rejection, and foreign-key cleanup. `VaultDeviceTest` creates and
+deletes a disposable Keystore alias: it verifies hardware security level, per-use strong
+biometric policy, non-exportability and rejection without authentication (skips if strong
+biometrics are not enrolled). `EntryUiDeviceTest` displays first-use/changed-key dialogs using
+fake public-key metadata without a network or production DB writes.
+
+Manual phone checks still required:
+- Hosts: empty/list/add/edit/delete; changing address or port clears trust.
+- Keys: Ed25519 generate; system-picker import, encrypted-file passphrase retry and format errors;
+  copy/share the public line; delete and reselection on hosts.
+- Biometric CryptoObject encrypt/decrypt success and cancellation; missing enrollment and
+  enrollment invalidation must produce clear recovery messages. Never change enrollment or
+  device security settings just to test these without separate user authorization.
+- Activity recreation must keep established sessions; explicit disconnect releases them.
+- First-use and prominent changed-key warnings, previous fingerprints and closed/error states.
+  Use test fixtures, not real hosts, until separately authorized.
+- Capture representative screenshots and inspect them; visual verification and successful
+  biometric round trips remain **pending phone**, not proved by compilation or JVM tests.
+
+The vault accepts only StrongBox or TEE AES-256-GCM keys, prefers StrongBox when available,
+requires BIOMETRIC_STRONG per operation and invalidates on new enrollment. No software or
+device-credential fallback is allowed. Invalidated records remain for explanation/deletion;
+re-import or generate a new SSH key to recover. Private keys are never exported or backed up:
+`allowBackup=false` and cloud/device-transfer extraction rules exclude all app data.
+Session ownership is application-scoped in M1, not a foreground service; process death ends it.
+This does not prove SSH/IME/terminal acceptance or the broader v0 background-session test.
