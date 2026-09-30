@@ -286,7 +286,12 @@ class TerminalView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         val start = System.nanoTime()
-        canvas.drawColor(grid.background.opaque()) // Includes right/bottom margins.
+        // AndroidView may inherit a larger Compose canvas clip. Bound every draw, including
+        // old grids during resize, cursor, selection and composing text, to this View.
+        val checkpoint = canvas.save()
+        canvas.clipRect(0f, 0f, width.toFloat(), height.toFloat())
+        paint.color = grid.background.opaque()
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint) // Includes grid margins.
         (selection?.rows ?: grid.rows).forEachIndexed { rowIndex, row ->
             val y = rowIndex * cellHeight
             row.cells.forEachIndexed { column, cell ->
@@ -358,6 +363,7 @@ class TerminalView(context: Context) : View(context) {
             canvas.drawText("apply p95 %.2f · draw p95 %.2f ms".format(applyTimings.percentile(95), drawTimings.percentile(95)),
                 0f, height - cellHeight + baseline, textPaint)
         }
+        canvas.restoreToCount(checkpoint)
     }
 
     private fun drawCell(canvas: Canvas, x: Float, y: Float, cell: ResolvedCell) {
