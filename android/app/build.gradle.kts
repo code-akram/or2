@@ -1,0 +1,106 @@
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
+}
+
+val rustRoot = rootProject.file("../core")
+val generatedBindings = layout.buildDirectory.dir("generated/uniffi/kotlin")
+val generatedLibraries = layout.buildDirectory.dir("generated/uniffi/jniLibs")
+val rustInputs = fileTree(rustRoot) {
+    include("Cargo.toml", "Cargo.lock", "or2-core/**", "or2-ffi/**")
+}
+
+val buildRustHost by tasks.registering(Exec::class) {
+    workingDir(rustRoot)
+    commandLine("cargo", "build", "--locked", "-p", "or2-ffi", "--lib")
+    inputs.files(rustInputs)
+    outputs.file(rustRoot.resolve("target/debug/libor2_ffi.so"))
+}
+
+val generateRustBindings by tasks.registering(Exec::class) {
+    dependsOn(buildRustHost)
+    workingDir(rustRoot)
+    commandLine(
+        "cargo", "run", "--locked", "-p", "or2-ffi", "--features", "bindgen",
+        "--bin", "uniffi-bindgen", "--", "generate", "target/debug/libor2_ffi.so",
+        "--language", "kotlin", "--out-dir", generatedBindings.get().asFile,
+        "--no-format",
+    )
+    inputs.files(rustInputs)
+    outputs.dir(generatedBindings)
+}
+
+val buildRustAndroid by tasks.registering(Exec::class) {
+    workingDir(rustRoot)
+    commandLine(
+        "cargo", "ndk", "-t", "arm64-v8a", "--platform", "34",
+        "-o", generatedLibraries.get().asFile,
+        "build", "--release", "--locked", "-p", "or2-ffi", "--lib",
+    )
+    inputs.files(rustInputs)
+    outputs.dir(generatedLibraries)
+}
+
+android {
+    namespace = "io.github.code_akram.or2"
+    compileSdk = 36
+    buildToolsVersion = "35.0.0"
+    ndkVersion = "30.0.16248370"
+
+    defaultConfig {
+        applicationId = "io.github.code_akram.or2"
+        minSdk = 34
+        targetSdk = 36
+        versionCode = 1
+        versionName = "0.1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk { abiFilters += "arm64-v8a" }
+    }
+
+    buildFeatures { compose = true }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    sourceSets["main"].apply {
+        java.srcDir(generatedBindings)
+        jniLibs.srcDir(generatedLibraries)
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
+
+configurations.configureEach {
+    if (name.endsWith("RuntimeClasspath")) {
+        // Kotlin 2.2 common is legacy metadata, not a separate JVM runtime.
+        // Its redundant runtime record breaks Gradle's lock-state validation.
+        exclude(group = "org.jetbrains.kotlin", module = "kotlin-stdlib-common")
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn(generateRustBindings, buildRustAndroid)
+}
+
+tasks.withType<Test>().configureEach {
+    dependsOn(buildRustHost)
+    systemProperty("jna.library.path", rustRoot.resolve("target/debug").absolutePath)
+}
+
+dependencies {
+    implementation("androidx.activity:activity-compose:1.11.0")
+    implementation(platform("androidx.compose:compose-bom:2025.10.00"))
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.ui:ui")
+    implementation("net.java.dev.jna:jna:5.17.0@aar")
+
+    testImplementation("junit:junit:4.13.2")
+    testRuntimeOnly("net.java.dev.jna:jna:5.17.0")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+}

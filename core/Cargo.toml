@@ -1,0 +1,13 @@
+[workspace]
+members = ["or2-core", "or2-ffi"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+or2-core = { path = "or2-core" }
+thiserror = "=2.0.17"
+uniffi = "=0.32.2"

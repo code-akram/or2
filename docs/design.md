@@ -66,14 +66,35 @@ Start with two crates. Split a module into its own crate only once its interface
 ### Boundaries
 
 - **Terminal state lives in Rust.** Kotlin receives packed snapshots of changed rows and draws them
-  on a Canvas with a glyph cache. If Canvas is too slow, Rust renders into a SurfaceView instead;
-  the FFI boundary does not change.
+  using hardware-accelerated Android Canvas with a glyph cache. Canvas is the selected renderer,
+  not a fallback for a custom GPU renderer. Retain frame-time instrumentation before considering
+  a different rendering backend.
 - **Input.** Kotlin owns the IME and the keys row and sends key events to libghostty's key encoder.
 - **Persistence lives in Kotlin.** Hosts and settings in Room. Private keys encrypted at rest with
   a hardware-backed Android Keystore key behind biometric unlock, decrypted only at connect time
   and handed to Rust. Rust has no storage code.
 - **Sessions live in Rust**, on a tokio runtime owned by the foreground service. The UI subscribes
-  through uniffi callback interfaces.
+  through uniffi callback interfaces. The foreground service is M3 work; M1 ties session ownership
+  to the app lifecycle instead.
+
+### M1 scaffold contract
+
+`core/` is a two-crate Rust edition-2024 workspace, separate from the M0 spikes.
+`or2-core` owns validated terminal geometry; `or2-ffi` converts it to UniFFI records and errors.
+Kotlin imports only generated `io.github.code_akram.or2.ffi` bindings. UniFFI 0.32.2 generates
+bindings from the host library; Gradle cross-builds and packages the Android arm64 library at
+API 34. Generated sources and native libraries are build outputs, not checked-in copies.
+
+The implemented bootstrap API is:
+- `build_info()`: version, FFI API version 1, minimum Android API 34, and `Renderer::Canvas`.
+- `terminal_size(columns: u16, rows: u16)`: preserves the dimensions, computes a `u32` cell
+  count, and returns `TerminalError::EmptyDimension` when either dimension is zero.
+
+This proves the native-library loading, record/enum conversion, unsigned values and error mapping
+on the JVM and Android. It is not a terminal emulator or SSH connection API. Add real session,
+input and changed-row snapshot exports with their implementations; no success-returning stubs.
+The scaffold has no networking, persistence, keys, foreground service or protocol implementation.
+See [build instructions](build.md) for the shared toolchain and verification commands.
 
 ### Transport
 
@@ -137,7 +158,7 @@ if ever, goes through UnifiedPush or ntfy, never FCM.
 
 ## Android specifics
 
-- `targetSdk` 36, `minSdk` 31.
+- `compileSdk` / `targetSdk` 36, `minSdk` 34 (Android 14).
 - OxygenOS kills background apps aggressively. Defences: a foreground service with a persistent
   notification while sessions are open (type `specialUse`), a one-time battery-optimisation
   exemption prompt, and sub-second reattach to the last tmux session or herdr pane.
@@ -169,7 +190,9 @@ if ever, goes through UnifiedPush or ntfy, never FCM.
 
 ### M0 results (2026-09-30)
 
-All three passed on the Arch host. Nothing has run on the phone yet. Details are in each `RESULT.md`.
+All three prototypes passed on the Arch host, not on the phone. Details are in each `RESULT.md`.
+The later M1 scaffold's UniFFI bridge is tested on the phone; that does not validate these
+protocol/terminal prototypes on Android yet.
 
 | Spike | Result | Pinned |
 |---|---|---|
@@ -204,5 +227,5 @@ Consequences for `or2-core`:
 | SSH | russh 0.63 (aws-lc-rs backend) | Pure Rust, async, streamlocal verified in M0 |
 | mosh | mosh-rs, vendored later | Only candidate verified against stock mosh-server 1.4.0 |
 | Persistence | Room (Kotlin) | Idiomatic Android; Rust stays storage-free |
-| Rendering | Canvas first | Simplest; GPU path kept open behind the same FFI |
+| Rendering | Hardware-accelerated Android Canvas | Selected renderer; measure frame times, no custom GPU backend in M1 |
 | Package ID | `io.github.code_akram.or2` | Change if a domain is preferred |

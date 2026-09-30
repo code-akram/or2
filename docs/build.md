@@ -1,0 +1,102 @@
+# M1 scaffold: build and verify
+
+The scaffold is a Compose app loading `or2-ffi` through generated UniFFI Kotlin/JNA bindings.
+It shows native build information, not an SSH terminal. `or2-core` remains free of Android,
+UniFFI and persistence dependencies. The M0 spikes remain standalone and unchanged.
+
+## Shared user-local toolchain
+
+Source `scripts/env.sh` from the repository root before running builds. It provides defaults
+without changing shell startup files; existing `JAVA_HOME`, `ANDROID_HOME` and
+`ANDROID_NDK_HOME` overrides win. The following tools are installed on the Arch runner:
+
+| Tool | Version | User-local location |
+|---|---|---|
+| Eclipse Temurin JDK | 17.0.20.1+1 | `$HOME/.local/share/jdk/17` (versioned symlink) |
+| Android command-line tools | build 15859902 | `$ANDROID_HOME/cmdline-tools/15859902` |
+| Android platform | API 36, revision 2 | `$ANDROID_HOME/platforms/android-36` |
+| Android build tools | 35.0.0 | `$ANDROID_HOME/build-tools/35.0.0` |
+| Android platform tools | 37.0.1 | `$ANDROID_HOME/platform-tools` |
+| Android NDK | r30 / 30.0.16248370 | `$ANDROID_HOME/android-ndk-r30` |
+| Gradle | 8.13 | `$HOME/.local/share/gradle/gradle-8.13` |
+| Rust / cargo-ndk | 1.98.1 / 4.1.2 | Existing runner installation |
+
+`ANDROID_HOME` defaults to `$HOME/.local/share/android`. The SDK's
+`ndk/30.0.16248370` symlink points to the existing r30 installation, so Gradle and cargo-ndk
+use the same NDK without another download. No root installation is required.
+
+For a fresh Linux setup, obtain JDK 17 from [Adoptium](https://adoptium.net/temurin/releases/),
+[Android command-line tools](https://developer.android.com/studio#command-tools), and
+[Gradle 8.13](https://services.gradle.org/distributions/gradle-8.13-bin.zip). Verify the
+published SHA-256 checksums before extracting. This runner's download checksums were:
+
+```text
+Temurin 17.0.20.1+1 Linux x64:
+3808d1d15e3ec6bd5b84057fb5d84c33d8a1536a258146bcea2e603fc726e08e
+commandlinetools-linux-15859902_latest.zip:
+4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583
+gradle-8.13-bin.zip:
+20f1b1176237254a6fc204d8434196fa11a4cfb387567519c61556e8710aed78
+```
+
+Install SDK packages after reading/accepting their licenses:
+
+```sh
+source scripts/env.sh
+sdkmanager --sdk_root="$ANDROID_HOME" --licenses
+sdkmanager --sdk_root="$ANDROID_HOME" 'platforms;android-36' 'build-tools;35.0.0'
+rustup target add aarch64-linux-android
+cargo install cargo-ndk --version 4.1.2 --locked
+```
+
+The current command-line tools warn that `sdkmanager` is deprecated in favor of `android sdk`;
+the installed `sdkmanager` commands above still work. Keep `local.properties`, credentials,
+signing keys and device/host details out of version control.
+
+## Rust and Android checks
+
+From the repository root:
+
+```sh
+source scripts/env.sh
+cargo fmt --manifest-path core/Cargo.toml --all --check
+cargo test --manifest-path core/Cargo.toml --workspace --all-features --locked
+cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
+android/gradlew -p android :app:assembleDebug :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:lintDebug
+```
+
+Gradle builds the host library, generates Kotlin under `app/build/generated/uniffi/kotlin`,
+and cross-builds the release Rust library into `app/build/generated/uniffi/jniLibs/arm64-v8a`.
+The app has minSdk 34, compile/targetSdk 36, and no Google Play Services/FCM dependencies.
+The Gradle wrapper verifies its distribution checksum. `core/Cargo.lock` and
+`android/app/gradle.lockfile` pin dependency graphs; Gradle locking is strict.
+Only update locks intentionally, using `--write-locks` when changing dependencies.
+Android runtime classpaths exclude Kotlin's legacy `kotlin-stdlib-common` metadata module:
+Gradle 8.13 otherwise writes a redundant record that fails its next locked resolution.
+The actual JVM `kotlin-stdlib` remains present and strictly locked. No runtime classpath or
+dependency group is exempted from locking.
+
+The JVM tests load the real host `.so` with desktop JNA; they do not mock Rust. Device tests
+load the packaged arm64 `.so` with Android JNA. Both test enum/record conversion, asymmetric
+geometry, unsigned values beyond signed/u16 ranges, and exception mapping for either zero axis.
+The runtime Rust library does not enable the host-only `bindgen` feature.
+
+Debug artifacts:
+- `android/app/build/outputs/apk/debug/app-debug.apk`
+- `android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk`
+
+## Phone smoke test
+
+Use an already-authorized ADB endpoint. For a remote server, supply the endpoint explicitly to
+every command; do not start/kill the server or change SSH authorization as part of these tests.
+The generic example below uses caller-supplied endpoint and serial variables, not real hosts:
+
+```sh
+adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" install -r android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am instrument -w io.github.code_akram.or2.test/androidx.test.runner.AndroidJUnitRunner
+adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am start -W -n io.github.code_akram.or2/.MainActivity
+```
+
+This verifies the bootstrap native bridge, not SSH, IME, terminal rendering, key storage,
+background sessions or the broader v0 acceptance test. Those remain later implementation work.

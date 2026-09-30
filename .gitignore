@@ -2,3 +2,7 @@ target/
 /spikes/ghostty-android/ghostty-source/
 /spikes/ghostty-android/top-raw.bin
 /spikes/ghostty-android/top-grid.txt
+/android/.gradle/
+/android/.kotlin/
+/android/local.properties
+/android/**/build/

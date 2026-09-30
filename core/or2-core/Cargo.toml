@@ -1,0 +1,5 @@
+[package]
+name = "or2-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
