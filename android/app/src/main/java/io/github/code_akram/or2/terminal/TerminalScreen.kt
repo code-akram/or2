@@ -104,7 +104,7 @@ fun TerminalScreen(
                         TerminalButton("Paste", modifier = actionModifier("Paste")) {
                             val text = context.getSystemService(ClipboardManager::class.java).primaryClip
                                 ?.getItemAt(0)?.text?.toString().orEmpty()
-                            if (pasteNeedsConfirmation(text)) pendingPaste = text else view.input.paste(text)
+                            if (pasteNeedsConfirmation(text)) pendingPaste = text else view.paste(text)
                         }
                         Row(Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
                             TerminalButton("Keyboard") { view.showKeyboard() }
@@ -126,7 +126,7 @@ fun TerminalScreen(
                 onDismissRequest = { pendingPaste = null },
                 title = { Text("Paste ${pasteLineCount(text)} lines?") },
                 text = { Text("They will run as typed.") },
-                confirmButton = { TerminalButton("Paste") { pendingPaste = null; view.input.paste(text) } },
+                confirmButton = { TerminalButton("Paste") { pendingPaste = null; view.paste(text) } },
                 dismissButton = { TerminalButton("Cancel") { pendingPaste = null } },
                 containerColor = Color(0xff101018), titleContentColor = Color(0xffd8e8ff),
                 textContentColor = Color(0xffd8e8ff),

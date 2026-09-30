@@ -70,6 +70,7 @@ class TerminalView(context: Context) : View(context) {
     private val glyphs = LruCache<Glyph, Picture>(2048)
     var onInputChanged: () -> Unit = {}
     var onSelectionChanged: () -> Unit = {}
+    private var inputConnection: TerminalInputConnection? = null
     val input = TerminalInput(
         { text -> clearSelection(); sessionCall { sendText(text) } },
         { key -> clearSelection(); sessionCall { sendKey(key) } },
@@ -169,6 +170,16 @@ class TerminalView(context: Context) : View(context) {
         context.getSystemService(InputMethodManager::class.java).showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
     }
 
+    /** Cancel the editor as well as the overlay before sending literal clipboard text. */
+    fun paste(text: String) {
+        if (text.isEmpty()) return
+        inputConnection?.cancelComposition()
+        inputConnection = null
+        input.discardComposition()
+        context.getSystemService(InputMethodManager::class.java).restartInput(this)
+        input.paste(text)
+    }
+
     override fun onCheckIsTextEditor() = true
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
@@ -181,7 +192,8 @@ class TerminalView(context: Context) : View(context) {
             EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
         outAttrs.initialSelStart = 0
         outAttrs.initialSelEnd = 0
-        return TerminalInputConnection(this)
+        inputConnection?.cancelComposition()
+        return TerminalInputConnection(this).also { inputConnection = it }
     }
 
     internal fun handleKey(event: KeyEvent): Boolean {
@@ -284,6 +296,8 @@ class TerminalView(context: Context) : View(context) {
     override fun onDetachedFromWindow() {
         removeCallbacks(blink)
         scroller.forceFinished(true)
+        inputConnection?.cancelComposition()
+        inputConnection = null
         input.discardComposition()
         Choreographer.getInstance().removeFrameCallback(frameCallback)
         framePending = false
