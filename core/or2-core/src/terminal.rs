@@ -31,11 +31,18 @@ pub struct TerminalEngine {
     event: Event<'static>,
     size: TerminalSize,
     full: bool,
+    colors: Option<(RgbColor, RgbColor)>,
 }
 
 impl TerminalEngine {
     pub fn new(size: TerminalSize, reply: impl Fn(&[u8]) + 'static) -> Result<Self, TerminalError> {
         let mut terminal = Terminal::new(size.columns(), size.rows())?;
+        terminal.set_default_fg_color(Some(RgbColor {
+            r: 255,
+            g: 255,
+            b: 255,
+        }))?;
+        terminal.set_default_bg_color(Some(RgbColor { r: 0, g: 0, b: 0 }))?;
         terminal.on_pty_write(move |_, bytes| reply(bytes))?;
         Ok(Self {
             terminal,
@@ -46,6 +53,7 @@ impl TerminalEngine {
             event: Event::new()?,
             size,
             full: true,
+            colors: None,
         })
     }
 
@@ -65,9 +73,18 @@ impl TerminalEngine {
     }
 
     pub fn frame(&mut self) -> Result<Frame, TerminalError> {
+        // DECCOLM is unsupported: Android, not remote escape sequences, owns the PTY grid.
+        if self.terminal.cols()? != self.size.columns() || self.terminal.rows()? != self.size.rows()
+        {
+            self.terminal
+                .resize(self.size.columns(), self.size.rows(), 0, 0)?;
+            self.full = true;
+        }
         let snapshot = self.render.update(&self.terminal)?;
-        let full = self.full || snapshot.dirty()? == Dirty::Full;
         let colors = snapshot.colors()?;
+        let resolved = (colors.foreground, colors.background);
+        // OSC default-colour changes and reverse-screen do not dirty native rows at this pin.
+        let full = self.full || snapshot.dirty()? == Dirty::Full || self.colors != Some(resolved);
         let position = if snapshot.cursor_visible()? {
             snapshot.cursor_viewport()?
         } else {
@@ -172,6 +189,7 @@ impl TerminalEngine {
         };
         snapshot.set_dirty(Dirty::Clean)?;
         self.full = false;
+        self.colors = Some(resolved);
         let build = if full { Frame::full } else { Frame::delta };
         Ok(build(
             self.size,

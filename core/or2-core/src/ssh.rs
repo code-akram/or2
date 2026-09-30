@@ -1,6 +1,8 @@
 //! Real SSH sessions over Transport. Network futures run on a process-wide runtime; the
 //! driver and callbacks stay on one dedicated thread (also the terminal's owner in M1).
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -8,7 +10,7 @@ use russh::client;
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use tokio::io::AsyncWriteExt;
 use tokio::runtime::Runtime;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::{Instant, sleep_until};
 
 use crate::session::{
@@ -21,6 +23,7 @@ use crate::transport::{DirectTcp, Transport};
 use crate::trust::{HostKey, HostKeyVerdict, verify};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const REPLY_BYTE_BUDGET: usize = 64 * 1024;
 
 fn runtime() -> &'static Runtime {
     static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -63,7 +66,67 @@ enum Event {
 
 enum Write {
     Bytes(Vec<u8>),
+    Reply(ReplyBatch),
     Resize(TerminalSize),
+}
+
+struct ReplyBatch {
+    bytes: Vec<u8>,
+    // Credit stays reserved through channel.data(), including a stalled in-flight write.
+    permit: OwnedSemaphorePermit,
+}
+
+struct GeneratedReplies {
+    budget: Arc<Semaphore>,
+    batch: Option<ReplyBatch>,
+    overflow: bool,
+}
+
+impl GeneratedReplies {
+    fn new() -> Self {
+        Self {
+            budget: Arc::new(Semaphore::new(REPLY_BYTE_BUDGET)),
+            batch: None,
+            overflow: false,
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8]) {
+        if self.overflow || bytes.is_empty() {
+            return;
+        }
+        let permit = u32::try_from(bytes.len())
+            .ok()
+            .and_then(|len| self.budget.clone().try_acquire_many_owned(len).ok());
+        let Some(permit) = permit else {
+            self.overflow = true;
+            return;
+        };
+        match &mut self.batch {
+            Some(batch) => {
+                batch.permit.merge(permit);
+                batch.bytes.extend_from_slice(bytes);
+            }
+            None => {
+                self.batch = Some(ReplyBatch {
+                    bytes: bytes.to_vec(),
+                    permit,
+                })
+            }
+        }
+    }
+
+    fn flush(&mut self, writes: &mpsc::UnboundedSender<Write>) -> Result<(), SessionFailure> {
+        if self.overflow {
+            return Err(SessionFailure::Protocol(format!(
+                "generated terminal replies exceed {REPLY_BYTE_BUDGET}-byte budget"
+            )));
+        }
+        if let Some(batch) = self.batch.take() {
+            let _ = writes.send(Write::Reply(batch));
+        }
+        Ok(())
+    }
 }
 
 struct Client {
@@ -123,9 +186,10 @@ async fn drive(request: ConnectRequest, driver: &mut SessionDriver, timeout: Dur
     let (events, mut incoming) = mpsc::channel(32);
     let (writes, outgoing) = mpsc::unbounded_channel();
     let (size, latest_size) = watch::channel(request.size);
-    let replies = writes.clone();
+    let replies = Rc::new(RefCell::new(GeneratedReplies::new()));
+    let collected = replies.clone();
     let mut terminal = match TerminalEngine::new(request.size, move |bytes| {
-        let _ = replies.send(Write::Bytes(bytes.to_vec()));
+        collected.borrow_mut().append(bytes);
     }) {
         Ok(terminal) => terminal,
         Err(error) => {
@@ -143,9 +207,12 @@ async fn drive(request: ConnectRequest, driver: &mut SessionDriver, timeout: Dur
     let mut remaining = timeout;
     let mut timing = true;
     let mut connected = false;
+    let mut pending_event = None;
     let outcome: Result<CloseReason, SessionFailure> = async { loop {
         tokio::select! {
-            Some(event) = incoming.recv() => match event {
+            Some(event) = async {
+                if pending_event.is_some() { pending_event.take() } else { incoming.recv().await }
+            } => match event {
                 Event::HostKey(prompt, reply) => {
                     remaining = deadline.saturating_duration_since(Instant::now());
                     timing = false; // Human confirmation is bounded by the server, not us.
@@ -158,11 +225,26 @@ async fn drive(request: ConnectRequest, driver: &mut SessionDriver, timeout: Dur
                 Event::Connected => {
                     timing = false;
                     connected = true;
+                    // Reconcile even a resize between the network's sample and this event.
+                    // Queue before the callback can enqueue input.
+                    let _ = writes.send(Write::Resize(*size.borrow()));
                     driver.transition(SessionState::Connected).map_err(internal)?;
                     publish(driver, &mut terminal)?;
                 }
                 Event::Output(bytes) => {
                     terminal.write(&bytes);
+                    replies.borrow_mut().flush(&writes)?;
+                    // Snapshot the available batch so a continuous printer cannot starve commands.
+                    for _ in 0..incoming.len() {
+                        let Ok(event) = incoming.try_recv() else { break; };
+                        if let Event::Output(bytes) = event {
+                            terminal.write(&bytes);
+                            replies.borrow_mut().flush(&writes)?;
+                        } else {
+                            pending_event = Some(event);
+                            break;
+                        }
+                    }
                     if connected { publish(driver, &mut terminal)?; }
                 }
                 Event::TransportEnded(failure) => {
@@ -297,7 +379,7 @@ async fn shell(
         Arc::new(config),
         stream,
         Client {
-            trusted: request.trusted_host_keys,
+            trusted: request.trusted_host_keys.clone(),
             events: events.clone(),
             checked: false,
         },
@@ -319,7 +401,7 @@ async fn shell(
         ClientError::Ssh(error) => SessionFailure::Protocol(format!("SSH handshake: {error}")),
     })?;
     let result = tokio::select! {
-        result = authenticated_shell(&mut handle, request.username, request.key, events, writes, size) => result,
+        result = authenticated_shell(&mut handle, request, events, writes, size) => result,
         _ = stop.changed() => {
             let _ = handle.disconnect(russh::Disconnect::ByApplication, "session closed", "").await;
             let _ = tokio::time::timeout(Duration::from_millis(150), handle).await;
@@ -337,8 +419,7 @@ async fn shell(
 
 async fn authenticated_shell(
     handle: &mut client::Handle<Client>,
-    username: String,
-    key: crate::keys::ClientKey,
+    request: ConnectRequest,
     events: &mpsc::Sender<Event>,
     writes: &mut mpsc::UnboundedReceiver<Write>,
     size: watch::Receiver<TerminalSize>,
@@ -351,8 +432,8 @@ async fn authenticated_shell(
         .flatten();
     let auth = handle
         .authenticate_publickey(
-            username,
-            PrivateKeyWithHashAlg::new(Arc::new(key.private_key().clone()), hash),
+            request.username,
+            PrivateKeyWithHashAlg::new(Arc::new(request.key.private_key().clone()), hash),
         )
         .await
         .map_err(connection_error)?;
@@ -390,29 +471,60 @@ async fn authenticated_shell(
             .await
             .map_err(connection_error)?;
     }
+    #[cfg(test)]
+    tests::before_connected(request.endpoint.port(), size.clone()).await;
     let _ = events.send(Event::Connected).await;
+    let (mut reader, writer) = channel.split();
     let mut exit_status = None;
     let mut exit_signal = false;
-    loop {
-        tokio::select! {
-            message = channel.wait() => match message {
-                Some(russh::ChannelMsg::Data { data } | russh::ChannelMsg::ExtendedData { data, .. }) => {
+    let reading = async {
+        loop {
+            match reader.wait().await {
+                Some(
+                    russh::ChannelMsg::Data { data } | russh::ChannelMsg::ExtendedData { data, .. },
+                ) => {
                     let _ = events.send(Event::Output(data.to_vec())).await;
                 }
-                Some(russh::ChannelMsg::ExitStatus { exit_status: status }) => exit_status = Some(status),
+                Some(russh::ChannelMsg::ExitStatus {
+                    exit_status: status,
+                }) => exit_status = Some(status),
                 Some(russh::ChannelMsg::ExitSignal { .. }) => exit_signal = true,
-                Some(russh::ChannelMsg::Close) | None => return if exit_status.is_some() || exit_signal {
-                    Ok(CloseReason::RemoteExited { exit_status })
-                } else { Err(lost()) },
+                Some(russh::ChannelMsg::Close) | None => {
+                    return if exit_status.is_some() || exit_signal {
+                        Ok(CloseReason::RemoteExited { exit_status })
+                    } else {
+                        Err(lost())
+                    };
+                }
                 // EOF can precede exit-status. Keep reading until close.
                 _ => {}
-            },
-            Some(write) = writes.recv() => match write {
-                Write::Bytes(bytes) => channel.data(bytes.as_slice()).await.map_err(connection_error)?,
-                Write::Resize(size) => channel.window_change(u32::from(size.columns()), u32::from(size.rows()), 0, 0)
-                    .await.map_err(connection_error)?,
-            },
+            }
         }
+    };
+    let writing = async {
+        while let Some(write) = writes.recv().await {
+            match write {
+                Write::Bytes(bytes) => writer
+                    .data(bytes.as_slice())
+                    .await
+                    .map_err(connection_error)?,
+                Write::Reply(batch) => writer
+                    .data(batch.bytes.as_slice())
+                    .await
+                    .map_err(connection_error)?,
+                Write::Resize(size) => writer
+                    .window_change(u32::from(size.columns()), u32::from(size.rows()), 0, 0)
+                    .await
+                    .map_err(connection_error)?,
+            }
+        }
+        Err(lost())
+    };
+    // Keep one writer alive across reads: never restart a partially completed data() call.
+    // Read end or the enclosing disconnect branch cancels it once, permanently.
+    tokio::select! {
+        result = reading => result,
+        result = writing => result,
     }
 }
 

@@ -337,3 +337,66 @@ fn terminal_queries_write_replies_back() {
     terminal.write(b"\x1b[3;7H\x1b[6n");
     assert_eq!(*replies.borrow(), b"\x1b[3;7R");
 }
+
+#[test]
+fn default_colours_set_reset_query_and_reverse_screen_resync_clean_rows() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let replies = Rc::new(RefCell::new(Vec::new()));
+    let recorded = replies.clone();
+    let mut terminal = TerminalEngine::new(TerminalSize::new(7, 3).unwrap(), move |bytes| {
+        recorded.borrow_mut().extend_from_slice(bytes)
+    })
+    .unwrap();
+    terminal.write(b"\x1b]10;?\x07\x1b]11;?\x07");
+    assert_eq!(
+        *replies.borrow(),
+        b"\x1b]10;rgb:ffff/ffff/ffff\x07\x1b]11;rgb:0000/0000/0000\x07"
+    );
+    terminal.write(b"cached");
+    terminal.frame().unwrap();
+    for (sequence, foreground, background) in [
+        (b"\x1b]10;#123456\x07".as_slice(), 0x123456, 0),
+        (b"\x1b]11;#abcdef\x07".as_slice(), 0x123456, 0xabcdef),
+        (b"\x1b[?5h".as_slice(), 0xabcdef, 0x123456),
+        (b"\x1b[?5l".as_slice(), 0x123456, 0xabcdef),
+        (b"\x1b]110\x07".as_slice(), 0xffffff, 0xabcdef),
+        (b"\x1b]111\x07".as_slice(), 0xffffff, 0),
+    ] {
+        assert!(terminal.frame().unwrap().rows().is_empty());
+        terminal.write(sequence);
+        let frame = terminal.frame().unwrap();
+        assert!(frame.is_full());
+        assert_eq!(frame.rows().len(), 3);
+        assert_eq!(text(&frame.rows()[0]), "cached ");
+        assert_eq!(frame.background().packed(), background);
+        for row in frame.rows() {
+            for cell in row.cells() {
+                assert_eq!(cell.style.foreground.packed(), foreground);
+                assert_eq!(cell.style.background.packed(), background);
+            }
+        }
+    }
+    replies.borrow_mut().clear();
+    terminal.write(b"\x1b]10;?\x07\x1b]11;?\x07");
+    assert_eq!(
+        *replies.borrow(),
+        b"\x1b]10;rgb:ffff/ffff/ffff\x07\x1b]11;rgb:0000/0000/0000\x07"
+    );
+}
+
+#[test]
+fn remote_column_switching_is_contained_at_the_embedder_geometry() {
+    let mut terminal = engine(79, 23);
+    terminal.frame().unwrap();
+    for sequence in [b"\x1b[?40h\x1b[?3h".as_slice(), b"\x1b[?3l".as_slice()] {
+        terminal.write(sequence);
+        let frame = terminal.frame().unwrap();
+        assert!(frame.is_full());
+        assert_eq!(frame.size(), TerminalSize::new(79, 23).unwrap());
+        assert_eq!(frame.rows().len(), 23);
+        assert!(frame.rows().iter().all(|row| row.cells().len() == 79));
+    }
+    terminal.write(b"still usable");
+    assert!(text(&terminal.frame().unwrap().rows()[0]).starts_with("still usable"));
+}
