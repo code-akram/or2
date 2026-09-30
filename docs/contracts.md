@@ -190,7 +190,9 @@ objects are `!Send`: keep each terminal on one thread and pass bytes to it over 
   `TerminalKey` names Enter, Tab, Backspace, Escape, Insert, Delete, Home, End, PageUp,
   PageDown, the arrows, `Function { number }` (1–12) and `Character { text }`: the unmodified
   character, e.g. `c` for Ctrl+C. Rust maps ASCII characters to US-layout physical keys and
-  encodes everything with libghostty's encoder using the terminal's current modes. Only presses
+  encodes everything with libghostty's encoder using the terminal's current modes. In legacy mode
+  (no Kitty keyboard flags, modifyOtherKeys off) Ctrl+`[`, Ctrl+`i` and Ctrl+`m` are sent as
+  Escape, Tab and Enter, as xterm does, rather than Ghostty's CSI-u forms. Only presses
   are sent. IME `deleteSurroundingText(before, after)` becomes `before` Backspace keys and
   `after` Delete keys.
 - `resize(columns, rows)`: Kotlin derives the grid from view size and cell metrics. Rust
