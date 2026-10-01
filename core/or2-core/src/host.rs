@@ -214,7 +214,8 @@ impl TerminalTarget {
     }
 }
 
-/// What the host offers, found by one probe per connection. Programs are absolute paths; pass
+/// What the host offers, found by a probe per connection (`herdr_sessions` is re-read on
+/// every query). Programs are absolute paths; pass
 /// them to `herdr::run`/`watch`/`focus_pane` and the tmux and mosh commands. A missing program
 /// is `None`, and whoever would use it reports `NotInstalled`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,7 +224,8 @@ pub struct HostCapabilities {
     pub herdr: Option<String>,
     pub mosh_server: Option<String>,
     pub utf8_locale: String,
-    /// Empty when herdr is missing or has no sessions.
+    /// Empty when herdr is missing, has no sessions or could not list them. Read afresh on
+    /// every `capabilities()` query; live state comes from `watch_herdr`.
     pub herdr_sessions: Vec<HerdrSessionInfo>,
 }
 
@@ -395,7 +397,8 @@ impl HostHandle {
         Ok(handle)
     }
 
-    /// Probes the host once per connection (the driver caches the answer).
+    /// The host's programs and locale, probed once per connection (the driver caches them),
+    /// with herdr's session list read afresh on every call.
     pub async fn capabilities(&self) -> Result<HostCapabilities, HostError> {
         let (reply, response) = oneshot::channel();
         self.require_connected()?;

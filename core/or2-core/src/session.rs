@@ -133,7 +133,8 @@ pub enum SessionFailure {
     /// The server offered only a host certificate or an unsupported key type.
     UnsupportedHostKey(String),
     AuthenticationRejected,
-    /// The server refused the PTY or shell request.
+    /// The server refused the PTY or shell request, or, on a host, the session channel itself
+    /// (OpenSSH `MaxSessions`: 10 per connection by default). The connection is healthy.
     ShellRejected,
     /// The terminal's program (`tmux`, `herdr`) is not installed on the host.
     NotInstalled {

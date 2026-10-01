@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
+use tokio::time::timeout;
 
 use super::connection::{SshHost, closed_reason};
 use super::pump::{
@@ -77,7 +78,7 @@ pub(super) async fn drive(
     // Whatever ended the session, close its channel (best effort, bounded) before the
     // network task goes: an orphaned channel would keep its program running on the host.
     shutdown.send_replace(true);
-    let _ = tokio::time::timeout(CHANNEL_CLOSE_GRACE * 2, &mut network).await;
+    let _ = timeout(CHANNEL_CLOSE_GRACE * 2, &mut network).await;
     network.abort();
     if !network.is_finished() {
         let _ = network.await;
@@ -93,7 +94,7 @@ async fn host_reason(
     if matches!(
         reason,
         CloseReason::Failed(SessionFailure::ConnectionLost(_))
-    ) && let Ok(host) = tokio::time::timeout(HOST_REASON_GRACE, closed_reason(closing)).await
+    ) && let Ok(host) = timeout(HOST_REASON_GRACE, closed_reason(closing)).await
     {
         return host;
     }
@@ -146,6 +147,16 @@ async fn program(
     command.render().map(Some).map_err(internal)
 }
 
+/// The server refusing a session channel (OpenSSH's `MaxSessions`, 10 per connection by
+/// default, counts every terminal and every exec in flight) leaves the connection healthy:
+/// `ShellRejected`, never `ConnectionLost`.
+fn open_failure(error: russh::Error) -> SessionFailure {
+    match error {
+        russh::Error::ChannelOpenFailure(_) => SessionFailure::ShellRejected,
+        error => connection_error(error),
+    }
+}
+
 fn not_installed(program: &str) -> SessionFailure {
     SessionFailure::NotInstalled {
         program: program.into(),
@@ -185,23 +196,29 @@ async fn channel_task(
         },
         () = stopped(stop.clone()) => return CloseReason::Disconnected,
     };
+    // The server may never answer the channel open, `pty-req` or the program request, and
+    // keepalives alone do not end that: bound the whole setup like an exec.
+    let limit = host.exec_timeout();
     let mut channel = tokio::select! {
-        channel = host.open_channel() => match channel {
-            Ok(channel) => channel,
-            Err(error) => return CloseReason::Failed(connection_error(error)),
+        channel = timeout(limit, host.open_channel()) => match channel {
+            Ok(Ok(channel)) => channel,
+            Ok(Err(error)) => return CloseReason::Failed(open_failure(error)),
+            Err(_) => return CloseReason::Failed(SessionFailure::TimedOut),
         },
         () = stopped(stop.clone()) => return CloseReason::Disconnected,
     };
     // From here on a channel exists: every exit closes it.
     let started = tokio::select! {
-        started = start_program(&mut channel, command.as_deref(), events, &size) => started,
+        started = timeout(limit, start_program(&mut channel, command.as_deref(), events, &size)) => {
+            started.unwrap_or(Err(SessionFailure::TimedOut))
+        }
         () = stopped(stop.clone()) => {
-            let _ = tokio::time::timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
+            let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
             return CloseReason::Disconnected;
         }
     };
     if let Err(failure) = started {
-        let _ = tokio::time::timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
+        let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
         return CloseReason::Failed(failure);
     }
     let _ = events.send(Event::Connected).await;

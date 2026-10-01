@@ -3,7 +3,7 @@
 //! refusal, loss) can be driven through the public `HostHandle`.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc as sync;
 
 use russh::server;
@@ -179,6 +179,16 @@ struct Shared {
     probes: AtomicUsize,
     /// What the capability probe prints.
     probe: Mutex<&'static str>,
+    /// Refuse session channels like an sshd at `MaxSessions`.
+    refuse_channels: AtomicBool,
+    /// Never answer public key authentication.
+    stall_auth: AtomicBool,
+    /// Channels the client closed.
+    closes: AtomicUsize,
+    /// A handle on the accepted socket, so a test can hang up on the client. Kept only when
+    /// asked: a duplicate descriptor would keep the connection open after the server ends.
+    socket: Mutex<Option<std::net::TcpStream>>,
+    keep_socket: bool,
 }
 
 struct Server {
@@ -194,6 +204,9 @@ impl server::Handler for Server {
         _: &str,
         key: &russh::keys::PublicKey,
     ) -> Result<server::Auth, Self::Error> {
+        if self.shared.stall_auth.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         Ok(if key == &self.client_key {
             server::Auth::Accept
         } else {
@@ -208,7 +221,22 @@ impl server::Handler for Server {
         _: &mut server::Session,
     ) -> Result<(), Self::Error> {
         drop(channel);
-        reply.accept().await;
+        if self.shared.refuse_channels.load(Ordering::SeqCst) {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+        } else {
+            reply.accept().await;
+        }
+        Ok(())
+    }
+
+    async fn channel_close(
+        &mut self,
+        _: russh::ChannelId,
+        _: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        self.shared.closes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -276,6 +304,7 @@ struct Fixture {
     states: sync::Receiver<(HostState, std::thread::ThreadId)>,
     shared: Arc<Shared>,
     task: tokio::task::JoinHandle<()>,
+    tapped: Option<oneshot::Receiver<Arc<SshHost>>>,
 }
 
 impl Fixture {
@@ -285,6 +314,25 @@ impl Fixture {
     }
 
     fn connected_with(exec_timeout: Duration, probe: &'static str) -> Self {
+        let fixture = Self::start(
+            HostOptions {
+                exec_timeout,
+                ..HostOptions::default()
+            },
+            probe,
+            true,
+        );
+        assert_eq!(next(&fixture.states), HostState::Authenticating);
+        assert_eq!(
+            next(&fixture.states),
+            HostState::Connected { address_index: 0 }
+        );
+        fixture
+    }
+
+    /// Connects without waiting for any state. With `trusted` false the first state is the
+    /// host-key prompt.
+    fn start(options: HostOptions, probe: &'static str, trusted: bool) -> Self {
         let host = ClientKey::generate_ed25519("");
         let host_openssh = host.public_key().openssh;
         let key = ClientKey::generate_ed25519("");
@@ -293,6 +341,12 @@ impl Fixture {
             listing: Mutex::new(Listing::Sessions),
             probes: AtomicUsize::new(0),
             probe: Mutex::new(probe),
+            refuse_channels: AtomicBool::new(false),
+            stall_auth: AtomicBool::new(false),
+            closes: AtomicUsize::new(0),
+            socket: Mutex::new(None),
+            // The prompt tests hang up on the client; the others let the server end it.
+            keep_socket: !trusted,
         });
         let (listener, port) = runtime().block_on(async {
             let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -311,40 +365,41 @@ impl Fixture {
             client_key,
             shared: shared.clone(),
         };
+        let accepted = shared.clone();
         let task = runtime().spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
+            let socket = socket.into_std().unwrap();
+            if accepted.keep_socket {
+                *accepted.socket.lock().unwrap() = Some(socket.try_clone().unwrap());
+            }
+            let socket = tokio::net::TcpStream::from_std(socket).unwrap();
             let session = server::run_stream(config, socket, handler).await.unwrap();
             let _ = session.await;
         });
         let (observer, states) = recorder();
+        let trusted = if trusted { vec![host_openssh] } else { vec![] };
         let request = HostConnectRequest::new(
             &[("127.0.0.1", port)],
             "fixture",
             &key.to_stored(),
-            &[host_openssh],
+            &trusted,
         )
         .unwrap();
-        let handle = start(
-            Arc::new(DirectTcp),
-            request,
-            observer,
-            HostOptions {
-                exec_timeout,
-                ..HostOptions::default()
-            },
-        );
-        let fixture = Self {
+        let (tap, tapped) = oneshot::channel();
+        let handle = start_tapped(Arc::new(DirectTcp), request, observer, options, Some(tap));
+        Self {
             handle,
             states,
             shared,
             task,
-        };
-        assert_eq!(next(&fixture.states), HostState::Authenticating);
-        assert_eq!(
-            next(&fixture.states),
-            HostState::Connected { address_index: 0 }
-        );
-        fixture
+            tapped: Some(tapped),
+        }
+    }
+
+    /// The established connection, as the host driver's own tasks use it.
+    fn ssh(&mut self) -> Arc<SshHost> {
+        let tapped = self.tapped.take().expect("asked once");
+        runtime().block_on(tapped).expect("the host connected")
     }
 
     fn list(&self, listing: Listing) -> Result<Vec<TmuxSession>, HostError> {
@@ -508,4 +563,204 @@ fn a_host_without_tmux_or_herdr_reports_not_installed_everywhere_without_opening
             .is_err()
     );
     fixture.handle.disconnect();
+}
+
+/// A terminal on a fixture host: its callback states.
+fn open_shell(fixture: &Fixture) -> (crate::session::SessionHandle, sync::Receiver<SessionState>) {
+    let (tx, states) = sync::channel();
+    let handle = fixture
+        .handle
+        .open_terminal(
+            TerminalTarget::Shell,
+            TerminalSize::new(80, 24).unwrap(),
+            Arc::new(SessionRecorder(tx)),
+        )
+        .unwrap();
+    (handle, states)
+}
+
+fn session_closed(states: &sync::Receiver<SessionState>) -> CloseReason {
+    let SessionState::Closed(reason) = states.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("expected the session to close")
+    };
+    reason
+}
+
+fn wait_for(condition: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !condition() {
+        assert!(std::time::Instant::now() < deadline, "condition not met");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_refused_session_channel_is_shell_rejected_and_the_host_stays_connected() {
+    // An sshd at `MaxSessions` refuses the channel open; the connection is healthy.
+    let fixture = Fixture::connected(Duration::from_secs(5));
+    fixture.shared.refuse_channels.store(true, Ordering::SeqCst);
+    let (_terminal, states) = open_shell(&fixture);
+    assert_eq!(
+        session_closed(&states),
+        CloseReason::Failed(SessionFailure::ShellRejected)
+    );
+    // Execs hit the same limit and say so as a command failure; then it clears.
+    let Err(HostError::CommandFailed { message }) = fixture.list(Listing::Sessions) else {
+        panic!("expected CommandFailed")
+    };
+    assert!(message.contains("refused"), "{message}");
+    assert!(matches!(
+        fixture.handle.state(),
+        HostState::Connected { .. }
+    ));
+    fixture
+        .shared
+        .refuse_channels
+        .store(false, Ordering::SeqCst);
+    assert_eq!(fixture.list(Listing::Sessions).unwrap().len(), 2);
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+}
+
+#[test]
+fn terminal_setup_that_the_server_never_answers_times_out_and_closes_its_channel() {
+    // This server accepts the channel but never answers `pty-req`.
+    let fixture = Fixture::connected(Duration::from_millis(300));
+    let (_terminal, states) = open_shell(&fixture);
+    let started = std::time::Instant::now();
+    assert_eq!(
+        session_closed(&states),
+        CloseReason::Failed(SessionFailure::TimedOut)
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+    wait_for(|| fixture.shared.closes.load(Ordering::SeqCst) == 1);
+    assert!(matches!(
+        fixture.handle.state(),
+        HostState::Connected { .. }
+    ));
+    fixture.handle.disconnect();
+}
+
+#[test]
+fn a_cancelled_exec_closes_its_channel_on_the_server() {
+    let mut fixture = Fixture::connected(Duration::from_secs(30));
+    let ssh = fixture.ssh();
+    *fixture.shared.listing.lock().unwrap() = Listing::Hang;
+    let outcome = runtime().block_on(async {
+        timeout(
+            Duration::from_millis(150),
+            ssh.exec_rendered("tmux list-sessions"),
+        )
+        .await
+    });
+    assert!(outcome.is_err(), "the server never answers");
+    wait_for(|| fixture.shared.closes.load(Ordering::SeqCst) == 1);
+    // The exec's own failure paths close the channel too (once each, not twice).
+    *fixture.shared.listing.lock().unwrap() = Listing::Refuse;
+    assert!(
+        runtime()
+            .block_on(ssh.exec_rendered("tmux list-sessions"))
+            .is_err()
+    );
+    wait_for(|| fixture.shared.closes.load(Ordering::SeqCst) == 2);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(fixture.shared.closes.load(Ordering::SeqCst), 2);
+    fixture.handle.disconnect();
+}
+
+fn untrusted(options: HostOptions) -> Fixture {
+    Fixture::start(options, PROBE_WITH_TMUX, false)
+}
+
+fn prompt(fixture: &Fixture) -> crate::session::HostKeyPrompt {
+    let HostState::AwaitingHostKey(prompt) = next(&fixture.states) else {
+        panic!("expected the host-key prompt")
+    };
+    prompt
+}
+
+#[test]
+fn the_connect_timer_is_paused_while_the_host_key_prompt_is_open() {
+    let fixture = untrusted(HostOptions {
+        connect_timeout: Duration::from_millis(300),
+        ..HostOptions::default()
+    });
+    let prompt = prompt(&fixture);
+    // Held for more than twice the connect timeout: still waiting for the user.
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(matches!(
+        fixture.handle.state(),
+        HostState::AwaitingHostKey(_)
+    ));
+    fixture
+        .handle
+        .approve_host_key(&prompt.presented.fingerprint())
+        .unwrap();
+    assert_eq!(next(&fixture.states), HostState::Authenticating);
+    assert_eq!(
+        next(&fixture.states),
+        HostState::Connected { address_index: 0 }
+    );
+    fixture.handle.disconnect();
+}
+
+#[test]
+fn the_connect_timer_resumes_after_approval() {
+    let fixture = untrusted(HostOptions {
+        connect_timeout: Duration::from_millis(400),
+        ..HostOptions::default()
+    });
+    fixture.shared.stall_auth.store(true, Ordering::SeqCst);
+    let prompt = prompt(&fixture);
+    std::thread::sleep(Duration::from_millis(600));
+    fixture
+        .handle
+        .approve_host_key(&prompt.presented.fingerprint())
+        .unwrap();
+    let approved = std::time::Instant::now();
+    assert_eq!(next(&fixture.states), HostState::Authenticating);
+    assert_eq!(
+        closed(&fixture.states),
+        CloseReason::Failed(SessionFailure::TimedOut)
+    );
+    // The remaining time, not a fresh 400 ms and not forever.
+    assert!(approved.elapsed() < Duration::from_millis(1500));
+}
+
+#[test]
+fn the_peer_hanging_up_during_the_prompt_closes_the_host_without_waiting_for_the_user() {
+    let fixture = untrusted(HostOptions::default());
+    let _prompt = prompt(&fixture);
+    let socket = fixture.shared.socket.lock().unwrap().take().unwrap();
+    socket.shutdown(std::net::Shutdown::Both).unwrap();
+    let CloseReason::Failed(SessionFailure::ConnectionLost(_)) = closed(&fixture.states) else {
+        panic!("expected ConnectionLost")
+    };
+}
+
+/// A transport whose `connect` is buggy.
+struct Panicking;
+
+impl Transport for Panicking {
+    type Stream = tokio::io::DuplexStream;
+
+    async fn connect(&self, _: &crate::transport::Endpoint) -> std::io::Result<Self::Stream> {
+        panic!("a transport bug");
+    }
+}
+
+#[test]
+fn a_connection_task_that_dies_without_reporting_closes_the_host_with_internal() {
+    let (observer, states) = recorder();
+    // The default 20 s connect timeout: the host must not need it to notice.
+    let handle = start(
+        Arc::new(Panicking),
+        request(&[("127.0.0.1", 1)], &[]),
+        observer,
+        HostOptions::default(),
+    );
+    let CloseReason::Failed(SessionFailure::Internal(_)) = closed(&states) else {
+        panic!("expected Internal")
+    };
+    assert!(matches!(handle.state(), HostState::Closed(_)));
 }

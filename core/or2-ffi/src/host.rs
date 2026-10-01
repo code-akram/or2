@@ -348,7 +348,8 @@ impl HostConnection {
         Ok(Session::new(handle))
     }
 
-    /// Cancelling the coroutine cancels the query.
+    /// Programs and locale are probed once per connection; `herdr_sessions` is read afresh
+    /// on every call. Cancelling the coroutine cancels the query.
     pub async fn capabilities(&self) -> Result<HostCapabilities, HostError> {
         Ok(self.handle.capabilities().await?.into())
     }

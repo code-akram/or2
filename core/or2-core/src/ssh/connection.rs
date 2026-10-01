@@ -12,8 +12,11 @@
 //! **Closing.** Whatever ends the host (user disconnect, release of the last handle, loss, a
 //! failed handshake) is one `CloseReason`. The driver publishes it to every terminal and
 //! watch, waits (bounded) until each has delivered its own `Closed`, tears the connection
-//! down, and only then reports the host's `Closed`: terminals and watches always close before
-//! the host, matching the contract probe. A user disconnect closes terminals with
+//! down, and only then reports the host's `Closed`: terminals and watches close before the
+//! host, matching the contract probe. The wait is bounded ([`SESSIONS_CLOSE_GRACE`]) because
+//! a terminal thread stuck in a slow observer callback must not hold the host open forever;
+//! a session that outlasts it can still deliver its `Closed` after the host's. A user
+//! disconnect closes terminals with
 //! `Disconnected` and sends each channel's close first; loss closes them with the failure the
 //! connection ended with. Queries still running are dropped, so their callers see `Closed`.
 
@@ -28,7 +31,7 @@ use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use super::client::{
     Client, HostKeyRequest, TransportEnd, authenticate, config, handshake_failure, relay,
 };
-use super::pump::{connection_error, internal, lost};
+use super::pump::{CHANNEL_CLOSE_GRACE, connection_error, internal, lost};
 use super::runtime;
 use super::terminal_session;
 use crate::herdr::{self, HerdrState, HerdrUnavailable, HerdrWatchDriver};
@@ -65,7 +68,8 @@ impl Default for HostOptions {
     }
 }
 
-/// How long closing waits for terminals and watches to deliver their `Closed`.
+/// How long closing waits for terminals and watches to deliver their `Closed`. Past it the
+/// host closes anyway: the "sessions before host" order holds unless a session is wedged.
 const SESSIONS_CLOSE_GRACE: Duration = Duration::from_secs(3);
 /// How long a watch whose capability probe failed waits before probing again.
 const WATCH_RETRY: Duration = Duration::from_secs(10);
@@ -108,6 +112,12 @@ impl SshHost {
         self.capabilities
             .get_or_try_init(|| probe::probe(self))
             .await
+    }
+
+    /// How long one request to the server may take: an exec, a socket open, a terminal's
+    /// channel setup.
+    pub(super) fn exec_timeout(&self) -> Duration {
+        self.exec_timeout
     }
 
     /// A new session channel, for a terminal.
@@ -169,6 +179,38 @@ impl SshHost {
     }
 }
 
+/// A session channel running an exec. Dropped while armed (the exec future was cancelled),
+/// it closes the channel in the background; `finished` disarms it once the server has closed
+/// the channel itself.
+struct ExecChannel(Option<russh::Channel<russh_client::Msg>>);
+
+impl ExecChannel {
+    fn channel(&mut self) -> &mut russh::Channel<russh_client::Msg> {
+        self.0.as_mut().expect("an armed exec channel")
+    }
+
+    fn finished(mut self) {
+        self.0 = None;
+    }
+
+    /// Best effort and bounded: the connection may already be gone.
+    async fn close(mut self) {
+        if let Some(channel) = self.0.take() {
+            let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
+        }
+    }
+}
+
+impl Drop for ExecChannel {
+    fn drop(&mut self) {
+        if let Some(channel) = self.0.take() {
+            runtime().spawn(async move {
+                let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
+            });
+        }
+    }
+}
+
 fn append_capped(into: &mut Vec<u8>, data: &[u8]) -> Result<(), RemoteError> {
     if into.len() + data.len() > OUTPUT_CAP {
         return Err(RemoteError::OutputTooLarge);
@@ -192,18 +234,21 @@ fn remote_error(error: russh::Error) -> RemoteError {
 impl RemoteHost for SshHost {
     type Stream = russh::ChannelStream<russh_client::Msg>;
 
-    /// One session channel per exec, no PTY. Output over the cap, a refused channel and the
-    /// timeout all close the channel before failing, so nothing is left running on the host's
-    /// side of it.
+    /// One session channel per exec, no PTY. Output over the cap, a refused command and the
+    /// timeout close the channel before failing, and so does dropping the future (a caller's
+    /// own timeout or a cancelled query): an orphaned channel would keep counting toward the
+    /// server's `MaxSessions`.
     async fn exec_rendered(&self, line: &str) -> Result<ExecOutput, RemoteError> {
         let deadline = Instant::now() + self.exec_timeout;
-        let mut channel = timeout_at(deadline, self.handle.channel_open_session())
+        let channel = timeout_at(deadline, self.handle.channel_open_session())
             .await
             .map_err(|_| RemoteError::TimedOut)?
             .map_err(remote_error)?;
-        let result = self.collect(&mut channel, line, deadline).await;
-        if result.is_err() {
-            let _ = timeout(Duration::from_millis(250), channel.close()).await;
+        let mut exec = ExecChannel(Some(channel));
+        let result = self.collect(exec.channel(), line, deadline).await;
+        match result {
+            Ok(_) => exec.finished(),
+            Err(_) => exec.close().await,
         }
         result
     }
@@ -310,6 +355,7 @@ async fn drive<T: Transport>(
 ) {
     let (events, mut incoming) = mpsc::channel(32);
     let (shutdown, stop) = watch::channel(false);
+    let mut network_ended = false;
     let mut network = tokio::spawn(async move {
         let reason = network(transport, request, events.clone(), options, stop).await;
         let _ = events.send(HostEvent::Closed(reason)).await;
@@ -378,6 +424,15 @@ async fn drive<T: Transport>(
                 () = sleep_until(deadline), if timing => {
                     break Ok(CloseReason::Failed(SessionFailure::TimedOut));
                 }
+                result = &mut network, if !network_ended => {
+                    network_ended = true;
+                    // A task that returns has queued its `Closed`, which the first arm takes
+                    // next. One that panicked has not: without this the host would sit in its
+                    // last state forever, its terminals and watches never told.
+                    if result.is_err() {
+                        break Err(internal("the host connection task failed"));
+                    }
+                }
             }
         }
     }
@@ -387,7 +442,7 @@ async fn drive<T: Transport>(
     closing_sender.send_replace(Some(reason.clone()));
     drop(tracker);
     let _ = timeout(SESSIONS_CLOSE_GRACE, drained.recv()).await;
-    if reason == CloseReason::Disconnected {
+    if reason == CloseReason::Disconnected && !network_ended {
         shutdown.send_replace(true);
         // Let the SSH disconnect flush, but never wait indefinitely for a peer.
         let _ = timeout(Duration::from_millis(400), &mut network).await;
@@ -418,7 +473,14 @@ fn dispatch(
             let (mut closing, tracker) = (closing.clone(), tracker.clone());
             runtime().spawn(async move {
                 let _tracker = tracker;
-                let query = async { host.capabilities().await.cloned().map_err(host_error) };
+                // Programs and locale are the cached probe; herdr's session list is read
+                // again so `running` and new sessions show.
+                let query = async {
+                    let cached = host.capabilities().await.map_err(host_error)?;
+                    probe::with_fresh_sessions(&*host, cached)
+                        .await
+                        .map_err(host_error)
+                };
                 // A host that closes mid-query drops `reply`: the caller sees `Closed`.
                 tokio::select! {
                     result = query => { let _ = reply.send(result); }
@@ -584,14 +646,22 @@ async fn hold(
     options: HostOptions,
     mut stop: watch::Receiver<bool>,
 ) -> Result<CloseReason, SessionFailure> {
+    let HostConnectRequest {
+        username,
+        key,
+        trusted_host_keys,
+        ..
+    } = request;
     let (ended_sender, mut ended) = oneshot::channel();
-    let mut client = Client::new(request.trusted_host_keys.clone(), events.clone());
+    let mut client = Client::new(trusted_host_keys, events.clone());
     client.ended = Some(ended_sender);
     let mut handle = russh_client::connect_stream(config(), stream, client)
         .await
         .map_err(handshake_failure)?;
     let _ = events.send(HostEvent::Authenticating).await;
-    authenticate(&mut handle, request.username.clone(), &request.key).await?;
+    authenticate(&mut handle, username, &key).await?;
+    // The key is needed for authentication only; do not keep it for the connection's lifetime.
+    drop(key);
     let host = Arc::new(SshHost {
         handle,
         exec_timeout: options.exec_timeout,
