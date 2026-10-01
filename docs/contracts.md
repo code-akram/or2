@@ -1226,6 +1226,12 @@ becomes **8**. Everything in M1/M2 still applies unless changed here.
 | M3-B: Android | foreground service owning `HostConnections`, network callback, per-host transport preference (Room v3), Auto fallback, reattach, battery-optimisation prompt, notification | M3-A's API 8 surface (via `contract_probe_host`) |
 | UI-C: compact UI | smaller default type scale, controls and popups everywhere ([ui](ui.md)) | none |
 
+UI-C is a pure token-level change (no FFI, schema or behaviour change): `Or2Dimens`, `Or2Shapes`
+and `Or2Type` in `ui/Theme.kt` carry the compact scale, which is the only scale and the default
+(documented in `docs/ui.md`, "Compact scale"). Decision: visible sizes shrink, but hit areas stay
+usable because the platform grows every clickable's touch target to 48 dp; primary controls are
+drawn at least 40 dp tall. The terminal's 12 dp default cell size is unchanged.
+
 M3-A lands its FFI surface and probe support first (a small commit), so M3-B builds against
 real generated bindings; the implementation follows on the same branch.
 

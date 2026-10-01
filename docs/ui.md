@@ -1,14 +1,30 @@
 # or2 UI system
 
 or2 is a phone remote for agents, so the UI should feel calm, dense and precise: one dark
-theme, few colours, generous touch targets, monospace wherever the text is machine text. The
-reference for polish is the Moshi Android app (studied on the test phone; screenshots stay out
-of the repository). This document records the resulting tokens and component rules; Compose code
-follows it through one theme file, never ad-hoc colours or sizes.
+theme, few colours, monospace wherever the text is machine text. The reference for *style* is the
+Moshi Android app (studied on the test phone; screenshots stay out of the repository); its
+*sizes* are not followed. This document records the resulting tokens and component rules;
+Compose code follows it through one theme file (`ui/Theme.kt`, `ui/Components.kt`), never ad-hoc
+colours or sizes.
+
+## Compact scale (the default)
+
+The whole UI is compact by default: UI text, controls, the arrow pad, forms, sheets and dialogs
+sit in the same size range as the small 12 dp terminal font. The owner found the first polish
+pass (Moshi-sized: 56 dp rows, 18 sp labels, 56 dp keys) too big for a phone, and a phone remote
+is mostly looked at in short glances next to a dense terminal, so more content per screen beats
+generous padding. There is no "large" mode: this is the one scale. Everything below is written in
+these terms; the tokens live in `Or2Dimens`, `Or2Shapes` and `Or2Type` (`ThemeTest` pins them).
+
+Touch targets: visible sizes are small, hit areas are not. Every clickable's touch target is grown
+by the platform to at least 48 dp (hit testing; `touchBoundsInRoot`), and primary controls are
+drawn at least 40 dp tall (44 dp rows, fields and primary buttons, 40 dp arrow-pad keys and
+toolbar touch boxes). Only secondary controls are drawn below 40 dp (segmented 32, chips 28,
+pad extras 36, header discs 14 in a 36 dp box) and rely on the platform growth.
 
 ## Palette
 
-Catppuccin Mocha (MIT). Dark only for M2; the terminal default theme uses the same palette.
+Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same palette.
 
 | Token | Hex | Use |
 |---|---|---|
@@ -42,69 +58,74 @@ Catppuccin Mocha (MIT). Dark only for M2; the terminal default theme uses the sa
   JetBrains Mono is not bundled. It is used for addresses (`user@host:port`), fingerprints, paths, session/pane ids, status lines such as
   `Checking server...`, kicker lines such as `~3 min · needs hostname + key`. `ui/MonoFont.kt`
   owns the choice.
-- Scale (sp): sheet title 28 light; **top-bar title of a pushed screen 20 light** (Moshi's size; form,
-  keys, host); card title 20; row label 18; body 16; secondary 15;
-  section header 13 UPPERCASE with +0.08 em tracking in `textMuted`; kicker 12 UPPERCASE mono
-  with +0.15 em tracking in `accent` at ~70 %; toolbar keys 14 mono; overlay pills on thumbnails
-  and the terminal header's transport badge 11 mono.
+- Scale (sp, compact): screen/sheet title 20 light; **top-bar title of a pushed screen 16 light**
+  (form, keys, host); card title 15; row label 14; body 13; secondary 12; button 14;
+  section header 10.5 UPPERCASE with +0.08 em tracking in `textMuted`; mono 12, mono small 10.5;
+  kicker 10 UPPERCASE mono with +0.15 em tracking in `accent` at ~70 %; toolbar and pad keys 12
+  mono; composer text 13 mono; overlay pills on thumbnails and the terminal header's transport
+  badge 10 mono; badge 11; chip 12.
 
 ## Layout
 
-- 16 dp screen gutters; 8 dp grid. Section header 32 dp above its group, 8 dp below.
-- Corner radii: cards and grouped lists 20 dp; fields 16 dp; chips, segmented controls,
-  toolbar and primary buttons fully rounded (pill); FAB circle 60 dp; icon tiles 16 dp.
-- Rows: at least 56 dp tall (72 dp with a subtitle), leading 24 dp outline icon in
-  `textMuted`, label, trailing value in `textMuted` and a chevron.
+- 12 dp screen gutters; 4 dp grid. Section header 24 dp above its group, 6 dp below.
+- Corner radii: cards and grouped lists 16 dp; fields, keys and icon tiles 12 dp; composer 20 dp;
+  sheets and the terminal card 24 dp (top); chips, segmented controls, toolbar and primary
+  buttons fully rounded (pill); FAB circle 48 dp.
+- Rows: at least 44 dp tall (56 dp with a subtitle), leading 20 dp outline icon in
+  `subtle`, label, trailing value in `textMuted` and a chevron. Icons are 20 dp throughout;
+  status dots 8 dp.
+- Controls: fields and the primary button 44 dp; segmented control 32 dp; chips 28 dp; pill
+  buttons 36 dp.
 - Top bar: no app-bar fill. Back arrow + light 20 sp title on the background; top-level screens
-  (Home, Inbox) show only trailing icon buttons (inbox/home switch, keys) with 48 dp targets and
-  16 dp end padding; the form's close and check sit 4 dp from the edge, as in Moshi.
+  (Home, Inbox) show only trailing icon buttons (inbox/home switch, keys), 44 dp round buttons
+  (touch target 48 dp) with 12 dp end padding; the form's close and check sit 2 dp from the edge.
 - Glow: a wide, flat ellipse behind the top bar (gone before lists start, so sticky headers on a
   plain `background` have no visible edge) and a modest radial in the bottom-right corner.
-- Primary action: full-width pill button (`accent`, 56 dp tall, Moshi's height; the disabled label is
+- Primary action: full-width pill button (`accent`, 44 dp tall; the disabled label is
   `textMuted` on `accentMuted`) at the end of a form, with a one-line muted footnote below. Top-bar
   check mark mirrors it.
 - Scrolling content runs edge to edge and scrolls *under* the gesture bar: screens apply only the
   side and top insets at the root and end their scrolling content with `BottomInsetSpacer` (the
   navigation-bar inset, minus the keyboard when it is up), so lists are never cut flat above the
   gesture pill. The FAB and the notices sit above the bar.
-- Touch targets: small drawn controls keep a full 48 dp target (terminal header buttons are 18 dp
-  discs in 48 dp; status chips that are buttons and the composer actions are 48 dp). Two exceptions
-  are deliberate: the toolbar and arrow-pad-extras keys are 40 x 52 / 32-44 x 44 dp and sit shoulder
-  to shoulder (nine 48 dp keys do not fit a 411 dp phone; the platform still grows each pointer
-  target toward 48 dp and a tap lands on the nearest key), and the segmented control's segments
-  span the whole 40 dp track (Moshi's height).
+- Touch targets: see "Compact scale". Small drawn controls keep a layout box of 36-44 dp and the
+  platform grows the hit area to 48 dp: terminal header buttons are 14 dp discs in 36 dp boxes,
+  status chips that are buttons are 28 dp, the composer's bare icon actions are 40 dp boxes (the
+  send button is a 36 dp disc in a 40 dp box). The toolbar and arrow-pad-extras keys are 30 x 40 dp
+  touch boxes (30 dp drawn) and 28-38 x 36 dp, shoulder to shoulder, so a tap lands on the nearest
+  key; the segmented control's segments span the whole 32 dp track.
 - Fingerprints in list rows are ellipsized in the middle on one line (`SHA256:7vK2mQ9x…tB1MkA`); the
   full value is in the key's own sheet and in the host-key dialogs, which never shorten it.
 - Validation is calm on a pristine form: hints ("Choose a key") are muted, and only a typed value
   that is wrong draws the field in `danger`.
-- Empty states: centred 96 dp `surface` circle with a 40 dp outline icon, a 20 sp title and a
+- Empty states: centred 72 dp `surface` circle with a 32 dp outline icon, a 20 sp title and a
   muted two-line explanation, then an optional call-to-action card.
-- Bottom sheets: `surfaceRaised`, 28 dp top radius, drag handle; option and detail sheets have a title
+- Bottom sheets: `surfaceRaised`, 24 dp top radius, drag handle; option and detail sheets have a title
   left and "Done" right. The session picker has neither, like Moshi's, and a minimum height of 55 % of
   the screen so the segmented control stays put when the tab (and so the list) changes.
 
 ## Components
 
-- **Host card:** `surface` card, leading 28 dp server icon (no tile fill; Moshi draws it bare) with
+- **Host card:** `surface` card, leading 24 dp server icon (no tile fill; Moshi draws it bare) with
   a status dot (attention when an agent is blocked or a host-key decision waits, accent while
-  connecting, green when connected, danger on failure), name (20 sp) and mono
+  connecting, green when connected, danger on failure), name (15 sp) and mono
   `user@host:port` subtitle, trailing chevron. Connection progress replaces the subtitle in
   place (`Checking server...`, `Unlocking key...`, `Authenticating...`) with an accent spinner in
-  the icon's own 28 dp slot, on a faint `surfaceTrack` ring, so the glyph never jumps sideways; no
+  the icon's own 24 dp slot, on a faint `surfaceTrack` ring, so the glyph never jumps sideways; no
   modal progress dialogs. The card's semantics carry the state ("Connected", "Needs attention", ...)
   as well as the dot colour.
-- **Status chip:** pill in `surface` with a 10 dp coloured dot and muted label, e.g.
+- **Status chip:** pill in `surface` with an 8 dp coloured dot and muted label, e.g.
   `● Needs attention: 1`; tapping opens the relevant sheet.
-- **Agent row (inbox):** status dot (in the same 26 dp leading slot as the host rows below, so
+- **Agent row (inbox):** status dot (in the same 20 dp leading slot as the host rows below, so
   both start their text at one x; working dots pulse between full and 70 % alpha), agent display name, muted mono
   `host · workspace / tab`, trailing relative time; blocked rows first and tinted with
   `attentionSurface`. Sticky muted section headers per status.
 - **Grouped settings list:** rows inside one `surface` card separated by inset hairlines.
-- **Segmented control:** `surfaceTrack` pill, selected segment `surface` with `text`, others
+- **Segmented control:** 32 dp `surfaceTrack` pill, selected segment `surface` with `text`, others
   `textMuted`.
 - **Toggle:** `accent` track with a `background` knob when on; `surfaceTrack` when off.
 - **Stepper:** pill `− value +` in `surfaceTrack`.
-- **Text field:** filled `surface`, 16 dp radius, no outline; label above in `text`;
+- **Text field:** filled `surface`, 44 dp tall, 12 dp radius, no outline; label above in `text`;
   placeholder in mono `textMuted`.
 - **Home:** the start destination, with trailing icon buttons only (agents inbox, keys). The agents
   inbox is its sibling top-level screen: sticky status headers, blocked rows tinted, an empty
@@ -112,7 +133,7 @@ Catppuccin Mocha (MIT). Dark only for M2; the terminal default theme uses the sa
   an unavailable session in muted mono). Sections in order: SESSIONS
   (open sessions as live terminal thumbnail cards, ~45 % width, rounded 16 dp, the terminal inset
   8 dp so corners never slice glyphs, with a compact host pill and a transport pill — `SSH`/`Mosh`
-  — overlaid, 16 sp title and mono path below; tap resumes), CONNECTIONS (host cards, "Long press for options." hint right-aligned in the
+  — overlaid, 13 sp title and mono path below; tap resumes), CONNECTIONS (host cards, "Long press for options." hint right-aligned in the
   section header), then status chips. A FAB adds a host.
 - **Focus progress:** opening or returning to an agent's terminal first focuses its pane in herdr;
   a floating `surfaceRaised` card with an accent spinner and a mono `Focusing host: herdr w1:p1…`
@@ -123,33 +144,33 @@ Catppuccin Mocha (MIT). Dark only for M2; the terminal default theme uses the sa
   segmented control (`herdr` / `tmux` / `Recent`) with a trailing "Skip" pill that opens a
   plain shell; below, one grouped list of herdr sessions (`● Running`), tmux sessions (`●
   Attached`, with a "new session" field) or, under Recent, the open terminals of the host.
-- **Terminal screen:** the terminal sits in a full-height card with a 28 dp top radius and a
-  drag handle (drag down to minimise to the SESSIONS thumbnail). Header row inside the card:
-  a small round "minimise" button (18 dp disc, `attention`) and sidebar toggle (18 dp, green) with
-  48 dp touch targets, the mono title (`host: target`) in `textMuted`, and a trailing transport badge
+- **Terminal screen:** the terminal sits in a full-height card with a 24 dp top radius and a
+  drag handle (drag down to minimise to the SESSIONS thumbnail). Header row inside the card, 36 dp:
+  a small round "minimise" button (14 dp disc, `attention`) and sidebar toggle (14 dp, green) in
+  36 dp boxes (48 dp touch targets), the mono title (`host: target`) in `textMuted`, and a trailing transport badge
   (`Mosh` in a saturated teal pill with dark text, `SSH` in a `surfaceTrack` pill with 70 % text).
-  The drag handle overlaps the top of the 48 dp header row, so the header costs no extra height.
+  The drag handle overlaps the top of the 36 dp header row, so the header costs no extra height.
   The card follows the terminal's own background (the remote can change it with OSC 11). The sidebar toggle opens the sessions sheet
   (switch session, disconnect). The terminal is edge to edge below it with a thin `accent`
   scroll indicator on the right.
-- **Terminal toolbar:** a floating pill (`background` at ~85 %) of rounded-square keys (`surface`),
-  36 dp wide (text keys as wide as their label) and 44 dp tall, each with a 40 x 52 dp touch
-  target (Moshi's keys are this size; 48 dp keys do not fit nine keys on a 411 dp phone):
+- **Terminal toolbar:** a floating pill (`background` at ~85 %) of rounded keys (`surface`),
+  30 dp wide (text keys as wide as their label) and 30 dp tall inside a 40 dp tall pill, each with
+  a 34 x 40 dp touch box (the platform grows the hit area to 48 dp):
   `Ctrl`, `Esc`, `Tab` as mono text, then icon keys (arrow pad, panes, paste, history; tap pages
   up into the scrollback, hold jumps to the bottom), then, apart, the composer and keyboard
   toggles without key backgrounds. A latched `Ctrl` draws in `accent` until it has been used for
   one key; `Alt` lives in the arrow pad's extras row. While text is selected `Copy` and `Clear`
   join the row. Horizontally scrollable when it overflows.
 - **Arrow pad:** the arrow key expands a floating 3×3 cluster above the toolbar: Backspace,
-  Up, Clear-line / Left, Enter, Right / Down; keys are 56 dp `surface` squares with 16 dp
-  radius, a grab handle above collapses it. Keys auto-repeat on hold (after 400 ms, every 60 ms).
-  Clear-line is an eraser outline. Below the cluster a 44 dp scrolling pill keeps `Alt`, `Home`,
-  `End`, `PgUp`, `PgDn` and the shell symbols (32 dp keys, label-wide navigation keys) one tap away,
+  Up, Clear-line / Left, Enter, Right / Down; keys are 40 dp `surface` squares with 12 dp
+  radius and 6 dp gaps, a grab handle above collapses it. Keys auto-repeat on hold (after 400 ms, every 60 ms).
+  Clear-line is an eraser outline. Below the cluster a 36 dp scrolling pill keeps `Alt`, `Home`,
+  `End`, `PgUp`, `PgDn` and the shell symbols (28 dp keys, label-wide navigation keys) one tap away,
   with an edge fade on each side that has more keys behind it.
-- **Composer (chat input):** a rounded 24 dp `crust` card docked above the IME and above the key
-  toolbar (which stays, so `Esc`, `Ctrl` and `Tab` remain reachable), with a mono placeholder
-  (`Message <host>...`), a row of 48 dp icon actions (paste, panes, close) and, right-aligned, a
-  circular send button (`surfaceTrack` until there is text and the session is connected, then
+- **Composer (chat input):** a rounded 20 dp `crust` card docked above the IME and above the key
+  toolbar (which stays, so `Esc`, `Ctrl` and `Tab` remain reachable), with a 13 sp mono placeholder
+  (`Message <host>...`), a row of icon actions (paste, panes, close; 40 dp boxes) and, right-aligned, a
+  36 dp circular send button (`surfaceTrack` until there is text and the session is connected, then
   `accent`). Sending calls the session's `submit_text`: Rust writes the text (one bracketed paste
   when the program enabled it) and then Enter as a separate write after a short pause, so agent
   TUIs with paste-burst detection submit instead of inserting a newline; this is the quick-reply
@@ -161,7 +182,8 @@ Catppuccin Mocha (MIT). Dark only for M2; the terminal default theme uses the sa
 ## Terminal defaults
 
 - Default terminal font size is small: the owner prefers dense text (Moshi's 8 pt minimum
-  feels right). The default is 12 dp (about 55 columns on a 1440 px-wide phone in portrait),
+  feels right), and the compact UI scale above is tuned to sit beside it. The terminal's cell size
+  and behaviour are not part of the compact scale. The default is 12 dp (about 55 columns on a 1440 px-wide phone in portrait),
   deliberately in density-independent pixels rather than sp so the column count does not depend
   on the system font size. Pinch zooms between 6 and 28 dp and the size is remembered per device
   (the app's private preferences; Rust has no storage).
