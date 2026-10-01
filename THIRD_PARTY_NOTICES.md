@@ -5,7 +5,7 @@ ported or vendored into the repository and for components built from source outs
 Gradle; the app embeds it (Home, About or2, Open source licenses, Vendored).
 
 Dependencies pulled through Cargo or Gradle are listed, with their full licence texts, by the
-generator `scripts/gen-licenses.sh` (see `docs/build.md`): the crates linked into the app's native
+generator `cargo xtask gen-licenses` (see `docs/build.md`): the crates linked into the app's native
 library in `android/app/src/main/assets/licenses/rust.json`, the release runtime classpath in
 `android/app/src/main/assets/licenses/android.json` (both shown in the app under Open source
 licenses) and the crates linked into the `or2-pair` CLI in `core/or2-pair/THIRD_PARTY.md`. All of
@@ -24,8 +24,8 @@ them were checked for GPL-3.0-or-later compatibility (see the README).
 
 `libghostty-vt` is built by the Rust build script of `libghostty-rs` (pinned in `core/Cargo.toml`)
 with Zig and linked statically into `libor2_ffi.so`. Nothing of it is copied into this repository.
-`scripts/gen-licenses.sh` stops if the Ghostty commit that build script pins changes, so this table
-and the licence texts in `scripts/licenses/ghostty/` cannot go stale unnoticed.
+`cargo xtask gen-licenses` stops if the Ghostty commit that build script pins changes, so this table
+and the licence texts in `core/xtask/licenses/ghostty/` cannot go stale unnoticed.
 
 | Component | Pinned source | Linked as | Licence | Copyright |
 |---|---|---|---|---|

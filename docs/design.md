@@ -133,7 +133,7 @@ answers first.
 - `pane.agent_status_changed` subscriptions need a `pane_id`, so or2 subscribes per pane. A
   subscription cannot grow, so when panes appear a new stream covering every current pane
   replaces the old one and the view is read again.
-- Types are generated from `herdr api schema --json` by `scripts/gen-herdr-types.sh`, never
+- Types are generated from `herdr api schema --json` by `cargo xtask gen-herdr-types`, never
   hand-written. The bundle needs a normalization step first (extract `schemas.success_response`,
   `schemas.event`, …, rewrite their `$ref`s, drop validation keywords, open string enums), then
   cargo-typify. Test against sanitized fixtures and an isolated live session.

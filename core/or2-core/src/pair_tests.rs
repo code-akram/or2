@@ -464,7 +464,7 @@ fn debug_output_never_contains_the_password() {
 
 #[test]
 fn the_macs_match_an_independent_hmac_sha256() {
-    // Computed with Python's hmac module: key 00..0f, nonce 20..3f.
+    // Computed with an independent HMAC-SHA256 implementation: key 00..0f, nonce 20..3f.
     //   request: b"or2-pair/2 request\0" + nonce + key line
     //   verdict: b"or2-pair/2 verdict\0" + nonce + verdict + b"\0" + fingerprint
     let nonce: Vec<u8> = (0x20..0x40).collect();

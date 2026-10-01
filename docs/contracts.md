@@ -711,12 +711,12 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
 
 ## herdr (`or2_core::herdr`)
 
-- **Types** are generated from `herdr api schema --json` by `scripts/gen-herdr-types.sh`
-  (`scripts/herdr_schema.py` normalizes, then cargo-typify). The normalized schema
+- **Types** are generated from `herdr api schema --json` by `cargo xtask gen-herdr-types`
+  (`core/xtask/src/herdr.rs` normalizes, then cargo-typify). The normalized schema
   `herdr/schema.json` (with the herdr version and protocol it came from: 0.9.3, protocol 22)
   and `herdr/generated.rs` are checked in; `generated.rs` has one module per schema family
   (`request`, `success_response`, `error_response`) and the
-  constants `HERDR_VERSION` and `PROTOCOL`. Never hand-edit it: fix the script and
+  constants `HERDR_VERSION` and `PROTOCOL`. Never hand-edit it: fix the generator and
   regenerate (`--offline` regenerates from the checked-in schema, `--check` verifies both
   files). Normalization decisions: `$ref`s become local; validation keywords a client has no use
   for (`pattern`, `propertyNames`, `maxProperties`, `minProperties`) are dropped, so one odd map
@@ -731,7 +731,7 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
   event it cannot decode. The schema's `event` and `subscription_event` families are not
   generated: their internally tagged `EventData` rejects an unknown event type, which would
   break the unknown-value rule for a later consumer (notifications) that trusted it. That
-  consumer adds the families to `scripts/herdr_schema.py` with an open event-type tag.
+  consumer adds the families to `core/xtask/src/herdr.rs` with an open event-type tag.
 - **Discovery:** `<herdr> session list --json` over `RemoteHost::exec` gives each session's name,
   `default`, `running` and `socket_path` (or2 reads only those; other fields are ignored).
   `herdr::list_sessions(host, herdr) -> Result<Vec<SessionEntry>, DiscoveryError>` is the one

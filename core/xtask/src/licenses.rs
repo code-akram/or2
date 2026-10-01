@@ -43,7 +43,7 @@ dependencies. No network, no extra tools. Never edit the generated files.";
 const ANDROID_TARGET: &str = "aarch64-linux-android";
 const FFI_PACKAGE: &str = "or2-ffi";
 const CLI_PACKAGE: &str = "or2-pair";
-const GENERATOR: &str = "scripts/gen-licenses.sh";
+const GENERATOR: &str = "cargo xtask gen-licenses";
 
 /// The Ghostty commit libghostty-vt-sys builds (its build.rs `GHOSTTY_COMMIT`). The texts under
 /// core/xtask/licenses/ghostty/ were read from that commit; if the pin moves the generator stops

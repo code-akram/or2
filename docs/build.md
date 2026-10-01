@@ -70,9 +70,18 @@ source scripts/env.sh
 cargo fmt --manifest-path core/Cargo.toml --all --check
 cargo test --manifest-path core/Cargo.toml --workspace --all-features --locked
 cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
-scripts/gen-licenses.sh --check
+cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- gen-herdr-types --offline --check
+cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- gen-licenses --check
 android/gradlew -p android :app:assembleDebug :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:lintDebug
 ```
+
+Repository tooling is the `core/xtask` crate (Rust; no scripts in other languages). Inside `core/` the
+cargo alias in `core/.cargo/config.toml` makes it `cargo xtask <task>`; from the repository root run the
+same task as `cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- <task>` (the form
+used above). The tasks are `gen-herdr-types` and `gen-licenses`; each regenerates checked-in files and
+has a `--check` mode that writes nothing and fails when they are stale. `xtask` is a workspace member
+but is not linked into the app library, so it never appears in the licence data. Its unit tests run
+with the rest of the workspace.
 
 `core/or2-pair` (the Easy pair host CLI, a workspace crate that does not depend on `or2-core` at run
 time) has unit tests next to the code and `tests/e2e.rs`: the whole CLI flow in a thread against the
@@ -242,27 +251,27 @@ or Kotlin protocol implementation is used.
 
 ## Open-source licences
 
-or2 ships other projects' code, so it ships their licences. `scripts/gen-licenses.sh` (python3 and
-cargo only; no network and no extra tool) generates, from the locked dependency graphs:
+or2 ships other projects' code, so it ships their licences. `cargo xtask gen-licenses` (Rust: cargo
+only, no network and no extra tool) generates, from the locked dependency graphs:
 
 | File | Content | Source |
 |---|---|---|
 | `android/app/src/main/assets/licenses/rust.json` | the crates linked into `libor2_ffi.so` (name, version, SPDX expression, repository, full licence and notice texts), the Zig-built libghostty-vt components (Ghostty, Highway, simdutf, uucode, the UTF-8 decoder, Zig's runtime) and the Rust standard library | `cargo tree -p or2-ffi --target aarch64-linux-android -e normal` (the features that build uses; build-script and dev dependencies ship no code and are left out) joined with `cargo metadata --locked --offline`; the texts are the `LICENSE*`/`COPYING*`/`NOTICE*` files in each crate's source in the cargo registry or checkout (for a crate that bundles C sources, such as `aws-lc-sys`, those of the bundled code too) |
-| `android/app/src/main/assets/licenses/android.json` | the release runtime classpath: coordinates, SPDX licence, project URL, the licence text and any `LICENSE`/`NOTICE` at the root of the artifact | every `releaseRuntimeClasspath` line of `android/app/gradle.lockfile` (the strict lock) and each artifact's POM from the offline Gradle cache (`$GRADLE_USER_HOME` or `~/.gradle`; parent POMs for inherited licences). An artifact whose POM licence is not in the script's table, or that has no POM in the cache, stops the generator |
+| `android/app/src/main/assets/licenses/android.json` | the release runtime classpath: coordinates, SPDX licence, project URL, the licence text and any `LICENSE`/`NOTICE` at the root of the artifact | every `releaseRuntimeClasspath` line of `android/app/gradle.lockfile` (the strict lock) and each artifact's POM from the offline Gradle cache (`$GRADLE_USER_HOME` or `~/.gradle`; parent POMs for inherited licences). An artifact whose POM licence is not in the generator's table, or that has no POM in the cache, stops the generator |
 | `android/app/src/main/assets/licenses/notices.md` | a copy of `THIRD_PARTY_NOTICES.md` (authoritative for vendored code and components built outside Cargo and Gradle) | the file itself |
 | `android/app/src/main/assets/licenses/COPYING` | a copy of `LICENSE` (or2's GPL-3.0 text, shown by About or2) | the file itself |
 | `core/or2-pair/THIRD_PARTY.md` | the same for the `or2-pair` host CLI: all targets, one numbered copy of each distinct text | `cargo tree -p or2-pair --target all -e normal` (the crates it links, with their texts) |
 
 A Maven artifact whose POM lists a second licence for code it bundles (camera-core and libyuv) is shown
-with `AND` and that project's own text, kept in `scripts/licenses/libyuv/`; a licence name the script
+with `AND` and that project's own text, kept in `core/xtask/licenses/libyuv/`; a licence name the generator
 does not know still stops it.
 
 A crate that ships no licence file (russh, uniffi, ...) is shown with the SPDX standard text of its
-declared licence from `scripts/licenses/spdx/`, flagged `fallback` with a note. The Ghostty
-components are not Cargo crates: their texts live in `scripts/licenses/ghostty/` (read from the
+declared licence from `core/xtask/licenses/spdx/`, flagged `fallback` with a note. The Ghostty
+components are not Cargo crates: their texts live in `core/xtask/licenses/ghostty/` (read from the
 pinned Ghostty commit) and the generator stops when `libghostty-vt-sys` starts building a different
-Ghostty commit, so a bump must re-read them. Run `scripts/gen-licenses.sh` after any dependency
-change and commit the result; `scripts/gen-licenses.sh --check` fails when a generated file is
+Ghostty commit, so a bump must re-read them. Run `cargo xtask gen-licenses` after any dependency
+change and commit the result; `cargo xtask gen-licenses --check` fails when a generated file is
 stale and is part of the verification list above. The generated data is the source of the app's
 Open source licenses screen. `LicenseDataTest` parses the real files and fails when a listed licence
 has no GPL-3.0-compatible alternative, `MiniJsonTest` covers the JSON reader, and the device test
@@ -272,10 +281,11 @@ no phone is available).
 ## herdr client
 
 `core/or2-core/src/herdr/generated.rs` is generated; do not edit it. After a herdr update run
-`scripts/gen-herdr-types.sh` (needs `python3`, `rustfmt` and `cargo install cargo-typify
+`cargo xtask gen-herdr-types` (needs `rustfmt` and `cargo install cargo-typify
 --version 0.10.0-alpha.1 --locked`; `--herdr PATH` picks the binary, `--offline` regenerates
 from the checked-in `schema.json`, `--check` fails when the checked-in files are stale), then
-review the diff of `schema.json` and the protocol note in `docs/contracts.md`.
+review the diff of `schema.json` and the protocol note in `docs/contracts.md`. The normalization
+lives in `core/xtask/src/herdr.rs` and has unit tests.
 
 `core/or2-core/tests/herdr_live.rs` runs the client against a real herdr: each test starts its
 own `herdr --session or2-test-<pid>-<n> server` (every `HERDR_*` variable removed, so it never

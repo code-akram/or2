@@ -2,7 +2,7 @@
 "schema": 1,
 "group": "rust",
 "target": "aarch64-linux-android",
-"generator": "scripts/gen-licenses.sh",
+"generator": "cargo xtask gen-licenses",
 "standard": {"Apache-2.0": "074e6e32c86a", "MIT": "b85dcd3e453d"},
 "packages": [
 {"license": "0BSD OR MIT OR Apache-2.0", "name": "adler2", "repository": "https://github.com/oyvindln/adler2", "source": "crates.io", "texts": [{"file": "LICENSE-0BSD", "id": "861399f8c21c"}, {"file": "LICENSE-APACHE", "id": "8ada45cd9f84"}, {"file": "LICENSE-MIT", "id": "23f18e03dc49"}], "version": "2.0.1"},

@@ -176,9 +176,9 @@ fn header(version: &str, protocol: &str) -> String {
     format!(
         "\
 //! **Generated. Do not edit.** herdr's socket API types for herdr {version} (protocol {protocol}),
-//! produced by `scripts/gen-herdr-types.sh` from `schema.json` (the normalized output of
+//! produced by `cargo xtask gen-herdr-types` from `schema.json` (the normalized output of
 //! `herdr api schema --json`) with cargo-typify. To regenerate after a herdr update, run
-//! `scripts/gen-herdr-types.sh`; fix problems in `scripts/herdr_schema.py`, never here.
+//! `cargo xtask gen-herdr-types`; fix problems in `core/xtask/src/herdr.rs`, never here.
 //!
 //! One module per schema family. Enums herdr sends carry a catch-all variant for values this
 //! build does not know; unknown fields are ignored.

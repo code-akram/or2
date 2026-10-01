@@ -2,7 +2,7 @@
 "schema": 1,
 "group": "android",
 "configuration": "releaseRuntimeClasspath",
-"generator": "scripts/gen-licenses.sh",
+"generator": "cargo xtask gen-licenses",
 "standard": {"Apache-2.0": "074e6e32c86a", "MIT": "b85dcd3e453d"},
 "packages": [
 {"license": "Apache-2.0", "name": "androidx.activity:activity", "repository": "https://developer.android.com/jetpack/androidx/releases/activity#1.11.0", "source": "maven", "texts": [{"file": "Apache-2.0 (standard text)", "id": "074e6e32c86a"}], "title": "Activity", "version": "1.11.0"},
