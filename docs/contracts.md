@@ -8,17 +8,17 @@ document and the tests together, and bumping `API_VERSION` in `or2-ffi` when an 
 
 ## Status
 
-| Contract | Implemented and tested now | Not implemented (lane work) |
-|---|---|---|
-| Transport | `Transport` trait, `DirectTcp`, `Endpoint` validation; a transport stream drives `russh::client::connect_stream` | address racing (M2), jump host, UDP (M3) |
-| Key material | Ed25519 generation, OpenSSH import with passphrase, storage form, typed errors; checked against `ssh-keygen` | Keystore encryption, biometric unlock, Room, UI |
-| Host-key trust | verdicts (trusted, first use, changed), prompt state, decision bound to the fingerprint | russh `check_server_key` wiring, trust UI and persistence |
-| Session lifecycle | state machine, handle/driver split, commands, errors, listener delivery and release, disconnect and drop semantics | `connect` export, SSH handshake, auth, PTY shell, timeouts, keepalive |
-| Frames | frame records, validation, full/delta merge, notify-once backpressure, style table | libghostty-vt adapter producing frames; Canvas drawing |
-| Input | key/text/scroll records and validation, newline mapping | libghostty key encoding, IME and keys row, alternate-screen scrolling |
+All M1 contracts below are implemented and tested (FFI API 3). M2 changes are specified in
+[M2: hosts, multiplexers and mosh](#m2-hosts-multiplexers-and-mosh) and bump the API to 4.
 
-`contract_probe_session` (see below) is the only way to obtain a `Session` today. There is no
-`connect` export until SSH works; nothing returns a pretend connection.
+| Contract | Implemented and tested | Open |
+|---|---|---|
+| Transport | `Transport` trait, `DirectTcp`, `Endpoint` validation | address racing (M2), UDP (M2 core, M3 export), jump host |
+| Key material | Ed25519 generation, OpenSSH import with passphrase, storage form, typed errors; Keystore/biometric vault in Kotlin | secure-element and FIDO2 keys (later) |
+| Host-key trust | verdicts, prompts bound to the presented fingerprint, Kotlin persistence and UI | per-host trust shared by several addresses (M2) |
+| Session lifecycle | state machine, handle/driver split, `connect` over russh with PTY shell, timeouts, keepalive | sessions as channels of a host connection (M2) |
+| Frames | libghostty-vt adapter, full/delta merge, notify-once mailbox, Canvas drawing | |
+| Input | libghostty key encoding, IME, keys row, scrolling, selection | bracketed paste |
 
 ## Ownership and threading
 
@@ -105,7 +105,7 @@ opens sockets.
 
 ## Session
 
-Lane A adds this export, implementing a `SessionDriver` on a tokio runtime:
+M1 exports (replaced in M2 by `connect_host` plus `HostConnection.open_terminal`):
 
 ```rust
 #[uniffi::export]
@@ -219,3 +219,247 @@ fixed cells (styles, a combining mark, CJK and emoji wide cells, a wide bar curs
 input: row 2 shows the bytes `send_text` would write, row 3 the validated key. App code must
 never call it. The JVM tests (`SessionContractTest`, `KeyContractTest`) and the device test
 (`NativeDeviceTest`) use it and the key exports against the real native library.
+
+# M2: hosts, multiplexers and mosh
+
+M2 replaces "one `connect` = one SSH connection = one shell" with **one SSH connection per
+host** that carries everything for that host: terminal channels, exec channels for tmux and
+probing, and streamlocal channels to herdr. One connection means one biometric unlock and one
+host-key decision per host, and sub-second terminal opens once the host is connected. FFI API
+becomes **4**. The M1 sections above still govern frames, input, key material, trust and the
+`Session` object; this section records what changes. Rust remains authoritative: when code and
+this text disagree, fix one of them in the same change.
+
+## Lanes and integration
+
+| Lane | Owns | Depends on |
+|---|---|---|
+| 0: contract gate | `or2-core` `host`, `remote`, `herdr::view`, `tmux` types; `or2-ffi` API 4 surface; `contract_probe_host`; Kotlin JVM contract test | this document |
+| A1: host connection | `ssh.rs` refactor into the host driver, address racing, exec, capability probe, tmux, terminal targets, `connect_host` | lane 0 |
+| A2: herdr | `herdr` client: generated types, discovery, bootstrap/reconcile, projection, `watch` and `focus_pane` | lane 0 (`RemoteHost`) |
+| A3: mosh core | vendored mosh-rs, `DatagramTransport`, `Screen` over libghostty, bootstrap, mosh session driver; **no FFI export** | lane 0 (`RemoteHost`) |
+| B: Android | Room v2, host connection holder, multiple sessions, inbox, host screen with tmux picker, navigation | lane 0 (generated bindings, probe) |
+
+Lane 0 lands first. A2 and A3 land independently. A1 and B land together: A1 removes the M1
+`connect` export and B removes its Kotlin use. `connect_host` exists from lane 0 so Kotlin
+compiles against it, but until A1 lands it closes every connection with
+`Failed { Internal }` (never a pretend success). Likewise lane 0's `herdr::watch` and
+`herdr::focus_pane` report "not integrated" failures until A2 replaces them.
+
+## Remote commands (`or2_core::remote`)
+
+Every exec and socket open goes through one trait so herdr, tmux and mosh code is testable
+without SSH:
+
+```rust
+pub trait RemoteHost: Send + Sync + 'static {
+    type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
+    /// Runs `command` without a PTY; collects stdout, stderr and the exit status.
+    fn exec(&self, command: &RemoteCommand) -> impl Future<Output = Result<ExecOutput, RemoteError>> + Send;
+    /// Opens a byte stream to a Unix socket on the host (OpenSSH direct-streamlocal).
+    fn open_unix(&self, path: &str) -> impl Future<Output = Result<Self::Stream, RemoteError>> + Send;
+}
+```
+
+- `RemoteCommand` is a program plus arguments, never a shell string. It renders as
+  `sh -c '<script>' or2 <args…>` with POSIX single-quote escaping, so it works whatever the
+  user's login shell is (bash, zsh, fish). Untrusted values (session names, pane ids) are only
+  ever positional arguments, never spliced into the script.
+- `ExecOutput { status: Option<u32>, stdout: Vec<u8>, stderr: Vec<u8> }`; output is capped at
+  1 MiB per stream (excess fails with `RemoteError::OutputTooLarge`); each exec has a 10 s
+  timeout (`RemoteError::TimedOut`).
+- `RemoteError`: `Closed`, `TimedOut`, `OutputTooLarge`, `Rejected(String)` (channel refused,
+  e.g. streamlocal forwarding disabled), `Io(String)`.
+- `LocalHost` (feature `test-support`, used by integration tests) implements `RemoteHost` with
+  local processes and `UnixStream`. Production code never uses it.
+
+### Capability probe
+
+Non-interactive SSH does not load the user's `PATH`. One exec per connection, cached in memory
+for the connection's lifetime (Rust has no storage), finds `tmux`, `herdr` and `mosh-server`:
+`command -v`, then `$HOME/.local/bin`, `$HOME/.cargo/bin`, `/opt/homebrew/bin`,
+`/usr/local/bin`, `/usr/bin`, `/bin`, `$HOME/.nix-profile/bin`, `/run/current-system/sw/bin`.
+It also reports a UTF-8 locale (`C.UTF-8`, else the first `*.UTF-8`/`*.utf8` in `locale -a`,
+else `en_US.UTF-8`). Every later tmux/herdr/mosh command uses the absolute path found.
+
+## Host connection (`or2_core::host`)
+
+A handle/driver split exactly like `session`: `HostHandle` (wrapped by FFI `HostConnection`)
+never blocks and enqueues `HostCommand`s; `HostDriver` owns state changes and calls the
+`HostObserver` on its own thread, in order, without holding locks.
+
+```text
+Connecting ──▶ AwaitingHostKey ──▶ Authenticating ──▶ Connected { address_index }
+    │   └──────────────────────────────────▲                      │
+    └─────────────┴────────────────────────┴──────────────────────┴──▶ Closed { reason }
+```
+
+- `HostConnectRequest { addresses: Vec<Endpoint> (1..=8, preference order), username, key,
+  trusted_host_keys }`. Trust belongs to the host, not to an address.
+- **Address racing.** Start address 0; start each next address 250 ms after the previous one
+  started or immediately when it fails. The first TCP connection wins; the others are dropped.
+  If all fail, close with `Unreachable` whose message lists each address's error (no secrets).
+  The SSH handshake runs only on the winner. `Connected.address_index` reports which one won.
+- Host-key relay, connect timeout (20 s, paused while awaiting the user), keepalive (15 s, 3
+  misses) and failure mapping are M1's. `CloseReason` is reused; `RemoteExited` never occurs
+  for a host.
+- Closing a host (user `disconnect`, release of the last handle, or loss) closes every terminal
+  session on it (`Disconnected` when the user disconnected the host, else the host's failure),
+  stops every herdr watch, and fails pending queries with `Closed`.
+- Queries are allowed only in `Connected` (`NotConnected` before, `Closed` after).
+
+### Terminal sessions on a host
+
+`open_terminal(target, size, observer) -> SessionHandle` opens a PTY channel and returns a
+`session::SessionHandle`. Its lifecycle is `Connecting → Connected → Closed` (lane 0 adds the
+`Connecting → Connected` transition; host-key and authentication states never occur on a
+channel session). Everything in the M1 Session, Frames and Input sections applies per session:
+one terminal engine per session on its own thread, resize latest-wins, the 64 KiB reply
+budget, concurrent read/write. Closing a session closes only its channel.
+
+`TerminalTarget`:
+
+| Target | Remote command (PTY, `TERM=xterm-256color`) |
+|---|---|
+| `Shell` | the login shell (`request_shell`) |
+| `Tmux { session_name }` | `<tmux> -u new-session -A -s <name>` (attach or create) |
+| `Herdr { session, pane_id }` | if `pane_id`: `herdr::focus_pane` first; then `<herdr>` (default session) or `<herdr> --session <name>` |
+
+Names are validated before anything runs (`InvalidName`): tmux names nonempty, at most 128
+bytes, no control characters, no `:` or `.`; herdr session names `[A-Za-z0-9_-]{1,64}`; pane
+ids `[A-Za-z0-9:_-]{1,128}`. A missing program fails with `NotInstalled { program }`.
+
+### tmux
+
+`list_tmux_sessions()` runs `<tmux> list-sessions -F` with fields joined by U+001F:
+`session_name`, `session_windows`, `session_attached`, `session_created`,
+`session_activity`. "no server running" / "no sessions" is an empty list, not an error.
+`TmuxSession { name, windows: u32, attached_clients: u32, created_unix: i64,
+activity_unix: i64 }`, sorted by most recent activity.
+
+## herdr (`or2_core::herdr`)
+
+- **Types** are generated from `herdr api schema --json` by `scripts/gen-herdr-types.sh`
+  (normalize: extract `schemas.*`, rewrite `$ref`s; then cargo-typify). The normalized schema
+  and the generated `herdr/generated.rs` are checked in with the herdr version they came from.
+  Deserialization ignores unknown fields; unknown enum values map to an `Unknown` variant
+  rather than failing the whole message. Never hand-edit the generated file.
+- **Discovery:** `<herdr> session list --json` gives each session's name, `running` and
+  `socket_path`. Never hard-code socket paths. `HostCapabilities.herdr_sessions` reports them.
+- **Watch:** `herdr::watch(host, session, observer) -> HerdrWatchHandle`. Opens one long-lived
+  streamlocal event channel and short-lived request channels. Bootstrap: `events.subscribe`
+  and wait for its ack, then `session.snapshot`; events arriving during a read are
+  invalidations, not patches: install the snapshot, then do serialized authoritative refreshes,
+  repeating while another event arrived mid-read. Subscribe per pane to
+  `pane.agent_status_changed` as panes appear. On `events_lost` or a dropped event channel,
+  resubscribe and re-snapshot.
+- **States** (`HerdrState`): `Starting` (initial, not delivered), `Live { view }`,
+  `Unavailable { reason, message }`, `Closed`. `reason`: `NotInstalled` and
+  `IncompatibleProtocol { protocol }` are final; `NotRunning` and `Failed` retry every 10 s
+  while the host is connected (the state is redelivered only when it changes). `Closed` is
+  delivered once, last, after `stop()` or host close, then the observer is released.
+- **View** (`HerdrView`) is or2's projection, delivered whole, coalesced to at most one
+  delivery per 100 ms: `version`, `protocol`, `focused_pane_id`, `workspaces`
+  (`workspace_id, number, label, focused, agent_status`), `tabs` (`tab_id, workspace_id,
+  number, label, focused, agent_status`), `panes` (`pane_id, tab_id, workspace_id, label,
+  agent, agent_status, cwd, title, focused`) and `agents` (`pane_id, tab_id, workspace_id,
+  name, agent, display_agent, status, cwd, title, focused, state_change_seq`). `AgentStatus`:
+  `Idle`, `Working`, `Blocked`, `Done`, `Unknown`.
+- **Focus:** `herdr::focus_pane(host, session, pane_id)` sends one `pane.focus` request. It
+  changes what the user's herdr clients show; tests use isolated named sessions only.
+- Tests never touch the default herdr session or any session they did not create. Live tests
+  start `herdr --session or2-test-<unique> server` and stop/delete it afterwards.
+
+## mosh core (`or2_core::mosh`, no FFI in M2)
+
+- Vendor the mosh-rs library (pinned `90b37125f5e4a598be91dec37d23921b6865276e`, GPL-3.0-or-later)
+  without its CLI front ends or the `vt100-screen` feature; record it in
+  `THIRD_PARTY_NOTICES.md` and keep upstream file headers.
+- UDP goes through a new `DatagramTransport` trait in `transport.rs` (`DirectUdp`). mosh code
+  never binds sockets itself. Roaming rebinds through the transport.
+- mosh-rs's `Screen` is implemented over or2's libghostty `TerminalEngine`, so terminal state
+  stays in libghostty and frames reach Kotlin exactly as for SSH. Local-echo prediction is off
+  in M2.
+- `mosh::bootstrap(host: &impl RemoteHost, caps, size, target)` runs
+  `LANG=<utf8> <mosh-server> new -s -c 256 -l LANG=<utf8> -- <target command>` and parses
+  `MOSH CONNECT <port> <key>`. The key is a secret: `Zeroizing`, redacted `Debug`, never
+  logged.
+- `mosh::start(params, host_name, observer) -> SessionHandle` drives the standard session
+  lifecycle (`Connecting → Connected → Closed`). M3 adds the FFI choice and network-health
+  reporting.
+
+## FFI API 4 (`or2-ffi`)
+
+```rust
+#[derive(uniffi::Record)] pub struct HostAddress { pub host: String, pub port: u16 }
+#[derive(uniffi::Record)] pub struct HostConnectRequest {
+    pub addresses: Vec<HostAddress>, pub username: String,
+    pub private_key: Vec<u8>, pub trusted_host_keys: Vec<String>,
+}
+#[uniffi::export] pub fn connect_host(request: HostConnectRequest, listener: Box<dyn HostListener>)
+    -> Result<Arc<HostConnection>, HostConnectError>;
+// HostConnectError: NoAddresses, TooManyAddresses, InvalidAddress { index }, InvalidUsername,
+//                   InvalidPrivateKey, InvalidTrustedHostKey { index }
+
+pub enum HostState { Connecting, AwaitingHostKeyDecision { presented, previously_trusted },
+                     Authenticating, Connected { address_index: u32 }, Closed { reason: CloseReason } }
+#[uniffi::export(callback_interface)] pub trait HostListener: Send + Sync {
+    fn on_host_state_changed(&self, state: HostState) -> Result<(), ListenerError>;
+}
+
+#[derive(uniffi::Object)] pub struct HostConnection;
+impl HostConnection {                     // all non-blocking unless async
+    fn state(&self) -> HostState;
+    fn approve_host_key(&self, fingerprint: String) -> Result<(), HostError>;
+    fn reject_host_key(&self) -> Result<(), HostError>;
+    fn disconnect(&self);
+    fn open_terminal(&self, target: TerminalTarget, columns: u16, rows: u16,
+                     listener: Box<dyn SessionListener>) -> Result<Arc<Session>, HostError>;
+    async fn capabilities(&self) -> Result<HostCapabilities, HostError>;
+    async fn list_tmux_sessions(&self) -> Result<Vec<TmuxSession>, HostError>;
+    fn watch_herdr(&self, session: Option<String>, listener: Box<dyn HerdrListener>)
+        -> Result<Arc<HerdrWatch>, HostError>;
+}
+// HostError: NotConnected, Closed, NoHostKeyPrompt, HostKeyMismatch, EmptyDimension,
+//            InvalidName, NotInstalled { program }, CommandFailed { message }
+// HostCapabilities { tmux: Option<String>, herdr: Option<String>, mosh_server: Option<String>,
+//                    utf8_locale: String, herdr_sessions: Vec<HerdrSessionInfo { name, running, is_default }> }
+
+#[uniffi::export(callback_interface)] pub trait HerdrListener: Send + Sync {
+    fn on_herdr_state_changed(&self, state: HerdrState) -> Result<(), ListenerError>;
+}
+#[derive(uniffi::Object)] pub struct HerdrWatch;   // fn state(&self) -> HerdrState; fn stop(&self);
+```
+
+- Async methods use UniFFI's tokio async runtime support and become Kotlin `suspend` functions;
+  cancelling the Kotlin coroutine cancels the Rust future. Callbacks keep M1's threading rules:
+  a Rust-owned thread, never concurrent per object, in order, may start before the factory
+  returns, released after the final `Closed`.
+- `HostConnectRequest` follows M1's private-key rules: Kotlin wipes the array after the
+  synchronous `connect_host` returns or throws, never logs the record, and Rust zeroizes its
+  copy.
+- `contract_probe_host(request, listener)` is the test fixture for this surface (no network):
+  it uses the production trust check with a per-process host key, reports
+  `Connected { address_index: 0 }`, answers `capabilities` and `list_tmux_sessions` with fixed
+  data, opens terminals through the M1 probe script, and drives a `HerdrWatch` through
+  `Live` (a fixed view with one blocked, one working and one idle agent), one update (the
+  blocked agent becomes working) and `Closed` on `stop()`. App code must never call it.
+- `contract_probe_session` stays for the M1 session tests.
+
+## Android (lane B)
+
+- **Room v2** with a real `Migration(1, 2)` (never destructive: Keystore-bound keys cannot be
+  recreated). New `host_addresses(hostId → hosts.id ON DELETE CASCADE, position, hostname,
+  port, PRIMARY KEY(hostId, position))`; the migration moves each host's `hostname`/`port` to
+  position 0 and drops those columns. `hosts` gains `showInInbox` (default true). Export the
+  schema (`exportSchema = true`, `app/schemas/`) and add a `MigrationTestHelper` device test.
+- Any change to a host's address list or ports clears its trust (M1's rule, generalised).
+- **Holder:** an application-scoped `HostConnections` keeps at most one `HostConnection` per
+  host and any number of terminal sessions per connection. Unlocking: one biometric prompt per
+  distinct key record; hosts sharing a key are connected from one decryption, wiping the array
+  after the last `connect_host` call. Host-key prompts move from sessions to hosts.
+- **Screens:** Inbox (start destination): agents across all `showInInbox` hosts, blocked first,
+  each with host, workspace/tab, agent and status; tap opens a `Herdr { session, pane_id }`
+  terminal. Host screen: connection state, Shell, tmux sessions (attach, new by name), herdr
+  sessions. Terminal: the M1 terminal screen per session, plus a switcher between open
+  sessions. Host form: ordered address list.

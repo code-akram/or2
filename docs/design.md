@@ -312,6 +312,25 @@ Known M1 limitations:
 Mosh, tmux/herdr integration and the foreground service remain M2/M3 work. Release signing is
 not configured by the scaffold; M1 development uses the debug APK.
 
+### M2 implementation checklist
+
+Scope: M2 plus the Rust half of M3's mosh. Lanes, ownership and interfaces are in
+[contracts: M2](contracts.md#m2-hosts-multiplexers-and-mosh). One SSH connection per host
+carries terminals, tmux/probe exec channels and herdr streamlocal channels (FFI API 4).
+
+- [ ] Lane 0: `remote`, `host`, `herdr::view` and tmux contract types; FFI API 4 surface;
+  `contract_probe_host`; Kotlin JVM contract test.
+- [ ] Lane A1: host driver over russh with multiplexed channels, address racing, capability
+  probe, tmux listing and attach, terminal targets, `connect_host`; OpenSSH interop tests.
+- [ ] Lane A2: generated herdr types, discovery, subscribe/snapshot/reconcile watch, focus;
+  fixture and live isolated-session tests.
+- [ ] Lane A3: vendored mosh-rs behind `DatagramTransport`, `Screen` over libghostty,
+  bootstrap and session driver; live tests against local `mosh-server`.
+- [ ] Lane B: Room v2 migration, multi-address hosts, host connection holder, inbox, host
+  screen with tmux picker, session switcher.
+- [ ] Integration, review and phone acceptance: inbox on both hosts, tap a blocked agent and
+  answer it, attach tmux, multi-address fallback.
+
 ## Decisions
 
 | Decision | Choice | Why |
