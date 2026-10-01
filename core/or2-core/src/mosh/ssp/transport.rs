@@ -2,7 +2,7 @@
 // Vendored from mosh-rs (https://github.com/wilsonglasser/mosh-rs), commit
 // 90b37125f5e4a598be91dec37d23921b6865276e, src/transport.rs. Upstream: GPL-3.0-or-later, copyright
 // Wilson Glasser; the protocol logic follows mosh (Keith Winstein and contributors, GPL-3.0-or-later).
-// See THIRD_PARTY_NOTICES.md. or2 changes: module paths only, redacted `Debug` for the types that hold payloads, then rustfmt. (Fragmentation, zlib and protobuf instructions; unrelated to or2's `Transport`.)
+// See THIRD_PARTY_NOTICES.md. or2 changes: module paths only, redacted `Debug` for the types that hold payloads, a `Fragmenter` that resends byte-identical payloads under a reused id, then rustfmt. (Fragmentation, zlib and protobuf instructions; unrelated to or2's `Transport`.)
 //! The transport layer: instructions, zlib, and the fragments that
 //! carry them (`transportfragment.cc`, `transportinstruction.proto`).
 //!
@@ -209,15 +209,21 @@ impl Fragment {
 
 /// Cuts instructions into fragments and hands out instruction ids.
 ///
-/// The id only advances when the instruction actually differs from the
-/// last one (or the MTU changed): a retransmission of identical bytes
-/// keeps its id, so the peer's reassembly recognizes the repeat
-/// instead of tearing down a half-assembled instruction.
+/// An id names one exact compressed payload. It only advances when the instruction differs
+/// from the last one (a numeric header field, the diff, or the MTU changed); a retransmission
+/// of the same state keeps its id AND resends the very bytes it sent before. The sender puts
+/// fresh random chaff in every instruction it builds, and zlib of different chaff is a
+/// different byte string, so recompressing under a reused id would hand the peer fragments
+/// of two different payloads under one id: a receiver that completes an instruction from
+/// complementary fragments of two transmissions (the point of reusing the id after a loss)
+/// would decode garbage. The first transmission's chaff therefore stands for every repeat.
 #[derive(Debug, Default)]
 pub struct Fragmenter {
     next_id: u64,
     last_instruction: Option<Instruction>,
     last_mtu: Option<usize>,
+    /// The compressed bytes `next_id` stands for.
+    last_payload: Vec<u8>,
 }
 
 impl Fragmenter {
@@ -227,24 +233,26 @@ impl Fragmenter {
     pub fn fragment(&mut self, inst: &Instruction, mtu: usize) -> Result<Vec<Fragment>> {
         let body_mtu = mtu.saturating_sub(FRAGMENT_HEADER_LEN).max(1);
 
-        // Compare on everything BUT the diff and chaff: mosh's own
-        // check is field-by-field over the transport header, and chaff
-        // is random per send so it would force a new id every time.
+        // Compare on everything BUT the chaff, which is random per send and would force a
+        // new id every time. mosh asserts the diff is unchanged for a repeated header; here a
+        // changed diff simply is a new instruction.
         let same = self.last_instruction.as_ref().is_some_and(|last| {
             last.protocol_version == inst.protocol_version
                 && last.old_num == inst.old_num
                 && last.new_num == inst.new_num
                 && last.ack_num == inst.ack_num
                 && last.throwaway_num == inst.throwaway_num
+                && last.diff == inst.diff
         }) && self.last_mtu == Some(mtu);
         if !same {
             self.next_id += 1;
+            self.last_payload = inst.to_compressed()?;
+            self.last_instruction = Some(inst.clone());
+            self.last_mtu = Some(mtu);
         }
-        self.last_instruction = Some(inst.clone());
-        self.last_mtu = Some(mtu);
         let id = self.next_id;
 
-        let payload = inst.to_compressed()?;
+        let payload = &self.last_payload;
         let total = payload.len().div_ceil(body_mtu);
         let mut out = Vec::with_capacity(total);
         for (i, chunk) in payload.chunks(body_mtu).enumerate() {
@@ -496,5 +504,69 @@ mod tests {
         // So is the same instruction under a changed MTU.
         let mtu_changed = f.fragment(&inst(6, b"same"), 400).unwrap()[0].id;
         assert_ne!(next, mtu_changed);
+        // And the same header over a different diff.
+        let other_diff = f.fragment(&inst(6, b"other"), 400).unwrap()[0].id;
+        assert_ne!(mtu_changed, other_diff);
+    }
+
+    fn with_chaff(mut i: Instruction, chaff: usize) -> Instruction {
+        i.chaff = Some((0..chaff).map(|n| (n * 7 + 1) as u8).collect());
+        i
+    }
+
+    /// The reviewer's case: complementary losses across retransmissions whose chaff differs.
+    /// Every datagram of the first send but the last is delivered, then only the last of the
+    /// second (and the reverse); the peer must reassemble the instruction from the mix.
+    #[test]
+    fn retransmissions_with_changing_chaff_resend_identical_fragments() {
+        let diff = incompressible(8192);
+        let first = with_chaff(inst(9, &diff), 0);
+        let again = with_chaff(inst(9, &diff), 16);
+        assert_ne!(first.to_compressed().unwrap(), again.to_compressed().unwrap());
+
+        let mut f = Fragmenter::default();
+        let one = f.fragment(&first, 500).unwrap();
+        let two = f.fragment(&again, 500).unwrap();
+        assert!(one.len() > 2, "the diff spans many fragments");
+        assert_eq!(one, two, "ids, numbering and bytes are repeated exactly");
+
+        // Complementary losses: the first send loses its last fragment, the second all others.
+        let mut asm = FragmentAssembly::default();
+        let mut complete = false;
+        for frag in &one[..one.len() - 1] {
+            complete = asm.add(frag.clone());
+        }
+        assert!(!complete);
+        assert!(asm.add(two.last().unwrap().clone()));
+        assert_eq!(asm.take().unwrap().unwrap(), first);
+
+        // The reverse split, through the wire encoding, with a third send in between whose
+        // chaff differs again.
+        let third = f.fragment(&with_chaff(inst(9, &diff), 5), 500).unwrap();
+        let mut asm = FragmentAssembly::default();
+        let mid = one.len() / 2;
+        for frag in &two[..mid] {
+            asm.add(Fragment::from_bytes(&frag.to_bytes()).unwrap());
+        }
+        let mut complete = false;
+        for frag in &third[mid..] {
+            complete = asm.add(Fragment::from_bytes(&frag.to_bytes()).unwrap());
+        }
+        assert!(complete);
+        assert_eq!(asm.take().unwrap().unwrap(), first);
+
+        // A genuinely new state still gets a new id and its own payload.
+        let next = f.fragment(&with_chaff(inst(10, &diff), 3), 500).unwrap();
+        assert_ne!(next[0].id, one[0].id);
+        let mut asm = FragmentAssembly::default();
+        let mut complete = false;
+        for frag in next {
+            complete = asm.add(frag);
+        }
+        assert!(complete);
+        assert_eq!(
+            asm.take().unwrap().unwrap(),
+            with_chaff(inst(10, &diff), 3)
+        );
     }
 }

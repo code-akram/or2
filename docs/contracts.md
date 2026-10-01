@@ -826,6 +826,16 @@ received datagram (`Fault::Dropped` for a forged or corrupt one, which is ordina
 `wait_time_ms` says when to call it again. `Tick::rebind` is true after ten seconds with no
 completed round trip (mosh's rule) or when `request_rebind` was called.
 
+**Fragment ids name one payload.** A state is sent again until acknowledged, and a large input
+spans many datagrams, so the receiver may complete one instruction from fragments of several
+transmissions of it; that only works if they are the same bytes. mosh gives every instruction
+fresh random chaff, and recompressing a repeat would produce a different zlib stream under the
+same fragment id, which the peer would combine into an undecodable instruction. `Fragmenter`
+therefore keeps the compressed payload of the last instruction and resends exactly those bytes
+(first transmission's chaff included) while the instruction is unchanged; a changed numeric
+header field, diff or MTU allocates a new id and a new payload. A test splits complementary
+fragments across transmissions with changing chaff.
+
 **`mosh::bootstrap`.**
 
 ```rust
