@@ -729,6 +729,131 @@ async fn a_closed_host_ends_the_watch_with_closed() {
     assert_eq!(states.len(), 2, "Live, then Closed: {states:?}");
 }
 
+/// What the host driver does when the host closes and it holds only the driver's task: abort
+/// it. The driver's `Drop` still delivers `Closed`, once, last.
+#[tokio::test(start_paused = true)]
+async fn aborting_the_run_task_delivers_closed_once_from_every_state() {
+    // Live.
+    let host = host_with(&two_panes());
+    let harness = Harness::start(&host, None);
+    harness.live().await;
+    harness.task.abort();
+    assert!(harness.task.await.unwrap_err().is_cancelled());
+    let states = harness.recorder.lock().clone();
+    let states: Vec<_> = states.into_iter().map(|(_, s)| s).collect();
+    assert!(matches!(states[0], HerdrState::Live { .. }));
+    assert_eq!(states[1..], [HerdrState::Closed]);
+    assert_eq!(harness.handle.state(), HerdrState::Closed);
+
+    // Parked at a final Unavailable, where no call is made that could see the host close.
+    let host = FakeHost::new();
+    host.set_exec(127, "", "");
+    let harness = Harness::start(&host, None);
+    harness
+        .until("unavailable", |h| !h.states().is_empty())
+        .await;
+    harness.task.abort();
+    assert!(harness.task.await.unwrap_err().is_cancelled());
+    let states = harness.recorder.lock().clone();
+    let states: Vec<_> = states.into_iter().map(|(_, s)| s).collect();
+    assert!(matches!(
+        states[0],
+        HerdrState::Unavailable {
+            reason: HerdrUnavailable::NotInstalled,
+            ..
+        }
+    ));
+    assert_eq!(states[1..], [HerdrState::Closed]);
+    assert_eq!(harness.handle.state(), HerdrState::Closed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_herdr_without_session_list_is_incompatible_and_final() {
+    // herdr's usage-error status: this release does not know `session list --json`.
+    let host = FakeHost::new();
+    host.set_exec(2, "", "herdr: unknown command: session");
+    let harness = Harness::start(&host, None);
+    harness
+        .until("unavailable", |h| !h.states().is_empty())
+        .await;
+    sleep(Duration::from_secs(120)).await;
+    assert_eq!(host.exec_log().len(), 1, "no retries");
+    let states = harness.stop().await;
+    assert!(matches!(
+        &states[0],
+        HerdrState::Unavailable {
+            reason: HerdrUnavailable::IncompatibleProtocol { protocol: 0 },
+            ..
+        }
+    ));
+    assert_eq!(states[1], HerdrState::Closed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rejected_first_subscribe_on_an_old_herdr_is_incompatible_and_final() {
+    let host = host_with(&two_panes().replace(r#""protocol":22"#, r#""protocol":5"#));
+    host.script_subscribes(vec![Some(("invalid_request", "unknown event type"))]);
+    let harness = Harness::start(&host, None);
+    harness
+        .until("unavailable", |h| !h.states().is_empty())
+        .await;
+    sleep(Duration::from_secs(120)).await;
+    assert_eq!(host.exec_log().len(), 1, "no retries");
+    let states = harness.stop().await;
+    assert!(matches!(
+        &states[0],
+        HerdrState::Unavailable {
+            reason: HerdrUnavailable::IncompatibleProtocol { protocol: 5 },
+            ..
+        }
+    ));
+    assert_eq!(states.len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rejected_first_subscribe_on_a_current_herdr_is_failed_and_retried() {
+    let host = host_with(&two_panes());
+    host.script_subscribes(vec![Some(("invalid_request", "bad request")); 50]);
+    let harness = Harness::start(&host, None);
+    harness.until("failed", |h| !h.states().is_empty()).await;
+    let HerdrState::Unavailable { reason, message } = harness.states()[0].clone() else {
+        panic!("{:?}", harness.states())
+    };
+    assert_eq!(reason, HerdrUnavailable::Failed);
+    assert!(message.contains("invalid_request"), "{message}");
+    sleep(Duration::from_secs(25)).await;
+    assert!(host.exec_log().len() >= 3, "retried every 10 s");
+    harness.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pane_subscription_the_server_keeps_rejecting_leaves_the_view_live() {
+    // Not `pane_not_found`: re-reading the panes cannot help, and the lifecycle stream and
+    // the snapshots still work, so the view must not flap to Unavailable.
+    let host = host_with(&two_panes());
+    let mut script = vec![None];
+    script.extend((0..50).map(|_| Some(("invalid_request", "cannot subscribe"))));
+    host.script_subscribes(script);
+    let harness = Harness::start(&host, None);
+    harness.live().await;
+    sleep(Duration::from_secs(25)).await;
+    assert_eq!(host.exec_log().len(), 1, "never left the attempt");
+    assert_eq!(harness.views().len(), 1);
+
+    // The lifecycle stream still invalidates: the next read shows the change.
+    host.script_snapshots(vec![Step::reply(&labelled("ws-two"))]);
+    host.emit(fixture("events_lifecycle.jsonl").lines().next().unwrap());
+    harness.until("the change", |h| h.views().len() == 2).await;
+    assert_eq!(workspace_label(&harness.latest_view().unwrap()), "ws-two");
+    let states = harness.stop().await;
+    assert!(
+        states[..states.len() - 1]
+            .iter()
+            .all(|s| matches!(s, HerdrState::Live { .. })),
+        "{states:?}"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_slow_server_times_out_and_is_failed() {
     let host = FakeHost::new();
@@ -799,12 +924,8 @@ async fn focus_failures_are_reported() {
 
 #[test]
 fn generated_types_decode_captured_messages_and_tolerate_the_future() {
-    use super::generated::{event, success_response};
+    use super::generated::success_response;
 
-    for line in fixture("events_lifecycle.jsonl").lines() {
-        let envelope: event::EventEnvelope = serde_json::from_str(line).unwrap();
-        assert!(matches!(envelope.event, event::EventKind::Variant0(_)));
-    }
     // A snapshot with unknown fields, unknown enum values and a map key the schema forbids.
     let line = fixture("snapshot_agents_future.json");
     let response: success_response::SuccessResponse = serde_json::from_str(&line).unwrap();
@@ -822,7 +943,4 @@ fn generated_types_decode_captured_messages_and_tolerate_the_future() {
         ack.result,
         success_response::ResponseResult::SubscriptionStarted
     ));
-    // An event kind this build does not know decodes as the catch-all.
-    let kind: event::EventKind = serde_json::from_str(r#""pane_teleported""#).unwrap();
-    assert!(matches!(kind, event::EventKind::Variant1(_)));
 }

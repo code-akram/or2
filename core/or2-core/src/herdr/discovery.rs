@@ -1,5 +1,6 @@
-//! Finding a session's socket: `<herdr> session list --json` over the host's exec channel.
-//! Paths are never guessed; the listing is the only source.
+//! Finding sessions and their sockets: `<herdr> session list --json` over the host's exec
+//! channel. Paths are never guessed; the listing is the only source. [`list_sessions`] is the
+//! one parser: the watch, `focus_pane` and the capability probe all read the listing through it.
 
 use serde::Deserialize;
 
@@ -8,20 +9,28 @@ use crate::remote::{RemoteCommand, RemoteError, RemoteHost};
 /// What stderr snippet a diagnostic may carry, in characters.
 const STDERR_SNIPPET: usize = 200;
 
+/// The exit status herdr's argument parser uses for a usage error. `session list --json` is a
+/// usage error only on a herdr that predates it.
+const USAGE_STATUS: u32 = 2;
+
 /// `herdr session list --json`. Only the fields or2 uses; everything else is ignored.
 #[derive(Debug, Deserialize)]
 struct Listing {
-    sessions: Vec<Entry>,
+    sessions: Vec<SessionEntry>,
 }
 
-#[derive(Debug, Deserialize)]
-struct Entry {
-    name: String,
+/// One session of `herdr session list --json`, in herdr's order.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SessionEntry {
+    pub name: String,
+    /// The session herdr uses when none is named.
     #[serde(default)]
-    default: bool,
+    pub default: bool,
+    /// Its server is up.
     #[serde(default)]
-    running: bool,
-    socket_path: String,
+    pub running: bool,
+    /// Never reported to Kotlin: the herdr client rediscovers it on every attempt.
+    pub(crate) socket_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -31,6 +40,10 @@ pub enum DiscoveryError {
     /// The command is not there (shell status 126 or 127).
     #[error("herdr is not installed")]
     NotInstalled,
+    /// herdr is there but rejected `session list --json` as a usage error (exit status 2): a
+    /// release that predates it, so older than the supported protocol.
+    #[error("this herdr does not support `session list --json`")]
+    Unsupported,
     /// No such session, or its server is stopped.
     #[error("{0}")]
     NotRunning(String),
@@ -38,19 +51,20 @@ pub enum DiscoveryError {
     Failed(String),
 }
 
-/// The socket of `session` (`None` is the entry marked `default`). The session must be
-/// running; a missing or stopped one is [`DiscoveryError::NotRunning`].
-pub async fn locate<H: RemoteHost>(
+/// Every session herdr lists, in its order. Exit status 126/127 is
+/// [`DiscoveryError::NotInstalled`], 2 is [`DiscoveryError::Unsupported`]; another failure or
+/// unreadable output is [`DiscoveryError::Failed`].
+pub async fn list_sessions<H: RemoteHost>(
     host: &H,
     herdr: &str,
-    session: Option<&str>,
-) -> Result<String, DiscoveryError> {
+) -> Result<Vec<SessionEntry>, DiscoveryError> {
     let output = host
         .exec(&RemoteCommand::new(herdr).args(["session", "list", "--json"]))
         .await?;
     match output.status {
         Some(0) => {}
         Some(126 | 127) => return Err(DiscoveryError::NotInstalled),
+        Some(USAGE_STATUS) => return Err(DiscoveryError::Unsupported),
         status => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let line: String = stderr
@@ -68,10 +82,23 @@ pub async fn locate<H: RemoteHost>(
     }
     let listing: Listing = serde_json::from_slice(&output.stdout)
         .map_err(|error| DiscoveryError::Failed(format!("unreadable session list: {error}")))?;
-    let entry = listing.sessions.into_iter().find(|entry| match session {
-        None => entry.default,
-        Some(name) => entry.name == name,
-    });
+    Ok(listing.sessions)
+}
+
+/// The socket of `session` (`None` is the entry marked `default`). The session must be
+/// running; a missing or stopped one is [`DiscoveryError::NotRunning`].
+pub async fn locate<H: RemoteHost>(
+    host: &H,
+    herdr: &str,
+    session: Option<&str>,
+) -> Result<String, DiscoveryError> {
+    let entry = list_sessions(host, herdr)
+        .await?
+        .into_iter()
+        .find(|entry| match session {
+            None => entry.default,
+            Some(name) => entry.name == name,
+        });
     match entry {
         None => Err(DiscoveryError::NotRunning(match session {
             None => "herdr lists no default session".into(),
@@ -118,6 +145,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_listing_reports_name_default_and_running_in_herdrs_order() {
+        let host = FakeHost::new();
+        host.set_listing(LISTING);
+        let sessions = list_sessions(&host, "/opt/herdr").await.unwrap();
+        let summary: Vec<_> = sessions
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.default, entry.running))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("default", true, true),
+                ("work", false, true),
+                ("idle", false, false)
+            ]
+        );
+        assert_eq!(
+            sessions[1].socket_path,
+            "/home/user/.config/herdr/sessions/work/herdr.sock"
+        );
+        // Missing flags read as false; an empty listing is not an error.
+        host.set_listing(r#"{"sessions":[{"name":"x","socket_path":"/s"}]}"#);
+        let sessions = list_sessions(&host, "h").await.unwrap();
+        assert!(!sessions[0].default && !sessions[0].running);
+        host.set_listing(r#"{"sessions":[]}"#);
+        assert!(list_sessions(&host, "h").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn missing_and_stopped_sessions_are_not_running() {
         let host = FakeHost::new();
         host.set_listing(LISTING);
@@ -144,6 +200,16 @@ mod tests {
         assert_eq!(
             locate(&host, "h", None).await,
             Err(DiscoveryError::NotInstalled)
+        );
+        // herdr's usage-error status: `session list --json` is not a command of this herdr.
+        host.set_exec(2, "", "herdr: unknown command");
+        assert_eq!(
+            locate(&host, "h", None).await,
+            Err(DiscoveryError::Unsupported)
+        );
+        assert_eq!(
+            list_sessions(&host, "h").await,
+            Err(DiscoveryError::Unsupported)
         );
         host.set_exec(1, "", "boom\nsecond line");
         assert_eq!(

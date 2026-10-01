@@ -10,7 +10,8 @@
 //!
 //! The client behind it: [`generated`] holds herdr's wire types (generated from
 //! `herdr api schema --json`, never edited), [`wire`] the newline-delimited JSON layer,
-//! `discovery` finds a session's socket with `session list --json`, `project` turns a
+//! `discovery` lists sessions and finds a session's socket with `session list --json`
+//! ([`list_sessions`] is public, for the capability probe), `project` turns a
 //! `session.snapshot` into the [`view`], and `watch` keeps it current from subscribe, snapshot
 //! and invalidating events. Everything reaches herdr through [`RemoteHost`].
 
@@ -33,7 +34,12 @@ use tokio::sync::mpsc;
 use crate::remote::{RemoteError, RemoteHost};
 use generated::request::{PaneTarget, RequestBody};
 
+pub use discovery::{DiscoveryError, SessionEntry, list_sessions};
 pub use view::{Agent, AgentStatus, HerdrView, Pane, Tab, Workspace};
+/// The watch's intervals, for integration tests that cannot wait for the production ones.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use watch::Timing;
 
 /// Why there is no live view. `NotInstalled` and `IncompatibleProtocol` are final;
 /// `NotRunning` and `Failed` are retried while the host is connected.
@@ -228,7 +234,26 @@ pub fn watch<H: RemoteHost>(
     handle
 }
 
-/// Drives `driver` until it is stopped or the host closes, then closes it. `herdr` is the
+/// [`watch`] with the intervals of `timing` instead of the contract's, for integration tests
+/// (feature `test-support`).
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn watch_with_timing<H: RemoteHost>(
+    host: Arc<H>,
+    herdr: String,
+    session: Option<String>,
+    observer: Arc<dyn HerdrObserver>,
+    timing: Timing,
+) -> HerdrWatchHandle {
+    let (handle, driver) = channel(observer);
+    crate::ssh::runtime().spawn(watch::run(host, herdr, session, driver, timing));
+    handle
+}
+
+/// Drives `driver` until it is stopped or the host closes, then closes it. The host driver
+/// that owns this task ends it on host close by aborting or dropping it (the driver's `Drop`
+/// delivers `Closed`): a watch learns of a lost host only from a failing call, and one parked
+/// at a final `Unavailable` makes none. `herdr` is the
 /// absolute path from the capability probe. The session's socket is not an input: the client
 /// finds it with `<herdr> session list --json` (`socket_path`), so it never leaves the herdr
 /// module. See [`watch`](self::watch) for the protocol: subscribe, snapshot, invalidating
@@ -254,7 +279,7 @@ pub async fn focus_pane<H: RemoteHost>(
     let socket = discovery::locate(host, herdr, session)
         .await
         .map_err(|error| match error {
-            discovery::DiscoveryError::Remote(error) => HerdrError::Remote(error),
+            DiscoveryError::Remote(error) => HerdrError::Remote(error),
             other => HerdrError::Failed(other.to_string()),
         })?;
     wire::call(

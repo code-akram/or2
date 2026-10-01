@@ -66,6 +66,13 @@ impl Default for Timing {
 /// request arrived) before the attempt fails. Each rejection re-reads the panes first.
 const MAX_REJECTED_SUBSCRIPTIONS: u32 = 3;
 
+/// herdr's code for a request that names a pane that does not exist (any more).
+const PANE_NOT_FOUND: &str = "pane_not_found";
+
+/// The `protocol` reported for a herdr that predates `session list --json`: older than any
+/// protocol number, which are positive.
+const PROTOCOL_UNKNOWN: u32 = 0;
+
 /// The lifecycle events behind [`HerdrView`]. Left out: `workspace.metadata_updated` (tokens),
 /// `worktree.*`, `layout.updated`, `pane.output_matched` and `pane.scroll_changed` (none is
 /// projected).
@@ -135,6 +142,14 @@ fn exit_for_discovery(error: DiscoveryError) -> Exit {
         DiscoveryError::NotInstalled => Exit::Unavailable {
             reason: HerdrUnavailable::NotInstalled,
             message: "herdr is not installed on the host".into(),
+        },
+        DiscoveryError::Unsupported => Exit::Unavailable {
+            reason: HerdrUnavailable::IncompatibleProtocol {
+                protocol: PROTOCOL_UNKNOWN,
+            },
+            message: "this herdr has no `session list --json`; it is older than the supported \
+                      protocol"
+                .into(),
         },
         DiscoveryError::NotRunning(message) => Exit::Unavailable {
             reason: HerdrUnavailable::NotRunning,
@@ -394,6 +409,31 @@ impl<H: RemoteHost> Watch<H> {
         exit
     }
 
+    /// The lifecycle-only subscription was rejected: read the snapshot once to see whether
+    /// herdr is too old (final) before reporting the rejection (`Failed`, retried).
+    async fn rejected_subscribe(&mut self, socket: &str, error: WireError) -> Exit {
+        let id = self.request_id();
+        let host = Arc::clone(&self.host);
+        let timeout = self.timing.request;
+        let snapshot = self
+            .pump(wire::call(
+                &*host,
+                socket,
+                &id,
+                &RequestBody::SessionSnapshot(EmptyParams(serde_json::Map::new())),
+                timeout,
+            ))
+            .await;
+        match snapshot {
+            Err(exit) => exit,
+            Ok(Ok(result)) => match project::parse_snapshot(&result) {
+                Err(error @ SnapshotError::Incompatible { .. }) => exit_for_snapshot(error),
+                _ => exit_for_wire(error),
+            },
+            Ok(Err(_)) => exit_for_wire(error),
+        }
+    }
+
     async fn attempt_inner(&mut self) -> Result<Infallible, Exit> {
         self.events = None;
         self.dirty = false;
@@ -413,10 +453,18 @@ impl<H: RemoteHost> Watch<H> {
         // Subscribe first, then read: nothing that happens from here on can be missed.
         let id = self.request_id();
         let none = PaneKeys::new();
-        let stream = self
+        let stream = match self
             .pump(subscribe(&*host, &socket, &id, &none, timeout))
             .await?
-            .map_err(exit_for_wire)?;
+        {
+            Ok(stream) => stream,
+            // An older herdr may not know every lifecycle event and reject the request; its
+            // protocol decides between "retry" and "final" as it would for a snapshot.
+            Err(error @ WireError::Herdr { .. }) => {
+                return Err(self.rejected_subscribe(&socket, error).await);
+            }
+            Err(error) => return Err(exit_for_wire(error)),
+        };
         self.events = Some(stream);
 
         let mut subscribed = PaneKeys::new();
@@ -462,11 +510,18 @@ impl<H: RemoteHost> Watch<H> {
                             // Events between the read and the new subscription are gone.
                             self.dirty = true;
                         }
-                        Err(WireError::Herdr { .. }) if rejected < MAX_REJECTED_SUBSCRIPTIONS => {
-                            // A pane in the list closed first: read the panes again.
+                        // A pane in the list closed first: read the panes again, a few times.
+                        Err(WireError::Herdr { code, .. })
+                            if code == PANE_NOT_FOUND && rejected < MAX_REJECTED_SUBSCRIPTIONS =>
+                        {
                             rejected += 1;
                             self.dirty = true;
                         }
+                        // Any other rejection is not about a vanished pane, so re-reading the
+                        // panes cannot help. The view stays live on the lifecycle stream that
+                        // is still open; per-pane status events are missing until a later
+                        // read (the next invalidation) is accepted.
+                        Err(WireError::Herdr { code, .. }) if code != PANE_NOT_FOUND => {}
                         Err(error) => return Err(exit_for_wire(error)),
                     }
                 }

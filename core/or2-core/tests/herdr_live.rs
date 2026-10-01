@@ -19,8 +19,8 @@ use or2_core::herdr::generated::request::{
 };
 use or2_core::herdr::view::AgentStatus;
 use or2_core::herdr::{
-    HerdrObserver, HerdrState, HerdrUnavailable, HerdrView, HerdrWatchHandle, focus_pane, watch,
-    wire,
+    HerdrObserver, HerdrState, HerdrUnavailable, HerdrView, HerdrWatchHandle, Timing, focus_pane,
+    watch, watch_with_timing, wire,
 };
 use or2_core::remote::LocalHost;
 use serde_json::Value;
@@ -140,15 +140,25 @@ impl Isolated {
             .output();
         if let Some(mut child) = self.server.take() {
             let deadline = Instant::now() + Duration::from_secs(15);
+            let mut exited = false;
             while Instant::now() < deadline {
                 if child.try_wait().ok().flatten().is_some() {
-                    return;
+                    exited = true;
+                    break;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            // Our own child, started by this test.
-            let _ = child.kill();
-            let _ = child.wait();
+            if !exited {
+                // Our own child, started by this test.
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        // The session counts as stopped once the listing says so and its socket is gone, even
+        // if the server process hands over to something else on its way out.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while self.socket().is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -493,12 +503,18 @@ async fn the_watch_recovers_when_the_server_starts_stops_and_restarts() {
     };
     let host = Arc::new(LocalHost::new());
     let recorder = Arc::new(Recorder::default());
-    // The session exists in nobody's list yet.
-    let handle = watch(
+    // The session exists in nobody's list yet. The retry pause is shortened from the
+    // contract's 10 s; the logic under test is the same.
+    let timing = Timing {
+        retry: Duration::from_millis(500),
+        ..Timing::default()
+    };
+    let handle = watch_with_timing(
         host,
         herdr.herdr().to_owned(),
         Some(herdr.name.clone()),
         recorder.clone(),
+        timing,
     );
     let deadline = Instant::now() + Duration::from_secs(15);
     while matches!(handle.state(), HerdrState::Starting) && Instant::now() < deadline {
@@ -516,14 +532,14 @@ async fn the_watch_recovers_when_the_server_starts_stops_and_restarts() {
         handle.state()
     );
 
-    // The server starts: the next retry (every 10 s) goes live.
+    // The server starts: the next retry goes live.
     herdr.start();
     view_where(&handle, "the view after the server started", |_| true).await;
 
     // The server stops: the stream drops and the watch reports it (a request that was in
     // flight may first see `Failed`, then the listing says the session is not running)...
     herdr.stop();
-    let deadline = Instant::now() + Duration::from_secs(40);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while !matches!(
         handle.state(),
         HerdrState::Unavailable {

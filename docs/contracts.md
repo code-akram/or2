@@ -264,7 +264,9 @@ pub trait RemoteHost: Send + Sync + 'static {
     fn exec(&self, command: &RemoteCommand) -> impl Future<Output = Result<ExecOutput, RemoteError>> + Send;
     /// Provided: `exec_rendered(render_script(script)?)`, for fixed multi-line scripts.
     fn exec_script(&self, script: &str) -> impl Future<Output = Result<ExecOutput, RemoteError>> + Send;
-    /// Opens a byte stream to a Unix socket on the host (OpenSSH direct-streamlocal).
+    /// Opens a byte stream to a Unix socket on the host (OpenSSH direct-streamlocal). A socket
+    /// that is missing or refuses the connection is `Io`; `Rejected` is only for a host that
+    /// refuses the channel itself (streamlocal forwarding disabled).
     fn open_unix(&self, path: &str) -> impl Future<Output = Result<Self::Stream, RemoteError>> + Send;
 }
 ```
@@ -297,6 +299,13 @@ pub trait RemoteHost: Send + Sync + 'static {
   timeout (`RemoteError::TimedOut`).
 - `RemoteError`: `Closed`, `TimedOut`, `OutputTooLarge`, `Unquotable`, `Rejected(String)` (channel refused,
   e.g. streamlocal forwarding disabled), `Io(String)`.
+  **`open_unix` error mapping** (the herdr watch depends on it: `Io` becomes `NotRunning`,
+  `Rejected` becomes `Failed`): a missing socket or one that refuses the connection is
+  `Io`; `Rejected` is a refusal by the host's policy. Over SSH both arrive as a channel-open
+  failure, told apart by its reason code: `SSH_OPEN_ADMINISTRATIVELY_PROHIBITED` is
+  `Rejected`; `SSH_OPEN_CONNECT_FAILED` (nothing listens, no such file) is `Io`; any other
+  reason is `Rejected`. Lane A1's OpenSSH interop test covers a stale socket path (must be
+  `Io`) next to a host with streamlocal forwarding disabled (must be `Rejected`).
 - `LocalHost` (feature `test-support`, enabled for or2-core's own tests through a dev-dependency
   on itself; used by integration tests) implements `RemoteHost` with local processes and
   `UnixStream`. `exec_rendered` runs the *rendered* line through `/bin/sh -c`, so quoting is
@@ -422,7 +431,7 @@ activity_unix: i64 }`, sorted by most recent activity.
   (`scripts/herdr_schema.py` normalizes, then cargo-typify). The normalized schema
   `herdr/schema.json` (with the herdr version and protocol it came from: 0.9.3, protocol 22)
   and `herdr/generated.rs` are checked in; `generated.rs` has one module per schema family
-  (`request`, `success_response`, `error_response`, `event`, `subscription_event`) and the
+  (`request`, `success_response`, `error_response`) and the
   constants `HERDR_VERSION` and `PROTOCOL`. Never hand-edit it: fix the script and
   regenerate (`--offline` regenerates from the checked-in schema, `--check` verifies both
   files). Normalization decisions: `$ref`s become local; validation keywords a client has no use
@@ -433,15 +442,25 @@ activity_unix: i64 }`, sorted by most recent activity.
   `AgentStatus::Unknown`); the bundle's `request` (an `id` plus a `oneOf` of `{method,
   params}`) is split so typify generates an adjacently tagged `RequestBody` enum, and
   `herdr::wire` adds the `id`. Unknown fields are ignored (no `deny_unknown_fields`).
-  *Event payloads are not typed at runtime*: events are invalidations, so the stream reader
+  *Event payloads are not typed at all*: events are invalidations, so the stream reader
   classifies a line by its top-level key (`error`, `result`, `event`) and never fails on an
-  event it cannot decode. The event families are generated for later consumers; their
-  internally tagged `EventData` is not tolerant of an unknown event type.
+  event it cannot decode. The schema's `event` and `subscription_event` families are not
+  generated: their internally tagged `EventData` rejects an unknown event type, which would
+  break the unknown-value rule for a later consumer (notifications) that trusted it. That
+  consumer adds the families to `scripts/herdr_schema.py` with an open event-type tag.
 - **Discovery:** `<herdr> session list --json` over `RemoteHost::exec` gives each session's name,
-  `default`, `running` and `socket_path` (or2 reads only those; other fields are ignored). A
+  `default`, `running` and `socket_path` (or2 reads only those; other fields are ignored).
+  `herdr::list_sessions(host, herdr) -> Result<Vec<SessionEntry>, DiscoveryError>` is the one
+  parser and is public: lane A1's capability probe builds `HostCapabilities.herdr_sessions`
+  (`name`, `running`, `is_default`) from it, and the watch and `focus_pane` locate a socket
+  through it. `SessionEntry { name, default, running }` is public; `socket_path` is
+  crate-private. A
   `None` session is the entry with `default: true`, `Some(name)` the entry with that name.
-  Never hard-code socket paths. Exit status 126/127 is `NotInstalled`; another failure or
-  unreadable output is `Failed`; a missing or stopped session is `NotRunning`.
+  Never hard-code socket paths. Exit status 126/127 is `NotInstalled`; exit status 2, herdr's
+  usage-error status, is `Unsupported` (a herdr that predates `session list --json`), which
+  the watch reports as `IncompatibleProtocol { protocol: 0 }` (0: older than any protocol
+  number; final); another failure or unreadable output is `Failed`; a missing or stopped
+  session is `NotRunning`.
   `HostCapabilities.herdr_sessions` reports name, `running` and `is_default`; `socket_path` is
   not reported to Kotlin. `run` and `focus_pane` rediscover it themselves on every attempt,
   using the herdr path they are given.
@@ -466,14 +485,25 @@ activity_unix: i64 }`, sorted by most recent activity.
     terminal_id)` is not covered, a new stream with the lifecycle subscriptions and every
     current pane replaces the old one, and the view is read again (events between the read and
     the new subscription are lost). A rejection (a pane closed meanwhile) re-reads the panes and
-    retries; the fourth consecutive rejection fails the attempt (`Failed`).
+    retries; the fourth consecutive rejection fails the attempt (`Failed`). Only the
+    `pane_not_found` error code means a pane vanished. Any other rejection of the per-pane
+    request leaves the view `Live` on the stream that is still open (agent status then changes
+    only through lifecycle-driven reads, and the request is tried again with every later read),
+    so a persistent rejection cannot make the view flap between `Live` and `Unavailable`.
+  - *Connect cost.* The first view is installed after one subscribe and one snapshot, as in
+    the contract sequence; the per-pane resubscribe and its confirming read follow it, and
+    every later new pane costs one more of each (a subscription cannot grow). Not yet
+    measured over an OpenSSH-backed host: measure when lane A1 lands.
   - *Recovery.* `events_lost` (an `error` line on the event stream, after which herdr closes it),
     any other error line, or a dropped stream ends the attempt with a 500 ms pause and a new
     attempt (rediscover, subscribe, snapshot). The last view stays delivered meanwhile; the
     state changes only if the new attempt fails.
 - **Protocol:** the snapshot's `protocol` must be at least `generated::PROTOCOL` (22); an older
   herdr is `IncompatibleProtocol { protocol }` (final), a newer one is accepted (herdr adds
-  fields, which are ignored). A snapshot that cannot be read is `Failed`.
+  fields, which are ignored). A snapshot that cannot be read is `Failed`. A herdr older than
+  the protocol may fail before it ever answers a snapshot: if the first (lifecycle-only)
+  `events.subscribe` is rejected with a herdr error, the watch reads one snapshot to check the
+  protocol, and an older one is `IncompatibleProtocol` instead of `Failed`.
 - **States** (`HerdrState`): `Starting` (initial, not delivered), `Live { view }`,
   `Unavailable { reason, message }`, `Closed`. `reason`: `NotInstalled` and
   `IncompatibleProtocol { protocol }` are final; `NotRunning` (no such session, stopped, or its
@@ -482,7 +512,13 @@ activity_unix: i64 }`, sorted by most recent activity.
   redelivered only when its *reason* changes, so a message that differs between attempts does
   not repeat it. `Closed` is delivered once, last, after `stop()` or host close
   (`RemoteError::Closed` from any call), then the observer is released. A stop interrupts every
-  wait, including a read in flight.
+  wait, including a read in flight. **The host driver ends its watches itself.** The watch
+  learns of a lost host only from a `RemoteError::Closed` that one of its calls returns, which
+  can take a retry or resubscribe pause, and a watch parked at a final `Unavailable` makes no
+  call at all. A host driver that holds only the `HerdrWatchDriver` (it passes it by value to
+  `run`) therefore ends a watch on host close by aborting or dropping the `run` task: dropping
+  the driver delivers `Closed`, once, last (tested under abort in every state), and the handle
+  Kotlin holds then reads `Closed`.
 - **Delivery.** `HerdrView` is delivered whole, at most once per 100 ms (the first view at once,
   a burst collapses to its latest view), and only when it differs from the last delivered view
   (compared without `version`, which is or2's own counter: it starts at 1 and increases with
@@ -497,8 +533,10 @@ activity_unix: i64 }`, sorted by most recent activity.
   the current one is not redelivered; after a final `Unavailable` only `Closed` is accepted.
   `focus_pane` returns `HerdrError` (`Remote`, `Failed`; lane A2 removed lane 0's
   `NotIntegrated`, which has no meaning any more). The retry, resubscribe and coalescing
-  intervals live in `herdr::watch::Timing` (crate-private; tests shorten them or run under a
-  paused clock).
+  intervals live in `herdr::watch::Timing` (crate-private; unit tests shorten them or run under
+  a paused clock; integration tests reach it through the `#[doc(hidden)]`
+  `herdr::watch_with_timing` and `herdr::Timing`, behind the `test-support` feature).
+  `herdr::list_sessions`, `SessionEntry` and `DiscoveryError` are public for lane A1.
 - **View** (`HerdrView`) is or2's projection of the snapshot, in herdr's order: `version`,
   `protocol`, `focused_pane_id`, `workspaces` (`workspace_id, number, label, focused,
   agent_status`), `tabs` (`tab_id, workspace_id, number, label, focused, agent_status`), `panes`
@@ -522,7 +560,8 @@ activity_unix: i64 }`, sorted by most recent activity.
   the 10 s retry, final reasons, rejected subscriptions and stop. The live test
   (`tests/herdr_live.rs`) starts `herdr --session or2-test-<pid>-<n> server` with every
   `HERDR_*` variable removed (so it starts empty and cannot reach the user's session), drives it
-  through its socket, and stops and deletes exactly that session; it is skipped with a message
+  through its socket, and stops and deletes exactly that session (its restart test shortens the
+  10 s retry through `watch_with_timing`, and a stop waits until the session's socket is gone); it is skipped with a message
   when herdr is absent unless `OR2_REQUIRE_HERDR` is set. Tests never touch the default herdr
   session or any session they did not create.
 
