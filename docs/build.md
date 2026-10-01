@@ -243,8 +243,11 @@ at least 3.35 (the migration uses `DROP COLUMN`; no JVM test can check the platf
 also migrates populated v2 and v1 databases to v3 (`hosts.transport`, validated against `3.json`) and
 round-trips the transport through the DAO. `ConnectionServiceDeviceTest` runs the foreground service
 over a scripted connection (`Or2Application.connectorOverride`, never set in production): it starts
-with a host, posts the ongoing notification with "Disconnect all", counts a session, and stops once
-everything is closed (it grants `POST_NOTIFICATIONS` to the app through `UiAutomation` first).
+with a host, owns its session, "Disconnect all" closes everything and the service stops, all
+asserted unconditionally. The notification's contents (title, "Disconnect all", the session
+count) are a separate test that runs only where `POST_NOTIFICATIONS` is already granted to the
+app and is skipped with a message otherwise: the test never grants it, because OEM builds
+(OxygenOS) refuse shell grants (`GRANT_RUNTIME_PERMISSIONS`); grant it in Settings once to run it.
 `TransportChromeDeviceTest` covers the header badge, the "Last heard N s ago" text past five seconds
 and the AUTO-fallback note. `VaultDeviceTest` creates and
 deletes a disposable Keystore alias: it verifies hardware security level, per-use strong
