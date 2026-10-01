@@ -244,7 +244,7 @@ pub fn attempt(
         }
     }
 
-    match authorized_keys::add(&session.account.home, &key, &device, (session.now)()) {
+    match authorized_keys::add(session.account, &key, &device, (session.now)()) {
         Ok(added) => {
             reply(connection, true, "");
             Some(Outcome::Authorized {

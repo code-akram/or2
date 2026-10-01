@@ -2304,6 +2304,17 @@ cannot inject terminal escapes or a second line), the date in the comment is UTC
 repaired, the backup is `authorized_keys.or2-backup-<UTC date>-<time>` (mode 0600, never overwrites an
 earlier one), and a key already present (any options, any comment) changes nothing, not even a backup.
 
+**`authorized_keys` is written through checked handles (Unix).** The home directory is opened once; `~/.ssh`
+and the file are opened relative to it with `O_NOFOLLOW` (and `O_DIRECTORY` for `~/.ssh`), never by path
+again. A symbolic link at either name is refused with a message, not followed. `~/.ssh` and the file must
+belong to the account (the home to the account or root, as sshd allows), the file must be a regular file with
+no other hard link, and a missing file is created with `O_CREAT|O_EXCL` (mode 0600, forced after the umask).
+The file is read, backed up (the backup is created exclusively, also relative to the `~/.ssh` handle) and
+appended to (one `write` on an `O_APPEND` handle; a failed write truncates back to the old length) through
+those same handles, under an advisory `flock`, so a path replaced after the checks changes nothing. Files over
+8 MiB are not read. On Windows only symbolic links and junctions are refused, by path; ownership and ACL
+checks are not done there.
+
 ### Bind policy: what "non-public" means
 
 The listener binds only addresses that are *not public*: IPv4 10/8, 172.16/12, 192.168/16, carrier-grade NAT

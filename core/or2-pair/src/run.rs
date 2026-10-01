@@ -186,7 +186,7 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
 
     heading(out, "Checks")?;
     let found = checks::run(&CheckInput {
-        home: &env.account.home,
+        account: &env.account,
         ssh_port,
         net: env.net,
         program_dirs: &env.program_dirs,

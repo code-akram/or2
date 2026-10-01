@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::account::Account;
 use crate::authorized_keys::{self, Writable};
 use crate::net::Net;
 
@@ -64,7 +65,7 @@ impl Platform {
 }
 
 pub struct CheckInput<'a> {
-    pub home: &'a Path,
+    pub account: &'a Account,
     pub ssh_port: u16,
     pub net: &'a dyn Net,
     /// Directories searched for programs: `PATH` plus the usual user and package-manager ones.
@@ -75,7 +76,7 @@ pub struct CheckInput<'a> {
 pub fn run(input: &CheckInput<'_>) -> Vec<Check> {
     let mut out = Vec::new();
     out.push(sshd(input));
-    out.extend(authorized_keys(input.home));
+    out.extend(authorized_keys(input.account));
     let mosh = find_program("mosh-server", input.program_dirs);
     for (name, note) in [
         ("tmux", "optional: or2 can attach to its sessions"),
@@ -137,9 +138,9 @@ fn sshd_hint(platform: Platform) -> &'static str {
     }
 }
 
-fn authorized_keys(home: &Path) -> Vec<Check> {
-    let (writable, notes) = authorized_keys::writable(home);
-    let file = authorized_keys::path(home);
+fn authorized_keys(account: &Account) -> Vec<Check> {
+    let (writable, notes) = authorized_keys::writable(account);
+    let file = authorized_keys::path(&account.home);
     let mut out = vec![match writable {
         Writable::Yes => check(Level::Ok, format!("{} can be written", file.display())),
         Writable::No(why) => check(Level::Warn, why),
@@ -222,13 +223,13 @@ mod tests {
     }
 
     fn input<'a>(
-        home: &'a Path,
+        account: &'a Account,
         net: &'a FakeNet,
         dirs: &'a [PathBuf],
         platform: Platform,
     ) -> CheckInput<'a> {
         CheckInput {
-            home,
+            account,
             ssh_port: 22,
             net,
             program_dirs: dirs,
@@ -251,7 +252,12 @@ mod tests {
         }
         let dirs = [bin.path().to_path_buf()];
         let net = FakeNet(Ok("SSH-2.0-OpenSSH_9.9".into()));
-        let checks = run(&input(home.path(), &net, &dirs, Platform::Linux));
+        let checks = run(&input(
+            &Account::new("t", home.path()),
+            &net,
+            &dirs,
+            Platform::Linux,
+        ));
         assert_eq!(checks[0].level, Level::Ok);
         assert!(checks[0].text.contains("OpenSSH_9.9"));
         assert!(
@@ -279,7 +285,7 @@ mod tests {
             (Platform::Linux, "systemctl"),
             (Platform::Windows, "OpenSSH Server"),
         ] {
-            let checks = run(&input(home.path(), &net, &[], platform));
+            let checks = run(&input(&Account::new("t", home.path()), &net, &[], platform));
             assert_eq!(checks[0].level, Level::Warn);
             assert!(checks[0].text.contains(word), "{}", checks[0].text);
         }
@@ -289,7 +295,12 @@ mod tests {
     fn something_that_is_not_sshd_is_a_warning() {
         let home = tempfile::tempdir().unwrap();
         let net = FakeNet(Ok("HTTP/1.1 400".into()));
-        let checks = run(&input(home.path(), &net, &[], Platform::Linux));
+        let checks = run(&input(
+            &Account::new("t", home.path()),
+            &net,
+            &[],
+            Platform::Linux,
+        ));
         assert_eq!(checks[0].level, Level::Warn);
         assert!(checks[0].text.contains("--ssh-port"));
     }
@@ -298,7 +309,12 @@ mod tests {
     fn an_unwritable_home_is_reported() {
         let net = FakeNet(Ok("SSH-2.0-x".into()));
         let missing = Path::new("/nonexistent-or2-home");
-        let checks = run(&input(missing, &net, &[], Platform::Linux));
+        let checks = run(&input(
+            &Account::new("t", missing),
+            &net,
+            &[],
+            Platform::Linux,
+        ));
         assert!(
             checks
                 .iter()
