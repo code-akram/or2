@@ -2,7 +2,7 @@
 // Vendored from mosh-rs (https://github.com/wilsonglasser/mosh-rs), commit
 // 90b37125f5e4a598be91dec37d23921b6865276e, src/packet.rs. Upstream: GPL-3.0-or-later, copyright
 // Wilson Glasser; the protocol logic follows mosh (Keith Winstein and contributors, GPL-3.0-or-later).
-// See THIRD_PARTY_NOTICES.md. or2 changes: module paths only, then rustfmt.
+// See THIRD_PARTY_NOTICES.md. or2 changes: module paths only, `Packet` has a redacted `Debug`, then rustfmt.
 //! The packet layer: what sits inside every encrypted datagram, and
 //! the connection bookkeeping around it (`network.cc`).
 //!
@@ -43,7 +43,7 @@ pub const MAX_RTO_MS: f64 = 1000.0;
 pub const CONGESTION_TIMESTAMP_PENALTY_MS: u16 = 500;
 
 /// A packet's plaintext: the two timestamps plus the transport payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Packet {
     /// Our clock when this was sent, in milliseconds mod 65536.
     pub timestamp: u16,
@@ -52,6 +52,16 @@ pub struct Packet {
     pub timestamp_reply: u16,
     /// One transport fragment.
     pub payload: Vec<u8>,
+}
+
+impl std::fmt::Debug for Packet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Packet")
+            .field("timestamp", &self.timestamp)
+            .field("timestamp_reply", &self.timestamp_reply)
+            .field("payload", &super::Redacted(self.payload.len()))
+            .finish()
+    }
 }
 
 impl Packet {

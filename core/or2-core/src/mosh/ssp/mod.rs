@@ -27,3 +27,83 @@ pub use key::Base64Key;
 pub use screen::{Screen, ScreenError};
 pub use session::{Fault, LinkHealth, Session, Tick};
 pub use terminal::ClientTerminal;
+
+/// Stands in for bytes that may be typed secrets or screen text in `Debug` output. Anything
+/// that holds decrypted plaintext, keystrokes or host output prints through this, so a stray
+/// `{:?}` or log line of a protocol type cannot leak them.
+pub(crate) struct Redacted(pub usize);
+
+impl std::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes redacted>", self.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crypto::{Direction, Incoming};
+    use super::packet::Packet;
+    use super::sender::TransportSender;
+    use super::statesync::{HostBytes, HostEvent, Keystroke, UserEvent};
+    use super::transport::{Fragment, FragmentAssembly, Instruction};
+
+    /// A typed password and screen text must not appear in a stray `{:?}`.
+    #[test]
+    fn debug_output_never_carries_keystrokes_or_screen_text() {
+        let secret = b"hunter2-s3cret";
+        let mut sender = TransportSender::new();
+        sender.state_mut().push_bytes(secret);
+        let mut assembly = FragmentAssembly::default();
+        let fragment = Fragment {
+            id: 1,
+            num: 0,
+            final_fragment: false,
+            contents: secret.to_vec(),
+        };
+        assembly.add(fragment.clone());
+        let printed = [
+            format!("{sender:?}"),
+            format!("{:?}", UserEvent::Byte(secret[0])),
+            format!(
+                "{:?}",
+                Incoming {
+                    seq: 1,
+                    direction: Direction::ToClient,
+                    plaintext: secret.to_vec(),
+                }
+            ),
+            format!(
+                "{:?}",
+                Packet {
+                    timestamp: 0,
+                    timestamp_reply: 0,
+                    payload: secret.to_vec(),
+                }
+            ),
+            format!(
+                "{:?}",
+                Instruction::new(0, 1, 0, 0, secret.to_vec(), secret.to_vec())
+            ),
+            format!("{fragment:?}"),
+            format!("{assembly:?}"),
+            format!(
+                "{:?}",
+                Keystroke {
+                    keys: Some(secret.to_vec())
+                }
+            ),
+            format!(
+                "{:?}",
+                HostBytes {
+                    hoststring: Some(secret.to_vec())
+                }
+            ),
+            format!("{:?}", HostEvent::Bytes(secret.to_vec())),
+        ];
+        for text in printed {
+            // Neither as text nor as a list of byte values.
+            assert!(!text.contains("hunter2"), "{text}");
+            assert!(!text.contains("104"), "{text}");
+        }
+    }
+}

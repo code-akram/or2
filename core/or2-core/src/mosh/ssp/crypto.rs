@@ -2,7 +2,7 @@
 // Vendored from mosh-rs (https://github.com/wilsonglasser/mosh-rs), commit
 // 90b37125f5e4a598be91dec37d23921b6865276e, src/crypto.rs. Upstream: GPL-3.0-or-later, copyright
 // Wilson Glasser; the protocol logic follows mosh (Keith Winstein and contributors, GPL-3.0-or-later).
-// See THIRD_PARTY_NOTICES.md. or2 changes: module paths only (`crate::` to `super::`), then rustfmt.
+// See THIRD_PARTY_NOTICES.md. or2 changes: module paths only (`crate::` to `super::`), `Incoming` has a redacted `Debug`, then rustfmt.
 //! The datagram crypto layer: AES-128-OCB3 exactly as mosh's
 //! `Crypto::Session` uses it (`src/crypto/crypto.cc`).
 //!
@@ -52,7 +52,6 @@ fn ocb_nonce(direction_seq: u64) -> [u8; 12] {
 /// One decrypted datagram: the sequence number and direction recovered
 /// from the nonce, plus the plaintext (timestamps + payload, parsed a
 /// layer up).
-#[derive(Debug)]
 pub struct Incoming {
     /// The sequence number the nonce carried.
     pub seq: u64,
@@ -60,6 +59,16 @@ pub struct Incoming {
     pub direction: Direction,
     /// Everything the tag covered.
     pub plaintext: Vec<u8>,
+}
+
+impl std::fmt::Debug for Incoming {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Incoming")
+            .field("seq", &self.seq)
+            .field("direction", &self.direction)
+            .field("plaintext", &super::Redacted(self.plaintext.len()))
+            .finish()
+    }
 }
 
 /// The keyed crypto session. Holds the AEAD and the 2^47-block lifetime

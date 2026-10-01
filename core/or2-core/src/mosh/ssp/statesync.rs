@@ -2,7 +2,7 @@
 // Vendored from mosh-rs (https://github.com/wilsonglasser/mosh-rs), commit
 // 90b37125f5e4a598be91dec37d23921b6865276e, src/statesync.rs. Upstream: GPL-3.0-or-later, copyright
 // Wilson Glasser; the protocol logic follows mosh (Keith Winstein and contributors, GPL-3.0-or-later).
-// See THIRD_PARTY_NOTICES.md. or2 changes: module paths only, then rustfmt.
+// See THIRD_PARTY_NOTICES.md. or2 changes: module paths only, redacted `Debug` for the types that hold keystrokes or host output, then rustfmt.
 //! State sync: what each side's diffs actually contain
 //! (`user.cc`, `completeterminal.cc`, `userinput.proto`,
 //! `hostinput.proto`).
@@ -41,9 +41,21 @@ use super::error::{MoshError, Result};
 // ---------------------------------------------------------------- //
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]
+#[prost(skip_debug)]
 pub struct Keystroke {
     #[prost(bytes = "vec", optional, tag = "4")]
     pub keys: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for Keystroke {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Keystroke")
+            .field(
+                "keys",
+                &self.keys.as_ref().map(|k| super::Redacted(k.len())),
+            )
+            .finish()
+    }
 }
 
 /// Also the host direction's resize; mosh declares one per package
@@ -89,7 +101,7 @@ impl UserMessage {
 }
 
 /// One thing the user did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum UserEvent {
     /// A single byte of input. mosh keeps input byte-by-byte and
     /// coalesces only when serializing, so a diff can start anywhere.
@@ -100,14 +112,36 @@ pub enum UserEvent {
     },
 }
 
+impl std::fmt::Debug for UserEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Byte(_) => f.write_str("Byte(<redacted>)"),
+            Self::Resize { width, height } => f
+                .debug_struct("Resize")
+                .field("width", width)
+                .field("height", height)
+                .finish(),
+        }
+    }
+}
+
 /// The client's state: everything the user has done, in order.
 ///
 /// Diffs are pure suffixes, so a state is "older" than another exactly
 /// when it is a prefix of it. That is what lets the sender recompute a
 /// diff against any state the receiver might still be holding.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct UserStream {
     events: Vec<UserEvent>,
+}
+
+/// Typed input can be a password: only the length is printed.
+impl std::fmt::Debug for UserStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserStream")
+            .field("events", &super::Redacted(self.events.len()))
+            .finish()
+    }
 }
 
 impl UserStream {
@@ -232,11 +266,23 @@ impl UserStream {
 // ---------------------------------------------------------------- //
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]
+#[prost(skip_debug)]
 pub struct HostBytes {
     /// ECMA-48 escape output, already rendered by the SERVER's
     /// terminal emulator as the difference between two framebuffers.
     #[prost(bytes = "vec", optional, tag = "4")]
     pub hoststring: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for HostBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostBytes")
+            .field(
+                "hoststring",
+                &self.hoststring.as_ref().map(|s| super::Redacted(s.len())),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
@@ -266,7 +312,7 @@ pub struct HostMessage {
 
 /// What one host diff asks the client to do, flattened out of the
 /// protobuf in arrival order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum HostEvent {
     /// Feed these bytes to the terminal emulator.
     Bytes(Vec<u8>),
@@ -275,6 +321,23 @@ pub enum HostEvent {
         height: i32,
     },
     EchoAck(u64),
+}
+
+impl std::fmt::Debug for HostEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bytes(bytes) => f
+                .debug_tuple("Bytes")
+                .field(&super::Redacted(bytes.len()))
+                .finish(),
+            Self::Resize { width, height } => f
+                .debug_struct("Resize")
+                .field("width", width)
+                .field("height", height)
+                .finish(),
+            Self::EchoAck(num) => f.debug_tuple("EchoAck").field(num).finish(),
+        }
+    }
 }
 
 /// Decode a host diff into the events it carries.

@@ -2,7 +2,7 @@
 // Vendored from mosh-rs (https://github.com/wilsonglasser/mosh-rs), commit
 // 90b37125f5e4a598be91dec37d23921b6865276e, src/transport.rs. Upstream: GPL-3.0-or-later, copyright
 // Wilson Glasser; the protocol logic follows mosh (Keith Winstein and contributors, GPL-3.0-or-later).
-// See THIRD_PARTY_NOTICES.md. or2 changes: module paths only, then rustfmt. (Fragmentation, zlib and protobuf instructions; unrelated to or2's `Transport`.)
+// See THIRD_PARTY_NOTICES.md. or2 changes: module paths only, redacted `Debug` for the types that hold payloads, then rustfmt. (Fragmentation, zlib and protobuf instructions; unrelated to or2's `Transport`.)
 //! The transport layer: instructions, zlib, and the fragments that
 //! carry them (`transportfragment.cc`, `transportinstruction.proto`).
 //!
@@ -46,7 +46,10 @@ pub const CHAFF_MAX: usize = 16;
 
 /// One transport instruction. Field numbers are proto2's, from
 /// `transportinstruction.proto`.
+///
+/// `Debug` is hand-written (see below): the diff and the chaff are host output or keystrokes.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
+#[prost(skip_debug)]
 pub struct Instruction {
     #[prost(uint32, optional, tag = "1")]
     /// Field 1. Must be [`MOSH_PROTOCOL_VERSION`].
@@ -73,6 +76,21 @@ pub struct Instruction {
     /// observer cannot read keystroke timing off packet lengths.
     #[prost(bytes = "vec", optional, tag = "7")]
     pub chaff: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for Instruction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = |bytes: &Option<Vec<u8>>| bytes.as_ref().map(|b| super::Redacted(b.len()));
+        f.debug_struct("Instruction")
+            .field("protocol_version", &self.protocol_version)
+            .field("old_num", &self.old_num)
+            .field("new_num", &self.new_num)
+            .field("ack_num", &self.ack_num)
+            .field("throwaway_num", &self.throwaway_num)
+            .field("diff", &redacted(&self.diff))
+            .field("chaff", &redacted(&self.chaff))
+            .finish()
+    }
 }
 
 impl Instruction {
@@ -137,7 +155,7 @@ impl Instruction {
 }
 
 /// One fragment of a compressed instruction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Fragment {
     /// Instruction id. Reused verbatim by a byte-identical retransmit,
     /// which is what lets the peer recognize the repeat.
@@ -148,6 +166,17 @@ pub struct Fragment {
     pub final_fragment: bool,
     /// A slice of the compressed instruction.
     pub contents: Vec<u8>,
+}
+
+impl std::fmt::Debug for Fragment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fragment")
+            .field("id", &self.id)
+            .field("num", &self.num)
+            .field("final_fragment", &self.final_fragment)
+            .field("contents", &super::Redacted(self.contents.len()))
+            .finish()
+    }
 }
 
 impl Fragment {
@@ -235,12 +264,22 @@ impl Fragmenter {
 /// Keyed by instruction id: a fragment carrying a different id wipes
 /// whatever was half-assembled, because mosh never interleaves two
 /// instructions on one connection.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct FragmentAssembly {
     current_id: Option<u64>,
     fragments: Vec<Option<Vec<u8>>>,
     arrived: usize,
     total: Option<usize>,
+}
+
+impl std::fmt::Debug for FragmentAssembly {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FragmentAssembly")
+            .field("current_id", &self.current_id)
+            .field("arrived", &self.arrived)
+            .field("total", &self.total)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FragmentAssembly {
