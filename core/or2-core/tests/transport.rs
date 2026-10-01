@@ -44,6 +44,24 @@ async fn direct_tcp_reports_refused_connections() {
     assert_eq!(error.kind(), ErrorKind::ConnectionRefused);
 }
 
+#[tokio::test]
+async fn a_race_reports_the_address_the_winning_connection_reached() {
+    let (dead, dead_endpoint) = listener().await;
+    drop(dead);
+    let (live, live_endpoint) = listener().await;
+    let live_addr = live.local_addr().unwrap();
+    let raced = or2_core::transport::race(
+        &Arc::new(DirectTcp),
+        &[dead_endpoint, live_endpoint],
+        std::time::Duration::from_millis(10),
+    )
+    .await
+    .unwrap();
+    assert_eq!(raced.index, 1);
+    assert_eq!(raced.peer, Some(live_addr));
+    assert_eq!(DirectTcp.peer_addr(&raced.stream), Some(live_addr));
+}
+
 struct RejectAll;
 
 impl client::Handler for RejectAll {

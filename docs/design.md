@@ -218,7 +218,8 @@ Consequences for `or2-core`:
   mosh session is therefore not like SSH; tmux or herdr provides history there.
 - `mosh-server -s` binds the UDP port to the address in the exec channel's `SSH_CONNECTION`, so
   the client must send to the address the SSH connection reached (with address racing, the
-  winning one), not to a different name or address of the same host.
+  winning one), not to a different name or address of the same host. The core pins every UDP
+  socket, roaming included, to that IP and port (`HostHandle::peer_addr`, `Link::adopt`).
 - `mosh-server` refuses to start without a UTF-8 locale. or2 sets `LANG=C.UTF-8` (or the host's
   UTF-8 locale) in the bootstrap command.
 

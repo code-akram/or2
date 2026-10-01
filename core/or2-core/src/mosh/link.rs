@@ -7,6 +7,13 @@
 //! from an older port comes back to that port, which is what keeps a source-port rotation from
 //! costing a round trip.
 //!
+//! **The remote address is pinned.** The server is one IP and port, the address the SSH
+//! connection that ran the bootstrap actually reached. Roaming changes only the LOCAL socket
+//! (a fresh source port, or on Android a socket on the new network): every socket must reach
+//! exactly that address, and one that does not (a host name that has since resolved to a
+//! different IP, even in the same address family) is refused, so the session can never be
+//! steered to an address where its `mosh-server` is not listening.
+//!
 //! Opening a socket resolves the host name and can take as long as the resolver does, so it is
 //! never done inside the link: [`Link::next_socket`] hands the driver an owned future to wait
 //! on next to everything else, and [`Link::adopt`] takes the result.
@@ -52,16 +59,26 @@ pub(super) fn is_too_large(error: &io::Error) -> bool {
 
 pub(super) struct Link<T: DatagramTransport> {
     transport: Arc<T>,
+    /// The pinned peer as an endpoint (an IP literal, so opening a socket resolves nothing).
     endpoint: Endpoint,
     /// Oldest first; the last one carries everything that is sent.
     sockets: Vec<T::Socket>,
-    /// Whether the server is IPv6, which sizes the datagrams for the whole session. Every
-    /// socket must agree: see [`Link::adopt`].
+    /// The only address any socket may reach (IP and port).
+    peer: SocketAddr,
+    /// Whether the server is IPv6, which sizes the datagrams for the whole session.
     peer_ipv6: bool,
     /// When the newest socket first delivered an authenticated datagram.
     newest_worked_since: Option<Instant>,
     /// Whether the datagram last returned by `poll_recv` came in on the newest socket.
     last_on_newest: bool,
+}
+
+/// Whether `socket` is connected to exactly `peer` (IP and port; an IPv6 scope or flow label
+/// is not part of the identity).
+fn reaches<S: DatagramSocket>(socket: &S, peer: SocketAddr) -> bool {
+    socket
+        .peer_addr()
+        .is_ok_and(|address| address.ip() == peer.ip() && address.port() == peer.port())
 }
 
 /// Errors a socket reports once and then recovers from: ICMP unreachable and its kin, and
@@ -81,16 +98,24 @@ fn is_transient(error: &io::Error) -> bool {
 }
 
 impl<T: DatagramTransport> Link<T> {
-    pub(super) async fn open(transport: Arc<T>, endpoint: Endpoint) -> io::Result<Self> {
+    /// Opens the first socket to `peer`, which every later socket must reach too. The first
+    /// socket is checked as well: a transport that connects somewhere else is an error.
+    pub(super) async fn open(transport: Arc<T>, peer: SocketAddr) -> io::Result<Self> {
+        let endpoint = Endpoint::new(&peer.ip().to_string(), peer.port())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let socket = transport.bind(&endpoint).await?;
-        let peer_ipv6 = socket
-            .peer_addr()
-            .is_ok_and(|address: SocketAddr| address.is_ipv6());
+        if !reaches(&socket, peer) {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "the socket reached an address other than the host's",
+            ));
+        }
         Ok(Self {
             transport,
             endpoint,
             sockets: vec![socket],
-            peer_ipv6,
+            peer,
+            peer_ipv6: peer.is_ipv6(),
             newest_worked_since: None,
             last_on_newest: false,
         })
@@ -171,17 +196,15 @@ impl<T: DatagramTransport> Link<T> {
 
     /// Sends from `socket` from now on, keeping the old ones to read from. Refused (and the link
     /// left exactly as it was, still sending from the socket it had: losing the ability to rotate
-    /// is worth strictly less than the session) when it reaches the other address family:
-    /// resolving the name again can land on the other family of a dual-stack host, but the
-    /// datagram size was chosen for the first one and the server listens on one address.
+    /// is worth strictly less than the session) unless the socket reaches the pinned peer
+    /// address, IP and port: only the local side may change when roaming. A socket that reaches
+    /// another address (the name resolved differently, or to the other family of a dual-stack
+    /// host) would send the session's datagrams where its `mosh-server` is not listening.
     pub(super) fn adopt(&mut self, socket: T::Socket) -> io::Result<()> {
-        let ipv6 = socket
-            .peer_addr()
-            .is_ok_and(|address: SocketAddr| address.is_ipv6());
-        if ipv6 != self.peer_ipv6 {
+        if !reaches(&socket, self.peer) {
             return Err(io::Error::new(
                 io::ErrorKind::AddrNotAvailable,
-                "the host now resolves to the other address family",
+                "the new socket reaches an address other than the host's",
             ));
         }
         self.sockets.push(socket);
@@ -260,8 +283,8 @@ mod tests {
 
     async fn link() -> (Link<DirectUdp>, UdpSocket) {
         let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = Endpoint::new("127.0.0.1", server.local_addr().unwrap().port()).unwrap();
-        let link = Link::open(Arc::new(DirectUdp), endpoint).await.unwrap();
+        let peer = server.local_addr().unwrap();
+        let link = Link::open(Arc::new(DirectUdp), peer).await.unwrap();
         (link, server)
     }
 
@@ -400,7 +423,7 @@ mod tests {
 
     struct Scripted {
         mode: Mode,
-        ipv6: bool,
+        peer: SocketAddr,
     }
 
     impl DatagramSocket for Scripted {
@@ -409,11 +432,7 @@ mod tests {
         }
 
         fn peer_addr(&self) -> io::Result<SocketAddr> {
-            Ok(if self.ipv6 {
-                SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 9))
-            } else {
-                SocketAddr::from(([127, 0, 0, 1], 9))
-            })
+            Ok(self.peer)
         }
 
         fn try_send(&self, datagram: &[u8]) -> io::Result<usize> {
@@ -435,11 +454,29 @@ mod tests {
         }
     }
 
-    /// Hands out scripted sockets in order: `(mode, ipv6)`.
-    struct ScriptedTransport(std::sync::Mutex<std::collections::VecDeque<(Mode, bool)>>);
+    fn address(ipv6: bool) -> SocketAddr {
+        if ipv6 {
+            SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 9))
+        } else {
+            SocketAddr::from(([127, 0, 0, 1], 9))
+        }
+    }
+
+    /// Hands out scripted sockets in order: `(mode, the address it reaches)`.
+    struct ScriptedTransport(std::sync::Mutex<std::collections::VecDeque<(Mode, SocketAddr)>>);
 
     impl ScriptedTransport {
+        /// `(mode, ipv6)`: every socket reaches the same address of that family.
         fn new(script: &[(Mode, bool)]) -> Arc<Self> {
+            Self::with_peers(
+                &script
+                    .iter()
+                    .map(|(mode, ipv6)| (*mode, address(*ipv6)))
+                    .collect::<Vec<_>>(),
+            )
+        }
+
+        fn with_peers(script: &[(Mode, SocketAddr)]) -> Arc<Self> {
             Arc::new(Self(std::sync::Mutex::new(
                 script.iter().copied().collect(),
             )))
@@ -450,14 +487,13 @@ mod tests {
         type Socket = Scripted;
 
         async fn bind(&self, _endpoint: &Endpoint) -> io::Result<Scripted> {
-            let (mode, ipv6) = self.0.lock().unwrap().pop_front().expect("scripted socket");
-            Ok(Scripted { mode, ipv6 })
+            let (mode, peer) = self.0.lock().unwrap().pop_front().expect("scripted socket");
+            Ok(Scripted { mode, peer })
         }
     }
 
     async fn scripted(script: &[(Mode, bool)]) -> Link<ScriptedTransport> {
-        let endpoint = Endpoint::new("127.0.0.1", 9).unwrap();
-        let mut link = Link::open(ScriptedTransport::new(script), endpoint)
+        let mut link = Link::open(ScriptedTransport::new(script), address(false))
             .await
             .unwrap();
         for _ in 1..script.len() {
@@ -506,11 +542,89 @@ mod tests {
         assert!(!link.peer_is_ipv6());
         let flipped = Scripted {
             mode: Mode::Silent,
-            ipv6: true,
+            peer: address(true),
         };
         assert!(link.adopt(flipped).is_err());
         assert_eq!(link.open_sockets(), 1, "the link is as it was");
         assert!(!link.peer_is_ipv6());
+    }
+
+    fn at(ip: &str, port: u16) -> SocketAddr {
+        SocketAddr::new(ip.parse().unwrap(), port)
+    }
+
+    #[tokio::test]
+    async fn rotating_answers_of_the_same_family_never_move_the_session() {
+        // The first resolution reached A; later ones (a round-robin name, a changed record)
+        // answer B, C and then A again. Only the local side may change when roaming.
+        let (a, b, c) = (at("127.0.0.1", 9), at("127.0.0.2", 9), at("127.0.0.3", 9));
+        let transport = ScriptedTransport::with_peers(&[
+            (Mode::Silent, a),
+            (Mode::Silent, b),
+            (Mode::Silent, c),
+            (Mode::Silent, a),
+        ]);
+        let mut link = Link::open(transport, a).await.unwrap();
+        for _ in 0..2 {
+            assert!(link.rebind().await.is_err(), "another IP is refused");
+            assert_eq!(link.open_sockets(), 1, "the link is as it was");
+        }
+        link.rebind().await.unwrap();
+        assert_eq!(
+            link.open_sockets(),
+            2,
+            "the pinned address is accepted again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_socket_that_reaches_another_port_or_the_first_socket_elsewhere_is_refused() {
+        let a = at("127.0.0.1", 9);
+        let transport = ScriptedTransport::with_peers(&[
+            (Mode::Silent, a),
+            (Mode::Silent, at("127.0.0.1", 10)),
+        ]);
+        let mut link = Link::open(transport, a).await.unwrap();
+        assert!(link.rebind().await.is_err(), "the same IP on another port");
+        assert_eq!(link.open_sockets(), 1);
+        // The very first socket is held to the pinned address too.
+        let elsewhere = ScriptedTransport::with_peers(&[(Mode::Silent, at("127.0.0.2", 9))]);
+        assert!(Link::open(elsewhere, a).await.is_err());
+    }
+
+    /// DNS that changes its answer: the first bind connects where asked, later ones to a
+    /// different loopback address.
+    struct Rotating(std::sync::atomic::AtomicUsize);
+
+    impl DatagramTransport for Rotating {
+        type Socket = tokio::net::UdpSocket;
+
+        async fn bind(&self, endpoint: &Endpoint) -> io::Result<Self::Socket> {
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                DirectUdp.bind(endpoint).await
+            } else {
+                DirectUdp
+                    .bind(&Endpoint::new("127.0.0.2", endpoint.port()).unwrap())
+                    .await
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn real_sockets_keep_sending_to_the_pinned_server_when_the_name_moves() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer = server.local_addr().unwrap();
+        let mut link = Link::open(Arc::new(Rotating(Default::default())), peer)
+            .await
+            .unwrap();
+        let first = link.local_port().unwrap();
+        assert!(link.rebind().await.is_err());
+        assert_eq!(link.open_sockets(), 1);
+        assert_eq!(link.local_port(), Some(first));
+        link.send(b"still here").unwrap();
+        let mut buf = [0u8; 32];
+        let (n, from) = server.recv_from(&mut buf).await.unwrap();
+        assert_eq!((&buf[..n], from.port()), (&b"still here"[..], first));
     }
 
     #[test]

@@ -71,6 +71,14 @@ pub trait Transport: Send + Sync + 'static {
 
     fn connect(&self, endpoint: &Endpoint)
     -> impl Future<Output = io::Result<Self::Stream>> + Send;
+
+    /// The remote address `stream` actually reached, when the transport knows it. A host name
+    /// can resolve to several addresses and to different ones over time, so this (not the
+    /// name) is what later datagram traffic to the same host must be pinned to (mosh).
+    /// `None` for a transport that carries no such address (a tunnel, a test pipe).
+    fn peer_addr(&self, _stream: &Self::Stream) -> Option<SocketAddr> {
+        None
+    }
 }
 
 /// OS sockets: LAN, or a VPN app such as ZeroTier that routes through the OS.
@@ -87,17 +95,23 @@ impl Transport for DirectTcp {
         stream.set_nodelay(true)?;
         Ok(stream)
     }
+
+    fn peer_addr(&self, stream: &TcpStream) -> Option<SocketAddr> {
+        stream.peer_addr().ok()
+    }
 }
 
 /// Each further address starts this long after the previous one started, unless the previous
 /// one failed first.
 pub const RACE_STAGGER: Duration = Duration::from_millis(250);
 
-/// The winner of a [`race`]: its position in the address list and its stream.
+/// The winner of a [`race`]: its position in the address list, its stream and the remote
+/// address the transport says that stream reached ([`Transport::peer_addr`]).
 #[derive(Debug)]
 pub struct Raced<S> {
     pub index: usize,
     pub stream: S,
+    pub peer: Option<SocketAddr>,
 }
 
 /// Every address failed. `errors[i]` is address `i`'s error.
@@ -133,7 +147,8 @@ pub async fn race<T: Transport>(
     stagger: Duration,
 ) -> Result<Raced<T::Stream>, RaceFailure> {
     // Dropping the set aborts every attempt still running.
-    let mut attempts: JoinSet<(usize, io::Result<T::Stream>)> = JoinSet::new();
+    type Attempt<S> = (usize, io::Result<(S, Option<SocketAddr>)>);
+    let mut attempts: JoinSet<Attempt<T::Stream>> = JoinSet::new();
     let mut errors: Vec<Option<io::Error>> = addresses.iter().map(|_| None).collect();
     let mut next = 0;
     let mut next_at = Instant::now();
@@ -144,7 +159,13 @@ pub async fn race<T: Transport>(
                 let transport = Arc::clone(transport);
                 let endpoint = addresses[next].clone();
                 let index = next;
-                attempts.spawn(async move { (index, transport.connect(&endpoint).await) });
+                attempts.spawn(async move {
+                    let connected = transport.connect(&endpoint).await.map(|stream| {
+                        let peer = transport.peer_addr(&stream);
+                        (stream, peer)
+                    });
+                    (index, connected)
+                });
                 next += 1;
                 next_at = Instant::now() + stagger;
             }
@@ -157,7 +178,7 @@ pub async fn race<T: Transport>(
                     Err(error) => std::panic::resume_unwind(error.into_panic()),
                 };
                 match result {
-                    Ok(stream) => return Ok(Raced { index, stream }),
+                    Ok((stream, peer)) => return Ok(Raced { index, stream, peer }),
                     Err(error) => {
                         errors[index] = Some(error);
                         // Only the most recently started attempt's failure brings the next

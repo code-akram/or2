@@ -20,6 +20,7 @@
 //! `Disconnected` and sends each channel's close first; loss closes them with the failure the
 //! connection ended with. Queries still running are dropped, so their callers see `Closed`.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -80,6 +81,7 @@ enum HostEvent {
     Authenticating,
     Connected {
         address_index: usize,
+        peer: Option<SocketAddr>,
         host: Arc<SshHost>,
     },
     TransportEnded(SessionFailure),
@@ -414,8 +416,9 @@ async fn drive<T: Transport>(
                     HostEvent::Authenticating => {
                         driver.transition(HostState::Authenticating).map_err(internal)?;
                     }
-                    HostEvent::Connected { address_index, host } => {
+                    HostEvent::Connected { address_index, peer, host } => {
                         timing = false;
+                        driver.set_peer_addr(peer);
                         if let Some(tap) = tap.take() {
                             let _ = tap.send(Arc::clone(&host));
                         }
@@ -664,7 +667,7 @@ async fn network<T: Transport>(
     tokio::pin!(relay);
     let result = tokio::select! {
         biased;
-        result = hold(request, raced.index, &events, ssh_stream, options, stop) => {
+        result = hold(request, raced.index, raced.peer, &events, ssh_stream, options, stop) => {
             if matches!(result, Ok(CloseReason::Disconnected)) {
                 // russh flushed into the duplex pipe; also drain that pipe to the transport.
                 let _ = timeout(Duration::from_millis(75), &mut relay).await;
@@ -686,6 +689,7 @@ async fn network<T: Transport>(
 async fn hold(
     request: HostConnectRequest,
     address_index: usize,
+    peer: Option<SocketAddr>,
     events: &mpsc::Sender<HostEvent>,
     stream: DuplexStream,
     options: HostOptions,
@@ -716,6 +720,7 @@ async fn hold(
     if events
         .send(HostEvent::Connected {
             address_index,
+            peer,
             host: Arc::clone(&host),
         })
         .await

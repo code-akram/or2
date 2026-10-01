@@ -2,7 +2,7 @@
 //! drive the client, so the lifecycle is covered without a `mosh-server` binary. The live test
 //! against the real one is `tests/mosh_live.rs`.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -26,6 +26,7 @@ use super::super::ssp::transport::{
 use super::*;
 
 const KEY: &str = "zr0jtuYVKJnfJHP/XOZs7A";
+const LOCALHOST: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 const OTHER_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAA";
 
 /// The server side of the protocol: it decrypts what the client sends and answers with host
@@ -206,7 +207,7 @@ fn start_fake(
     let (handle, control) = spawn(
         DirectUdp,
         params(port, key, 20, 5),
-        "127.0.0.1",
+        LOCALHOST,
         Arc::new(Recorder(Mutex::new(sender))),
         None,
         connect_timeout,
@@ -453,8 +454,7 @@ async fn forged_datagrams_do_not_connect_a_session() {
 fn an_invalid_endpoint_is_refused_synchronously() {
     let (sender, _states) = mpsc::channel();
     let observer = Arc::new(Recorder(Mutex::new(sender)));
-    assert!(start(params(60001, KEY, 80, 24), "bad host", observer.clone()).is_err());
-    assert!(start(params(0, KEY, 80, 24), "127.0.0.1", observer).is_err());
+    assert!(start(params(0, KEY, 80, 24), LOCALHOST, observer).is_err());
 }
 
 /// A transport whose sockets open only when told to (after the first `free` binds, which are
@@ -498,7 +498,7 @@ fn start_gated(
     let (handle, control) = spawn(
         transport,
         params(port, KEY, 20, 5),
-        "127.0.0.1",
+        LOCALHOST,
         Arc::new(Recorder(Mutex::new(sender))),
         None,
         CONNECT_TIMEOUT,
@@ -582,4 +582,62 @@ async fn a_rebind_stuck_on_the_resolver_does_not_freeze_the_session() {
         state(&states).await,
         SessionState::Closed(CloseReason::Disconnected)
     );
+}
+
+/// A name whose later resolutions land on another address: the first socket reaches the server
+/// that was asked for, every later one a different loopback IP.
+struct Moving(AtomicUsize);
+
+impl DatagramTransport for Moving {
+    type Socket = <DirectUdp as DatagramTransport>::Socket;
+
+    async fn bind(&self, endpoint: &Endpoint) -> std::io::Result<Self::Socket> {
+        if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            DirectUdp.bind(endpoint).await
+        } else {
+            DirectUdp
+                .bind(&Endpoint::new("127.0.0.2", endpoint.port()).unwrap())
+                .await
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_roam_to_another_address_is_refused_and_the_session_keeps_its_server() {
+    let mut server = FakeServer::new(KEY).await;
+    let (sender, states) = mpsc::channel();
+    let (handle, control) = spawn(
+        Moving(AtomicUsize::new(0)),
+        params(server.port(), KEY, 20, 5),
+        LOCALHOST,
+        Arc::new(Recorder(Mutex::new(sender))),
+        None,
+        CONNECT_TIMEOUT,
+    )
+    .unwrap();
+    let mut grid = Grid::default();
+    let first_port = server
+        .hear(Duration::from_secs(5))
+        .await
+        .unwrap()
+        .from
+        .port();
+    server.say(b"hi").await;
+    assert_eq!(state(&states).await, SessionState::Connected);
+
+    // The roam opens a socket that resolves elsewhere; it is refused, so the client keeps
+    // sending from its old socket to the same server, and replies are still read.
+    control.roam();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    handle.send_text("x".into()).unwrap();
+    let heard = server
+        .hear_until(|heard| heard.iter().any(|h| h.keys == b"x"))
+        .await;
+    assert!(
+        heard.iter().all(|h| h.from.port() == first_port),
+        "nothing left from a new port"
+    );
+    server.say(b"ok").await;
+    grid.wait_for(&handle, "hiok").await;
+    handle.disconnect();
 }

@@ -410,6 +410,7 @@ fn finish(
 }
 
 struct Fixture {
+    port: u16,
     handle: HostHandle,
     states: sync::Receiver<(HostState, std::thread::ThreadId)>,
     shared: Arc<Shared>,
@@ -528,6 +529,7 @@ impl Fixture {
         let (tap, tapped) = oneshot::channel();
         let handle = start_tapped(transport, request, observer, options, Some(tap));
         Self {
+            port,
             handle,
             states,
             shared,
@@ -1395,4 +1397,33 @@ fn a_failed_session_listing_reports_the_last_list_read_not_the_one_from_connect_
     // The probe itself ran once.
     assert_eq!(fixture.shared.probes.load(Ordering::SeqCst), 1);
     fixture.handle.disconnect();
+}
+
+#[test]
+fn the_host_reports_the_address_its_tcp_connection_reached_once_connected() {
+    let fixture = Fixture::start(HostOptions::default(), PROBE_WITH_TMUX, true);
+    assert_eq!(next(&fixture.states), HostState::Authenticating);
+    assert_eq!(
+        next(&fixture.states),
+        HostState::Connected { address_index: 0 }
+    );
+    // Set before `Connected` is reported, so a caller that saw it can read it (mosh pins its
+    // UDP traffic to this IP instead of resolving the host name again).
+    assert_eq!(
+        fixture.handle.peer_addr(),
+        Some(std::net::SocketAddr::from((
+            std::net::Ipv4Addr::LOCALHOST,
+            fixture.port
+        )))
+    );
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+}
+
+#[test]
+fn a_host_that_never_connected_has_no_peer_address() {
+    let (observer, states) = recorder();
+    let handle = connect_host(request(&[("127.0.0.1", dead_port())], &[]), observer);
+    let _ = closed(&states);
+    assert_eq!(handle.peer_addr(), None);
 }

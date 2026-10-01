@@ -20,6 +20,7 @@
 //! ([`HostHandle::capabilities`], [`HostHandle::list_tmux_sessions`]) carry a oneshot reply and
 //! are bounded by [`QUERY_TIMEOUT`].
 
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::{mpsc, oneshot};
@@ -315,6 +316,8 @@ impl HostCommand {
 
 struct Shared {
     state: Mutex<HostState>,
+    /// The remote address the winning TCP connection reached; set before `Connected`.
+    peer: Mutex<Option<SocketAddr>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -324,6 +327,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 pub fn channel(observer: Arc<dyn HostObserver>) -> (HostHandle, HostDriver) {
     let shared = Arc::new(Shared {
         state: Mutex::new(HostState::Connecting),
+        peer: Mutex::new(None),
     });
     let (sender, receiver) = mpsc::unbounded_channel();
     (
@@ -349,6 +353,15 @@ pub struct HostHandle {
 impl HostHandle {
     pub fn state(&self) -> HostState {
         lock(&self.shared.state).clone()
+    }
+
+    /// The remote address the host's TCP connection actually reached (the winner of address
+    /// racing, after name resolution), once it is `Connected`; `None` before that, and for a
+    /// transport that cannot say. This is the address mosh must send its UDP datagrams to:
+    /// the host name may resolve to other addresses, now or later, which are not this
+    /// session's `mosh-server`. Only the IP is meaningful for UDP (the port is the SSH one).
+    pub fn peer_addr(&self) -> Option<SocketAddr> {
+        *lock(&self.shared.peer)
     }
 
     pub fn approve_host_key(&self, fingerprint: &str) -> Result<(), HostError> {
@@ -489,6 +502,12 @@ impl HostDriver {
 
     pub fn state(&self) -> HostState {
         lock(&self.shared.state).clone()
+    }
+
+    /// Records the address the winning connection reached, to be set before the move to
+    /// `Connected` so a handle that sees `Connected` can read it.
+    pub fn set_peer_addr(&self, peer: Option<SocketAddr>) {
+        *lock(&self.shared.peer) = peer;
     }
 
     /// Moves to `next` and notifies the observer. On `Closed` further commands are refused,

@@ -346,7 +346,7 @@ async fn a_real_mosh_server_session() {
     let (handle, control) = mosh::start_with(
         transport.clone(),
         params,
-        "127.0.0.1",
+        std::net::Ipv4Addr::LOCALHOST.into(),
         Arc::new(Observer(Mutex::new(sender))),
         None,
     )

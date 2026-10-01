@@ -797,8 +797,16 @@ resolves the host name and so can take as long as the resolver: the driver runs 
 everything else (`Link::next_socket` is an owned future, `Link::adopt` takes the result), so
 commands, input, frames, health callbacks and a disconnect are served while it runs. An attempt
 is given up after 3 s; a failed or given-up rebind leaves the link as it was and is retried
-after 1 s. A new socket that reaches the other address family is refused (the datagram size is
-fixed at open and the server listens on one address). A datagram refused as too large
+after 1 s. **The remote address is pinned.** The server is one IP and UDP port: the IP the
+SSH connection that ran the bootstrap actually reached, which the caller passes to `start`.
+Roaming changes only the local socket (a fresh source port, or the new network on Android).
+`Link::open` checks that the first socket reaches exactly that address and `Link::adopt`
+refuses (leaving the link as it was) any socket whose peer IP or port differs: a name that
+resolves to another address on a later rebind, a round-robin or changed DNS record, the other
+address family. Sockets are opened from the IP literal, so no resolver is involved, and a
+transport that connects elsewhere anyway is caught by the check (an IPv6 scope id or flow
+label is not part of the identity; scoped link-local IPv6 is not supported for mosh). A
+datagram refused as too large
 (`EMSGSIZE`) drops the datagram size to 500 and stays there, as mosh does. The Android network
 binding in M3 is another `DatagramTransport`.
 
@@ -912,21 +920,26 @@ client was offline for a while. An exec that fails after the server started (a t
 the pid and cannot be cleaned up.
 
 `-s` makes `mosh-server` bind to the server address in the exec channel's `SSH_CONNECTION`
-(wildcard with a warning when it is absent). The UDP host given to `start` must therefore be
+(wildcard with a warning when it is absent). The UDP address given to `start` must therefore be
 the address the SSH connection reached: with address racing, the winning address, not another
-name for the host.
+name or record for the host. The host connection carries it: `Transport::peer_addr(&stream)`
+(`DirectTcp`: the TCP peer) fills `Raced::peer`, the host driver records it before `Connected`,
+and `HostHandle::peer_addr() -> Option<SocketAddr>` exposes it (its IP is what `start` takes;
+the port is SSH's). `None` for a transport that cannot say; M3 must then not start mosh, or
+resolve the name once itself, and pin that.
 
 **`mosh::start`.**
 
 ```rust
-pub fn start(params: MoshParams, host_name: &str, observer: Arc<dyn SessionObserver>)
+pub fn start(params: MoshParams, peer: IpAddr, observer: Arc<dyn SessionObserver>)
     -> Result<SessionHandle, EndpointError>;
-pub fn start_with<T: DatagramTransport>(transport: T, params: MoshParams, host_name: &str,
+pub fn start_with<T: DatagramTransport>(transport: T, params: MoshParams, peer: IpAddr,
     observer: Arc<dyn SessionObserver>, health: Option<Arc<dyn HealthObserver>>)
     -> Result<(SessionHandle, LinkControl), EndpointError>;
 ```
 
-`host_name` plus `params.port` is the endpoint; an invalid one fails synchronously. The
+`peer` (the IP the SSH connection reached, see above) plus `params.port` is the pinned
+address; a zero port fails synchronously. The
 dedicated `or2-mosh` thread owns the `TerminalEngine` and drives the standard lifecycle, with
 the same command, frame and publish rules as the SSH driver:
 
@@ -962,7 +975,9 @@ a fake server that speaks the server half of the protocol (lifecycle, input, res
 remote end, disconnect, timeout, wrong key, forged datagrams, a disconnect or resize while the
 first socket opens, a rebind stuck on a resolver), the sans-IO session against a forged
 server (an unapplicable or garbled diff is not acknowledged), the socket set with scripted
-sockets (failing, starved, other address family), and `Debug` redaction of every protocol type
+sockets (failing, starved, other address family, other IP of the same family, other port,
+rotating DNS answers, a first socket that connects elsewhere), the driver refusing a roam to
+another address, and `Debug` redaction of every protocol type
 that holds keystrokes or host output. `tests/mosh_live.rs` (feature
 `test-support`) bootstraps a real local `mosh-server` over `LocalHost` with `SSH_CONNECTION`
 set to a loopback connection, connects over 127.0.0.1, runs a command, resizes and checks

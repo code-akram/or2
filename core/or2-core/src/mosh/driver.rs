@@ -11,6 +11,7 @@
 
 use std::future::{Future, poll_fn};
 use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,15 +68,17 @@ impl LinkControl {
     }
 }
 
-/// Starts a mosh session over OS UDP sockets. Validates the endpoint synchronously and returns
-/// at once; everything else arrives through `observer`. `host_name` is where the UDP port
-/// `params.port` is reached (normally the host that ran the bootstrap).
+/// Starts a mosh session over OS UDP sockets. Validates the address synchronously and returns
+/// at once; everything else arrives through `observer`. `peer` is the IP address the SSH
+/// connection that ran the bootstrap actually reached (`HostHandle::peer_addr`, not a name
+/// looked up again); the server listens on it at UDP port `params.port`. Every socket of the
+/// session, roaming included, must reach exactly that address.
 pub fn start(
     params: MoshParams,
-    host_name: &str,
+    peer: IpAddr,
     observer: Arc<dyn SessionObserver>,
 ) -> Result<SessionHandle, EndpointError> {
-    Ok(start_with(DirectUdp, params, host_name, observer, None)?.0)
+    Ok(start_with(DirectUdp, params, peer, observer, None)?.0)
 }
 
 /// [`start`] over any [`DatagramTransport`], with a health hook, returning the network control
@@ -83,29 +86,24 @@ pub fn start(
 pub fn start_with<T: DatagramTransport>(
     transport: T,
     params: MoshParams,
-    host_name: &str,
+    peer: IpAddr,
     observer: Arc<dyn SessionObserver>,
     health: Option<Arc<dyn HealthObserver>>,
 ) -> Result<(SessionHandle, LinkControl), EndpointError> {
-    spawn(
-        transport,
-        params,
-        host_name,
-        observer,
-        health,
-        CONNECT_TIMEOUT,
-    )
+    spawn(transport, params, peer, observer, health, CONNECT_TIMEOUT)
 }
 
 fn spawn<T: DatagramTransport>(
     transport: T,
     params: MoshParams,
-    host_name: &str,
+    peer: IpAddr,
     observer: Arc<dyn SessionObserver>,
     health: Option<Arc<dyn HealthObserver>>,
     connect_timeout: Duration,
 ) -> Result<(SessionHandle, LinkControl), EndpointError> {
-    let endpoint = Endpoint::new(host_name, params.port)?;
+    // Only to validate the port; the link builds its own endpoint from the pinned address.
+    Endpoint::new(&peer.to_string(), params.port)?;
+    let peer = SocketAddr::new(peer, params.port);
     let (handle, mut driver) = channel(observer);
     let control = LinkControl {
         roam: Arc::new(Notify::new()),
@@ -119,7 +117,7 @@ fn spawn<T: DatagramTransport>(
             runtime.block_on(async move {
                 let reason = match run(
                     transport,
-                    endpoint,
+                    peer,
                     params,
                     health,
                     roam,
@@ -144,7 +142,7 @@ fn internal(error: impl std::fmt::Display) -> SessionFailure {
 
 async fn run<T: DatagramTransport>(
     transport: T,
-    endpoint: Endpoint,
+    peer: SocketAddr,
     params: MoshParams,
     health: Option<Arc<dyn HealthObserver>>,
     roam: Arc<Notify>,
@@ -156,7 +154,7 @@ async fn run<T: DatagramTransport>(
     // Opening the first socket resolves the host name, which can take as long as the resolver
     // does: a disconnect (or a dropped handle) must not wait for it. A resize is remembered.
     let mut size = params.size;
-    let open = timeout(connect_timeout, Link::open(Arc::new(transport), endpoint));
+    let open = timeout(connect_timeout, Link::open(Arc::new(transport), peer));
     tokio::pin!(open);
     let mut link = loop {
         tokio::select! {
