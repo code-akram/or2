@@ -171,6 +171,10 @@ pub enum PairError {
     Protocol,
     #[error("the connection to the host ended early")]
     ConnectionLost,
+    /// The answer did not prove the host knows the code (an old or wrong code, or someone else
+    /// answering): nothing was believed and the code is not spent.
+    #[error("the host's answer could not be verified")]
+    HostNotAuthenticated,
     /// The person at the host answered no.
     #[error("the host declined the key")]
     Declined,
@@ -200,6 +204,7 @@ impl From<core::PairError> for PairError {
             E::TimedOut => Self::TimedOut,
             E::Protocol => Self::Protocol,
             E::ConnectionLost => Self::ConnectionLost,
+            E::HostNotAuthenticated => Self::HostNotAuthenticated,
             E::Refused(R::Declined) => Self::Declined,
             E::Refused(R::AuthenticationFailed) => Self::AuthenticationFailed,
             E::Refused(R::KeyNotAccepted) => Self::KeyNotAccepted,
@@ -251,16 +256,43 @@ pub async fn pair_submit_key(
         core::PairTiming::default(),
     )
     .await;
-    let spent = matches!(&result, Ok(()) | Err(core::PairError::Refused(_)));
+    let spent = code_is_spent(&result);
     if spent {
         exchange.secret.wipe();
     }
     result.map_err(Into::into)
 }
 
+/// Whether the code has served: a success, or a refusal that carried the host's proof. Anything
+/// the host did not authenticate (including a forged success or refusal) and every network failure
+/// leaves the code usable.
+fn code_is_spent(result: &Result<(), core::PairError>) -> bool {
+    matches!(result, Ok(()) | Err(core::PairError::Refused(_)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_authenticated_outcome_spends_the_code() {
+        use self::core::{PairError as E, Refusal};
+        assert!(code_is_spent(&Ok(())));
+        assert!(code_is_spent(&Err(E::Refused(Refusal::Declined))));
+        for kept in [
+            E::HostNotAuthenticated,
+            E::Protocol,
+            E::TimedOut,
+            E::Unreachable,
+            E::ConnectionLost,
+        ] {
+            assert!(!code_is_spent(&Err(kept)), "{kept:?}");
+        }
+        assert_eq!(
+            PairError::from(E::HostNotAuthenticated),
+            PairError::HostNotAuthenticated
+        );
+    }
 
     const CODE: &str = "or2-pair:1?name=Work%20Mac&user=alice&port=22&a=192.168.1.20\
         &hk=ssh-ed25519%20AAAAC3NzaC1lZDI1NTE5AAAAIAc39XUWT33SvSLy6vA7I83%2BXgmwnHmYtMQRjLeaZ2U7\

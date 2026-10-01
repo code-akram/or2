@@ -2199,7 +2199,8 @@ terminal QR rendering).
 4. **Listens once** on `pair` (a random port, bound only to the LAN/overlay addresses listed,
    never 0.0.0.0 on a public interface) for at most 120 s. Exchange (newline-delimited JSON):
    server → `{"v":1,"nonce":<base64 32B>}`; phone → `{"v":1,"key":"<openssh public key line>",
-   "device":"<label>","mac":<base64 HMAC-SHA256(otp, nonce || key)>}`; server verifies the HMAC
+   "device":"<label>","mac":<base64 HMAC-SHA256(otp, nonce || key)>}` (superseded: see "The exchange" below,
+   version 2 with domain-separated MACs and an authenticated verdict); server verifies the HMAC
    in constant time, prints the key's SHA-256 fingerprint and the device label, and asks
    `Authorize this key for <user>? [y/N]`. On `y` it appends
    `no-agent-forwarding,no-X11-forwarding <key> or2-<device>-<date>` to `authorized_keys`
@@ -2233,7 +2234,7 @@ tests, exchange against the real CLI listener in-process (loopback). Kotlin: rev
 persistence logic with fakes; JVM end-to-end against a CLI listener on loopback; device test
 compiles (camera needs the phone).
 
-## Easy pair: implementation and decisions (FFI API 11)
+## Easy pair: implementation and decisions (FFI API 12)
 
 Implemented on `easy-pair`: `core/or2-pair` (the CLI), `or2_core::pair`, `or2-ffi`'s `pair` module
 and the Android screens. The user guide is [Pair a host](pairing.md). Where the text above left room,
@@ -2260,16 +2261,40 @@ or where the code differs from it, this section is the contract.
 ### The exchange
 
 ```text
-host  -> {"v":1,"nonce":"<base64, 32 bytes>"}
-phone -> {"v":1,"key":"<algo> <base64>","device":"<label>","mac":"<base64 HMAC-SHA256(otp, nonce || key)>"}
-host  -> {"ok":true} | {"ok":false,"reason":"authentication|key|declined|timeout|request|failed"}
+host  -> {"v":2,"nonce":"<base64, 32 bytes>"}
+phone -> {"v":2,"key":"<algo> <base64>","device":"<label>","mac":"<base64 request MAC>"}
+host  -> {"ok":true,"mac":"<base64 verdict MAC>"}
+       | {"ok":false,"reason":"key|declined|timeout|failed|busy","mac":"<base64 verdict MAC>"}
+       | {"ok":false,"reason":"request|authentication"}            (unsigned, see below)
+
+request MAC = HMAC-SHA256(otp, "or2-pair/2 request" 0x00 || nonce || key)
+verdict MAC = HMAC-SHA256(otp, "or2-pair/2 verdict" 0x00 || nonce || verdict 0x00 || fingerprint)
 ```
+
+**Protocol version 2 (this section supersedes version 1, which had no host proof).** The exchange version
+(`v`, not the URI's `or2-pair:1`; the code format did not change) is 2 in all three messages: a phone that
+meets a `v` other than 2 in the hello reports `Protocol` ("the host does not speak this pairing protocol"),
+and a host refuses a request whose `v` is not 2 as `request`. An older phone or host therefore fails
+cleanly; update both.
 
 `otp` here is the 16 decoded bytes; `key` is the exact text of the field, as sent (the phone sends
 `<algorithm> <base64>` and drops the key's comment); `device` is not under the MAC (the host's person sees
-and confirms the key's fingerprint, which is). Lines are bounded (256 bytes for the hello, 512 for the
-reply, 2048 for the request). The host verifies with `Mac::verify_slice` (constant time) **before** it
-looks at or shows anything about the key.
+and confirms the key's fingerprint, which is). `verdict` is `ok` or the refusal reason; `fingerprint` is the
+`SHA256:…` fingerprint of the key the phone sent (empty when the host could not parse it). The domain tags
+differ, so a request MAC can never be replayed as a verdict, nor a verdict from another exchange (other
+nonce) or about another key. Lines are bounded (256 bytes for the hello, 512 for the reply, 2048 for the
+request). The host verifies the request with `Mac::verify_slice` (constant time) **before** it looks at or
+shows anything about the key.
+
+**The host's answer is authenticated.** The phone verifies the verdict MAC in constant time (`Otp::verify_verdict`)
+before it reports success or a refusal, so a responder that does not know the password cannot make the phone
+save a host and trust its key, nor spend its code with a forged refusal. An answer with a missing or wrong MAC
+is `PairError::HostNotAuthenticated` ("the host's answer could not be verified"): nothing is saved, the secret
+is **not** wiped, and the same code can be tried again while the host listens. Refusals the host makes to a
+peer that has not proven it knows the password (`request`, `authentication`) carry **no** MAC on purpose: a
+signed `authentication` for a key of the peer's choosing would be a valid refusal an attacker could replay to a
+phone that sent that key. As a consequence a phone holding a wrong or old code sees `HostNotAuthenticated`, not
+"wrong code". `busy` (a second verified request while the first is being confirmed) is signed.
 
 **Timing.** The phone gives every connect, the hello and the write 10 s (`PairTiming::step`). The wait for
 the verdict is the host's own 120 s window plus a margin (125 s), because that wait is a person typing `y`;
@@ -2354,7 +2379,7 @@ network path: it has no phone, no overlay binding and no async runtime, and it m
 that opens a socket, so the listener is replaceable in tests and the rule's intent (no scattered sockets)
 holds. The **phone** side uses `or2_core::pair` over `Transport` (`DirectTcp` through `race`).
 
-### FFI (API 11)
+### FFI (API 12; 11 before the verdict MAC)
 
 - `parse_pair_payload(text) -> PairOffer` (`PairParseError`: `NotPairingCode`, `UnsupportedVersion`, `TooLong`,
   `Malformed`, `MissingField`/`DuplicateField`/`InvalidField {field}`, `UnknownField`).
@@ -2364,8 +2389,10 @@ holds. The **phone** side uses `or2_core::pair` over `Transport` (`DirectTcp` th
   `toString()` prints a pointer). `exchange` is `None` for a `--no-listen` code.
 - `async pair_submit_key(offer, public_key_line, device_label) -> Result<(), PairError>` (`NoExchange`, `Wiped`,
   `InvalidOffer`, `InvalidKey`, `InvalidDevice`, `Unreachable`, `TimedOut`, `Protocol`, `ConnectionLost`,
-  `Declined`, `AuthenticationFailed`, `KeyNotAccepted`, `HostTimedOut`, `BadRequest`, `Refused`). It wipes the
-  secret on success and when the host refused (the code is spent); after network failures the secret stays so
+  `Declined`, `AuthenticationFailed`, `KeyNotAccepted`, `HostTimedOut`, `BadRequest`, `Refused`, and (API 12)
+  `HostNotAuthenticated`). It wipes the
+  secret on success and when the host refused with a verified answer (the code is spent); after network failures
+  and after `HostNotAuthenticated` the secret stays so
   the same code can be retried while the host listens. Cancelling the coroutine closes the connection.
 - The text of a code is a JVM `String` and cannot be wiped (like a passphrase); it is never logged, never put
   in saved state, and dropped when the flow leaves the screens.

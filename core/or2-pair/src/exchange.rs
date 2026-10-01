@@ -90,13 +90,37 @@ impl Default for Limits {
 /// How long a thread waits in one read before it looks at the clock and the stop flag.
 const SLICE: Duration = Duration::from_millis(50);
 
-/// `HMAC-SHA256(otp, nonce || key)`.
-fn mac_of(otp: &[u8; 16], nonce: &[u8], key: &str) -> Hmac<Sha256> {
+/// The version of the exchange (not of the pairing code): 2 authenticates the host's verdict.
+pub const EXCHANGE_VERSION: u32 = 2;
+/// The MAC domains: distinct, so a MAC made for one purpose is never valid for the other.
+const REQUEST_DOMAIN: &[u8] = b"or2-pair/2 request\0";
+const VERDICT_DOMAIN: &[u8] = b"or2-pair/2 verdict\0";
+
+fn hmac(otp: &[u8; 16], domain: &[u8]) -> Hmac<Sha256> {
     let mut mac =
         <Hmac<Sha256> as KeyInit>::new_from_slice(otp).expect("HMAC accepts a key of any length");
+    mac.update(domain);
+    mac
+}
+
+/// `HMAC-SHA256(otp, "or2-pair/2 request" 0x00 || nonce || key)`.
+fn mac_of(otp: &[u8; 16], nonce: &[u8], key: &str) -> Hmac<Sha256> {
+    let mut mac = hmac(otp, REQUEST_DOMAIN);
     mac.update(nonce);
     mac.update(key.as_bytes());
     mac
+}
+
+/// `HMAC-SHA256(otp, "or2-pair/2 verdict" 0x00 || nonce || verdict 0x00 || fingerprint)`: the
+/// host's proof, in its answer, that it knows the one-time password. `verdict` is `ok` or the
+/// refusal reason; `fingerprint` is that of the key the phone sent.
+fn verdict_mac(otp: &[u8; 16], nonce: &[u8], verdict: &str, fingerprint: &str) -> [u8; 32] {
+    let mut mac = hmac(otp, VERDICT_DOMAIN);
+    mac.update(nonce);
+    mac.update(verdict.as_bytes());
+    mac.update(&[0]);
+    mac.update(fingerprint.as_bytes());
+    mac.finalize().into_bytes().into()
 }
 
 /// What the exchange needs from its surroundings.
@@ -219,15 +243,36 @@ fn read_line(
     }
 }
 
-fn reply(connection: &mut dyn Connection, ok: bool, reason: &str) {
-    let text = if ok {
-        "{\"ok\":true}\n".to_owned()
-    } else {
-        format!("{{\"ok\":false,\"reason\":\"{reason}\"}}\n")
-    };
+fn send(connection: &mut dyn Connection, text: &str) {
     let _ = connection.set_timeout(IO_TIMEOUT);
     let _ = connection.write_all(text.as_bytes());
     let _ = connection.flush();
+}
+
+/// A refusal of a peer that has not proven it knows the password (`request`, `authentication`).
+/// It carries no MAC, and the phone takes it for what it is: unauthenticated. Signing it would
+/// let anyone obtain a valid refusal for a key of their choosing and replay it to a phone.
+fn refuse(connection: &mut dyn Connection, reason: &str) {
+    send(
+        connection,
+        &format!("{{\"ok\":false,\"reason\":\"{reason}\"}}\n"),
+    );
+}
+
+/// The answer to a verified request, signed: `reason` is `None` for success.
+fn answer(
+    connection: &mut dyn Connection,
+    otp: &[u8; 16],
+    nonce: &[u8; 32],
+    reason: Option<&str>,
+    fingerprint: &str,
+) {
+    let mac = STANDARD.encode(verdict_mac(otp, nonce, reason.unwrap_or("ok"), fingerprint));
+    let text = match reason {
+        None => format!("{{\"ok\":true,\"mac\":\"{mac}\"}}\n"),
+        Some(reason) => format!("{{\"ok\":false,\"reason\":\"{reason}\",\"mac\":\"{mac}\"}}\n"),
+    };
+    send(connection, &text);
 }
 
 /// What a connection came to before anyone was asked anything.
@@ -239,8 +284,8 @@ enum Pre {
     Rejected,
     /// A verified request, but another one was already taken: told `busy`.
     Busy,
-    /// A verified request that is the one taken: the attempt.
-    Verified(Request),
+    /// A verified request that is the one taken: the attempt (with the nonce it was made for).
+    Verified(Request, [u8; 32]),
 }
 
 /// The part of a connection that needs no thread-shared state beyond two flags: greet, read the
@@ -253,7 +298,10 @@ fn pre_auth(
     stop: &AtomicBool,
     claimed: &AtomicBool,
 ) -> Pre {
-    let hello = format!("{{\"v\":1,\"nonce\":\"{}\"}}\n", STANDARD.encode(nonce));
+    let hello = format!(
+        "{{\"v\":{EXCHANGE_VERSION},\"nonce\":\"{}\"}}\n",
+        STANDARD.encode(nonce)
+    );
     let wait = until
         .saturating_duration_since(Instant::now())
         .min(IO_TIMEOUT);
@@ -268,15 +316,15 @@ fn pre_auth(
     let line = match read_line(connection, REQUEST_LIMIT, until, stop) {
         Line::Silent => return Pre::Silent,
         Line::Broken => {
-            reply(connection, false, "request");
+            refuse(connection, "request");
             return Pre::Rejected;
         }
         Line::Complete(line) => line,
     };
     let request = match serde_json::from_slice::<Request>(&line) {
-        Ok(request) if request.v == 1 => request,
+        Ok(request) if request.v == EXCHANGE_VERSION => request,
         _ => {
-            reply(connection, false, "request");
+            refuse(connection, "request");
             return Pre::Rejected;
         }
     };
@@ -288,15 +336,18 @@ fn pre_auth(
         .ok()
         .is_some_and(|mac| mac_of(otp, nonce, &request.key).verify_slice(&mac).is_ok());
     if !proven {
-        reply(connection, false, "authentication");
+        refuse(connection, "authentication");
         return Pre::Rejected;
     }
     // The peer knows the one-time password. Only the first such request is the attempt.
     if claimed.swap(true, Ordering::SeqCst) {
-        reply(connection, false, "busy");
+        let fingerprint = KeyLine::parse(&request.key)
+            .map(|key| key.fingerprint())
+            .unwrap_or_default();
+        answer(connection, otp, nonce, Some("busy"), &fingerprint);
         return Pre::Busy;
     }
-    Pre::Verified(request)
+    Pre::Verified(request, *nonce)
 }
 
 /// One connection, start to finish, on the calling thread: what `serve` does for each
@@ -314,7 +365,9 @@ pub fn attempt(
     match pre_auth(connection, &nonce, &session.otp, until, &stop, &claimed) {
         Pre::Silent => Attempt::Silent,
         Pre::Rejected | Pre::Busy => Attempt::Rejected,
-        Pre::Verified(request) => Attempt::Over(authorize(connection, session, deadline, &request)),
+        Pre::Verified(request, nonce) => {
+            Attempt::Over(authorize(connection, session, &nonce, deadline, &request))
+        }
     }
 }
 
@@ -330,11 +383,13 @@ pub enum Attempt {
 fn authorize(
     connection: &mut dyn Connection,
     session: &Session<'_>,
+    nonce: &[u8; 32],
     deadline: Instant,
     request: &Request,
 ) -> Outcome {
+    let otp = &session.otp;
     let Ok(key) = KeyLine::parse(&request.key) else {
-        reply(connection, false, "key");
+        answer(connection, otp, nonce, Some("key"), "");
         return Outcome::KeyRejected;
     };
     let device =
@@ -352,21 +407,21 @@ fn authorize(
     match session.confirm.confirm(&question, deadline) {
         Answer::Yes => {}
         Answer::No => {
-            reply(connection, false, "declined");
+            answer(connection, otp, nonce, Some("declined"), &fingerprint);
             return Outcome::Declined {
                 device,
                 fingerprint,
             };
         }
         Answer::TimedOut => {
-            reply(connection, false, "timeout");
+            answer(connection, otp, nonce, Some("timeout"), &fingerprint);
             return Outcome::TimedOut;
         }
     }
 
     match authorized_keys::add(session.account, &key, &device, (session.now)()) {
         Ok(added) => {
-            reply(connection, true, "");
+            answer(connection, otp, nonce, None, &fingerprint);
             Outcome::Authorized {
                 added,
                 device,
@@ -374,7 +429,7 @@ fn authorize(
             }
         }
         Err(error) => {
-            reply(connection, false, "failed");
+            answer(connection, otp, nonce, Some("failed"), &fingerprint);
             Outcome::WriteFailed(error)
         }
     }
@@ -401,7 +456,7 @@ struct Book {
 
 impl Book {
     /// Takes in what a finished connection reports; the verified request, if it was one.
-    fn absorb(&mut self, report: Report) -> Option<(Box<dyn Connection>, Request)> {
+    fn absorb(&mut self, report: Report) -> Option<(Box<dyn Connection>, Request, [u8; 32])> {
         self.total -= 1;
         if let Some(count) = self.active.get_mut(&report.peer) {
             *count -= 1;
@@ -413,7 +468,7 @@ impl Book {
                 self.stats.rejected += 1;
                 *self.failures.entry(report.peer).or_default() += 1;
             }
-            Pre::Verified(request) => return report.connection.map(|c| (c, request)),
+            Pre::Verified(request, nonce) => return report.connection.map(|c| (c, request, nonce)),
         }
         None
     }
@@ -455,8 +510,8 @@ pub fn serve(listener: &mut dyn PairListener, session: &Session<'_>, deadline: I
             while let Ok(report) = receiver.try_recv() {
                 verified = verified.or_else(|| book.absorb(report));
             }
-            if let Some((mut winner, request)) = verified {
-                break authorize(winner.as_mut(), session, deadline, &request);
+            if let Some((mut winner, request, nonce)) = verified {
+                break authorize(winner.as_mut(), session, &nonce, deadline, &request);
             }
             let Some(connection) = connection else {
                 continue;
@@ -479,7 +534,7 @@ pub fn serve(listener: &mut dyn PairListener, session: &Session<'_>, deadline: I
             scope.spawn(move || {
                 let mut connection = connection;
                 let pre = pre_auth(connection.as_mut(), &nonce, &otp, until, stop, claimed);
-                let keep = matches!(pre, Pre::Verified(_)).then_some(connection);
+                let keep = matches!(pre, Pre::Verified(..)).then_some(connection);
                 let _ = sender.send(Report {
                     peer,
                     pre,
@@ -610,11 +665,67 @@ mod tests {
         [byte; 32]
     }
 
+    fn fingerprint_of(key: &str) -> String {
+        KeyLine::parse(key).unwrap().fingerprint()
+    }
+
+    /// The signed answer line (without its newline) for a host that sent `nonce_of(7)`.
+    fn verdict_json(reason: Option<&str>, fingerprint: &str) -> String {
+        let mac = STANDARD.encode(verdict_mac(
+            &OTP,
+            &nonce_of(7),
+            reason.unwrap_or("ok"),
+            fingerprint,
+        ));
+        match reason {
+            None => format!("{{\"ok\":true,\"mac\":\"{mac}\"}}"),
+            Some(reason) => {
+                format!("{{\"ok\":false,\"reason\":\"{reason}\",\"mac\":\"{mac}\"}}")
+            }
+        }
+    }
+
+    #[test]
+    fn the_macs_match_an_independent_implementation() {
+        // Computed with Python's hmac module: key 00..0f, nonce 32 x 0x07,
+        //   request: b"or2-pair/2 request\0" + nonce + key line
+        //   verdict: b"or2-pair/2 verdict\0" + nonce + verdict + b"\0" + fingerprint
+        let fingerprint = "SHA256:kY2vpQbIHmUhbgG5ANuAICLEcGLAYOduVWjw0y23ZPo";
+        assert_eq!(fingerprint_of(PHONE), fingerprint);
+        let request = mac_of(&OTP, &nonce_of(7), PHONE).finalize().into_bytes();
+        assert_eq!(
+            STANDARD.encode(request),
+            "PAaLIftH99RZ4M9f4XYmuaNXZaaXLbn9L5onzCzD/uA="
+        );
+        for (verdict, expected) in [
+            ("ok", "pnjPCUiNgflvbFCdB52UgxklAPfsYSTYKafVtqi4wJ0="),
+            ("declined", "XGj3vyEPqhMIuIpTumQM5/HZDX9kXLQHm35L/VLtx8I="),
+            ("timeout", "7rvvjU4QtylEpSZgjX8nuJ8RF33t53B3JHuDg0WSjX0="),
+            ("key", "UXvICon8g7Tm3oN6QqiFJJeIkDkoE/pR3KEYRmm53CI="),
+            ("failed", "m3RXXcSy0Te3yym/VQOEASlbGFHu/Kq8VEjJjD3BUIc="),
+            ("busy", "gWUCwkCLWARDtf5ephAmoG4Uy8IBxz0baGx8240/ZgU="),
+        ] {
+            assert_eq!(
+                STANDARD.encode(verdict_mac(&OTP, &nonce_of(7), verdict, fingerprint)),
+                expected,
+                "{verdict}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_request_and_verdict_domains_are_distinct() {
+        let nonce = nonce_of(7);
+        let verdict = verdict_mac(&OTP, &nonce, "ok", "SHA256:x");
+        let request = mac_of(&OTP, &nonce, "ok\0SHA256:x").finalize().into_bytes();
+        assert_ne!(verdict[..], request[..]);
+    }
+
     /// A request a phone holding `otp` would send for a host that sent `nonce`.
     fn request_for(otp: &[u8; 16], nonce: &[u8; 32], key: &str, device: &str) -> Vec<u8> {
         let mac = mac_of(otp, nonce, key).finalize().into_bytes();
         let mut line = serde_json::json!({
-            "v": 1, "key": key, "device": device, "mac": STANDARD.encode(mac),
+            "v": 2, "key": key, "device": device, "mac": STANDARD.encode(mac),
         })
         .to_string()
         .into_bytes();
@@ -689,9 +800,9 @@ mod tests {
         let lines = written(&connection);
         assert_eq!(
             lines[0],
-            format!("{{\"v\":1,\"nonce\":\"{}\"}}", STANDARD.encode(nonce_of(7)))
+            format!("{{\"v\":2,\"nonce\":\"{}\"}}", STANDARD.encode(nonce_of(7)))
         );
-        assert_eq!(lines[1], "{\"ok\":true}");
+        assert_eq!(lines[1], verdict_json(None, &fingerprint_of(PHONE)));
         let keys = fixture.authorized_keys().unwrap();
         assert_eq!(
             keys,
@@ -751,7 +862,7 @@ mod tests {
         let fixture = Fixture::new(Answer::Yes);
         for mac in ["", "!!!", "AAAA", "short"] {
             let line =
-                format!("{{\"v\":1,\"key\":\"{PHONE}\",\"device\":\"d\",\"mac\":\"{mac}\"}}\n");
+                format!("{{\"v\":2,\"key\":\"{PHONE}\",\"device\":\"d\",\"mac\":\"{mac}\"}}\n");
             let mut connection = Script::new(&[line.as_bytes()]);
             assert!(
                 matches!(fixture.run(&mut connection), Attempt::Rejected),
@@ -771,7 +882,7 @@ mod tests {
         ));
         assert_eq!(
             written(&connection)[1],
-            "{\"ok\":false,\"reason\":\"declined\"}"
+            verdict_json(Some("declined"), &fingerprint_of(PHONE))
         );
         assert!(fixture.authorized_keys().is_none());
     }
@@ -787,7 +898,7 @@ mod tests {
         ));
         assert_eq!(
             written(&connection)[1],
-            "{\"ok\":false,\"reason\":\"timeout\"}"
+            verdict_json(Some("timeout"), &fingerprint_of(PHONE))
         );
         assert!(fixture.authorized_keys().is_none());
     }
@@ -805,7 +916,7 @@ mod tests {
                 ),
                 "{key}"
             );
-            assert_eq!(written(&connection)[1], "{\"ok\":false,\"reason\":\"key\"}");
+            assert_eq!(written(&connection)[1], verdict_json(Some("key"), ""));
         }
         assert!(fixture.confirm.asked.borrow().is_empty());
     }
@@ -831,7 +942,7 @@ mod tests {
     fn malformed_requests_get_a_request_refusal_and_are_not_the_attempt() {
         let fixture = Fixture::new(Answer::Yes);
         let huge = vec![b'x'; REQUEST_LIMIT + 10];
-        let wrong_version = b"{\"v\":2,\"key\":\"k\",\"device\":\"d\",\"mac\":\"m\"}\n".to_vec();
+        let wrong_version = b"{\"v\":1,\"key\":\"k\",\"device\":\"d\",\"mac\":\"m\"}\n".to_vec();
         for input in [
             b"not json\n".to_vec(),
             b"{}\n".to_vec(),
@@ -891,7 +1002,7 @@ mod tests {
         ));
         assert_eq!(
             written(&connection)[1],
-            "{\"ok\":false,\"reason\":\"failed\"}"
+            verdict_json(Some("failed"), &fingerprint_of(PHONE))
         );
     }
 
@@ -1245,5 +1356,53 @@ mod tests {
         let served = serve_with(&fixture, &mut feeder, limits, Duration::from_millis(900));
         assert_eq!(served.stats.dropped, 1, "{:?}", served.stats);
         assert!(late.lock().unwrap().output.is_empty(), "never greeted");
+    }
+
+    // --- Finding 5: the host proves its verdict ----------------------------------------------
+
+    #[test]
+    fn a_second_verified_request_is_told_busy_with_a_signed_answer() {
+        let request = request_for(&OTP, &nonce_of(7), PHONE, "phone");
+        let mut connection = Script::new(&[&request]);
+        let claimed = AtomicBool::new(true);
+        let pre = pre_auth(
+            &mut connection,
+            &nonce_of(7),
+            &OTP,
+            Instant::now() + Duration::from_secs(1),
+            &AtomicBool::new(false),
+            &claimed,
+        );
+        assert!(matches!(pre, Pre::Busy));
+        assert_eq!(
+            written(&connection)[1],
+            verdict_json(Some("busy"), &fingerprint_of(PHONE))
+        );
+    }
+
+    #[test]
+    fn refusals_before_the_proof_carry_no_mac_so_nobody_can_collect_one() {
+        // A signed `authentication` for a key of the peer's choosing would be a valid refusal for
+        // a phone that sent that key: refusals of unauthenticated peers are never signed.
+        let fixture = Fixture::new(Answer::Yes);
+        let mut wrong = OTP;
+        wrong[3] ^= 1;
+        let mut bad_proof = Script::new(&[&request_for(&wrong, &nonce_of(7), PHONE, "phone")]);
+        assert!(matches!(fixture.run(&mut bad_proof), Attempt::Rejected));
+        assert_eq!(
+            written(&bad_proof)[1],
+            "{\"ok\":false,\"reason\":\"authentication\"}"
+        );
+        // An old phone (exchange version 1, MAC without the domain) is refused as a bad request.
+        let old = format!(
+            "{{\"v\":1,\"key\":\"{PHONE}\",\"device\":\"d\",\"mac\":\"{}\"}}\n",
+            STANDARD.encode(OTP)
+        );
+        let mut old_phone = Script::new(&[old.as_bytes()]);
+        assert!(matches!(fixture.run(&mut old_phone), Attempt::Rejected));
+        assert_eq!(
+            written(&old_phone)[1],
+            "{\"ok\":false,\"reason\":\"request\"}"
+        );
     }
 }

@@ -137,10 +137,13 @@ chmod 600 ~/.ssh/authorized_keys`. On Windows, an administrator's keys live in
 `C:\ProgramData\ssh\administrators_authorized_keys`, which `or2-pair` does not touch: add the key
 there yourself (`--no-listen`).
 
-### "The pairing code did not verify" or "already used"
+### "The host's answer could not be verified"
 
-Each run makes a new one-time code, good for one attempt. A second scan, an old screenshot or a
-restart of `or2-pair` needs a fresh run.
+The phone only believes an answer that proves the host knows the one-time code. It cannot prove
+that when the code is old (an earlier run, a screenshot, a restart of `or2-pair`), when it is for
+another host, or when something else answered. Run `or2-pair` again and scan the new code; the
+phone's code is not used up, and `or2-pair` stays open and counts the refused connection. An
+older `or2-pair` or app (pairing protocol 1, before this check) is refused the same way: update both.
 
 ### The host has no ED25519 key
 
@@ -154,7 +157,10 @@ RSA 4096 key may produce a code that is large; addresses are dropped from the en
 - The QR carries the host's public key, so the phone trusts it from the scan; it also carries a
   one-time password that never crosses the network. The phone proves it knows the password with
   an HMAC over the host's fresh nonce and its key; the host checks that in constant time and
-  refuses a replay.
+  refuses a replay. The host's answer carries an HMAC of its own (over the nonce, the verdict and
+  the key's fingerprint), which the phone verifies before it saves the host or believes a refusal,
+  so someone on the network who does not know the code cannot make the phone trust a host that
+  never confirmed anything.
 - The listener serves one attempt, then closes (or after 120 seconds). An attempt is a request
   whose proof verifies, which only the phone that scanned the code can make. A port scan, a stray
   byte or a wrong code is refused and does not end your pairing (`or2-pair` counts them in its

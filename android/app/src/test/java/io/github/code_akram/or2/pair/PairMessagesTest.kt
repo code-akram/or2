@@ -16,6 +16,7 @@ class PairMessagesTest {
         PairException.InvalidDevice(), PairException.Unreachable(), PairException.TimedOut(), PairException.Protocol(),
         PairException.ConnectionLost(), PairException.Declined(), PairException.AuthenticationFailed(),
         PairException.KeyNotAccepted(), PairException.HostTimedOut(), PairException.BadRequest(), PairException.Refused(),
+        PairException.HostNotAuthenticated(),
     )
 
     private val everyParseError = listOf(

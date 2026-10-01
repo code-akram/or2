@@ -153,10 +153,9 @@ fn a_wrong_password_is_refused_but_does_not_end_the_listener() {
         )
     });
     let (wrong, asked_after_wrong, right) = result.phone.unwrap();
-    assert_eq!(
-        wrong,
-        Err(PairError::Refused(Refusal::AuthenticationFailed))
-    );
+    // The host cannot prove anything to a phone that holds another password, so the phone
+    // believes neither the refusal nor anything else, and its code is not spent.
+    assert_eq!(wrong, Err(PairError::HostNotAuthenticated));
     assert_eq!(asked_after_wrong, 0, "nothing was shown to the person");
     assert_eq!(right, Ok(()));
     assert_eq!(result.exit.unwrap(), Exit::Paired);
@@ -166,6 +165,56 @@ fn a_wrong_password_is_refused_but_does_not_end_the_listener() {
         result.output
     );
     assert!(world.authorized_keys().unwrap().contains(&key));
+}
+
+/// A man in the middle for one connection: forwards everything, but rewrites the host's
+/// refusals into successes (the proof it cannot make stays what it was).
+fn flipping_proxy(target: std::net::SocketAddr) -> std::net::SocketAddr {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut client, _) = listener.accept().unwrap();
+        let upstream = std::net::TcpStream::connect(target).unwrap();
+        let mut upstream_write = upstream.try_clone().unwrap();
+        let mut client_read = client.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut client_read, &mut upstream_write);
+        });
+        for line in BufReader::new(upstream).lines() {
+            let Ok(line) = line else { break };
+            let line = line.replace("\"ok\":false", "\"ok\":true");
+            if client.write_all(format!("{line}\n").as_bytes()).is_err() {
+                break;
+            }
+        }
+    });
+    address
+}
+
+#[test]
+fn the_phone_does_not_believe_a_success_the_host_did_not_send() {
+    // Finding 5 end to end: the real host declines; a party on the path turns its refusal into
+    // a success. The phone checks the host's proof, so it reports an unverified answer and not
+    // a paired host.
+    let world = World::new();
+    let key = phone_key();
+    let result = pair(
+        &world,
+        &options(),
+        &Auto::new(Answer::No),
+        WINDOW,
+        |ready| {
+            let proxy = flipping_proxy(ready.listening[0]);
+            let code = ready
+                .payload
+                .replace(&ready.listening[0].to_string(), &proxy.to_string());
+            phone_pairs(&code, &key, "phone")
+        },
+    );
+    assert_eq!(result.phone, Some(Err(PairError::HostNotAuthenticated)));
+    assert_eq!(result.exit.unwrap(), Exit::Declined);
+    assert!(world.authorized_keys().is_none());
 }
 
 #[test]

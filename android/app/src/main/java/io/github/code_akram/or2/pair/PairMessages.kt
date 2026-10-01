@@ -19,6 +19,8 @@ fun pairErrorMessage(error: PairException): String = when (error) {
     is PairException.Declined -> "The host declined the key, so nothing was changed. Run or2-pair again to retry."
     is PairException.AuthenticationFailed ->
         "The host did not accept the code. It may already have been used: run or2-pair again and scan the new one."
+    is PairException.HostNotAuthenticated ->
+        "The host's answer could not be verified, so nothing was saved. The code may be old, or this is not the host that made it: run or2-pair again and scan the new code."
     is PairException.HostTimedOut, is PairException.TimedOut ->
         "Nobody confirmed on the host in time. Run or2-pair again and answer y at its prompt."
     is PairException.Unreachable ->

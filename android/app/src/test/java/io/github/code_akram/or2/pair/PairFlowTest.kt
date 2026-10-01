@@ -246,6 +246,7 @@ class PairFlowTest {
         for ((failure, fragment) in listOf(
             PairException.Declined() to "declined",
             PairException.AuthenticationFailed() to "already have been used",
+            PairException.HostNotAuthenticated() to "could not be verified",
             PairException.HostTimedOut() to "Nobody confirmed",
             PairException.TimedOut() to "Nobody confirmed",
             PairException.Unreachable() to "same network",
