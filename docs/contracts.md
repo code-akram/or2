@@ -2441,9 +2441,19 @@ only its own slot and an honest phone is served at once (the previous one-at-a-t
 hold every phone behind it for 8-10 s, longer than the phone's 10 s wait for the greeting). What an
 unauthenticated peer can cost is bounded: each connection has 8 s in total (`PRE_AUTH`) to deliver its one
 request line (at most 2048 bytes); at most 16 connections are handled at once and 4 per peer address (the
-phone races up to four endpoints), further ones are closed unanswered rather than left queued; a peer address
-whose requests were refused 5 times is no longer greeted; every thread looks at a stop flag between short
-reads, so the listener ends promptly. Only the first verified request is taken: a second verified request
+phone races up to four endpoints), further ones are closed unanswered rather than left queued; every thread
+looks at a stop flag between short reads, so the listener ends promptly. **A refusal history slows a peer
+address, it never bans it.** Each peer address has a score: +1 per refused request (junk, a wrong proof;
+silence and dropped connections do not count), forgiven at 1 per 2 s of quiet, capped at 32. The first 5
+are free. Every refusal past that earns a pause of 250 ms doubled per further refusal, capped at **2 s**,
+in which that address's new connections are closed unanswered; the pause and the score drain by themselves.
+The earlier rule (five refusals, ignored for the rest of the window) let anyone sharing the phone's source
+address (a NAT or proxy, another app on the phone) lock the honest phone out of its whole window without the
+code. Now such a peer can slow the pairing only while it keeps probing, and the same code works a couple of
+seconds after it stops; it never obtains a key and never spends the code. A peer that probes continuously
+at the pause's edge can still make an honest phone behind the same address fail to connect repeatedly (the
+phone reports "connection lost" and can retry); that residual denial needs sustained traffic from the same
+address and the 120 s window still bounds it. The records are swept when 256 addresses accumulate. Only the first verified request is taken: a second verified request
 while the first is being confirmed is answered `{"ok":false,"reason":"busy"}` (the phone reports it as a
 generic refusal). The confirmation and the write run on the listener's own thread.
 

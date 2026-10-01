@@ -60,8 +60,32 @@ fn a_signed_success_relabelled_as_a_refusal_is_not_authentic() {
     assert_eq!(confirm.asked.lock().unwrap().len(), 1);
 }
 
+/// One unauthenticated probe from this machine's loopback address (the honest phone's address
+/// in these tests): a bare newline, answered with a refusal. `false` when the host did not
+/// greet it (it is being slowed down).
+fn probe(listening: std::net::SocketAddr) -> bool {
+    let Ok(mut socket) = TcpStream::connect(listening) else {
+        return false;
+    };
+    socket
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let mut reader = BufReader::new(socket.try_clone().unwrap());
+    let mut hello = String::new();
+    if reader.read_line(&mut hello).unwrap_or(0) == 0 {
+        return false;
+    }
+    assert!(hello.contains("nonce"));
+    socket.write_all(b"\n").unwrap();
+    let mut refusal = String::new();
+    let _ = reader.read_line(&mut refusal);
+    refusal.contains("request")
+}
+
 #[test]
-fn five_probes_block_an_honest_phone_sharing_the_peer_address() {
+fn five_probes_do_not_slow_an_honest_phone_sharing_the_peer_address() {
+    // Review of 6afa42e: five probes used to ban the address for the rest of the window, so an
+    // attacker sharing the phone's source address could lock the honest phone out.
     let world = World::new();
     let confirm = Auto::new(Answer::Yes);
     let key = phone_key();
@@ -69,29 +93,47 @@ fn five_probes_block_an_honest_phone_sharing_the_peer_address() {
         &world,
         &options(),
         &confirm,
-        Duration::from_secs(2),
+        Duration::from_secs(5),
         |ready| {
             for _ in 0..5 {
-                let mut socket = TcpStream::connect(ready.listening[0]).unwrap();
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(1)))
-                    .unwrap();
-                let mut reader = BufReader::new(socket.try_clone().unwrap());
-                let mut hello = String::new();
-                reader.read_line(&mut hello).unwrap();
-                assert!(hello.contains("nonce"));
-                socket.write_all(b"\n").unwrap();
-                let mut refusal = String::new();
-                reader.read_line(&mut refusal).unwrap();
-                assert!(refusal.contains("request"));
+                assert!(probe(ready.listening[0]));
             }
-            std::thread::sleep(Duration::from_millis(100));
             phone_pairs(&ready.payload, &key, "honest-phone")
         },
     );
-    assert_eq!(result.phone.unwrap(), Err(PairError::ConnectionLost));
-    assert!(world.authorized_keys().is_none());
-    assert!(confirm.asked.lock().unwrap().is_empty());
+    assert_eq!(result.phone.unwrap(), Ok(()));
+    assert!(world.authorized_keys().unwrap().contains(&key));
+    assert_eq!(confirm.asked.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_flood_of_probes_only_slows_the_peer_for_a_few_seconds() {
+    let world = World::new();
+    let confirm = Auto::new(Answer::Yes);
+    let key = phone_key();
+    let result = pair(
+        &world,
+        &options(),
+        &confirm,
+        Duration::from_secs(12),
+        |ready| {
+            let mut greeted = 0;
+            for _ in 0..40 {
+                greeted += usize::from(probe(ready.listening[0]));
+            }
+            // Past the free ones the host stops greeting for a while (bounded work).
+            assert!(greeted < 40, "{greeted}");
+            // Right away the honest phone is slowed down too: it cannot tell it from the probes.
+            let early = phone_pairs(&ready.payload, &key, "honest-phone");
+            assert_eq!(early, Err(PairError::ConnectionLost));
+            // But the slowdown is a few seconds, not the rest of the window: the same code works.
+            std::thread::sleep(Duration::from_millis(3200));
+            phone_pairs(&ready.payload, &key, "honest-phone")
+        },
+    );
+    assert_eq!(result.phone.unwrap(), Ok(()));
+    assert!(world.authorized_keys().unwrap().contains(&key));
+    assert_eq!(confirm.asked.lock().unwrap().len(), 1);
 }
 
 #[cfg(unix)]

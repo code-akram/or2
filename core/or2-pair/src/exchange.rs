@@ -28,8 +28,12 @@
 //! an unauthenticated peer is bounded ([`Limits`]): each connection has [`PRE_AUTH`] in total to
 //! deliver its one request line (at most [`REQUEST_LIMIT`] bytes), at most [`MAX_ACTIVE`]
 //! connections are handled at once and [`MAX_ACTIVE_PER_PEER`] per peer address (more are closed
-//! unanswered), and a peer address whose requests were refused [`MAX_FAILURES_PER_PEER`] times is
-//! no longer greeted. Only one verified request is taken (a second one is told `busy`): the
+//! unanswered), and a peer address whose requests were refused more than
+//! [`FREE_FAILURES_PER_PEER`] times is slowed down: its connections are closed unanswered for a
+//! pause that starts at [`BACKOFF_BASE`], doubles with each further refusal and never exceeds
+//! [`BACKOFF_MAX`], while the refusals are forgiven one per [`FAILURE_FORGIVENESS`]. Nothing is
+//! permanent: someone who shares the phone's source address can slow its pairing while they keep
+//! probing but cannot lock it out for the rest of the window. Only one verified request is taken (a second one is told `busy`): the
 //! confirmation and the write happen on the listener's own thread.
 
 use std::collections::HashMap;
@@ -64,8 +68,15 @@ pub const PRE_AUTH: Duration = Duration::from_secs(8);
 pub const MAX_ACTIVE: usize = 16;
 /// Connections handled at once from one peer address (the phone races up to four endpoints).
 pub const MAX_ACTIVE_PER_PEER: usize = 4;
-/// A peer address that has sent this many refused requests is not greeted again.
-pub const MAX_FAILURES_PER_PEER: u32 = 5;
+/// A peer address may have this many refused requests (junk, a wrong proof) before it is slowed
+/// down; each one past that earns it a pause in which its connections are closed unanswered.
+pub const FREE_FAILURES_PER_PEER: u32 = 5;
+/// The first pause, doubled by every further refusal.
+pub const BACKOFF_BASE: Duration = Duration::from_millis(250);
+/// The longest pause: a slowed-down peer is never out for more than this at a time.
+pub const BACKOFF_MAX: Duration = Duration::from_secs(2);
+/// A peer is forgiven one refusal for every period it stays quiet.
+pub const FAILURE_FORGIVENESS: Duration = Duration::from_secs(2);
 
 /// How the cost of unauthenticated peers is bounded; the defaults are the module's constants.
 #[derive(Debug, Clone, Copy)]
@@ -73,7 +84,13 @@ pub struct Limits {
     pub pre_auth: Duration,
     pub max_active: usize,
     pub max_active_per_peer: usize,
-    pub max_failures_per_peer: u32,
+    /// Refused requests a peer address may make before it is slowed down.
+    pub free_failures_per_peer: u32,
+    /// The first pause past those, doubled by every further refusal, capped at `backoff_max`.
+    pub backoff_base: Duration,
+    pub backoff_max: Duration,
+    /// One refusal is forgiven per period of quiet.
+    pub failure_forgiveness: Duration,
 }
 
 impl Default for Limits {
@@ -82,7 +99,10 @@ impl Default for Limits {
             pre_auth: PRE_AUTH,
             max_active: MAX_ACTIVE,
             max_active_per_peer: MAX_ACTIVE_PER_PEER,
-            max_failures_per_peer: MAX_FAILURES_PER_PEER,
+            free_failures_per_peer: FREE_FAILURES_PER_PEER,
+            backoff_base: BACKOFF_BASE,
+            backoff_max: BACKOFF_MAX,
+            failure_forgiveness: FAILURE_FORGIVENESS,
         }
     }
 }
@@ -463,12 +483,84 @@ struct Report {
     connection: Option<Box<dyn Connection>>,
 }
 
+/// A peer address's record of refused requests: a score that rises with each refusal and is
+/// forgiven over time, and the pause (if any) it has earned. Nothing here is permanent: the score
+/// drains by itself and a pause is at most `Limits::backoff_max` long, so a peer that shares an
+/// address with the honest phone (a NAT, a proxy, another app on the phone) can slow the phone's
+/// pairing while it keeps probing but can never lock it out for the rest of the window.
+#[derive(Clone, Copy)]
+struct Penalty {
+    score: u32,
+    /// Forgiveness has been applied up to here.
+    as_of: Instant,
+    /// Connections before this instant are closed unanswered.
+    until: Instant,
+}
+
+/// The score is capped, so one flood does not take long to forgive.
+const SCORE_CAP: u32 = 32;
+
+impl Penalty {
+    fn new(now: Instant) -> Self {
+        Self {
+            score: 0,
+            as_of: now,
+            until: now,
+        }
+    }
+
+    /// Takes in a refusal made at `now`.
+    fn refused(&mut self, now: Instant, limits: &Limits) {
+        self.forgive(now, limits);
+        self.score = (self.score + 1).min(SCORE_CAP);
+        if let Some(over) = self
+            .score
+            .checked_sub(limits.free_failures_per_peer)
+            .filter(|over| *over > 0)
+        {
+            let doublings = (over - 1).min(16);
+            let pause = limits
+                .backoff_base
+                .saturating_mul(1 << doublings)
+                .min(limits.backoff_max);
+            self.until = self.until.max(now + pause);
+        }
+    }
+
+    fn forgive(&mut self, now: Instant, limits: &Limits) {
+        let period = limits.failure_forgiveness.as_nanos().max(1);
+        let periods = (now.saturating_duration_since(self.as_of).as_nanos() / period)
+            .min(u128::from(SCORE_CAP)) as u32;
+        if periods > 0 {
+            self.score = self.score.saturating_sub(periods);
+            self.as_of += limits.failure_forgiveness.saturating_mul(periods);
+        }
+        if self.score == 0 {
+            self.as_of = now;
+        }
+    }
+
+    fn paused(&self, now: Instant) -> bool {
+        now < self.until
+    }
+
+    /// Whether the record says nothing any more.
+    fn spent(&self, now: Instant, limits: &Limits) -> bool {
+        let mut later = *self;
+        later.forgive(now, limits);
+        later.score == 0 && !later.paused(now)
+    }
+}
+
+/// How many peer records are kept before the forgiven ones are swept out.
+const PEERS_KEPT: usize = 256;
+
 /// What the listener's thread knows about the connections it has handed out.
 #[derive(Default)]
 struct Book {
     stats: Stats,
     /// Refused requests, per peer address.
-    failures: HashMap<Option<IpAddr>, u32>,
+    failures: HashMap<Option<IpAddr>, Penalty>,
     /// Connections being handled, per peer address, and in all.
     active: HashMap<Option<IpAddr>, usize>,
     total: usize,
@@ -476,7 +568,11 @@ struct Book {
 
 impl Book {
     /// Takes in what a finished connection reports; the verified request, if it was one.
-    fn absorb(&mut self, report: Report) -> Option<(Box<dyn Connection>, Request, [u8; 32])> {
+    fn absorb(
+        &mut self,
+        report: Report,
+        limits: &Limits,
+    ) -> Option<(Box<dyn Connection>, Request, [u8; 32])> {
         self.total -= 1;
         if let Some(count) = self.active.get_mut(&report.peer) {
             *count -= 1;
@@ -486,16 +582,27 @@ impl Book {
             Pre::Busy => self.stats.dropped += 1,
             Pre::Rejected => {
                 self.stats.rejected += 1;
-                *self.failures.entry(report.peer).or_default() += 1;
+                let now = Instant::now();
+                if self.failures.len() >= PEERS_KEPT {
+                    self.failures
+                        .retain(|_, penalty| !penalty.spent(now, limits));
+                }
+                self.failures
+                    .entry(report.peer)
+                    .or_insert_with(|| Penalty::new(now))
+                    .refused(now, limits);
             }
             Pre::Verified(request, nonce) => return report.connection.map(|c| (c, request, nonce)),
         }
         None
     }
 
-    /// Whether a connection from `peer` is not taken on: too many at once, or too many refusals.
+    /// Whether a connection from `peer` is not taken on: too many at once, or the peer is in a
+    /// pause it earned with refused requests (which ends by itself within `backoff_max`).
     fn refuses(&self, peer: Option<IpAddr>, limits: &Limits) -> bool {
-        self.failures.get(&peer).copied().unwrap_or(0) >= limits.max_failures_per_peer
+        self.failures
+            .get(&peer)
+            .is_some_and(|penalty| penalty.paused(Instant::now()))
             || self.total >= limits.max_active
             || self.active.get(&peer).copied().unwrap_or(0) >= limits.max_active_per_peer
     }
@@ -528,7 +635,7 @@ pub fn serve(listener: &mut dyn PairListener, session: &Session<'_>, deadline: I
             // What finished meanwhile counts before the new connection is judged.
             let mut verified = None;
             while let Ok(report) = receiver.try_recv() {
-                verified = verified.or_else(|| book.absorb(report));
+                verified = verified.or_else(|| book.absorb(report, &limits));
             }
             if let Some((mut winner, request, nonce)) = verified {
                 break authorize(winner.as_mut(), session, &nonce, deadline, &request);
@@ -1284,20 +1391,146 @@ mod tests {
         assert_eq!(fixture.authorized_keys().unwrap().lines().count(), 1);
     }
 
+    /// A listener that waits `before` each scripted connection (and after the last, the deadline).
+    struct Paced(VecDeque<(Duration, Script)>);
+
+    impl PairListener for Paced {
+        fn endpoints(&self) -> Vec<SocketAddr> {
+            Vec::new()
+        }
+        fn accept(&mut self, deadline: Instant) -> io::Result<Option<Box<dyn Connection>>> {
+            if let Some((before, next)) = self.0.pop_front() {
+                std::thread::sleep(before);
+                return Ok(Some(Box::new(next) as Box<dyn Connection>));
+            }
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            Ok(None)
+        }
+    }
+
+    // --- Review of 6afa42e, new 2: a refusal history slows a peer, it never bans it ---------
+
     #[test]
-    fn a_peer_that_keeps_failing_is_dropped_after_a_few_tries() {
+    fn the_free_refusals_of_a_peer_do_not_slow_it() {
         let fixture = Fixture::new(Answer::Yes);
         let good = request_for(&OTP, &nonce_of(7), PHONE, "phone");
-        let junk = || Script::new(&[b"junk\n"]);
-        // Every script is from the same peer address (see `Script::peer`): after
-        // MAX_FAILURES_PER_PEER refusals its next connection is closed without a greeting, even
-        // a correct one.
-        let mut scripts: Vec<Script> = (0..MAX_FAILURES_PER_PEER).map(|_| junk()).collect();
+        // Every script is from the same peer address (see `Script::peer`).
+        let mut scripts: Vec<Script> = (0..FREE_FAILURES_PER_PEER)
+            .map(|_| Script::new(&[b"junk\n"]))
+            .collect();
+        scripts.push(Script::new(&[&good]));
+        let (outcome, _) = serve_scripts(&fixture, scripts);
+        assert!(matches!(outcome, Outcome::Authorized { .. }), "{outcome:?}");
+    }
+
+    #[test]
+    fn a_peer_that_keeps_failing_is_paused_for_a_moment() {
+        let fixture = Fixture::new(Answer::Yes);
+        let good = request_for(&OTP, &nonce_of(7), PHONE, "phone");
+        // One refusal past the free ones: the next connection, a correct one, is closed
+        // unanswered because it comes inside the pause.
+        let mut scripts: Vec<Script> = (0..=FREE_FAILURES_PER_PEER)
+            .map(|_| Script::new(&[b"junk\n"]))
+            .collect();
         scripts.push(Script::new(&[&good]));
         let (outcome, left) = serve_scripts(&fixture, scripts);
         assert!(matches!(outcome, Outcome::TimedOut), "{outcome:?}");
         assert_eq!(left, 0);
         assert!(fixture.authorized_keys().is_none());
+    }
+
+    #[test]
+    fn the_pause_ends_by_itself_so_the_phone_gets_through_after_a_flood() {
+        let fixture = Fixture::new(Answer::Yes);
+        let good = request_for(&OTP, &nonce_of(7), PHONE, "phone");
+        let limits = Limits {
+            backoff_base: Duration::from_millis(100),
+            backoff_max: Duration::from_millis(300),
+            ..fast()
+        };
+        let mut paced = VecDeque::new();
+        for _ in 0..40 {
+            paced.push_back((Duration::from_millis(10), Script::new(&[b"junk\n"])));
+        }
+        // Past the longest pause (and a margin), the same peer address is served.
+        paced.push_back((Duration::from_millis(500), Script::new(&[&good])));
+        let served = serve_with(&fixture, &mut Paced(paced), limits, Duration::from_secs(5));
+        assert!(
+            matches!(served.outcome, Outcome::Authorized { .. }),
+            "{:?}",
+            served.outcome
+        );
+    }
+
+    fn penalty_limits() -> Limits {
+        Limits {
+            free_failures_per_peer: 3,
+            backoff_base: Duration::from_millis(250),
+            backoff_max: Duration::from_secs(2),
+            failure_forgiveness: Duration::from_secs(2),
+            ..Limits::default()
+        }
+    }
+
+    #[test]
+    fn penalties_grow_from_the_free_count_double_and_are_capped() {
+        let limits = penalty_limits();
+        let start = Instant::now();
+        let mut penalty = Penalty::new(start);
+        for _ in 0..3 {
+            penalty.refused(start, &limits);
+            assert!(!penalty.paused(start));
+        }
+        let mut pauses = Vec::new();
+        for _ in 0..6 {
+            penalty.refused(start, &limits);
+            pauses.push(penalty.until - start);
+        }
+        assert_eq!(
+            pauses,
+            [250, 500, 1000, 2000, 2000, 2000].map(Duration::from_millis)
+        );
+        // However many refusals follow, the pause never exceeds the cap.
+        for _ in 0..1000 {
+            penalty.refused(start, &limits);
+        }
+        assert_eq!(penalty.until - start, Duration::from_secs(2));
+        assert!(penalty.paused(start + Duration::from_millis(1999)));
+        assert!(!penalty.paused(start + Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn a_quiet_peer_is_forgiven_and_its_record_is_dropped() {
+        let limits = penalty_limits();
+        let start = Instant::now();
+        let mut penalty = Penalty::new(start);
+        for _ in 0..10 {
+            penalty.refused(start, &limits);
+        }
+        assert!(penalty.paused(start));
+        assert!(!penalty.spent(start + Duration::from_secs(2), &limits));
+        // One refusal forgiven per 2 s of quiet: after 20 s all ten are gone.
+        let later = start + Duration::from_secs(20);
+        assert!(penalty.spent(later, &limits));
+        // A new refusal then starts from scratch: free again, no pause.
+        penalty.refused(later, &limits);
+        assert!(!penalty.paused(later));
+        assert_eq!(penalty.score, 1);
+    }
+
+    #[test]
+    fn a_sustained_trickle_does_not_ratchet_the_pause_beyond_the_cap() {
+        let limits = penalty_limits();
+        let start = Instant::now();
+        let mut penalty = Penalty::new(start);
+        // One refusal every 1.5 s, for a long time: the score settles and every pause is capped.
+        let mut now = start;
+        for _ in 0..200 {
+            now += Duration::from_millis(1500);
+            penalty.refused(now, &limits);
+            assert!(penalty.until <= now + limits.backoff_max);
+            assert!(penalty.score <= SCORE_CAP);
+        }
     }
 
     // --- Finding 4: idle peers hold nothing but their own slot ---------------------------
