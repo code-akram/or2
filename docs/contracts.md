@@ -660,8 +660,10 @@ The channel is closed exactly once and the terminal's `Closed` is unchanged. Tes
 (`exec_rendered`: the probe, tmux and herdr execs) takes the same path (the connection holds a
 `Weak` to its own `Arc`, so the `&self` trait method can start one): a confirmation that arrives
 after the exec's deadline (`TimedOut`) is closed by the connection, test
-`an_exec_whose_open_is_confirmed_after_its_deadline_has_the_channel_closed`. The direct-streamlocal
-open (`open_unix`) is still bounded by its own deadline only.
+`an_exec_whose_open_is_confirmed_after_its_deadline_has_the_channel_closed`. So does the
+direct-streamlocal open (`open_unix`: the herdr client, watch and focus sockets), test
+`a_streamlocal_open_confirmed_after_its_deadline_has_the_channel_closed`. Every channel open on
+the connection is therefore the connection's own task.
 
 ### tmux
 

@@ -308,6 +308,8 @@ struct Shared {
     channel_events: Mutex<Option<sync::Sender<(&'static str, russh::ChannelId)>>>,
     focus_hangs: AtomicBool,
     open_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Holds back the confirmation of the next streamlocal open.
+    unix_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 struct Server {
@@ -376,7 +378,19 @@ impl server::Handler for Server {
         reply: server::ChannelOpenHandle,
         _: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        let channel_id = channel.id();
         drop(channel);
+        let gate = self.shared.unix_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            if let Some(tx) = self.shared.channel_events.lock().unwrap().as_ref() {
+                let _ = tx.send(("pending", channel_id));
+            }
+            tokio::spawn(async move {
+                let _ = gate.await;
+                reply.accept().await;
+            });
+            return Ok(());
+        }
         let behaviour = self.shared.streamlocal.lock().unwrap().clone();
         match behaviour {
             Streamlocal::Herdr => reply.accept().await,
@@ -642,6 +656,7 @@ impl Fixture {
             channel_events: Mutex::new(None),
             focus_hangs: AtomicBool::new(false),
             open_gate: Mutex::new(None),
+            unix_gate: Mutex::new(None),
         });
         let (listener, port) = runtime().block_on(async {
             let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -1861,5 +1876,43 @@ fn an_exec_whose_open_is_confirmed_after_its_deadline_has_the_channel_closed() {
             .block_on(ssh.exec_rendered("tmux list-sessions"))
             .is_ok()
     );
+    fixture.handle.disconnect();
+}
+
+#[test]
+fn a_streamlocal_open_confirmed_after_its_deadline_has_the_channel_closed() {
+    let mut fixture = Fixture::connected_with(Duration::from_millis(300), PROBE_WITH_HERDR);
+    let ssh = fixture.ssh();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *fixture.shared.unix_gate.lock().unwrap() = Some(gate);
+    // The server holds the confirmation back past the open's deadline.
+    let error = runtime()
+        .block_on(ssh.open_unix("/run/herdr.sock"))
+        .err()
+        .expect("the open outlasts the deadline");
+    assert_eq!(error, RemoteError::TimedOut);
+    let id = loop {
+        if let ("pending", id) = events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            break id;
+        }
+    };
+    release.send(()).unwrap();
+    let mut closed = false;
+    while let Ok((kind, channel)) = events.recv_timeout(Duration::from_secs(2)) {
+        if kind == "close" && channel == id {
+            closed = true;
+            break;
+        }
+    }
+    assert!(
+        closed,
+        "the late-confirmed streamlocal channel {id:?} was never closed"
+    );
+    // The connection is healthy and the open task is gone.
+    wait_for(|| ssh.outstanding_opens() == 0);
+    // The stream must drop inside the runtime.
+    assert!(runtime().block_on(async { ssh.open_unix("/run/herdr.sock").await.is_ok() }));
     fixture.handle.disconnect();
 }

@@ -228,6 +228,11 @@ impl SshHost {
     /// leaked one counts against the server's `MaxSessions` for the connection's lifetime. The
     /// task ends with its answer, or with the connection ([`SshHost::end_opens`]).
     pub(super) fn start_open(self: &Arc<Self>) -> PendingOpen {
+        self.start_open_of(OpenKind::Session)
+    }
+
+    /// [`SshHost::start_open`] for any kind of channel open.
+    fn start_open_of(self: &Arc<Self>, kind: OpenKind) -> PendingOpen {
         let (answer, reply) = oneshot::channel();
         let host = Arc::clone(self);
         let mut opens = self.opens.lock().unwrap_or_else(PoisonError::into_inner);
@@ -237,7 +242,12 @@ impl SshHost {
             while set.try_join_next().is_some() {}
             set.spawn_on(
                 async move {
-                    let opened = host.handle.channel_open_session().await;
+                    let opened = match kind {
+                        OpenKind::Session => host.handle.channel_open_session().await,
+                        OpenKind::Streamlocal(path) => {
+                            host.handle.channel_open_direct_streamlocal(path).await
+                        }
+                    };
                     // `host` is still held: a failed send means nobody waits any more.
                     if let Err(Ok(channel)) = answer.send(opened) {
                         let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
@@ -326,7 +336,14 @@ impl SshHost {
     }
 }
 
-/// A session channel being opened by the connection ([`SshHost::start_open`]). Dropping it is
+/// Which channel [`SshHost::start_open_of`] opens.
+enum OpenKind {
+    Session,
+    /// `direct-streamlocal@openssh.com` to this socket path.
+    Streamlocal(String),
+}
+
+/// A channel being opened by the connection ([`SshHost::start_open`]). Dropping it is
 /// safe at any moment: the connection closes the channel if the server confirms it later.
 pub(super) struct PendingOpen(
     oneshot::Receiver<Result<russh::Channel<russh_client::Msg>, russh::Error>>,
@@ -452,13 +469,17 @@ impl RemoteHost for SshHost {
     /// connection fails the open with `CONNECT_FAILED`: `Io`. A server with streamlocal
     /// forwarding disabled (or any other refusal) is `Rejected` ([`streamlocal_error`]).
     async fn open_unix(&self, path: &str) -> Result<Self::Stream, RemoteError> {
-        let channel = timeout(
-            self.exec_timeout,
-            self.handle.channel_open_direct_streamlocal(path),
-        )
-        .await
-        .map_err(|_| RemoteError::TimedOut)?
-        .map_err(streamlocal_error)?;
+        // The open is the connection's (see `start_open`): past the deadline, a confirmation that
+        // arrives late is closed by the connection instead of orphaned on it.
+        let mut opening = self
+            .me
+            .upgrade()
+            .ok_or(RemoteError::Closed)?
+            .start_open_of(OpenKind::Streamlocal(path.to_owned()));
+        let channel = timeout(self.exec_timeout, opening.wait())
+            .await
+            .map_err(|_| RemoteError::TimedOut)?
+            .map_err(streamlocal_error)?;
         Ok(channel.into_stream())
     }
 }
