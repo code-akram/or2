@@ -6,11 +6,21 @@
 //! the request's trusted keys, and renders fixed cells plus echoes of the input it receives.
 //! JVM and device tests use it to exercise listener threading, lifecycle, host-key decisions,
 //! frames and input across the real FFI. App code must never call it.
+//!
+//! `contract_probe_host` does the same for a host connection (API 4): see its documentation.
 
+use std::future::Future;
 use std::sync::{Arc, OnceLock};
 
 use or2_core::frame::{
     Cell, CellStyle, CellWidth, Cursor, CursorShape, Frame, Rgb, Row, Scrollback, Underline,
+};
+use or2_core::herdr::{
+    Agent, AgentStatus, HerdrState, HerdrView, HerdrWatchDriver, Pane, Tab, Workspace,
+};
+use or2_core::host::{
+    self as core_host, HerdrSessionInfo, HostCapabilities, HostCommand, HostDriver, HostState,
+    TmuxSession,
 };
 use or2_core::input::{ViewportScroll, text_bytes};
 use or2_core::keys::ClientKey;
@@ -19,12 +29,18 @@ use or2_core::session::{
 };
 use or2_core::term::TerminalSize;
 use or2_core::trust::{self, HostKey, HostKeyVerdict};
+use tokio::sync::watch;
+use tokio::task::JoinSet;
 
+use crate::host::{
+    HostConnectError, HostConnectRequest, HostConnection, HostListener, HostListenerObserver,
+};
 use crate::session::{ConnectError, ConnectRequest, ListenerObserver, Session, SessionListener};
 
 const FOREGROUND: Rgb = Rgb::new(0xd0, 0xd0, 0xd0);
 const BACKGROUND: Rgb = Rgb::new(0x10, 0x10, 0x18);
 const HISTORY_ROWS: u64 = 100;
+const BANNER: &str = "or2 contract probe";
 
 /// Test fixture only; see the module documentation. Never connects to anything.
 #[uniffi::export]
@@ -34,11 +50,24 @@ pub fn contract_probe_session(
 ) -> Result<Arc<Session>, ConnectError> {
     let request = request.validate()?;
     let (handle, driver) = core::channel(Arc::new(ListenerObserver(listener)));
-    std::thread::Builder::new()
-        .name("or2-contract-probe".into())
-        .spawn(move || run(&request.trusted_host_keys, request.size, driver))
-        .expect("spawning the probe thread");
+    spawn_probe_thread("or2-contract-probe", async move {
+        run_session(&request.trusted_host_keys, request.size, driver).await;
+    });
     Ok(Session::new(handle))
+}
+
+/// Runs a probe script on its own thread with a single-threaded runtime, so every callback it
+/// makes comes from a Rust-owned thread, one at a time.
+fn spawn_probe_thread(name: &str, script: impl Future<Output = ()> + Send + 'static) {
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("building the probe runtime")
+                .block_on(script);
+        })
+        .expect("spawning the probe thread");
 }
 
 fn probe_host_key() -> &'static HostKey {
@@ -49,20 +78,23 @@ fn probe_host_key() -> &'static HostKey {
     })
 }
 
-fn run(trusted: &[HostKey], mut size: TerminalSize, mut driver: SessionDriver) {
+fn untrusted_prompt(trusted: &[HostKey]) -> Option<HostKeyPrompt> {
     let presented = probe_host_key();
-    if trust::verify(presented, trusted) != HostKeyVerdict::Trusted {
-        let prompt = HostKeyPrompt {
-            presented: presented.clone(),
-            previously_trusted: trusted.to_vec(),
-        };
+    (trust::verify(presented, trusted) != HostKeyVerdict::Trusted).then(|| HostKeyPrompt {
+        presented: presented.clone(),
+        previously_trusted: trusted.to_vec(),
+    })
+}
+
+async fn run_session(trusted: &[HostKey], mut size: TerminalSize, mut driver: SessionDriver) {
+    if let Some(prompt) = untrusted_prompt(trusted) {
         driver
             .transition(SessionState::AwaitingHostKey(prompt))
             .expect("Connecting -> AwaitingHostKey");
         loop {
-            match driver.blocking_next_command() {
+            match driver.next_command().await {
                 Command::ApproveHostKey { fingerprint }
-                    if fingerprint == presented.fingerprint() =>
+                    if fingerprint == probe_host_key().fingerprint() =>
                 {
                     break;
                 }
@@ -81,16 +113,32 @@ fn run(trusted: &[HostKey], mut size: TerminalSize, mut driver: SessionDriver) {
     driver
         .transition(SessionState::Connected)
         .expect("-> Connected");
+    // Nothing but its own commands ever stops a standalone session.
+    let (_keep_open, stop) = watch::channel(None);
+    serve_terminal(driver, size, BANNER.into(), stop).await;
+}
 
-    let mut screen = Screen::new(size);
+/// Serves one connected terminal session: fixed cells plus echoes of the input it receives.
+/// Ends on `Disconnect`, or when `stop` carries the reason the host closed.
+async fn serve_terminal(
+    mut driver: SessionDriver,
+    size: TerminalSize,
+    title: String,
+    mut stop: watch::Receiver<Option<CloseReason>>,
+) {
+    let mut screen = Screen::new(size, title);
     publish(&mut driver, screen.full());
     loop {
-        match driver.blocking_next_command() {
+        let command = tokio::select! {
+            command = driver.next_command() => command,
+            _ = stop.changed() => {
+                let reason = stop.borrow().clone().unwrap_or(CloseReason::Disconnected);
+                return driver.close(reason);
+            }
+        };
+        match command {
             Command::Resize(new_size) => {
-                screen = Screen {
-                    size: new_size,
-                    ..screen
-                };
+                screen.size = new_size;
                 publish(&mut driver, screen.full());
             }
             Command::Text(text) => {
@@ -144,17 +192,270 @@ fn publish(driver: &mut SessionDriver, frame: Frame) {
     }
 }
 
+/// Test fixture only; see the module documentation. Never connects to anything.
+///
+/// The host uses the production trust check against the request's trusted keys with the same
+/// per-process host key as `contract_probe_session`, then reports `Connected { 0 }`.
+/// `capabilities` and `list_tmux_sessions` return fixed data. `open_terminal` returns a
+/// session served by the M1 probe script without host-key states (`Connecting` to
+/// `Connected`; row 0 names the target). `watch_herdr` goes `Live`, updates once and closes on
+/// `stop()`. Closing the host closes its terminals and watches first.
+#[uniffi::export]
+pub fn contract_probe_host(
+    request: HostConnectRequest,
+    listener: Box<dyn HostListener>,
+) -> Result<Arc<HostConnection>, HostConnectError> {
+    let request = request.validate()?;
+    let (handle, driver) = core_host::channel(Arc::new(HostListenerObserver(listener)));
+    spawn_probe_thread("or2-contract-probe-host", async move {
+        run_host(&request.trusted_host_keys, driver).await;
+    });
+    Ok(HostConnection::new(handle))
+}
+
+fn probe_capabilities() -> HostCapabilities {
+    HostCapabilities {
+        tmux: Some("/usr/bin/tmux".into()),
+        herdr: Some("/home/probe/.local/bin/herdr".into()),
+        mosh_server: None,
+        utf8_locale: "C.UTF-8".into(),
+        herdr_sessions: vec![
+            HerdrSessionInfo {
+                name: "default".into(),
+                running: true,
+                is_default: true,
+            },
+            HerdrSessionInfo {
+                name: "or2-probe".into(),
+                running: false,
+                is_default: false,
+            },
+        ],
+    }
+}
+
+/// Most recently active first, as `list_tmux_sessions` promises.
+fn probe_tmux_sessions() -> Vec<TmuxSession> {
+    [
+        ("main", 3, 1, 1_700_000_000, 1_700_003_600),
+        ("build", 1, 0, 1_700_000_500, 1_700_001_000),
+    ]
+    .into_iter()
+    .map(
+        |(name, windows, attached_clients, created_unix, activity_unix)| TmuxSession {
+            name: name.into(),
+            windows,
+            attached_clients,
+            created_unix,
+            activity_unix,
+        },
+    )
+    .collect()
+}
+
+fn target_title(target: &core_host::TerminalTarget) -> String {
+    use core_host::TerminalTarget as T;
+    match target {
+        T::Shell => format!("{BANNER} shell"),
+        T::Tmux { session_name } => format!("{BANNER} tmux {session_name}"),
+        T::Herdr { session, pane_id } => format!(
+            "{BANNER} herdr {} {}",
+            session.as_deref().unwrap_or("default"),
+            pane_id.as_deref().unwrap_or("-")
+        ),
+    }
+}
+
+async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
+    if let Some(prompt) = untrusted_prompt(trusted) {
+        driver
+            .transition(HostState::AwaitingHostKey(prompt))
+            .expect("Connecting -> AwaitingHostKey");
+        loop {
+            match driver.next_command().await {
+                HostCommand::ApproveHostKey { fingerprint }
+                    if fingerprint == probe_host_key().fingerprint() =>
+                {
+                    break;
+                }
+                HostCommand::RejectHostKey => {
+                    return driver.close(CloseReason::Failed(SessionFailure::HostKeyRejected));
+                }
+                HostCommand::Disconnect => return driver.close(CloseReason::Disconnected),
+                _ => {}
+            }
+        }
+    }
+    driver
+        .transition(HostState::Authenticating)
+        .expect("-> Authenticating");
+    driver
+        .transition(HostState::Connected { address_index: 0 })
+        .expect("-> Connected");
+
+    let (stop_sender, stop) = watch::channel(None);
+    let mut tasks = JoinSet::new();
+    loop {
+        match driver.next_command().await {
+            HostCommand::Capabilities { reply } => {
+                let _ = reply.send(Ok(probe_capabilities()));
+            }
+            HostCommand::ListTmux { reply } => {
+                let _ = reply.send(Ok(probe_tmux_sessions()));
+            }
+            HostCommand::OpenTerminal {
+                target,
+                size,
+                driver: session,
+            } => {
+                tasks.spawn(run_terminal(
+                    session,
+                    size,
+                    target_title(&target),
+                    stop.clone(),
+                ));
+            }
+            HostCommand::WatchHerdr {
+                session,
+                driver: watcher,
+            } => {
+                tasks.spawn(run_herdr_watch(watcher, session, stop.clone()));
+            }
+            HostCommand::Disconnect => break,
+            HostCommand::ApproveHostKey { .. } | HostCommand::RejectHostKey => {}
+        }
+    }
+    // Terminals and watches close first, then the host.
+    let _ = stop_sender.send(Some(CloseReason::Disconnected));
+    while tasks.join_next().await.is_some() {}
+    driver.close(CloseReason::Disconnected);
+}
+
+async fn run_terminal(
+    mut driver: SessionDriver,
+    size: TerminalSize,
+    title: String,
+    stop: watch::Receiver<Option<CloseReason>>,
+) {
+    driver
+        .transition(SessionState::Connected)
+        .expect("Connecting -> Connected");
+    serve_terminal(driver, size, title, stop).await;
+}
+
+async fn run_herdr_watch(
+    mut driver: HerdrWatchDriver,
+    session: Option<String>,
+    mut stop: watch::Receiver<Option<CloseReason>>,
+) {
+    let label = session.unwrap_or_else(|| "default".into());
+    for view in [probe_view(&label, 1, false), probe_view(&label, 2, true)] {
+        driver
+            .transition(HerdrState::Live { view })
+            .expect("-> Live");
+    }
+    tokio::select! {
+        () = driver.stopped() => {}
+        _ = stop.changed() => {}
+    }
+    driver.close();
+}
+
+/// One blocked, one working and one idle agent; `resolved` turns the blocked one into working.
+fn probe_view(label: &str, version: u64, resolved: bool) -> HerdrView {
+    let first = if resolved {
+        AgentStatus::Working
+    } else {
+        AgentStatus::Blocked
+    };
+    let agent = |pane: &str, name: &str, status, seq| {
+        let (workspace, _) = pane.split_once(':').expect("pane ids are workspace:pane");
+        Agent {
+            pane_id: pane.into(),
+            tab_id: format!("{workspace}:t1"),
+            workspace_id: workspace.into(),
+            name: Some(name.into()),
+            agent: Some(name.into()),
+            display_agent: Some(name.to_uppercase()),
+            status,
+            cwd: Some(format!("/home/probe/{name}")),
+            title: None,
+            focused: pane == "w1:p1",
+            state_change_seq: seq,
+        }
+    };
+    let pane = |a: &Agent| Pane {
+        pane_id: a.pane_id.clone(),
+        tab_id: a.tab_id.clone(),
+        workspace_id: a.workspace_id.clone(),
+        label: None,
+        agent: a.agent.clone(),
+        agent_status: a.status,
+        cwd: a.cwd.clone(),
+        title: None,
+        focused: a.focused,
+    };
+    let agents = vec![
+        agent("w1:p1", "claude", first, if resolved { 5 } else { 4 }),
+        agent("w1:p2", "codex", AgentStatus::Working, 2),
+        agent("w2:p1", "pi", AgentStatus::Idle, 1),
+    ];
+    HerdrView {
+        version,
+        protocol: 22,
+        focused_pane_id: Some("w1:p1".into()),
+        workspaces: vec![
+            Workspace {
+                workspace_id: "w1".into(),
+                number: 1,
+                label: label.into(),
+                focused: true,
+                agent_status: first,
+            },
+            Workspace {
+                workspace_id: "w2".into(),
+                number: 2,
+                label: "scratch".into(),
+                focused: false,
+                agent_status: AgentStatus::Idle,
+            },
+        ],
+        tabs: vec![
+            Tab {
+                tab_id: "w1:t1".into(),
+                workspace_id: "w1".into(),
+                number: 1,
+                label: "agents".into(),
+                focused: true,
+                agent_status: first,
+            },
+            Tab {
+                tab_id: "w2:t1".into(),
+                workspace_id: "w2".into(),
+                number: 1,
+                label: "shell".into(),
+                focused: false,
+                agent_status: AgentStatus::Idle,
+            },
+        ],
+        panes: agents.iter().map(pane).collect(),
+        agents,
+    }
+}
+
 struct Screen {
     size: TerminalSize,
+    title: String,
     text_echo: String,
     key_echo: String,
     history_offset: u64,
 }
 
 impl Screen {
-    fn new(size: TerminalSize) -> Self {
+    fn new(size: TerminalSize, title: String) -> Self {
         Self {
             size,
+            title,
             text_echo: String::new(),
             key_echo: String::new(),
             history_offset: HISTORY_ROWS,
@@ -180,7 +481,7 @@ impl Screen {
             ..plain
         };
         let graphemes: Vec<(String, bool, CellStyle)> = match index {
-            0 => ascii("or2 contract probe", plain),
+            0 => ascii(&self.title, plain),
             1 => vec![
                 ("R".into(), false, red_bold),
                 ("界".into(), true, plain),

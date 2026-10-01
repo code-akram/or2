@@ -18,5 +18,6 @@ bindgen = ["uniffi/cli"]
 [dependencies]
 or2-core.workspace = true
 thiserror.workspace = true
-uniffi.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+uniffi = { workspace = true, features = ["tokio"] }
 zeroize.workspace = true
