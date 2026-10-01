@@ -2205,8 +2205,10 @@ terminal QR rendering).
    `Authorize this key for <user>? [y/N]`. On `y` it appends
    `no-agent-forwarding,no-X11-forwarding <key> or2-<device>-<date>` to `authorized_keys`
    (creating `~/.ssh` 0700 / file 0600 if needed, backing up the file first, skipping
-   duplicates) and replies `{"ok":true}`; otherwise `{"ok":false,"reason":…}`. One attempt;
-   any failure or timeout ends the listener. The OTP never crosses the network.
+   duplicates) and replies `{"ok":true,"mac":…}`; otherwise `{"ok":false,"reason":…,"mac":…}`. One
+   *verified* attempt (a request whose HMAC verifies; junk, probes and wrong proofs do not count; see
+   "One attempt" below); a failure after that, or the timeout, ends the listener. The OTP never
+   crosses the network.
    `--no-listen` prints the QR without a listener (the phone then shows its public key line for
    the user to install by hand).
 
@@ -2444,14 +2446,22 @@ holds. The **phone** side uses `or2_core::pair` over `Transport` (`DirectTcp` th
 
 ### Tests
 
-CLI unit tests (73), five tests of the built binary (`tests/cli.rs`: usage, exit codes, `--check`, no listening without a
-terminal, each with a throwaway HOME) and a loopback end-to-end suite in a temporary home (`tests/e2e.rs`, 18: the
+CLI unit tests (103), tests of the built binary (`tests/cli.rs`, 6 with `--all-features`: usage, exit codes, a
+`--user` that is not the account, no listening without a terminal, and `--check`, which only a `test-support`
+build runs because only that build can be pointed at a throwaway account with `OR2_PAIR_TEST_HOME` and
+`OR2_PAIR_TEST_USER`) and a loopback end-to-end suite in a temporary home (`tests/e2e.rs`, 28: the
 or2-core client against the CLI listener in process, with an automatic-yes `Confirm` that lives only in the
 tests): payload round trip through the strict parser, address ordering, MAC good/bad/replayed/swapped-key,
 `authorized_keys` create/permissions/backup/duplicate/newline repair/two-in-a-second, listener timeout,
-one-shot behaviour, idle connections, bind policy (including a public-only host and an explicit public bind),
-`--no-listen`, `--check`, non-interactive refusal, and an independent QR decoder (`rqrr`) reading the drawing.
-`or2_core::pair`: 32 table and exchange tests (every field, timing on a paused clock, bounded reads, racing).
+one-shot behaviour, bind policy (including a public-only host, an explicit public bind and `--address` naming
+a detected address), `--no-listen`, `--check`, non-interactive refusal, and an independent QR decoder (`rqrr`)
+reading the drawing. The security review's findings each have tests that failed first: a `--user` that is not
+the account, symbolic-link / hard-link / foreign-owner / swapped-path writes, junk and wrong-proof probes
+before the phone, idle sockets held open while a phone pairs (with a short phone timer), a forged or flipped
+verdict (a proxy that turns the host's refusal into a success), a queued socket after a slow print, a
+group-writable key file, twelve interfaces round-tripped through the real parser, and key-looking comments.
+`or2_core::pair`: 34 table and exchange tests (every field, timing on a paused clock, bounded reads, racing,
+independent-HMAC vectors for both MAC domains, every forged-verdict shape).
 Kotlin JVM: `PairFlowTest` (fakes), `QrDecoderTest` (ZXing's writer through the decoder: stride, inverted,
 rotated, noisy, 1 KB), `PairMessagesTest`, `HostRecordsTest` (`saveHostWithTrust`), `ManifestTest`,
 `NavigationTest`, and `PairEndToEndTest`: `or2-pair-testhost` on loopback in a temporary home, the real native

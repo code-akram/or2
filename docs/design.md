@@ -429,9 +429,9 @@ the orphan cleanup).
 
 - [x] `or2-pair` CLI (macOS/Linux/Windows): checks, address gathering, terminal QR, one-shot
   HMAC-authenticated key listener with on-host confirmation ([contracts](contracts.md#easy-pair-qr-onboarding),
-  [implementation](contracts.md#easy-pair-implementation-and-decisions-ffi-api-11)). Ticked on its unit tests and
+  [implementation](contracts.md#easy-pair-implementation-and-decisions-ffi-api-12)). Ticked on its unit tests and
   the loopback end-to-end suite in a temporary home (Linux); a macOS or Windows host has not been run.
-- [x] Phone: scan or paste, Rust parser and exchange (FFI API 11), review screen, pinned host key, connect.
+- [x] Phone: scan or paste, Rust parser and exchange (FFI API 12), review screen, pinned host key, connect.
   Ticked on the Rust and JVM tests (fakes, and the real native exchange against the CLI listener followed by a
   real connect with the host key trusted) and the compile-checked device tests; the camera, its permission
   dialog and a QR read off a real monitor are phone-only and unobserved.
