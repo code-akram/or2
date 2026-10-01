@@ -42,6 +42,7 @@ class TerminalSessionTest {
         override fun rejectHostKey() { touch() }
         override fun disconnect() { touch() }
         override fun transport(): TerminalTransport { touch(); return TerminalTransport.SSH }
+        override fun serverPid(): UInt? = null
         override fun roam() { touch() }
     }
 

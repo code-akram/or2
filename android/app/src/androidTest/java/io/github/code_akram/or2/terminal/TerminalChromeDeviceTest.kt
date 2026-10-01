@@ -76,6 +76,7 @@ class TerminalChromeDeviceTest {
         override fun takeFrame(): TerminalFrame? = null
         override fun state(): SessionState = SessionState.Connected
         override fun transport() = TerminalTransport.SSH
+        override fun serverPid(): UInt? = null
         override fun roam() = Unit
         override fun approveHostKey(fingerprint: String) = Unit
         override fun rejectHostKey() = Unit

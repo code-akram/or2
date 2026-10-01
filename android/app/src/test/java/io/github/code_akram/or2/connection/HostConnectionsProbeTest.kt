@@ -1,5 +1,6 @@
 package io.github.code_akram.or2.connection
 
+import io.github.code_akram.or2.app.MemoryPrefStore
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.TrustStore
@@ -13,6 +14,7 @@ import io.github.code_akram.or2.ffi.networkChanged
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import io.github.code_akram.or2.ffi.HerdrState
+import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.PublicKeyInfo
 import io.github.code_akram.or2.ffi.SessionState
@@ -239,6 +241,45 @@ class HostConnectionsProbeTest {
                     networkChanged() // What the service's debounced callback calls.
                     assertEquals("roams 1", roamed())
 
+                    holder.disconnect(host.id)
+                    withTimeout(5000) { active.state.first { it is HostState.Closed } }
+                } finally { key.privateKey.fill(0); holder.release(host.id, closeTerminals = true) }
+            }
+        }
+    }
+
+    @Test
+    fun aMoshServerIsRecordedForTheSessionAndOrphansAreStoppedOverTheNewConnectionThroughTheRealFfi() = runBlocking<Unit> {
+        Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { main ->
+            withContext(main) {
+                val prefs = MemoryPrefStore()
+                val host = testHost(addresses = listOf(HostEndpoint("probe.invalid", 22)))
+                // What an earlier process left: a server the probe host can stop, and one it cannot (13).
+                MoshServerLedger(prefs).apply { record(host.id, 999u); record(host.id, 13u) }
+                val holder = HostConnections(probe, Store(), main, moshServers = MoshServerLedger(prefs))
+                val key = generateEd25519Key("probe")
+                try {
+                    val active = connectedProbe(holder, host, key)
+                    // The orphan that was stopped is forgotten; the one whose stop failed stays for next time.
+                    withTimeout(5000) { while (MoshServerLedger(prefs).pids(host.id).contains(999u)) delay(5) }
+                    assertEquals(listOf(13u), MoshServerLedger(prefs).pids(host.id))
+
+                    // A mosh session records the pid its server reported (the probe's is 4242) once connected...
+                    val mosh = holder.openTerminal(active, TerminalTarget.Tmux("work"))
+                    assertEquals(TerminalTransport.MOSH, mosh.transport.value)
+                    withTimeout(5000) { mosh.state.first { it == SessionState.Connected } }
+                    assertEquals(4242u, mosh.handle.value!!.serverPid())
+                    assertEquals(listOf(13u, 4242u), MoshServerLedger(prefs).pids(host.id))
+
+                    // ...and forgets it when the user ends the session.
+                    holder.disconnectTerminal(mosh)
+                    withTimeout(5000) { mosh.state.first { it is SessionState.Closed } }
+                    assertEquals(listOf(13u), MoshServerLedger(prefs).pids(host.id))
+
+                    // The connection itself answers the new FFI call: Ok for a stoppable pid, an error for the probe's 13.
+                    active.ready.await().stopMoshServer(1234u)
+                    assertThrows(HostException::class.java) { runBlocking { active.ready.await().stopMoshServer(13u) } }
+                    assertThrows(HostException.InvalidName::class.java) { runBlocking { active.ready.await().stopMoshServer(0u) } }
                     holder.disconnect(host.id)
                     withTimeout(5000) { active.state.first { it is HostState.Closed } }
                 } finally { key.privateKey.fill(0); holder.release(host.id, closeTerminals = true) }

@@ -44,12 +44,16 @@ class FakeSession(val events: MutableList<String> = mutableListOf(), val transpo
     var destroyed = false
     var roams = 0
     var nativeState: SessionState = SessionState.Connecting
+
+    /** What `serverPid()` answers: the `mosh-server` a mosh session started; null for SSH. */
+    var pid: UInt? = null
     val lastFrame = TerminalFrame(1uL, 2u, 1u, true,
         listOf(CellStyle(0xffffffu, 0u, null, Underline.NONE, false, false, false, false, false)),
         listOf(TerminalRow(0u, false, listOf(TerminalCell("L", CellWidth.NARROW, 0u), TerminalCell("R", CellWidth.NARROW, 0u)))),
         null, 0u, Scrollback(1uL, 0uL))
     var pending: TerminalFrame? = lastFrame
     override fun transport() = transport
+    override fun serverPid() = pid
     override fun roam() { roams++ }
     override fun approveHostKey(fingerprint: String) = Unit
     override fun rejectHostKey() = Unit
@@ -106,6 +110,13 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
 
     /** The mosh budget (`moshBudgetMs`) each `openTerminal` call passed, in call order. */
     val budgets = mutableListOf<UInt?>()
+
+    /** The `mosh-server` pid each mosh session this port opens reports; null makes a session report none. */
+    var nextServerPid: UInt? = null
+
+    /** Pids `stopMoshServer` was asked for, in call order; a failure is thrown after the call is recorded. */
+    val stopped = mutableListOf<UInt>()
+    var stopFailure: Exception? = null
     val watches = mutableListOf<Triple<String?, HerdrListener, FakeWatch>>()
 
     override fun state() = nativeState
@@ -123,7 +134,10 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         openFailure?.let { throw it }
         transports += transport
         budgets += moshBudgetMs
-        return FakeSession(transport = transport).also { terminals += Triple(target, listener, it) }
+        return FakeSession(transport = transport).also {
+            if (transport == TerminalTransport.MOSH) it.pid = nextServerPid
+            terminals += Triple(target, listener, it)
+        }
     }
     override suspend fun capabilities(): HostCapabilities {
         capabilityCalls++
@@ -136,6 +150,11 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         check(!destroyed) { "Host connection object has already been destroyed" }
         watchFailure?.let { throw it }
         return FakeWatch(events).also { it.stopFailure = watchStopFailure; watches += Triple(session, listener, it) }
+    }
+    override suspend fun stopMoshServer(pid: UInt) {
+        events += "stop:$pid"
+        stopped += pid
+        stopFailure?.let { throw it }
     }
     override suspend fun focusHerdrPane(session: String?, paneId: String) {
         events += "focus:$session:$paneId"

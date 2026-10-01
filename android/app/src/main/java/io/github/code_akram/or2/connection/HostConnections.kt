@@ -70,6 +70,13 @@ interface HostPort : AutoCloseable {
 
     /** API 6: resolves once herdr acknowledged the focus; `PaneNotFound` when the pane is gone. */
     suspend fun focusHerdrPane(session: String?, paneId: String)
+
+    /**
+     * API 10: stops the `mosh-server` [pid] an earlier process left on the host. Returns when no such
+     * server runs any more (stopped, or not there, or the id names another program, which is left
+     * alone); throws when the stop could not run, and the caller keeps the pid.
+     */
+    suspend fun stopMoshServer(pid: UInt)
 }
 
 class NativeHostPort(private val connection: HostConnection) : HostPort {
@@ -85,6 +92,7 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
     override fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface =
         connection.watchHerdr(session, listener)
     override suspend fun focusHerdrPane(session: String?, paneId: String) = connection.focusHerdrPane(session, paneId)
+    override suspend fun stopMoshServer(pid: UInt) = connection.stopMoshServer(pid)
     override fun close() = connection.close()
 }
 
@@ -187,6 +195,9 @@ class ActiveTerminal internal constructor(val id: Long, val host: Host, val targ
     /** Which session object's callbacks count: a fallback to SSH replaces the handle and bumps this. */
     internal var attempt = 0
 
+    /** Mosh only: the server's process id on the host, read when the session connected and kept after it closes. */
+    internal var moshServerPid: UInt? = null
+
     /** AUTO chose mosh, so a `TimedOut` or `NotInstalled` before the first frame retries over SSH. */
     internal var fallbackEligible = false
     val state = mutableState.asStateFlow()
@@ -237,6 +248,8 @@ class HostConnections(
     private val moshFailures: MoshFailureStore? = null,
     /** Wall-clock milliseconds, for the failure memory's expiry. */
     private val clock: () -> Long = System::currentTimeMillis,
+    /** The mosh servers this app started, so an orphan of a dead process is stopped at the next connection; null keeps none. */
+    private val moshServers: MoshServerLedger? = null,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + main)
 
@@ -311,7 +324,10 @@ class HostConnections(
                         // Preserve a transient Connected even if the UI observes only Closed.
                         if (state is HostState.Connected) current.mutableHasConnected.value = true
                         current.mutableState.value = state
-                        if (state is HostState.Connected) probe(current)
+                        if (state is HostState.Connected) {
+                            reapOrphans(current)
+                            probe(current)
+                        }
                         if (state is HostState.Closed) releaseWatches(current)
                     }
                 }
@@ -388,6 +404,7 @@ class HostConnections(
     fun release(hostId: Long, closeTerminals: Boolean) {
         dismissHost(hostId)
         if (closeTerminals) {
+            moshServers?.purge(hostId)
             userClose?.hostClosed(hostId)
             mutableTerminals.value.filter { it.host.id == hostId }.forEach(::dismissTerminal)
         }
@@ -587,13 +604,70 @@ class HostConnections(
         if (attempt != terminal.attempt) return
         if (state is SessionState.Closed && fallBackToSsh(terminal, current, state)) return
         // Preserve a transient Connected even if the UI observes only Closed.
-        if (state == SessionState.Connected) terminal.mutableHasConnected.value = true
+        if (state == SessionState.Connected) {
+            terminal.mutableHasConnected.value = true
+            recordMoshServer(terminal)
+        }
         terminal.mutableState.value = state
+        if (state is SessionState.Closed) forgetMoshServer(terminal, state.reason)
         // Nothing is heard on a closed session: its last health must not keep saying "Last heard N s ago".
         if (state is SessionState.Closed) terminal.mutableLinkHealth.value = null
         // A shell the user exited is over: reattach must not offer it again.
         if (state is SessionState.Closed && state.reason is CloseReason.RemoteExited) {
             userClose?.terminalClosed(terminal.host.id, terminal.target)
+        }
+    }
+
+    // --- mosh servers orphaned by process death ------------------------------------------
+
+    /** A connected mosh session's server is written down at once: the process can die at any moment. */
+    private fun recordMoshServer(terminal: ActiveTerminal) {
+        val ledger = moshServers ?: return
+        if (terminal.mutableTransport.value != TerminalTransport.MOSH) return
+        val session = terminal.mutableHandle.value ?: return
+        // A session object already destroyed (a late callback after its release) has nothing to say.
+        val pid = try {
+            session.serverPid()
+        } catch (_: Exception) {
+            null
+        } ?: return
+        terminal.moshServerPid = pid
+        ledger.record(terminal.host.id, pid)
+    }
+
+    /**
+     * A session the user ended, or whose server ended itself, leaves nothing running (Rust stopped the
+     * server before it reported the close, or the server announced its own end). A failure keeps the
+     * record: its stop may not have reached the host, and the next connection tries again.
+     */
+    private fun forgetMoshServer(terminal: ActiveTerminal, reason: CloseReason) {
+        val ledger = moshServers ?: return
+        val pid = terminal.moshServerPid ?: return
+        if (reason is CloseReason.Disconnected || reason is CloseReason.RemoteExited) ledger.clear(terminal.host.id, pid)
+    }
+
+    /**
+     * The host is connected again: stops the servers an earlier process recorded for it and left
+     * behind. Servers of this process's own sessions are spared (a mosh session outlives a lost SSH
+     * connection). Runs beside the rest of the connect, never ahead of it: a terminal reopened by
+     * Resume does not wait. A stop that fails keeps its record for the next connection.
+     */
+    private fun reapOrphans(current: ActiveHost) {
+        val ledger = moshServers ?: return
+        val live = mutableTerminals.value.filter { it.state.value !is SessionState.Closed }.mapNotNull { it.moshServerPid }.toSet()
+        val orphans = orphanedServers(ledger.pids(current.host.id), live)
+        if (orphans.isEmpty()) return
+        scope.launch {
+            for (pid in orphans) {
+                try {
+                    current.ready.await().stopMoshServer(pid)
+                    ledger.clear(current.host.id, pid)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    // The pid stays recorded; the next connection to this host tries again.
+                }
+            }
         }
     }
 

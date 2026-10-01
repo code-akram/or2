@@ -5,6 +5,7 @@ import android.os.PowerManager
 import androidx.room.Room
 import io.github.code_akram.or2.connection.HostConnections
 import io.github.code_akram.or2.connection.HostConnector
+import io.github.code_akram.or2.connection.MoshServerLedger
 import io.github.code_akram.or2.data.AppDatabase
 import io.github.code_akram.or2.data.MIGRATION_1_2
 import io.github.code_akram.or2.data.MIGRATION_2_3
@@ -29,6 +30,9 @@ class Or2Application : Application() {
     /** App-private settings: the one-time prompts and the last terminal. */
     val prefs: PrefStore by lazy { SharedPrefsStore(this) }
     val reattach by lazy { ReattachMemory(prefs) }
+
+    /** The mosh servers this app started, so one orphaned by process death is stopped at the next connect. */
+    val moshServers by lazy { MoshServerLedger(prefs) }
     val notificationPolicy by lazy { NotificationPermissionPolicy(prefs) }
     val battery by lazy { BatteryPrompt(prefs, isExempt = ::isBatteryExempt) }
 
@@ -39,7 +43,7 @@ class Or2Application : Application() {
     /** The process's one set of connections; [ConnectionService] keeps the process alive while any is open. */
     val connections by lazy {
         HostConnections({ request, listener -> (connectorOverride ?: HostConnector.Native).connect(request, listener) }, database.dao(),
-            moshFailures = database.dao())
+            moshFailures = database.dao(), moshServers = moshServers)
             .also { it.userClose = reattach }
     }
 
