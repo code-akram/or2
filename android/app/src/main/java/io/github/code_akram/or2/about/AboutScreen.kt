@@ -110,11 +110,11 @@ fun AboutScreen(
             )
             SectionHeader("Version")
             GroupCard {
-                ListRow("Version", value = info.appVersion, modifier = Modifier.testTag("about-version"))
+                ListRow("Version", value = info.appVersion, valueMono = true, modifier = Modifier.testTag("about-version"))
                 GroupDivider()
-                ListRow("API version", value = info.apiVersion, modifier = Modifier.testTag("about-api-version"))
+                ListRow("API version", value = info.apiVersion, valueMono = true, modifier = Modifier.testTag("about-api-version"))
                 GroupDivider()
-                ListRow("Native core", value = info.coreVersion, modifier = Modifier.testTag("about-core-version"))
+                ListRow("Native core", value = info.coreVersion, valueMono = true, modifier = Modifier.testTag("about-core-version"))
             }
             SectionHeader("License")
             GroupCard {

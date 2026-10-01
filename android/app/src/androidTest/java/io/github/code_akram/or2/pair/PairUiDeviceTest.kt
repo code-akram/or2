@@ -56,8 +56,10 @@ class PairUiDeviceTest {
         var asked = 0
         val received = mutableListOf<String>()
         show { PairScanScreen("That is not an or2 pairing code.", CameraAccess(granted = false, denied = false) { asked++ }, { received += it }, back = {}) }
+        // The screen asks once by itself when it opens; the button asks again.
+        compose.runOnIdle { assertEquals(1, asked) }
         compose.onNodeWithTag("pair-allow-camera").assertIsDisplayed().assertTouchTargetAtLeast().performClick()
-        assertEquals(1, asked)
+        compose.runOnIdle { assertEquals(2, asked) }
         compose.onNodeWithTag("pair-scan-error").assertTextContains("not an or2 pairing code", substring = true)
         compose.onNodeWithTag("pair-paste").performScrollTo().performClick()
         compose.onNodeWithTag("pair-paste-continue").performScrollTo().assertIsNotEnabled()

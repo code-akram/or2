@@ -62,6 +62,8 @@ class AboutUiDeviceTest {
             compose.onNodeWithTag("licenses-list").performScrollToNode(hasTestTagStartingWith(prefix))
             compose.onNode(hasTestTagStartingWith(prefix)).assertIsDisplayed()
         }
+        // The loop ended on the last group, so the russh row is no longer composed: scroll back to it.
+        compose.onNodeWithTag("licenses-list").performScrollToNode(hasTestTagStartingWith("license:Rust:russh:"))
         compose.onNode(hasTestTagStartingWith("license:Rust:russh:")).performClick()
         compose.onNodeWithTag("license-text").assertIsDisplayed()
         compose.onNodeWithTag("top-back").performClick()

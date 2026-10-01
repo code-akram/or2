@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.text.KeyboardOptions
@@ -56,7 +57,6 @@ import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Field
 import io.github.code_akram.or2.ui.Or2Icons
-import io.github.code_akram.or2.ui.Or2Shapes
 import io.github.code_akram.or2.ui.Or2Sheet
 import io.github.code_akram.or2.ui.Or2Type
 import io.github.code_akram.or2.ui.PillButton
@@ -143,7 +143,7 @@ fun PairScanScreen(error: String?, access: CameraAccess, onCode: (String) -> Uni
             )
             if (!pasting) {
                 Box(
-                    Modifier.fillMaxWidth().aspectRatio(1f).clip(Or2Shapes.Sheet).background(Or2Colors.Crust).testTag("pair-camera"),
+                    Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(24.dp)).background(Or2Colors.Crust).testTag("pair-camera").semantics(mergeDescendants = true) {},
                     contentAlignment = Alignment.Center,
                 ) {
                     if (access.granted) {
@@ -218,19 +218,20 @@ fun PairReviewScreen(
         ) {
             Or2Field(review.name, { edit(it, null, null) }, label = "Name", placeholder = "My server", mono = false,
                 enabled = !review.working, tag = "pair-name")
-            Or2Field(review.username, { edit(null, it, null) }, label = "Username", placeholder = "your-username",
-                // With a listener the key is authorized for the account the code names, so it is not editable.
-                enabled = !review.working && !review.listens, tag = "pair-username",
-                errorText = if (review.username.isNotEmpty()) hostFieldError(review.username) else null)
-            if (review.listens) {
-                Text("The host authorizes this key for ${review.username} only.", style = Or2Type.Secondary,
-                    color = Or2Colors.TextMuted, modifier = Modifier.padding(top = (-10).dp))
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Or2Field(review.username, { edit(null, it, null) }, label = "Username", placeholder = "your-username",
+                    // With a listener the key is authorized for the account the code names, so it is not editable.
+                    enabled = !review.working && !review.listens, tag = "pair-username",
+                    errorText = if (review.username.isNotEmpty()) hostFieldError(review.username) else null)
+                if (review.listens) {
+                    Text("The host authorizes this key for ${review.username} only.", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
+                }
             }
             Column {
                 Text("Addresses", style = Or2Type.Body, color = Or2Colors.Text)
                 Text("Tried in this order, port ${offer.port}.", style = Or2Type.Secondary, color = Or2Colors.TextMuted,
                     modifier = Modifier.padding(top = 2.dp, bottom = 6.dp))
-                GroupCard(Modifier.testTag("pair-addresses")) {
+                GroupCard(Modifier.testTag("pair-addresses").semantics(mergeDescendants = true) {}) {
                     offer.addresses.forEachIndexed { index, address ->
                         if (index > 0) GroupDivider(inset = Or2Dimens.Gutter)
                         Row(Modifier.fillMaxWidth().padding(horizontal = Or2Dimens.Gutter, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -288,7 +289,7 @@ fun PairReviewScreen(
                 Text(
                     if (review.listens) "Only the public key is sent. You confirm it on the host."
                     else "The host key above is trusted. Connecting needs the key installed first.",
-                    style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp),
+                    style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.fillMaxWidth(),
                 )
             }
             Spacer(Modifier.height(24.dp))

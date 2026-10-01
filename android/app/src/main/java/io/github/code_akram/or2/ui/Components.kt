@@ -191,7 +191,7 @@ fun GroupDivider(inset: Dp = Or2Dimens.Gutter) {
 @Composable
 fun ListRow(
     title: String, modifier: Modifier = Modifier, subtitle: String? = null, subtitleMono: Boolean = false,
-    icon: ImageVector? = null, value: String? = null, chevron: Boolean = false,
+    icon: ImageVector? = null, value: String? = null, valueMono: Boolean = false, chevron: Boolean = false,
     titleColor: Color = Or2Colors.Text, onClick: (() -> Unit)? = null, onLongClick: (() -> Unit)? = null,
     enabled: Boolean = true, trailing: @Composable (() -> Unit)? = null,
 ) {
@@ -220,7 +220,7 @@ fun ListRow(
         }
         if (value != null) {
             Spacer(Modifier.width(8.dp))
-            Text(value, style = Or2Type.Body, color = Or2Colors.TextMuted, maxLines = 1)
+            Text(value, style = if (valueMono) Or2Type.Mono else Or2Type.Body, color = Or2Colors.TextMuted, maxLines = 1)
         }
         if (trailing != null) {
             Spacer(Modifier.width(8.dp))
