@@ -85,4 +85,49 @@ class HostRecordsTest {
         assertThrows(IllegalStateException::class.java) { runBlocking { dao.replaceTrust(stale, first) } }
         assertThrows(IllegalStateException::class.java) { runBlocking { dao.saveHost(stale, stale) } }
     }
+
+    // --- the follow-up: `sleeps` and the mosh failure memory ------------------------------------
+
+    private val until = 1_800_086_400_000L
+
+    @Test
+    fun theSleepsFlagIsSavedWithTheHostAndTheFailureMemoryByItsOwnWrite() = runBlocking<Unit> {
+        val dao = FakeDao()
+        dao.saveHost(testHost(id = 0, addresses = twoAddresses, sleeps = true), null)
+        var host = dao.host(1)!!
+        assertTrue(host.sleeps)
+        assertEquals(0L, host.moshFailedUntil)
+        dao.markMoshFailed(1, until)
+        host = dao.host(1)!!
+        assertEquals(until, host.moshFailedUntil)
+
+        // An edit that changes neither the transport nor the addresses keeps the memory, and `sleeps` is an ordinary field.
+        dao.saveHost(host.copy(record = host.record.copy(label = "Renamed", sleeps = false)), host)
+        val renamed = dao.host(1)!!
+        assertEquals(until, renamed.moshFailedUntil)
+        assertFalse(renamed.sleeps)
+        assertEquals("Renamed", renamed.label)
+    }
+
+    @Test
+    fun aNewTransportPreferenceOrADifferentDestinationForgetsTheMoshFailure() = runBlocking<Unit> {
+        val dao = FakeDao()
+        dao.saveHost(testHost(id = 0, addresses = twoAddresses), null)
+        var host = dao.host(1)!!
+
+        dao.markMoshFailed(1, until)
+        host = dao.host(1)!!
+        dao.saveHost(host.copy(record = host.record.copy(transport = TransportPref.SSH)), host)
+        assertEquals(0L, dao.host(1)!!.moshFailedUntil) // A new preference is a fresh decision.
+
+        host = dao.host(1)!!
+        dao.markMoshFailed(1, until)
+        host = dao.host(1)!!
+        dao.saveHost(host.copy(addresses = twoAddresses.reversed()), host)
+        assertEquals(0L, dao.host(1)!!.moshFailedUntil) // Another address may have UDP open.
+
+        dao.markMoshFailed(1, until)
+        dao.clearMoshFailure(1)
+        assertEquals(0L, dao.host(1)!!.moshFailedUntil)
+    }
 }

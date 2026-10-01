@@ -21,6 +21,15 @@ fun chooseTransport(pref: TransportPref, moshServer: String?, moshRejected: Bool
     TransportPref.AUTO -> if (moshServer == null || moshRejected) TerminalTransport.SSH else TerminalTransport.MOSH
 }
 
+/** The mosh start's whole budget under AUTO: bootstrap, socket and first datagram (explicit Mosh keeps 15 s). */
+const val AUTO_MOSH_BUDGET_MS = 5_000u
+
+/** How long AUTO skips mosh for a host after mosh timed out on it. */
+const val MOSH_PAUSE_MS = 24L * 60 * 60 * 1000
+
+/** The muted line when AUTO skips mosh because it timed out on this host recently (see [MOSH_PAUSE_MS]). */
+const val MOSH_PAUSED_NOTE = "Mosh could not reach this host over UDP recently. Using SSH."
+
 /** The program whose absence is mosh itself being unavailable; any other missing program is not a mosh problem. */
 const val MOSH_SERVER_PROGRAM = "mosh-server"
 

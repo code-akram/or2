@@ -2,6 +2,7 @@ package io.github.code_akram.or2.connection
 
 import io.github.code_akram.or2.app.TerminalActivations
 import io.github.code_akram.or2.data.Host
+import io.github.code_akram.or2.data.MoshFailureStore
 import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.data.TrustStore
 import io.github.code_akram.or2.ffi.CloseReason
@@ -17,6 +18,7 @@ import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.LinkHealth
+import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionListener
 import io.github.code_akram.or2.ffi.SessionState
@@ -53,7 +55,15 @@ interface HostPort : AutoCloseable {
     fun approveHostKey(fingerprint: String)
     fun rejectHostKey()
     fun disconnect()
-    fun openTerminal(target: TerminalTarget, transport: TerminalTransport, columns: UShort, rows: UShort, listener: SessionListener): SessionInterface
+
+    /**
+     * [moshBudgetMs] (API 9, mosh only): the whole mosh start must reach `Connected` within it,
+     * counted from this call, or the session closes `TimedOut` with its server stopped; null keeps
+     * the 15 s default.
+     */
+    fun openTerminal(
+        target: TerminalTarget, transport: TerminalTransport, columns: UShort, rows: UShort, moshBudgetMs: UInt?, listener: SessionListener,
+    ): SessionInterface
     suspend fun capabilities(): HostCapabilities
     suspend fun listTmuxSessions(): List<TmuxSession>
     fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface
@@ -67,8 +77,9 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
     override fun approveHostKey(fingerprint: String) = connection.approveHostKey(fingerprint)
     override fun rejectHostKey() = connection.rejectHostKey()
     override fun disconnect() = connection.disconnect()
-    override fun openTerminal(target: TerminalTarget, transport: TerminalTransport, columns: UShort, rows: UShort, listener: SessionListener): SessionInterface =
-        connection.openTerminal(target, transport, columns, rows, listener)
+    override fun openTerminal(
+        target: TerminalTarget, transport: TerminalTransport, columns: UShort, rows: UShort, moshBudgetMs: UInt?, listener: SessionListener,
+    ): SessionInterface = connection.openTerminal(target, transport, columns, rows, moshBudgetMs, listener)
     override suspend fun capabilities() = connection.capabilities()
     override suspend fun listTmuxSessions() = connection.listTmuxSessions()
     override fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface =
@@ -117,6 +128,15 @@ class ActiveHost internal constructor(val host: Host) {
      * AUTO terminals on it go straight to SSH. The note explains why, in muted text.
      */
     internal var moshFallbackNote: String? = null
+
+    /**
+     * Epoch milliseconds until which AUTO skips mosh for this host, from an earlier connection's
+     * failure ([Host.moshFailedUntil], persisted) or this one's. 0 is no memory.
+     */
+    internal var moshPausedUntil = host.moshFailedUntil
+
+    /** AUTO must not try mosh on this connection now: it failed here, or recently on this host. */
+    internal fun moshRejected(now: Long) = moshFallbackNote != null || moshPausedUntil > now
 
     /** Whether herdr watches should run: the host's inbox flag, which can change on a live connection. */
     internal var watching = host.showInInbox
@@ -213,6 +233,10 @@ class HostConnections(
     private val trust: TrustStore,
     main: CoroutineDispatcher = Dispatchers.Main.immediate,
     private val worker: CoroutineDispatcher = Dispatchers.Default,
+    /** Where AUTO's per-host memory of a mosh failure is kept (Room); null remembers nothing. */
+    private val moshFailures: MoshFailureStore? = null,
+    /** Wall-clock milliseconds, for the failure memory's expiry. */
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + main)
 
@@ -452,6 +476,8 @@ class HostConnections(
         if (current.transportPref == pref) return
         current.transportPref = pref
         current.moshFallbackNote = null
+        // Room's `saveHost` clears the stored memory in the same write as the new preference.
+        current.moshPausedUntil = 0
     }
 
     /**
@@ -514,22 +540,27 @@ class HostConnections(
      * Call on main. Opens a terminal on a connected host; throws [HostException] if it cannot.
      * The transport follows the host's current preference ([chooseTransport]); under AUTO that
      * needs the capability probe, so callers that can suspend call [awaitTransportChoice] first
-     * (a probe that has not answered counts as no `mosh-server`). Under AUTO a mosh terminal that
-     * fails with `TimedOut` or a missing `mosh-server` before it connected is retried over SSH on
-     * the same [ActiveTerminal].
+     * (a probe that has not answered counts as no `mosh-server`). Under AUTO a mosh terminal gets a
+     * [AUTO_MOSH_BUDGET_MS] budget for its whole start, and one that fails with `TimedOut` or a missing
+     * `mosh-server` before it connected is retried over SSH on the same [ActiveTerminal]; a timeout is
+     * also remembered for the host for [MOSH_PAUSE_MS], and AUTO skips mosh until then.
      */
     fun openTerminal(current: ActiveHost, target: TerminalTarget): ActiveTerminal {
         if (!owns(current) || current.retired) throw HostException.Closed()
         val port = current.mutablePort.value ?: throw HostException.NotConnected()
         val pref = current.transportPref
         val moshServer = current.capabilities.value?.moshServer
-        val choice = chooseTransport(pref, moshServer, current.moshFallbackNote != null)
+        val now = clock()
+        val choice = chooseTransport(pref, moshServer, current.moshRejected(now))
         val terminal = ActiveTerminal(nextTerminalId, current.host, target)
         terminal.fallbackEligible = pref == TransportPref.AUTO && choice == TerminalTransport.MOSH
         if (pref == TransportPref.AUTO && moshServer != null && choice == TerminalTransport.SSH) {
-            terminal.mutableNote.value = current.moshFallbackNote
+            terminal.mutableNote.value = current.moshFallbackNote ?: MOSH_PAUSED_NOTE
         }
-        val session = port.openTerminal(target, choice, 80u, 24u, sessionListener(terminal, current, attempt = 0))
+        // AUTO gives mosh a short budget (the whole start, bootstrap included) so a blocked UDP path
+        // costs seconds before SSH takes over; an explicit Mosh keeps the 15 s default.
+        val budget = if (terminal.fallbackEligible) AUTO_MOSH_BUDGET_MS else null
+        val session = port.openTerminal(target, choice, 80u, 24u, budget, sessionListener(terminal, current, attempt = 0))
         nextTerminalId++
         terminal.mutableTransport.value = session.transport()
         terminal.mutableHandle.value = session
@@ -579,9 +610,10 @@ class HostConnections(
         terminal.fallbackEligible = false
         terminal.mutableState.value = SessionState.Connecting
         try {
-            val session = port.openTerminal(terminal.target, TerminalTransport.SSH, 80u, 24u,
+            val session = port.openTerminal(terminal.target, TerminalTransport.SSH, 80u, 24u, null,
                 sessionListener(terminal, current, terminal.attempt))
             current.moshFallbackNote = note
+            if (failure is SessionFailure.TimedOut) rememberMoshFailure(current)
             terminal.mutableNote.value = note
             terminal.mutableLinkHealth.value = null
             terminal.mutableTransport.value = session.transport()
@@ -595,6 +627,26 @@ class HostConnections(
         // The old object has nothing left to say; release it once its observers have moved on.
         if (previous != null) scope.launch { yield(); (previous as? AutoCloseable)?.close() }
         return true
+    }
+
+    /**
+     * UDP did not get through: AUTO skips mosh for this host for [MOSH_PAUSE_MS] (also across
+     * connections and restarts, through [moshFailures]). A missing `mosh-server` is not remembered:
+     * the capability probe already says so on every connection, and installing it must just work.
+     */
+    private fun rememberMoshFailure(current: ActiveHost) {
+        val until = clock() + MOSH_PAUSE_MS
+        current.moshPausedUntil = until
+        val store = moshFailures ?: return
+        scope.launch {
+            try {
+                store.markMoshFailed(current.host.id, until)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // Without the memory the next connection simply tries mosh once more.
+            }
+        }
     }
 
     /**

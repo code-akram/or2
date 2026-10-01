@@ -17,8 +17,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 fun testHost(
     id: Long = 7, label: String = "Fixture", keyId: String? = "ephemeral",
     addresses: List<HostEndpoint> = listOf(HostEndpoint("fixture.invalid", 2222)), showInInbox: Boolean = true,
-    transport: TransportPref = TransportPref.AUTO,
-) = Host(HostRecord(id, label, "fixture", keyId, showInInbox, transport), addresses)
+    transport: TransportPref = TransportPref.AUTO, sleeps: Boolean = false, moshFailedUntil: Long = 0,
+) = Host(HostRecord(id, label, "fixture", keyId, showInInbox, transport, sleeps, moshFailedUntil), addresses)
 
 val testPublicKey = PublicKeyInfo("test-algorithm", "test-public-line", "test-fingerprint", "")
 val testPrompt = HostState.AwaitingHostKeyDecision(testPublicKey, emptyList())
@@ -103,6 +103,9 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
 
     /** The transport each `openTerminal` call asked for, in call order. */
     val transports = mutableListOf<TerminalTransport>()
+
+    /** The mosh budget (`moshBudgetMs`) each `openTerminal` call passed, in call order. */
+    val budgets = mutableListOf<UInt?>()
     val watches = mutableListOf<Triple<String?, HerdrListener, FakeWatch>>()
 
     override fun state() = nativeState
@@ -113,10 +116,13 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         events += "disconnect"
     }
     override fun close() { destroyed = true; events += "close" }
-    override fun openTerminal(target: TerminalTarget, transport: TerminalTransport, columns: UShort, rows: UShort, listener: SessionListener): SessionInterface {
+    override fun openTerminal(
+        target: TerminalTarget, transport: TerminalTransport, columns: UShort, rows: UShort, moshBudgetMs: UInt?, listener: SessionListener,
+    ): SessionInterface {
         check(!destroyed) { "Host connection object has already been destroyed" }
         openFailure?.let { throw it }
         transports += transport
+        budgets += moshBudgetMs
         return FakeSession(transport = transport).also { terminals += Triple(target, listener, it) }
     }
     override suspend fun capabilities(): HostCapabilities {
@@ -171,9 +177,15 @@ class FakeDao : AppDao() {
     }
     override suspend fun insertAddresses(addresses: List<HostAddressRecord>) { this.addresses.value += addresses }
     override suspend fun deleteAddresses(hostId: Long) { addresses.value = addresses.value.filterNot { it.hostId == hostId } }
-    override suspend fun updateHost(id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean, transport: TransportPref) {
+    override suspend fun updateHost(id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean, transport: TransportPref, sleeps: Boolean) {
         if (failSave) error("storage failure")
-        records.value = records.value.map { if (it.id == id) HostRecord(id, label, username, keyId, showInInbox, transport) else it }
+        records.value = records.value.map {
+            if (it.id == id) HostRecord(id, label, username, keyId, showInInbox, transport, sleeps, it.moshFailedUntil) else it
+        }
+    }
+    override suspend fun markMoshFailed(hostId: Long, until: Long) {
+        events += "mosh-failed:$hostId:$until"
+        records.value = records.value.map { if (it.id == hostId) it.copy(moshFailedUntil = until) else it }
     }
     override suspend fun deleteHost(id: Long) {
         if (failDelete) error("storage failure")

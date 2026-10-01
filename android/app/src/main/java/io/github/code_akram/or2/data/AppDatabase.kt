@@ -48,6 +48,16 @@ data class HostRecord(
     val keyId: String?,
     @ColumnInfo(defaultValue = "1") val showInInbox: Boolean = true,
     @ColumnInfo(defaultValue = "'AUTO'") val transport: TransportPref = TransportPref.AUTO,
+    /**
+     * The host goes to sleep when idle (a laptop): a lost SSH connection is "asleep", not a failure
+     * to retry, and no reconnect is offered for it on return.
+     */
+    @ColumnInfo(name = "sleeps", defaultValue = "0") val sleeps: Boolean = false,
+    /**
+     * Epoch milliseconds until which AUTO skips mosh for this host (mosh failed to reach it over UDP);
+     * 0 is no memory. Cleared when the transport preference or the addresses change.
+     */
+    @ColumnInfo(name = "mosh_failed_until", defaultValue = "0") val moshFailedUntil: Long = 0,
 )
 
 /** One of a host's addresses, tried in `position` order (0 is preferred). */
@@ -85,6 +95,8 @@ data class Host(val record: HostRecord, val addresses: List<HostEndpoint>) {
     val keyId get() = record.keyId
     val showInInbox get() = record.showInInbox
     val transport get() = record.transport
+    val sleeps get() = record.sleeps
+    val moshFailedUntil get() = record.moshFailedUntil
 
     /** `host:port` summaries for lists and dialogs. */
     val addressSummary get() = addresses.joinToString(", ") { "${it.hostname}:${it.port}" }
@@ -116,8 +128,17 @@ interface TrustStore {
     suspend fun replaceTrust(host: Host, presented: PublicKeyInfo)
 }
 
+/** The per-host memory of a mosh failure that AUTO honours across connections and restarts. */
+interface MoshFailureStore {
+    /** AUTO skips mosh for [hostId] until [until] (epoch milliseconds). */
+    suspend fun markMoshFailed(hostId: Long, until: Long)
+
+    /** Forgets the failure: the next AUTO terminal tries mosh again. */
+    suspend fun clearMoshFailure(hostId: Long)
+}
+
 @Dao
-abstract class AppDao : TrustStore {
+abstract class AppDao : TrustStore, MoshFailureStore {
     @Transaction
     @Query("SELECT * FROM hosts ORDER BY label COLLATE NOCASE")
     abstract fun hostRows(): Flow<List<HostWithAddresses>>
@@ -151,8 +172,15 @@ abstract class AppDao : TrustStore {
     @Query("DELETE FROM host_addresses WHERE hostId = :hostId")
     abstract suspend fun deleteAddresses(hostId: Long)
 
-    @Query("UPDATE hosts SET label = :label, username = :username, keyId = :keyId, showInInbox = :showInInbox, transport = :transport WHERE id = :id")
-    abstract suspend fun updateHost(id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean, transport: TransportPref)
+    // `mosh_failed_until` is deliberately not here: an edit never touches the failure memory except
+    // through `saveHost`, which clears it when the transport or the addresses change.
+    @Query("UPDATE hosts SET label = :label, username = :username, keyId = :keyId, showInInbox = :showInInbox, transport = :transport, sleeps = :sleeps WHERE id = :id")
+    abstract suspend fun updateHost(id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean, transport: TransportPref, sleeps: Boolean)
+
+    @Query("UPDATE hosts SET mosh_failed_until = :until WHERE id = :hostId")
+    abstract override suspend fun markMoshFailed(hostId: Long, until: Long)
+
+    override suspend fun clearMoshFailure(hostId: Long) = markMoshFailed(hostId, 0)
 
     @Query("DELETE FROM hosts WHERE id = :id")
     abstract suspend fun deleteHost(id: Long)
@@ -187,7 +215,9 @@ abstract class AppDao : TrustStore {
         } else {
             val stored = host(host.id) ?: error("Host was deleted.")
             if (host.addresses != stored.addresses) clearTrust(host.id)
-            updateHost(host.id, host.label, host.username, host.keyId, host.showInInbox, host.transport)
+            // A different destination or a new preference is a fresh decision about mosh.
+            if (host.addresses != stored.addresses || host.transport != stored.transport) clearMoshFailure(host.id)
+            updateHost(host.id, host.label, host.username, host.keyId, host.showInInbox, host.transport, host.sleeps)
             deleteAddresses(host.id)
             insertAddresses(addressRows(host.id, host.addresses))
         }
@@ -199,7 +229,7 @@ abstract class AppDao : TrustStore {
 
 @Database(
     entities = [HostRecord::class, HostAddressRecord::class, KeyRecord::class, TrustedHostKey::class],
-    version = 3, exportSchema = true,
+    version = 4, exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dao(): AppDao

@@ -9,8 +9,8 @@ import io.github.code_akram.or2.ffi.*
 /** Fakes for the device UI tests: no network, no Keystore, no production database. */
 fun uiHost(
     id: Long = 1, label: String = "Fixture", keyId: String? = "fixture-key", showInInbox: Boolean = true,
-    addresses: List<HostEndpoint> = listOf(HostEndpoint("fixture.invalid", 22)),
-) = Host(HostRecord(id, label, "fixture-user", keyId, showInInbox), addresses)
+    addresses: List<HostEndpoint> = listOf(HostEndpoint("fixture.invalid", 22)), sleeps: Boolean = false,
+) = Host(HostRecord(id, label, "fixture-user", keyId, showInInbox, sleeps = sleeps), addresses)
 
 class UiTrust : TrustStore {
     override suspend fun trustedKeys(hostId: Long) = emptyList<String>()
@@ -72,7 +72,7 @@ class UiPort(
     override fun rejectHostKey() = Unit
     override fun disconnect() { hostListener?.onHostStateChanged(HostState.Closed(CloseReason.Disconnected)) }
     override fun close() = Unit
-    override fun openTerminal(target: TerminalTarget, transport: TerminalTransport, columns: UShort, rows: UShort, listener: SessionListener): SessionInterface {
+    override fun openTerminal(target: TerminalTarget, transport: TerminalTransport, columns: UShort, rows: UShort, moshBudgetMs: UInt?, listener: SessionListener): SessionInterface {
         val session = sessionFor(target)
         session.listener = listener
         sessions += target to session

@@ -87,7 +87,7 @@ class HostConnectNativeTest {
 
                     // A shell terminal on the connection: echo, resize, exit status.
                     val shell = RecordingListener().also { it.timeline = timeline; it.timelineTag = "shell" }
-                    val session = host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 80u, 24u, shell)
+                    val session = host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 80u, 24u, null, shell)
                     assertEquals(SessionState.Connected, shell.awaitState<SessionState.Connected>())
                     val grid = mutableMapOf<Int, String>()
                     session.sendText("stty -echo; printf '\\033[2J\\033[H'; printf 'OR2-%s\\n' READY\n")
@@ -106,7 +106,7 @@ class HostConnectNativeTest {
 
                     // A second terminal shares the connection; ending the first leaves it up.
                     val second = RecordingListener().also { it.timeline = timeline; it.timelineTag = "second" }
-                    val other = host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 60u, 20u, second)
+                    val other = host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 60u, 20u, null, second)
                     second.awaitState<SessionState.Connected>()
                     session.sendText("exit 17\n")
                     assertEquals(CloseReason.RemoteExited(17u), shell.awaitState<SessionState.Closed>().reason)
@@ -120,7 +120,7 @@ class HostConnectNativeTest {
                     assertEquals(CloseReason.Disconnected, recorder.await<HostState.Closed>().reason)
                     assertThrows(HostException.Closed::class.java) { runBlocking { host.capabilities() } }
                     assertThrows(HostException.Closed::class.java) {
-                        host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 80u, 24u, RecordingListener())
+                        host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 80u, 24u, null, RecordingListener())
                     }
                     recorder.assertQuiet()
                     second.assertNoMoreStates()
@@ -195,7 +195,7 @@ class HostConnectNativeTest {
                     // The probe found the fixture's mosh-server: AUTO would pick mosh here.
                     assertTrue(runBlocking { host.capabilities() }.moshServer != null)
                     val listener = RecordingListener()
-                    val session = host.openTerminal(TerminalTarget.Shell, TerminalTransport.MOSH, 80u, 24u, listener)
+                    val session = host.openTerminal(TerminalTarget.Shell, TerminalTransport.MOSH, 80u, 24u, null, listener)
                     assertEquals(TerminalTransport.MOSH, session.transport())
                     assertEquals(SessionState.Connected, listener.awaitState<SessionState.Connected>())
                     val grid = mutableMapOf<Int, String>()
@@ -217,6 +217,15 @@ class HostConnectNativeTest {
                     networkChanged()
                     session.sendText("printf 'ROAM-%s\\n' TWO\n")
                     awaitText(session, listener, grid, "ROAM-TWO")
+                    assertEquals(HostState.Connected(0u), host.state())
+
+                    // API 9: a mosh start whose budget is spent (1 ms: the deadline is absolute and covers the
+                    // bootstrap too) closes TimedOut, whatever it had started is stopped, and the connection is intact.
+                    val spent = RecordingListener()
+                    host.openTerminal(TerminalTarget.Shell, TerminalTransport.MOSH, 80u, 24u, 1u, spent).use {
+                        val closed = spent.awaitState<SessionState.Closed>()
+                        assertEquals(CloseReason.Failed(SessionFailure.TimedOut), closed.reason)
+                    }
                     assertEquals(HostState.Connected(0u), host.state())
 
                     // A user disconnect of the host closes the mosh session too, before the host.
