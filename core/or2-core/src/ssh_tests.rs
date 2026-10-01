@@ -1,6 +1,7 @@
 use std::sync::mpsc as sync;
 
 use super::*;
+use crate::host::HostState;
 use crate::keys::ClientKey;
 use crate::session::SessionError;
 use russh::server;
@@ -726,4 +727,30 @@ fn timeout_and_disconnect_cancel_a_peer_that_never_speaks_ssh() {
         });
         assert!(bytes.starts_with(b"SSH-2.0-"));
     }
+}
+
+struct HostRecorder(sync::Sender<(HostState, std::thread::ThreadId)>);
+
+impl HostObserver for HostRecorder {
+    fn state_changed(&self, state: &HostState) {
+        let _ = self.0.send((state.clone(), std::thread::current().id()));
+    }
+}
+
+#[test]
+fn host_connections_are_not_implemented_and_close_honestly_from_a_rust_thread() {
+    let key = ClientKey::generate_ed25519("k").to_stored();
+    let request = HostConnectRequest::new(&[("127.0.0.1", 22)], "u", &key, &[]).unwrap();
+    let (sender, states) = sync::channel();
+    let handle = connect_host(request, Arc::new(HostRecorder(sender)));
+    let (state, thread) = states.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        state,
+        HostState::Closed(CloseReason::Failed(SessionFailure::Internal(
+            "host connections land with lane A1".into()
+        )))
+    );
+    assert_ne!(thread, std::thread::current().id());
+    assert_eq!(handle.state(), state);
+    assert!(states.recv_timeout(Duration::from_millis(100)).is_err());
 }

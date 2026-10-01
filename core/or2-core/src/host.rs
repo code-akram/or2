@@ -1,0 +1,1007 @@
+//! One SSH connection per host, shared by terminals, exec queries and herdr watches.
+//!
+//! [`channel`] splits a host connection into a [`HostHandle`], which the FFI layer wraps for
+//! Kotlin, and a [`HostDriver`], which the task that owns the connection uses. Exactly like
+//! `session`: the handle never blocks, it validates against the current state and enqueues a
+//! [`HostCommand`]; the driver owns every state change and calls the [`HostObserver`] from its
+//! own thread, in order, without holding any lock.
+//!
+//! ```text
+//! Connecting ──▶ AwaitingHostKey ──▶ Authenticating ──▶ Connected { address_index }
+//!     │  └──────────────────────────────────▲                      │
+//!     └─────────────┴───────────────────────┴──────────────────────┴──▶ Closed (terminal, once)
+//! ```
+//!
+//! Operations that return a handle at once ([`HostHandle::open_terminal`],
+//! [`HostHandle::watch_herdr`]) create the handle/driver pair themselves and send the *driver*
+//! to the host driver in the command; a host that cannot honour the request closes that driver
+//! with a failure. Queries ([`HostHandle::capabilities`], [`HostHandle::list_tmux_sessions`])
+//! carry a oneshot reply.
+
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use tokio::sync::{mpsc, oneshot};
+
+use crate::herdr::{self, HerdrObserver, HerdrWatchDriver, HerdrWatchHandle};
+use crate::keys::{ClientKey, KeyError};
+use crate::session::{
+    self, CloseReason, HostKeyPrompt, SessionDriver, SessionHandle, SessionObserver,
+};
+use crate::term::TerminalSize;
+use crate::transport::{Endpoint, EndpointError};
+use crate::trust::HostKey;
+
+/// At most this many addresses per host.
+pub const MAX_ADDRESSES: usize = 8;
+
+/// Everything Rust needs to connect to one host. Kotlin assembles it per connection from Room
+/// and the Keystore; Rust keeps nothing after the connection ends. Trust belongs to the host,
+/// not to an address.
+#[derive(Debug)]
+pub struct HostConnectRequest {
+    /// In preference order, 1 to [`MAX_ADDRESSES`].
+    pub addresses: Vec<Endpoint>,
+    pub username: String,
+    pub key: ClientKey,
+    pub trusted_host_keys: Vec<HostKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HostConnectError {
+    #[error("a host needs at least one address")]
+    NoAddresses,
+    #[error("a host has at most 8 addresses")]
+    TooManyAddresses,
+    #[error("address {index} is invalid: {error}")]
+    InvalidAddress { index: usize, error: EndpointError },
+    #[error("username must be nonempty without control characters")]
+    InvalidUsername,
+    #[error("stored private key is unusable: {0}")]
+    InvalidPrivateKey(KeyError),
+    #[error("trusted host key {index} is not an OpenSSH public key")]
+    InvalidTrustedHostKey { index: usize },
+}
+
+impl HostConnectRequest {
+    /// Validates in order: address count, each address, username, trusted keys, private key.
+    pub fn new(
+        addresses: &[(&str, u16)],
+        username: &str,
+        private_key: &[u8],
+        trusted_host_keys: &[String],
+    ) -> Result<Self, HostConnectError> {
+        if addresses.is_empty() {
+            return Err(HostConnectError::NoAddresses);
+        }
+        if addresses.len() > MAX_ADDRESSES {
+            return Err(HostConnectError::TooManyAddresses);
+        }
+        let addresses = addresses
+            .iter()
+            .enumerate()
+            .map(|(index, (host, port))| {
+                Endpoint::new(host, *port)
+                    .map_err(|error| HostConnectError::InvalidAddress { index, error })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if username.is_empty() || username.chars().any(char::is_control) {
+            return Err(HostConnectError::InvalidUsername);
+        }
+        let trusted_host_keys = trusted_host_keys
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                HostKey::from_openssh(line)
+                    .map_err(|_| HostConnectError::InvalidTrustedHostKey { index })
+            })
+            .collect::<Result<_, _>>()?;
+        let key =
+            ClientKey::from_stored(private_key).map_err(HostConnectError::InvalidPrivateKey)?;
+        Ok(Self {
+            addresses,
+            username: username.to_owned(),
+            key,
+            trusted_host_keys,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostState {
+    /// Racing addresses and handshaking. The initial state; not delivered as a change.
+    Connecting,
+    /// Waiting for the user to approve or reject an untrusted host key.
+    AwaitingHostKey(HostKeyPrompt),
+    Authenticating,
+    /// Established: terminals, queries and watches are accepted. `address_index` is the
+    /// request address that won the race.
+    Connected {
+        address_index: usize,
+    },
+    Closed(CloseReason),
+}
+
+impl HostState {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Connecting => "Connecting",
+            Self::AwaitingHostKey(_) => "AwaitingHostKey",
+            Self::Authenticating => "Authenticating",
+            Self::Connected { .. } => "Connected",
+            Self::Closed(_) => "Closed",
+        }
+    }
+
+    fn can_become(&self, next: &HostState) -> bool {
+        use HostState::*;
+        matches!(
+            (self, next),
+            (Connecting, AwaitingHostKey(_) | Authenticating)
+                | (AwaitingHostKey(_), Authenticating)
+                | (Authenticating, Connected { .. })
+                | (
+                    Connecting | AwaitingHostKey(_) | Authenticating | Connected { .. },
+                    Closed(_)
+                )
+        )
+    }
+}
+
+/// Receives host changes on the driver's thread. Implementations must return quickly and may
+/// call back into the [`HostHandle`].
+pub trait HostObserver: Send + Sync {
+    fn state_changed(&self, state: &HostState);
+}
+
+/// What the terminal opens. Names are validated by [`TerminalTarget::validate`] before
+/// anything runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalTarget {
+    /// The login shell.
+    Shell,
+    /// Attach to, or create, a tmux session.
+    Tmux { session_name: String },
+    /// herdr in `session` (`None` is the default session), after focusing `pane_id` if given.
+    Herdr {
+        session: Option<String>,
+        pane_id: Option<String>,
+    },
+}
+
+/// Nonempty, at most 128 bytes, no control characters, `\`, `:` or `.`.
+pub fn is_valid_tmux_session_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\\' | ':' | '.'))
+}
+
+/// `[A-Za-z0-9_-]{1,64}`.
+pub fn is_valid_herdr_session_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+/// `[A-Za-z0-9:_-]{1,128}`.
+pub fn is_valid_herdr_pane_id(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-'))
+}
+
+impl TerminalTarget {
+    pub fn validate(&self) -> Result<(), HostError> {
+        let valid = match self {
+            Self::Shell => true,
+            Self::Tmux { session_name } => is_valid_tmux_session_name(session_name),
+            Self::Herdr { session, pane_id } => {
+                session.as_deref().is_none_or(is_valid_herdr_session_name)
+                    && pane_id.as_deref().is_none_or(is_valid_herdr_pane_id)
+            }
+        };
+        valid.then_some(()).ok_or(HostError::InvalidName)
+    }
+}
+
+/// What the host offers, found by one probe per connection. Programs are absolute paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostCapabilities {
+    pub tmux: Option<String>,
+    pub herdr: Option<String>,
+    pub mosh_server: Option<String>,
+    pub utf8_locale: String,
+    /// Empty when herdr is missing or has no sessions.
+    pub herdr_sessions: Vec<HerdrSessionInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HerdrSessionInfo {
+    pub name: String,
+    pub running: bool,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TmuxSession {
+    pub name: String,
+    pub windows: u32,
+    pub attached_clients: u32,
+    pub created_unix: i64,
+    pub activity_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HostError {
+    #[error("the host is not connected yet")]
+    NotConnected,
+    #[error("the host connection is closed")]
+    Closed,
+    #[error("no host key is awaiting a decision")]
+    NoHostKeyPrompt,
+    #[error("the fingerprint does not match the presented host key")]
+    HostKeyMismatch,
+    #[error("session, pane or tmux name is not allowed")]
+    InvalidName,
+    #[error("{program} is not installed on the host")]
+    NotInstalled { program: String },
+    /// A command ran but failed; the message is a diagnostic without secrets.
+    #[error("command failed: {message}")]
+    CommandFailed { message: String },
+}
+
+/// What the host driver is asked to do.
+pub enum HostCommand {
+    ApproveHostKey {
+        fingerprint: String,
+    },
+    RejectHostKey,
+    /// Explicit disconnect, or every handle was dropped.
+    Disconnect,
+    /// Open a PTY channel for `target` and run `driver` (a session in `Connecting`) on it.
+    /// On failure close `driver` with a [`CloseReason::Failed`].
+    OpenTerminal {
+        target: TerminalTarget,
+        size: TerminalSize,
+        driver: SessionDriver,
+    },
+    Capabilities {
+        reply: oneshot::Sender<Result<HostCapabilities, HostError>>,
+    },
+    ListTmux {
+        reply: oneshot::Sender<Result<Vec<TmuxSession>, HostError>>,
+    },
+    /// Run [`herdr::run`] (or an equivalent) on `driver`. The session name is validated.
+    WatchHerdr {
+        session: Option<String>,
+        driver: HerdrWatchDriver,
+    },
+}
+
+struct Shared {
+    state: Mutex<HostState>,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+pub fn channel(observer: Arc<dyn HostObserver>) -> (HostHandle, HostDriver) {
+    let shared = Arc::new(Shared {
+        state: Mutex::new(HostState::Connecting),
+    });
+    let (sender, receiver) = mpsc::unbounded_channel();
+    (
+        HostHandle {
+            shared: Arc::clone(&shared),
+            commands: sender,
+        },
+        HostDriver {
+            shared,
+            commands: receiver,
+            observer: Some(observer),
+        },
+    )
+}
+
+/// Kotlin's side of a host connection. All methods are non-blocking (the queries only wait for
+/// their reply) and callable from any thread. Dropping the last handle disconnects.
+pub struct HostHandle {
+    shared: Arc<Shared>,
+    commands: mpsc::UnboundedSender<HostCommand>,
+}
+
+impl HostHandle {
+    pub fn state(&self) -> HostState {
+        lock(&self.shared.state).clone()
+    }
+
+    pub fn approve_host_key(&self, fingerprint: &str) -> Result<(), HostError> {
+        match &*lock(&self.shared.state) {
+            HostState::AwaitingHostKey(prompt) if prompt.presented.fingerprint() == fingerprint => {
+            }
+            HostState::AwaitingHostKey(_) => return Err(HostError::HostKeyMismatch),
+            HostState::Closed(_) => return Err(HostError::Closed),
+            _ => return Err(HostError::NoHostKeyPrompt),
+        }
+        self.send(HostCommand::ApproveHostKey {
+            fingerprint: fingerprint.to_owned(),
+        })
+    }
+
+    pub fn reject_host_key(&self) -> Result<(), HostError> {
+        match &*lock(&self.shared.state) {
+            HostState::AwaitingHostKey(_) => {}
+            HostState::Closed(_) => return Err(HostError::Closed),
+            _ => return Err(HostError::NoHostKeyPrompt),
+        }
+        self.send(HostCommand::RejectHostKey)
+    }
+
+    /// Idempotent. Closes every terminal and watch on the host; `Closed` arrives through the
+    /// observer.
+    pub fn disconnect(&self) {
+        let _ = self.commands.send(HostCommand::Disconnect);
+    }
+
+    /// Opens a terminal session on the host. The returned session starts in `Connecting` and
+    /// reaches `Connected` once its channel is open; failures close it.
+    pub fn open_terminal(
+        &self,
+        target: TerminalTarget,
+        size: TerminalSize,
+        observer: Arc<dyn SessionObserver>,
+    ) -> Result<SessionHandle, HostError> {
+        self.require_connected()?;
+        target.validate()?;
+        let (handle, driver) = session::channel(observer);
+        self.send(HostCommand::OpenTerminal {
+            target,
+            size,
+            driver,
+        })?;
+        Ok(handle)
+    }
+
+    /// Probes the host once per connection (the driver caches the answer).
+    pub async fn capabilities(&self) -> Result<HostCapabilities, HostError> {
+        let (reply, response) = oneshot::channel();
+        self.require_connected()?;
+        self.send(HostCommand::Capabilities { reply })?;
+        // A dropped reply means the connection ended before the answer.
+        response.await.unwrap_or(Err(HostError::Closed))
+    }
+
+    /// tmux sessions, most recently active first; empty when no tmux server runs.
+    pub async fn list_tmux_sessions(&self) -> Result<Vec<TmuxSession>, HostError> {
+        let (reply, response) = oneshot::channel();
+        self.require_connected()?;
+        self.send(HostCommand::ListTmux { reply })?;
+        response.await.unwrap_or(Err(HostError::Closed))
+    }
+
+    /// Watches a herdr session (`None` is the default session). The watch ends with the
+    /// connection.
+    pub fn watch_herdr(
+        &self,
+        session: Option<String>,
+        observer: Arc<dyn HerdrObserver>,
+    ) -> Result<HerdrWatchHandle, HostError> {
+        self.require_connected()?;
+        if !session.as_deref().is_none_or(is_valid_herdr_session_name) {
+            return Err(HostError::InvalidName);
+        }
+        let (handle, driver) = herdr::channel(observer);
+        self.send(HostCommand::WatchHerdr { session, driver })?;
+        Ok(handle)
+    }
+
+    fn require_connected(&self) -> Result<(), HostError> {
+        match *lock(&self.shared.state) {
+            HostState::Connected { .. } => Ok(()),
+            HostState::Closed(_) => Err(HostError::Closed),
+            _ => Err(HostError::NotConnected),
+        }
+    }
+
+    fn send(&self, command: HostCommand) -> Result<(), HostError> {
+        self.commands.send(command).map_err(|_| HostError::Closed)
+    }
+}
+
+/// The connection task's side. Dropping it without closing reports an internal failure, so
+/// Kotlin always receives exactly one `Closed`.
+pub struct HostDriver {
+    shared: Arc<Shared>,
+    commands: mpsc::UnboundedReceiver<HostCommand>,
+    observer: Option<Arc<dyn HostObserver>>,
+}
+
+impl HostDriver {
+    pub async fn next_command(&mut self) -> HostCommand {
+        self.commands
+            .recv()
+            .await
+            .unwrap_or(HostCommand::Disconnect)
+    }
+
+    /// For drivers running on a plain thread. Must not be called inside an async runtime.
+    pub fn blocking_next_command(&mut self) -> HostCommand {
+        self.commands
+            .blocking_recv()
+            .unwrap_or(HostCommand::Disconnect)
+    }
+
+    pub fn state(&self) -> HostState {
+        lock(&self.shared.state).clone()
+    }
+
+    /// Moves to `next` and notifies the observer. On `Closed` further commands are refused,
+    /// those already queued are failed (terminals close with the host's reason, watches close,
+    /// queries see `Closed`), and the observer is released afterwards.
+    pub fn transition(&mut self, next: HostState) -> Result<(), TransitionError> {
+        {
+            let mut state = lock(&self.shared.state);
+            if !state.can_become(&next) {
+                return Err(TransitionError {
+                    from: state.name(),
+                    to: next.name(),
+                });
+            }
+            *state = next.clone();
+        }
+        let observer = if let HostState::Closed(reason) = &next {
+            self.commands.close();
+            self.fail_queued(reason);
+            self.observer.take()
+        } else {
+            self.observer.clone()
+        };
+        if let Some(observer) = observer {
+            observer.state_changed(&next);
+        }
+        Ok(())
+    }
+
+    /// Closes unless already closed.
+    pub fn close(&mut self, reason: CloseReason) {
+        let _ = self.transition(HostState::Closed(reason));
+    }
+
+    fn fail_queued(&mut self, reason: &CloseReason) {
+        while let Ok(command) = self.commands.try_recv() {
+            match command {
+                HostCommand::OpenTerminal { mut driver, .. } => driver.close(reason.clone()),
+                HostCommand::WatchHerdr { mut driver, .. } => driver.close(),
+                // Dropping a reply sender makes the query fail with `Closed`.
+                _ => {}
+            }
+        }
+    }
+}
+
+impl Drop for HostDriver {
+    fn drop(&mut self) {
+        self.close(CloseReason::Failed(session::SessionFailure::Internal(
+            "host task ended without closing".into(),
+        )));
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid host transition {from} -> {to}")]
+pub struct TransitionError {
+    pub from: &'static str,
+    pub to: &'static str,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Weak;
+
+    use super::*;
+    use crate::herdr::{HerdrState, HerdrUnavailable};
+    use crate::session::{SessionFailure, SessionState};
+    use crate::trust::HostKeyVerdict;
+
+    #[derive(Default)]
+    struct Recorder {
+        events: Mutex<Vec<String>>,
+        handle: Mutex<Option<Arc<HostHandle>>>,
+    }
+
+    impl HostObserver for Recorder {
+        fn state_changed(&self, state: &HostState) {
+            // Reentrancy: reading state from inside the callback must not deadlock.
+            if let Some(handle) = &*lock(&self.handle) {
+                assert_eq!(&handle.state(), state);
+            }
+            lock(&self.events).push(state.name().into());
+        }
+    }
+
+    #[derive(Default)]
+    struct SessionRecorder(Mutex<Vec<SessionState>>);
+
+    impl SessionObserver for SessionRecorder {
+        fn state_changed(&self, state: &SessionState) {
+            lock(&self.0).push(state.clone());
+        }
+
+        fn frame_ready(&self) {}
+    }
+
+    #[derive(Default)]
+    struct WatchRecorder(Mutex<Vec<HerdrState>>);
+
+    impl HerdrObserver for WatchRecorder {
+        fn state_changed(&self, state: &HerdrState) {
+            lock(&self.0).push(state.clone());
+        }
+    }
+
+    fn setup(reentrant: bool) -> (Arc<Recorder>, Arc<HostHandle>, HostDriver) {
+        let recorder = Arc::new(Recorder::default());
+        let (handle, driver) = channel(recorder.clone());
+        let handle = Arc::new(handle);
+        if reentrant {
+            *lock(&recorder.handle) = Some(handle.clone());
+        }
+        (recorder, handle, driver)
+    }
+
+    fn events(recorder: &Recorder) -> Vec<String> {
+        lock(&recorder.events).clone()
+    }
+
+    fn host_key() -> HostKey {
+        HostKey::from_openssh(&ClientKey::generate_ed25519("h").public_key().openssh).unwrap()
+    }
+
+    fn connect(driver: &mut HostDriver) {
+        driver.transition(HostState::Authenticating).unwrap();
+        driver
+            .transition(HostState::Connected { address_index: 1 })
+            .unwrap();
+    }
+
+    fn size() -> TerminalSize {
+        TerminalSize::new(80, 24).unwrap()
+    }
+
+    #[test]
+    fn host_connect_request_validates_every_field_with_indices() {
+        let key = ClientKey::generate_ed25519("k").to_stored();
+        let trusted = vec![host_key().info().openssh];
+        let addresses = [("a.example", 22), ("10.0.0.2", 2222)];
+        let request = HostConnectRequest::new(&addresses, "akram", &key, &trusted).unwrap();
+        assert_eq!(request.addresses.len(), 2);
+        assert_eq!(request.addresses[1].host(), "10.0.0.2");
+        assert_eq!(request.addresses[1].port(), 2222);
+        assert_eq!(request.trusted_host_keys.len(), 1);
+        assert!(!format!("{request:?}").contains("OPENSSH"));
+
+        let err = |addresses: &[(&str, u16)], user, key: &[u8], trusted: &[String]| {
+            HostConnectRequest::new(addresses, user, key, trusted).unwrap_err()
+        };
+        assert_eq!(err(&[], "a", &key, &[]), HostConnectError::NoAddresses);
+        let nine = vec![("h", 22); 9];
+        assert_eq!(
+            err(&nine, "a", &key, &[]),
+            HostConnectError::TooManyAddresses
+        );
+        assert!(HostConnectRequest::new(&nine[..8], "a", &key, &[]).is_ok());
+        assert_eq!(
+            err(&[("h", 22), ("a b", 22)], "a", &key, &[]),
+            HostConnectError::InvalidAddress {
+                index: 1,
+                error: EndpointError::InvalidHost
+            }
+        );
+        assert_eq!(
+            err(&[("h", 0)], "a", &key, &[]),
+            HostConnectError::InvalidAddress {
+                index: 0,
+                error: EndpointError::InvalidPort
+            }
+        );
+        assert_eq!(
+            err(&[("h", 22)], "", &key, &[]),
+            HostConnectError::InvalidUsername
+        );
+        assert_eq!(
+            err(&[("h", 22)], "a\n", &key, &[]),
+            HostConnectError::InvalidUsername
+        );
+        let bad_trust = vec![trusted[0].clone(), "nope".into()];
+        assert_eq!(
+            err(&[("h", 22)], "a", &key, &bad_trust),
+            HostConnectError::InvalidTrustedHostKey { index: 1 }
+        );
+        assert_eq!(
+            err(&[("h", 22)], "a", b"junk", &[]),
+            HostConnectError::InvalidPrivateKey(KeyError::Malformed)
+        );
+    }
+
+    #[test]
+    fn terminal_targets_validate_names_exactly() {
+        let tmux = |name: &str| TerminalTarget::Tmux {
+            session_name: name.into(),
+        };
+        let herdr = |session: Option<&str>, pane: Option<&str>| TerminalTarget::Herdr {
+            session: session.map(Into::into),
+            pane_id: pane.map(Into::into),
+        };
+        let long = "x".repeat(129);
+        let max = "x".repeat(128);
+        for ok in [
+            TerminalTarget::Shell,
+            tmux("main"),
+            tmux("my work 2"),
+            tmux("é界😀"),
+            tmux("-dash"),
+            tmux(&"é".repeat(64)),
+            tmux(&max),
+            herdr(None, None),
+            herdr(Some("or2-test_1"), Some("w1:p_2-3")),
+            herdr(Some(&"a".repeat(64)), Some(&"a".repeat(128))),
+        ] {
+            assert_eq!(ok.validate(), Ok(()), "{ok:?}");
+        }
+        for bad in [
+            tmux(""),
+            tmux(&long),
+            tmux(&"é".repeat(65)),
+            tmux("a:b"),
+            tmux("a.b"),
+            tmux("a\\b"),
+            tmux("a\nb"),
+            tmux("a\u{7f}"),
+            herdr(Some(""), None),
+            herdr(Some("a b"), None),
+            herdr(Some("a:b"), None),
+            herdr(Some("é"), None),
+            herdr(Some(&"a".repeat(65)), None),
+            herdr(None, Some("")),
+            herdr(None, Some("a b")),
+            herdr(None, Some("a.b")),
+            herdr(None, Some(&"a".repeat(129))),
+            herdr(Some("ok"), Some("bad/id")),
+        ] {
+            assert_eq!(bad.validate(), Err(HostError::InvalidName), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn host_key_decision_is_bound_to_the_presented_key() {
+        let (recorder, handle, mut driver) = setup(false);
+        assert_eq!(handle.state(), HostState::Connecting);
+        assert!(
+            events(&recorder).is_empty(),
+            "the initial state is not a change"
+        );
+        assert_eq!(
+            handle.approve_host_key("SHA256:x"),
+            Err(HostError::NoHostKeyPrompt)
+        );
+
+        let presented = host_key();
+        let prompt = HostKeyPrompt {
+            presented: presented.clone(),
+            previously_trusted: vec![host_key()],
+        };
+        assert_eq!(prompt.verdict(), HostKeyVerdict::Changed);
+        driver
+            .transition(HostState::AwaitingHostKey(prompt))
+            .unwrap();
+        assert_eq!(
+            handle.approve_host_key(&host_key().fingerprint()),
+            Err(HostError::HostKeyMismatch)
+        );
+        handle.approve_host_key(&presented.fingerprint()).unwrap();
+        assert!(matches!(
+            driver.blocking_next_command(),
+            HostCommand::ApproveHostKey { fingerprint } if fingerprint == presented.fingerprint()
+        ));
+        handle.reject_host_key().unwrap();
+        assert!(matches!(
+            driver.blocking_next_command(),
+            HostCommand::RejectHostKey
+        ));
+        driver.transition(HostState::Authenticating).unwrap();
+        assert_eq!(handle.reject_host_key(), Err(HostError::NoHostKeyPrompt));
+    }
+
+    #[test]
+    fn transitions_are_ordered_and_invalid_ones_are_rejected_without_callbacks() {
+        let (recorder, _handle, mut driver) = setup(true);
+        assert_eq!(
+            driver.transition(HostState::Connected { address_index: 0 }),
+            Err(TransitionError {
+                from: "Connecting",
+                to: "Connected"
+            })
+        );
+        connect(&mut driver);
+        assert_eq!(
+            driver.transition(HostState::Authenticating),
+            Err(TransitionError {
+                from: "Connected",
+                to: "Authenticating"
+            })
+        );
+        assert_eq!(driver.state(), HostState::Connected { address_index: 1 });
+        driver.close(CloseReason::Disconnected);
+        assert!(driver.transition(HostState::Authenticating).is_err());
+        driver.close(CloseReason::Failed(SessionFailure::TimedOut));
+        assert_eq!(events(&recorder), ["Authenticating", "Connected", "Closed"]);
+    }
+
+    #[test]
+    fn closing_releases_the_observer_and_rejects_everything() {
+        let (recorder, handle, mut driver) = setup(true);
+        let weak: Weak<Recorder> = Arc::downgrade(&recorder);
+        *lock(&recorder.handle) = None;
+        drop(recorder);
+        connect(&mut driver);
+        handle.disconnect();
+        assert!(matches!(
+            driver.blocking_next_command(),
+            HostCommand::Disconnect
+        ));
+        driver.close(CloseReason::Disconnected);
+        assert!(weak.upgrade().is_none(), "observer released after Closed");
+        assert_eq!(handle.state(), HostState::Closed(CloseReason::Disconnected));
+        assert_eq!(handle.reject_host_key(), Err(HostError::Closed));
+        assert_eq!(handle.approve_host_key("x"), Err(HostError::Closed));
+        assert_eq!(
+            handle
+                .open_terminal(
+                    TerminalTarget::Shell,
+                    size(),
+                    Arc::new(SessionRecorder::default())
+                )
+                .err(),
+            Some(HostError::Closed)
+        );
+        assert_eq!(
+            handle
+                .watch_herdr(None, Arc::new(WatchRecorder::default()))
+                .err(),
+            Some(HostError::Closed)
+        );
+        handle.disconnect();
+    }
+
+    #[test]
+    fn dropping_all_handles_disconnects_and_dropping_the_driver_closes() {
+        let (recorder, handle, mut driver) = setup(false);
+        drop(handle);
+        assert!(matches!(
+            driver.blocking_next_command(),
+            HostCommand::Disconnect
+        ));
+        drop(driver);
+        assert_eq!(events(&recorder), ["Closed"]);
+
+        let (_recorder, handle, driver) = setup(false);
+        drop(driver);
+        assert_eq!(
+            handle.state(),
+            HostState::Closed(CloseReason::Failed(SessionFailure::Internal(
+                "host task ended without closing".into()
+            )))
+        );
+    }
+
+    #[tokio::test]
+    async fn queries_and_openings_require_a_connected_host() {
+        let (_recorder, handle, mut driver) = setup(false);
+        let sessions = Arc::new(SessionRecorder::default());
+        let watches = Arc::new(WatchRecorder::default());
+        assert_eq!(handle.capabilities().await, Err(HostError::NotConnected));
+        assert_eq!(
+            handle.list_tmux_sessions().await,
+            Err(HostError::NotConnected)
+        );
+        assert_eq!(
+            handle
+                .open_terminal(TerminalTarget::Shell, size(), sessions.clone())
+                .err(),
+            Some(HostError::NotConnected)
+        );
+        assert_eq!(
+            handle.watch_herdr(None, watches.clone()).err(),
+            Some(HostError::NotConnected)
+        );
+        driver.transition(HostState::Authenticating).unwrap();
+        assert_eq!(handle.capabilities().await, Err(HostError::NotConnected));
+        connect_from_authenticating(&mut driver);
+
+        // Invalid names are rejected before anything is enqueued.
+        let bad = TerminalTarget::Tmux {
+            session_name: "a:b".into(),
+        };
+        assert_eq!(
+            handle.open_terminal(bad, size(), sessions.clone()).err(),
+            Some(HostError::InvalidName)
+        );
+        assert_eq!(
+            handle.watch_herdr(Some("a b".into()), watches).err(),
+            Some(HostError::InvalidName)
+        );
+        assert!(lock(&sessions.0).is_empty(), "no session was created");
+        driver.close(CloseReason::Disconnected);
+        assert_eq!(handle.capabilities().await, Err(HostError::Closed));
+        assert_eq!(handle.list_tmux_sessions().await, Err(HostError::Closed));
+    }
+
+    fn connect_from_authenticating(driver: &mut HostDriver) {
+        driver
+            .transition(HostState::Connected { address_index: 0 })
+            .unwrap();
+    }
+
+    fn capabilities() -> HostCapabilities {
+        HostCapabilities {
+            tmux: Some("/usr/bin/tmux".into()),
+            herdr: None,
+            mosh_server: None,
+            utf8_locale: "C.UTF-8".into(),
+            herdr_sessions: vec![HerdrSessionInfo {
+                name: "default".into(),
+                running: true,
+                is_default: true,
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn queries_are_answered_through_their_reply() {
+        let (_recorder, handle, mut driver) = setup(false);
+        connect(&mut driver);
+        let answers = std::thread::spawn(move || {
+            for _ in 0..2 {
+                match driver.blocking_next_command() {
+                    HostCommand::Capabilities { reply } => {
+                        reply.send(Ok(capabilities())).unwrap();
+                    }
+                    HostCommand::ListTmux { reply } => {
+                        reply
+                            .send(Err(HostError::NotInstalled {
+                                program: "tmux".into(),
+                            }))
+                            .unwrap();
+                    }
+                    _ => panic!("unexpected command"),
+                }
+            }
+            driver
+        });
+        assert_eq!(handle.capabilities().await, Ok(capabilities()));
+        assert_eq!(
+            handle.list_tmux_sessions().await,
+            Err(HostError::NotInstalled {
+                program: "tmux".into()
+            })
+        );
+        drop(answers.join().unwrap());
+    }
+
+    #[tokio::test]
+    async fn closing_fails_pending_queries_with_closed() {
+        let (_recorder, handle, mut driver) = setup(false);
+        connect(&mut driver);
+        let pending = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.list_tmux_sessions().await }
+        });
+        // The driver took the query and then the connection ended: its reply is dropped.
+        let taken = std::thread::spawn(move || {
+            let command = driver.blocking_next_command();
+            driver.close(CloseReason::Failed(SessionFailure::ConnectionLost(
+                "gone".into(),
+            )));
+            drop(command);
+        });
+        assert_eq!(pending.await.unwrap(), Err(HostError::Closed));
+        taken.join().unwrap();
+
+        // A query still queued when the host closes fails the same way.
+        let (_recorder, handle, mut driver) = setup(false);
+        connect(&mut driver);
+        let queued = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.capabilities().await }
+        });
+        while driver.commands.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        driver.close(CloseReason::Disconnected);
+        assert_eq!(queued.await.unwrap(), Err(HostError::Closed));
+    }
+
+    #[test]
+    fn terminals_and_watches_are_created_by_the_handle_and_failed_when_the_host_closes() {
+        let (_recorder, handle, mut driver) = setup(false);
+        connect(&mut driver);
+        let sessions = Arc::new(SessionRecorder::default());
+        let watches = Arc::new(WatchRecorder::default());
+        let target = TerminalTarget::Herdr {
+            session: Some("work".into()),
+            pane_id: Some("w1:p2".into()),
+        };
+        let terminal = handle
+            .open_terminal(target.clone(), size(), sessions.clone())
+            .unwrap();
+        let watch = handle
+            .watch_herdr(Some("work".into()), watches.clone())
+            .unwrap();
+        assert_eq!(terminal.state(), SessionState::Connecting);
+        assert_eq!(watch.state(), HerdrState::Starting);
+
+        // The driver receives each pair's driver half and drives it.
+        let HostCommand::OpenTerminal {
+            target: got,
+            size: got_size,
+            driver: mut session_driver,
+        } = driver.blocking_next_command()
+        else {
+            panic!("expected OpenTerminal");
+        };
+        assert_eq!((got, got_size), (target, size()));
+        session_driver.transition(SessionState::Connected).unwrap();
+        assert_eq!(terminal.state(), SessionState::Connected);
+        let HostCommand::WatchHerdr {
+            session,
+            driver: mut watch_driver,
+        } = driver.blocking_next_command()
+        else {
+            panic!("expected WatchHerdr");
+        };
+        assert_eq!(session.as_deref(), Some("work"));
+        watch_driver
+            .transition(HerdrState::Unavailable {
+                reason: HerdrUnavailable::NotRunning,
+                message: "m".into(),
+            })
+            .unwrap();
+        watch.stop();
+        watch_driver.close();
+        assert_eq!(watch.state(), HerdrState::Closed);
+        drop(session_driver);
+
+        // Opened but not yet picked up when the host closes: closed with the host's reason.
+        let user_closed = Arc::new(SessionRecorder::default());
+        let queued = handle
+            .open_terminal(TerminalTarget::Shell, size(), user_closed.clone())
+            .unwrap();
+        let queued_watch = handle
+            .watch_herdr(None, Arc::new(WatchRecorder::default()))
+            .unwrap();
+        driver.close(CloseReason::Disconnected);
+        assert_eq!(
+            queued.state(),
+            SessionState::Closed(CloseReason::Disconnected)
+        );
+        assert_eq!(
+            *lock(&user_closed.0),
+            [SessionState::Closed(CloseReason::Disconnected)]
+        );
+        assert_eq!(queued_watch.state(), HerdrState::Closed);
+
+        let (_recorder, handle, mut driver) = setup(false);
+        connect(&mut driver);
+        let lost = Arc::new(SessionRecorder::default());
+        let queued = handle
+            .open_terminal(TerminalTarget::Shell, size(), lost.clone())
+            .unwrap();
+        let reason = CloseReason::Failed(SessionFailure::ConnectionLost("gone".into()));
+        driver.close(reason.clone());
+        assert_eq!(queued.state(), SessionState::Closed(reason));
+    }
+}

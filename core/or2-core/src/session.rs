@@ -8,9 +8,14 @@
 //!
 //! ```text
 //! Connecting ──▶ AwaitingHostKey ──▶ Authenticating ──▶ Connected
-//!     │  └──────────────────────────────────▲                │
-//!     └─────────────┴───────────────────────┴────────────────┴──▶ Closed (terminal, once)
+//!     │  │                                  ▲                ▲
+//!     │  └──────────────────────────────────┘                │
+//!     └──────────── channel sessions (M2) ───────────────────┘
+//! any state ──▶ Closed (terminal, once)
 //! ```
+//!
+//! A session that owns a channel on an established host connection goes straight from
+//! `Connecting` to `Connected`: host-key and authentication states belong to the host.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -150,7 +155,7 @@ impl SessionState {
         use SessionState::*;
         matches!(
             (self, next),
-            (Connecting, AwaitingHostKey(_) | Authenticating)
+            (Connecting, AwaitingHostKey(_) | Authenticating | Connected)
                 | (AwaitingHostKey(_), Authenticating)
                 | (Authenticating, Connected)
                 | (
@@ -588,17 +593,43 @@ mod tests {
     #[test]
     fn invalid_transitions_are_rejected_without_callbacks() {
         let (recorder, _handle, mut driver) = setup(false);
+        driver.transition(SessionState::Authenticating).unwrap();
         assert_eq!(
-            driver.transition(SessionState::Connected),
+            driver.transition(SessionState::AwaitingHostKey(HostKeyPrompt {
+                presented: host_key(),
+                previously_trusted: Vec::new(),
+            })),
             Err(TransitionError {
-                from: "Connecting",
-                to: "Connected"
+                from: "Authenticating",
+                to: "AwaitingHostKey"
+            })
+        );
+        driver.transition(SessionState::Connected).unwrap();
+        assert_eq!(
+            driver.transition(SessionState::Authenticating),
+            Err(TransitionError {
+                from: "Connected",
+                to: "Authenticating"
             })
         );
         driver.close(CloseReason::Disconnected);
         assert!(driver.transition(SessionState::Authenticating).is_err());
         driver.close(CloseReason::Failed(SessionFailure::TimedOut));
-        assert_eq!(events(&recorder), ["Closed"]);
+        assert_eq!(events(&recorder), ["Authenticating", "Connected", "Closed"]);
+    }
+
+    #[test]
+    fn channel_sessions_skip_straight_to_connected() {
+        let (recorder, handle, mut driver) = setup(false);
+        driver.transition(SessionState::Connected).unwrap();
+        handle.send_text("ls\n".into()).unwrap();
+        assert_eq!(driver.blocking_next_command(), Command::Text("ls\n".into()));
+        driver.publish(frame(true)).unwrap();
+        assert_eq!(events(&recorder), ["Connected", "frame_ready(taken=false)"]);
+
+        let (_recorder, _handle, mut driver) = setup(false);
+        driver.close(CloseReason::Disconnected);
+        assert!(driver.transition(SessionState::Connected).is_err());
     }
 
     #[test]

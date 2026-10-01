@@ -13,6 +13,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::{Instant, sleep_until};
 
+use crate::host::{self, HostConnectRequest, HostHandle, HostObserver};
 use crate::session::{
     CloseReason, Command, ConnectRequest, HostKeyPrompt, SessionDriver, SessionFailure,
     SessionHandle, SessionObserver, SessionState, channel,
@@ -25,7 +26,7 @@ use crate::trust::{HostKey, HostKeyVerdict, verify};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const REPLY_BYTE_BUDGET: usize = 64 * 1024;
 
-fn runtime() -> &'static Runtime {
+pub(crate) fn runtime() -> &'static Runtime {
     static RUNTIME: OnceLock<Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -38,6 +39,22 @@ fn runtime() -> &'static Runtime {
 
 pub fn connect(request: ConnectRequest, observer: Arc<dyn SessionObserver>) -> SessionHandle {
     start(request, observer, CONNECT_TIMEOUT)
+}
+
+/// Connects to a host. Not implemented until lane A1: closes at once with
+/// `Failed(Internal)`, never a pretend success. The close is delivered from a Rust thread.
+pub fn connect_host(request: HostConnectRequest, observer: Arc<dyn HostObserver>) -> HostHandle {
+    let (handle, mut driver) = host::channel(observer);
+    drop(request);
+    std::thread::Builder::new()
+        .name("or2-host".into())
+        .spawn(move || {
+            driver.close(CloseReason::Failed(SessionFailure::Internal(
+                "host connections land with lane A1".into(),
+            )));
+        })
+        .expect("create host thread");
+    handle
 }
 
 fn start(
