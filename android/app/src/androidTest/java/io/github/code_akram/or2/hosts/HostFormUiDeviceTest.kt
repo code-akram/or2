@@ -203,4 +203,37 @@ class HostFormUiDeviceTest {
         show(previous)
         compose.onNodeWithTag("host-transport:1").performScrollTo().assertIsSelected()
     }
+
+    @Test
+    fun theAddressListSaysToPutTheAddressThatWorksEverywhereFirst() {
+        show(null)
+        compose.onNodeWithTag("host-address-hint").assertIsDisplayed()
+            .assertTextContains("list the one that works on every network first", substring = true)
+        compose.onNodeWithTag("host-address-hint").assertTextContains("Mosh stays on the address SSH reached", substring = true)
+    }
+
+    @Test
+    fun theSleepsToggleIsOffByDefaultExplainedAndSaved() {
+        var saved: Host? = null
+        show(null, save = { saved = it })
+        fillHostFields()
+        compose.onNodeWithTag("host-sleeps-note").performScrollTo().assertIsDisplayed()
+            .assertTextContains("no reconnect is offered", substring = true)
+        compose.onNodeWithTag("host-sleeps").performScrollTo().performClick()
+        compose.onNodeWithTag("host-form-primary").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(true, saved!!.sleeps) }
+    }
+
+    @Test
+    fun editingASleepingHostStartsFromItsFlagAndKeepsTheMoshMemory() {
+        var saved: Host? = null
+        val previous = uiHost(sleeps = true).let { it.copy(record = it.record.copy(moshFailedUntil = 1_800_000_000_000L)) }
+        show(previous, save = { saved = it })
+        compose.onNodeWithTag("host-sleeps").performScrollTo().performClick() // Off.
+        compose.onNodeWithTag("host-form-primary").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertEquals(false, saved!!.sleeps)
+            assertEquals(1_800_000_000_000L, saved!!.moshFailedUntil)
+        }
+    }
 }

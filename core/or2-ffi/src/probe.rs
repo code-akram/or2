@@ -8,7 +8,7 @@
 //! frames and input across the real FFI. App code must never call it.
 //!
 //! `contract_probe_host` does the same for a host connection (API 4): see its documentation.
-//! It also serves `TerminalTransport::Mosh` terminals (API 8) deterministically.
+//! It also serves `TerminalTransport::Mosh` terminals (API 8, API 9) deterministically.
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -362,6 +362,7 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                 transport,
                 size,
                 driver: session,
+                ..
             } => {
                 tasks.spawn(run_terminal(
                     session,

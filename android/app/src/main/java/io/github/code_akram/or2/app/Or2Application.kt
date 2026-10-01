@@ -8,8 +8,11 @@ import io.github.code_akram.or2.connection.HostConnector
 import io.github.code_akram.or2.data.AppDatabase
 import io.github.code_akram.or2.data.MIGRATION_1_2
 import io.github.code_akram.or2.data.MIGRATION_2_3
+import io.github.code_akram.or2.data.MIGRATION_3_4
 import io.github.code_akram.or2.keys.BiometricVault
+import io.github.code_akram.or2.ffi.networkChanged
 import io.github.code_akram.or2.service.ConnectionService
+import io.github.code_akram.or2.service.NetworkChanges
 import io.github.code_akram.or2.service.ServiceStarter
 import io.github.code_akram.or2.service.serviceSnapshots
 import kotlinx.coroutines.CoroutineScope
@@ -20,7 +23,7 @@ import kotlinx.coroutines.launch
 class Or2Application : Application() {
     val database by lazy { Room.databaseBuilder(this, AppDatabase::class.java, "or2.db")
         // Never destructive: key records are bound to Keystore entries that cannot be recreated.
-        .addMigrations(MIGRATION_1_2, MIGRATION_2_3).build() }
+        .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build() }
     val vault by lazy { BiometricVault(this) }
 
     /** App-private settings: the one-time prompts and the last terminal. */
@@ -35,8 +38,18 @@ class Or2Application : Application() {
 
     /** The process's one set of connections; [ConnectionService] keeps the process alive while any is open. */
     val connections by lazy {
-        HostConnections({ request, listener -> (connectorOverride ?: HostConnector.Native).connect(request, listener) }, database.dao())
+        HostConnections({ request, listener -> (connectorOverride ?: HostConnector.Native).connect(request, listener) }, database.dao(),
+            moshFailures = database.dao())
             .also { it.userClose = reattach }
+    }
+
+    /**
+     * The one debouncer of `network_changed()`: the service's network callbacks and every return to
+     * the foreground feed it, so a burst of events (and a return right after a handover) is one roam.
+     * Calling it with nothing live is free: the registry of live sessions is empty.
+     */
+    val networkChanges by lazy {
+        NetworkChanges(CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate), null) { networkChanged() }
     }
 
     private var starter: ServiceStarter? = null

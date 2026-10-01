@@ -372,7 +372,7 @@ service and mosh.
 
 ### M3 implementation checklist
 
-Interfaces are in [contracts: M3](contracts.md#m3-stays-connected) (FFI API 8).
+Interfaces are in [contracts: M3](contracts.md#m3-stays-connected) (FFI API 9 with the follow-up).
 
 - [x] M3-A: mosh terminals on host connections (transport choice, peer pinning, bootstrap,
   terminate on early failure), link health, `roam`/`network_changed`, mosh survives host loss.
@@ -386,8 +386,15 @@ Interfaces are in [contracts: M3](contracts.md#m3-stays-connected) (FFI API 8).
   here has observed, so they stay in the acceptance item below. Decisions and deviations are in
   [contracts: M3-B](contracts.md#m3-b-android-status-and-decisions-integrated-on-m3integrate).
 - [x] UI-C: compact default scale everywhere (type, controls, popups, arrow pad).
-- [ ] M3 follow-up: `resume_mosh` with Keystore-protected tickets, broader roaming triggers,
-  5 s Auto fallback remembered per host, non-blocking return, manifest permissions
+- [x] M3 follow-up (advisor review and owner decisions of 2026-10-01): broader roaming triggers
+  (transport-set and interface changes, every foreground return), AUTO's 5 s mosh budget as an absolute
+  deadline over the whole start with a 24 h per-host memory in Room (v4, with `sleeps`), a non-modal
+  reconnect chip and `Asleep` hosts, auto-resume after process death, the host-form address hint and
+  the manifest permissions, on FFI API 9. `resume_mosh` was **rejected after review** (nonce reuse
+  under a persisted key, and the transport state a fresh client lacks); process death is handled by
+  the fast Home Resume path instead. Ticked on the Rust suite (real `sshd`, `tmux`, herdr, `mosh-server`),
+  the JVM, real-FFI and fake-backed tests and the compile-checked device tests; the phone-only
+  behaviour stays in the acceptance item below
   ([contracts](contracts.md#m3-follow-up-advisor-review-owner-decisions-2026-10-01)).
 - [ ] Integration, external review and phone acceptance, including v0 step 3 (background
   10 minutes over mobile data, return to the same pane without re-typing).

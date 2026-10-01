@@ -68,7 +68,6 @@ import io.github.code_akram.or2.host.TmuxList
 import io.github.code_akram.or2.hosts.HostFormScreen
 import io.github.code_akram.or2.inbox.InboxScreen
 import io.github.code_akram.or2.inbox.InboxState
-import io.github.code_akram.or2.inbox.LinkStatus
 import io.github.code_akram.or2.inbox.dialogForOtherHost
 import io.github.code_akram.or2.inbox.hostStates
 import io.github.code_akram.or2.inbox.inbox
@@ -234,6 +233,19 @@ fun Or2App(
         }
     }
 
+    // The chip was tapped: the usual grouped unlock (one biometric per distinct key) and connect. Coming
+    // back from a terminal whose connection was lost, its terminal is reopened (or reused, if a mosh
+    // session kept it alive) once the host is connected again.
+    // The hosts whose lost connection the app offered to restore when it returned: shown as a chip
+    // (not a dialog: nothing waits for an answer), for as long as they are still lost.
+    var offeredIds by remember { mutableStateOf(emptySet<Long>()) }
+    var stoppedOnTerminal by rememberSaveable { mutableStateOf(false) }
+    fun acceptReconnect(offer: ReconnectOffer) {
+        offeredIds = emptySet()
+        last?.takeIf { stoppedOnTerminal && offer.hosts.any { host -> host.id == it.hostId } }?.let { pendingResume = it }
+        connect(offer.hosts)
+    }
+
     // What the user last had in front of them: remembered once the terminal connected.
     val shownConnected = currentTerminal?.hasConnected?.collectAsStateWithLifecycle()?.value == true
     val shownTransport = currentTerminal?.transport?.collectAsStateWithLifecycle()?.value
@@ -242,10 +254,20 @@ fun Or2App(
             actions.reattach.remember(LastTerminal(currentTerminal.host.id, currentTerminal.target, shownTransport))
         }
     }
-    // A terminal id saved by a previous process means nothing now: start from Home (Resume is there).
-    LaunchedEffect(Unit) {
+    // A terminal id saved by a previous process means nothing now: the process died while the user was
+    // on that terminal (the system killed it, and brought the user back through the recents list).
+    // Start from Home and resume at once: one grouped unlock (the fingerprint), then the host connects
+    // and the remembered target reopens, with no further tap. A cold start from the launcher has no
+    // saved destination and shows Home's Resume card instead.
+    var recovered by remember { mutableStateOf(false) }
+    LaunchedEffect(loaded) {
+        if (!loaded || recovered) return@LaunchedEffect
+        recovered = true
         val top = NavStack.decode(saved).current
-        if (top is Destination.Terminal && connections.terminal(top.terminalId) == null) navigate(NavStack())
+        if (top is Destination.Terminal && connections.terminal(top.terminalId) == null) {
+            navigate(NavStack())
+            if (shouldAutoResume(actions.reattach.last.value, hostsNow.value, connectedHosts)) resumeLast()
+        }
     }
 
     // Leaving and returning: see the contract's reattach, battery and reconnect rules. The flags
@@ -255,10 +277,12 @@ fun Or2App(
     // work itself waits for the stored hosts to be read, which a recreated activity has not yet done.
     val activity = LocalActivity.current
     var returning by rememberSaveable { mutableStateOf(false) }
-    var stoppedOnTerminal by rememberSaveable { mutableStateOf(false) }
     var returned by remember { mutableStateOf(false) }
     var batteryExplanation by rememberSaveable { mutableStateOf(false) }
-    var offer by remember { mutableStateOf<ReconnectOffer?>(null) }
+    val chipOffer = remember(offeredIds, hosts, states) {
+        if (offeredIds.isEmpty()) null
+        else reconnectOffer(hosts.filter { it.id in offeredIds }, connections.hosts.value)
+    }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
         if (activity?.isChangingConfigurations == true) return@LifecycleEventEffect
         returning = true
@@ -275,7 +299,7 @@ fun Or2App(
         returned = false
         val stored = hostsNow.value
         if (actions.battery.takeIfDue()) batteryExplanation = true
-        offer = reconnectOffer(stored, connections.hosts.value)
+        offeredIds = reconnectOffer(stored, connections.hosts.value)?.hosts?.map { it.id }?.toSet().orEmpty()
         val liveHosts = connections.hosts.value.filterValues { it.state.value is HostState.Connected }.keys
         val decision = decideReattach(
             actions.reattach.last.value,
@@ -320,9 +344,9 @@ fun Or2App(
                     }
                     val cards = hosts.map { host ->
                         val state = states[host.id]
-                        HostCard(host, hostCardStatus(state, host.id in unlocking, blockedByHost[host.id] ?: 0), linkStatus(state))
+                        HostCard(host, hostCardStatus(state, host.id in unlocking, blockedByHost[host.id] ?: 0, host.sleeps), linkStatus(state, host.sleeps))
                     }
-                    val connectable = cards.filter { it.host.keyId != null && (it.link == LinkStatus.NOT_CONNECTED || it.link == LinkStatus.FAILED) }
+                    val connectable = cards.filter { it.host.keyId != null && it.link.canConnect }
                     HomeScreen(
                         sessions = sessions,
                         hosts = cards, keyCount = keys.size,
@@ -331,10 +355,10 @@ fun Or2App(
                         canConnectAll = connectable.size > 1, busy = busy,
                         openSession = { resumeTerminal(it.id) },
                         openHost = { host ->
-                            val link = linkStatus(states[host.id])
+                            val link = linkStatus(states[host.id], host.sleeps)
                             // Tapping a host that is not connected unlocks and connects it; the host screen
                             // is where its host-key prompts and the session picker live.
-                            if (!busy && host.keyId != null && (link == LinkStatus.NOT_CONNECTED || link == LinkStatus.FAILED)) connect(listOf(host))
+                            if (!busy && host.keyId != null && link.canConnect) connect(listOf(host))
                             openHostPage(host.id)
                         },
                         addHost = { navigate(nav.push(Destination.HostForm(0))) },
@@ -386,13 +410,15 @@ fun Or2App(
             }
             if (current is Destination.Terminal) {
                 // A full-screen terminal has no notice area: progress and failures float at the top.
-                Column(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(Or2Dimens.Gutter)) {
+                Column(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(Or2Dimens.Gutter), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     FocusNotice(focusing)
                     if (message != null) MessageCard(message, dismiss = { actions.message(null) })
+                    chipOffer?.let { ReconnectChip(it, reconnect = { acceptReconnect(it) }, dismiss = { offeredIds = emptySet() }) }
                 }
             } else {
                 Notices(message, busy, focusing, dismiss = { actions.message(null) },
-                    Modifier.align(Alignment.BottomCenter).windowInsetsPadding(Or2BottomInsets)
+                    chip = chipOffer?.let { offer -> { ReconnectChip(offer, reconnect = { acceptReconnect(offer) }, dismiss = { offeredIds = emptySet() }) } },
+                    modifier = Modifier.align(Alignment.BottomCenter).windowInsetsPadding(Or2BottomInsets)
                         .padding(bottom = if (current == Destination.Home) Or2Dimens.Fab + 24.dp else 8.dp))
             }
         }
@@ -402,28 +428,6 @@ fun Or2App(
     pending.dialogForOtherHost((current as? Destination.HostPage)?.hostId)?.let { (active, prompt) ->
         HostTrustDialog(prompt, busy, { actions.approve(active, prompt) }, { actions.reject(active) },
             hostLabel = hosts.find { it.id == active.host.id }?.label ?: active.host.label)
-    }
-    offer?.let { pendingOffer ->
-        val prompts = pendingOffer.prompts
-        Or2Dialog(
-            onDismiss = { offer = null }, title = "Reconnect?",
-            confirm = {
-                TextAction("Reconnect", {
-                    offer = null
-                    // Coming back from a terminal that was lost: reopen it once its host is connected again.
-                    last?.takeIf { stoppedOnTerminal && pendingOffer.hosts.any { host -> host.id == it.hostId } }
-                        ?.let { pendingResume = it }
-                    connect(pendingOffer.hosts)
-                }, modifier = Modifier.testTag("reconnect-confirm"))
-            },
-            dismiss = { TextAction("Not now", { offer = null }, color = Or2Colors.Text, modifier = Modifier.testTag("reconnect-dismiss")) },
-            modifier = Modifier.testTag("reconnect-dialog"),
-        ) {
-            Text(
-                "The connection to " + pendingOffer.hosts.joinToString { it.label } + " was lost while the app was away. " +
-                    if (prompts == 1) "Reconnecting asks for your fingerprint once." else "Reconnecting asks for your fingerprint $prompts times, once per key.",
-            )
-        }
     }
     if (batteryExplanation) {
         Or2Dialog(
@@ -486,10 +490,14 @@ private fun FocusNotice(focusing: String?) {
 
 /** Messages and waiting state as floating cards above the content, never modal. */
 @Composable
-private fun Notices(message: String?, busy: Boolean, focusing: String?, dismiss: () -> Unit, modifier: Modifier = Modifier) {
+private fun Notices(
+    message: String?, busy: Boolean, focusing: String?, dismiss: () -> Unit, modifier: Modifier = Modifier,
+    chip: (@Composable () -> Unit)? = null,
+) {
     Column(modifier.fillMaxWidth().padding(horizontal = Or2Dimens.Gutter), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (message != null) MessageCard(message, dismiss)
         FocusNotice(focusing)
+        chip?.invoke()
         if (busy) {
             Or2Card(Modifier.testTag("busy-banner").semantics { liveRegion = LiveRegionMode.Polite }, color = Or2Colors.SurfaceRaised) {
                 Row(Modifier.padding(Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {

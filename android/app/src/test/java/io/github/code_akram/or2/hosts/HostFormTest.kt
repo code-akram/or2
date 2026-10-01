@@ -67,4 +67,19 @@ class HostFormTest {
         val previous = testHost()
         assertFalse(connectionAffectedBy(previous, previous.copy(record = previous.record.copy(transport = TransportPref.MOSH))))
     }
+
+    @Test
+    fun theAddressHintTellsTheUserToListTheAddressThatWorksEverywhereFirst() {
+        assertTrue(ADDRESS_ORDER_HINT.contains("list the one that works on every network first"))
+        assertTrue(ADDRESS_ORDER_HINT.contains("Mosh stays on the address SSH reached"))
+        assertTrue(ADDRESS_ORDER_HINT.startsWith("In order of preference."))
+    }
+
+    @Test
+    fun theSleepsFlagIsExplainedAndDoesNotEndALiveConnection() {
+        assertTrue(SLEEPS_EXPLANATION.contains("asleep"))
+        assertTrue(SLEEPS_EXPLANATION.contains("no reconnect is offered"))
+        val previous = testHost()
+        assertFalse(connectionAffectedBy(previous, previous.copy(record = previous.record.copy(sleeps = true))))
+    }
 }

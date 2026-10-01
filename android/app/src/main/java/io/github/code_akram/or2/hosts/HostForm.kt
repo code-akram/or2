@@ -54,3 +54,15 @@ fun transportExplanation(pref: TransportPref) = when (pref) {
     TransportPref.SSH -> "Terminals always use SSH and end when the connection drops."
     TransportPref.MOSH -> "Terminals always use mosh and survive network changes. Needs mosh-server and UDP."
 }
+
+/**
+ * Under the address list. Mosh pins to the address SSH actually reached (it never resolves again
+ * and never switches address), so the one that works from every network should come first.
+ */
+const val ADDRESS_ORDER_HINT =
+    "In order of preference. All are tried; the first to answer wins. Mosh stays on the address SSH " +
+        "reached, so list the one that works on every network first."
+
+/** Under the "Host sleeps when idle" toggle. */
+const val SLEEPS_EXPLANATION =
+    "For a laptop that sleeps: when its connection is lost it shows as asleep, and no reconnect is offered."

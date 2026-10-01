@@ -105,11 +105,18 @@ class ServiceStarter(private val state: ServiceRunState = ServiceRunState.Proces
 }
 
 /**
- * Turns the connectivity callback's events into one debounced `network_changed()`. The default
- * network is tracked by its handle so only a real change counts: [available] for the network that
- * is already the default (a repeat, or the callback's first report after registering) does nothing,
- * a different one does, and [lost] followed by the same network returning does (lost-then-available).
- * Several events within [debounceMs] collapse into one notification.
+ * Turns the connectivity callback's events into one debounced `network_changed()`. Four things
+ * count as a change, and several within [debounceMs] collapse into one notification:
+ *
+ * - the default network is a different one ([available]; the callback's first report of the network
+ *   that was already the default is not a change), or the same one came back after [lost];
+ * - its **transport set** changed ([capabilitiesChanged]: Wi-Fi to cellular under a VPN keeps the
+ *   same default network, and this is the only signal), or its **interface** changed
+ *   ([linkChanged]). The first report of either is only the baseline, and a report of the same
+ *   value is not a change, so the stream of bandwidth and signal-strength updates that arrives
+ *   through the same callbacks does nothing;
+ * - the app returned to the foreground ([foregrounded]): whatever happened while it was away is
+ *   settled by one roam, whether or not the callbacks fired in the background.
  */
 class NetworkChanges(
     private val scope: CoroutineScope,
@@ -118,17 +125,51 @@ class NetworkChanges(
     private val notify: () -> Unit,
 ) {
     private var current = initial
+    private var transports: String? = null
+    private var iface: String? = null
     private var pending: Job? = null
+
+    /** Starts tracking [network] as the default without counting it as a change. */
+    fun seed(network: Long?) {
+        current = network
+        transports = null
+        iface = null
+    }
 
     fun available(network: Long) {
         if (network == current) return
         current = network
+        transports = null
+        iface = null
         schedule()
     }
 
     fun lost(network: Long) {
-        if (network == current) current = null
+        if (network == current) {
+            current = null
+            transports = null
+            iface = null
+        }
     }
+
+    /** [signature] names the network's transports (for example `CELLULAR,VPN`). */
+    fun capabilitiesChanged(network: Long, signature: String) {
+        if (network != current) available(network)
+        val before = transports
+        transports = signature
+        if (before != null && before != signature) schedule()
+    }
+
+    /** [name] is the link's interface name (`wlan0`, `rmnet_data1`, `tun0`), null when it has none. */
+    fun linkChanged(network: Long, name: String?) {
+        if (network != current) available(network)
+        val before = iface
+        iface = name ?: ""
+        if (before != null && before != iface) schedule()
+    }
+
+    /** The app is back in front of the user. */
+    fun foregrounded() = schedule()
 
     private fun schedule() {
         pending?.cancel()

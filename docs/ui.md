@@ -151,6 +151,22 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   `Auto` / `SSH` / `Mosh` segmented control (the 32 dp control above) with one muted `Secondary`
   sentence that follows the selection (`Mosh when the host has mosh-server; SSH if mosh cannot
   connect.`).
+- **Address hint and sleeps (host form):** the muted `Secondary` sentence under the `Addresses` label ends
+  with the mosh rule (`Mosh stays on the address SSH reached, so list the one that works on every network
+  first.`). The grouped card with the inbox switch has a second row, `Host sleeps when idle` (the same toggle),
+  and a muted `Secondary` sentence under the card (`For a laptop that sleeps: when its connection is lost it
+  shows as asleep, and no reconnect is offered.`).
+- **Asleep:** a host flagged as sleeping whose connection went quiet is not a failure: Home's card shows
+  `Asleep` in `textMuted` `Secondary` (no `danger` line, no dot; the card's state description reads
+  `Asleep`), the inbox row's message is `Asleep` in `textMuted` with the usual `Unlock` pill (tapping still
+  connects), and the host screen's status card says `Asleep` with a muted dot. A rejected key or host key
+  stays a `danger` failure.
+- **Reconnect chip:** when the app returns and an inbox host's SSH connection was lost, a status chip
+  (`surface` pill, 28 dp, `attention` 8 dp dot, `Chip` 12 sp `text` label, a 16 dp `textMuted` close glyph
+  at the right) reads `Reconnect Alpha · 1 fingerprint` (`Reconnect 3 hosts · 2 fingerprints`). It floats with
+  the other notices (bottom of Home and the inbox, top of a full-screen terminal) and never covers or blocks a
+  live pane; tapping the label runs the grouped unlock, the glyph dismisses it. It is not a dialog and holds
+  nothing modal.
 - **Focus progress:** opening or returning to an agent's terminal first focuses its pane in herdr;
   a floating `surfaceRaised` card with an accent spinner and a mono `Focusing host: herdr w1:p1…`
   line shows in place (above the content, at the top of a full-screen terminal), never a dialog.

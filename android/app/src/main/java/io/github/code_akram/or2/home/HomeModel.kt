@@ -14,7 +14,7 @@ enum class HostDot { NONE, CONNECTED, ATTENTION, CONNECTING, FAILED }
  * place (with a small spinner in the icon slot), a [failure] explains itself in the danger
  * colour, and the [dot] summarises the connection.
  */
-data class HostCardStatus(val progress: String?, val failure: String?, val dot: HostDot) {
+data class HostCardStatus(val progress: String?, val failure: String?, val dot: HostDot, val asleep: Boolean = false) {
     val spinning get() = progress != null && dot == HostDot.CONNECTING
 }
 
@@ -26,10 +26,10 @@ data class HostCard(val host: Host, val status: HostCardStatus, val link: LinkSt
  * the tap and the key being unlocked (the biometric prompt); [blockedAgents] makes a connected
  * host's dot an attention dot.
  */
-fun hostCardStatus(state: HostState?, unlocking: Boolean, blockedAgents: Int): HostCardStatus {
-    val link = linkStatus(state)
+fun hostCardStatus(state: HostState?, unlocking: Boolean, blockedAgents: Int, sleeps: Boolean = false): HostCardStatus {
+    val link = linkStatus(state, sleeps)
     return when {
-        unlocking && (link == LinkStatus.NOT_CONNECTED || link == LinkStatus.FAILED) ->
+        unlocking && link.canConnect ->
             HostCardStatus("Unlocking key…", null, HostDot.CONNECTING)
         state == HostState.Connecting -> HostCardStatus("Checking server…", null, HostDot.CONNECTING)
         state == HostState.Authenticating -> HostCardStatus("Authenticating…", null, HostDot.CONNECTING)
@@ -37,6 +37,8 @@ fun hostCardStatus(state: HostState?, unlocking: Boolean, blockedAgents: Int): H
         link == LinkStatus.CONNECTED ->
             HostCardStatus(null, null, if (blockedAgents > 0) HostDot.ATTENTION else HostDot.CONNECTED)
         link == LinkStatus.FAILED -> HostCardStatus(null, state?.let(::hostStateMessage), HostDot.FAILED)
+        // A sleeping host that went quiet: muted, no failure colour, no dot.
+        link == LinkStatus.ASLEEP -> HostCardStatus(null, null, HostDot.NONE, asleep = true)
         else -> HostCardStatus(null, null, HostDot.NONE)
     }
 }

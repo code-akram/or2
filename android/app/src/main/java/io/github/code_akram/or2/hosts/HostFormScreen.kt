@@ -71,12 +71,13 @@ fun HostFormScreen(
     var keyId by rememberSaveable(identity) { mutableStateOf(if (previous == null) keys.singleOrNull()?.id else previous.keyId) }
     var showInInbox by rememberSaveable(identity) { mutableStateOf(previous?.showInInbox ?: true) }
     var transport by rememberSaveable(identity) { mutableStateOf(previous?.transport ?: TransportPref.AUTO) }
+    var sleeps by rememberSaveable(identity) { mutableStateOf(previous?.sleeps ?: false) }
     val usernameError = if (username.isEmpty()) null else hostFieldError(username)
     val valid = validHost(label, addresses, username) && keys.any { it.id == keyId }
     fun submit() {
         if (!valid || busy) return
         save(Host(
-            HostRecord(previous?.id ?: 0, label.trim(), username, keyId, showInInbox, transport),
+            HostRecord(previous?.id ?: 0, label.trim(), username, keyId, showInInbox, transport, sleeps, previous?.moshFailedUntil ?: 0),
             addresses.map { HostEndpoint(it.hostname, it.port.toInt()) },
         ))
     }
@@ -94,7 +95,7 @@ fun HostFormScreen(
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text("Addresses", style = Or2Type.Body, color = Or2Colors.Text)
-                    Text("In order of preference. All are tried; the first to answer wins.", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
+                    Text(ADDRESS_ORDER_HINT, style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.testTag("host-address-hint"))
                 }
                 addresses.forEachIndexed { index, address ->
                     AddressRow(
@@ -147,7 +148,13 @@ fun HostFormScreen(
                     "Show agents in the inbox", onClick = { showInInbox = !showInInbox },
                     trailing = { Or2Toggle(showInInbox, { showInInbox = it }, Modifier.testTag("host-inbox")) },
                 )
+                GroupDivider(inset = Or2Dimens.Gutter)
+                ListRow(
+                    "Host sleeps when idle", onClick = { sleeps = !sleeps },
+                    trailing = { Or2Toggle(sleeps, { sleeps = it }, Modifier.testTag("host-sleeps")) },
+                )
             }
+            Text(SLEEPS_EXPLANATION, style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.testTag("host-sleeps-note"))
             if (previous != null) {
                 Text("Changing any address or port clears previous host-key trust.", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
             }

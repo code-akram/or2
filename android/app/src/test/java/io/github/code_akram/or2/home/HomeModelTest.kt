@@ -7,6 +7,7 @@ import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.PublicKeyInfo
 import io.github.code_akram.or2.ffi.SessionFailure
+import io.github.code_akram.or2.session.hostStateMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -64,5 +65,17 @@ class HomeModelTest {
         fun host(vararg endpoints: HostEndpoint) = Host(HostRecord(1, "Box", "dev", null), endpoints.toList())
         assertEquals("dev@workstation.invalid:22", hostAddressLine(host(HostEndpoint("workstation.invalid", 22))))
         assertEquals("dev@a.invalid:2222 +2", hostAddressLine(host(HostEndpoint("a.invalid", 2222), HostEndpoint("b.invalid", 22), HostEndpoint("c.invalid", 22))))
+    }
+
+    @Test
+    fun aSleepingHostsLostConnectionIsMutedAsleepWithNoFailureAndNoDot() {
+        val lost = HostState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("reset")))
+        assertEquals(HostCardStatus(null, hostStateMessage(lost), HostDot.FAILED), hostCardStatus(lost, unlocking = false, blockedAgents = 0))
+        val asleep = hostCardStatus(lost, unlocking = false, blockedAgents = 0, sleeps = true)
+        assertEquals(HostCardStatus(null, null, HostDot.NONE, asleep = true), asleep)
+        assertNull(asleep.failure)
+        // Unlocking still shows its progress, and a connected host is just connected.
+        assertEquals("Unlocking key\u2026", hostCardStatus(lost, unlocking = true, blockedAgents = 0, sleeps = true).progress)
+        assertEquals(HostDot.CONNECTED, hostCardStatus(HostState.Connected(0u), unlocking = false, blockedAgents = 0, sleeps = true).dot)
     }
 }

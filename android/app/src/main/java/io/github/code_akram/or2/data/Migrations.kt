@@ -44,3 +44,20 @@ val MIGRATION_2_3 = object : Migration(2, 3) {
         MIGRATION_2_3_STATEMENTS.forEach(db::execSQL)
     }
 }
+
+/**
+ * v3 -> v4 (the M3 follow-up): each host gains `sleeps` (it goes to sleep when idle; default 0) and
+ * `mosh_failed_until` (epoch milliseconds until which AUTO skips mosh for it; default 0, no memory).
+ * Two additive `ALTER TABLE ... ADD COLUMN`s: nothing is dropped, recreated or rewritten, so keys,
+ * trust and addresses are untouched.
+ */
+val MIGRATION_3_4_STATEMENTS = listOf(
+    "ALTER TABLE `hosts` ADD COLUMN `sleeps` INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE `hosts` ADD COLUMN `mosh_failed_until` INTEGER NOT NULL DEFAULT 0",
+)
+
+val MIGRATION_3_4 = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        MIGRATION_3_4_STATEMENTS.forEach(db::execSQL)
+    }
+}

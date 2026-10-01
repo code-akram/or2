@@ -2,7 +2,7 @@
 
 The Compose app loads `or2-ffi` through generated UniFFI Kotlin/JNA bindings. Host settings
 (with their ordered address lists), encrypted key records and trusted host keys live in Room
-(schema version 3, exported to `android/app/schemas/`). `or2-core` remains free of Android,
+(schema version 4, exported to `android/app/schemas/`). `or2-core` remains free of Android,
 UniFFI and persistence dependencies. The production connector calls `connect_host` and opens
 terminals with `HostConnection.open_terminal`; the contract probes (`contract_probe_session`,
 `contract_probe_host`) are used only by tests. The terminal screen embeds the Canvas terminal
@@ -94,7 +94,8 @@ host-key prompt and a dying connection task.
 
 `core/or2-core/tests/host_mosh.rs` runs mosh terminals through a host connection to the
 disposable sshd with a real `mosh-server` (bootstrap, roam, link health, host loss and disconnect,
-blocked UDP, cleanup of unreached servers); it needs `sshd`, `tmux` and `mosh-server`, skips
+blocked UDP, cleanup of unreached servers, and AUTO's absolute start budget: a blocked start and a
+slow bootstrap both ending `TimedOut` at the budget with the server stopped); it needs `sshd`, `tmux` and `mosh-server`, skips
 with a message otherwise, and `OR2_REQUIRE_SSHD`, `OR2_REQUIRE_TMUX` and `OR2_REQUIRE_MOSH`
 make the skips failures. It finds the `mosh-server`s its sshd started by the fixture's private
 `TMUX_TMPDIR` in their environment and kills exactly those, however the test ends.
@@ -146,9 +147,14 @@ A to B to A reusing A's terminal after focusing A, switcher and thumbnail resume
 and other errors not navigating, progress, cancellation) on fakes, and `TerminalActivationsProbeTest`
 the same over the real FFI against `contract_probe_host`'s deterministic answers. `UnlockPlanTest` covers biometric grouping
 (one prompt per distinct key record), `InboxModelTest` the inbox ordering and the flow that
-assembles it, `HostRecordsTest` trust clearing on any address-list change (over a fake of the
-DAO's primitives), and `MigrationSqlTest` runs the real v1 to v2 SQL with foreign keys on and
-compares the result with a fresh v2 database. `HostConnectionsProbeTest` drives the whole holder
+assembles it, `HostRecordsTest` trust clearing on any address-list change and the clearing of the mosh failure
+memory on a new transport or addresses (over a fake of the DAO's primitives), and `MigrationSqlTest`
+runs the real v1 to v2, v2 to v3 and v3 to v4 SQL with foreign keys on and compares each result with a
+fresh database of that version. `HostConnectionsTransportTest` covers AUTO's 5 s budget, the 24 h
+failure memory and its expiry, `ServiceTest` the roaming triggers (`NetworkChanges`: transport-set and
+interface changes, no reaction to bandwidth ticks, the foreground return, one debounce for all),
+`ReattachTest` the auto-resume after process death, `ReconnectOfferTest` the chip and the sleeping hosts,
+and `ManifestTest` the permission list. `HostConnectionsProbeTest` drives the whole holder
 over the real FFI with `contract_probe_host` (host-key relay and persistence, capabilities,
 agents into the inbox, terminals and frames, disconnect ordering).
 Tests that wait on those callbacks wait for the specific thing (a frame whose row shows the echo, the

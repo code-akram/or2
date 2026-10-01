@@ -1,6 +1,7 @@
 package io.github.code_akram.or2.connection
 
 import io.github.code_akram.or2.data.Host
+import io.github.code_akram.or2.data.MoshFailureStore
 import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HostException
@@ -34,6 +35,18 @@ import org.junit.Test
 class HostConnectionsTransportTest {
     private val shell = TerminalTarget.Shell
 
+    /** A [MoshFailureStore] that records what Room would be told. */
+    private class Failures : MoshFailureStore {
+        val marks = mutableListOf<Pair<Long, Long>>()
+        var cleared = 0
+        var failure: Exception? = null
+        override suspend fun markMoshFailed(hostId: Long, until: Long) {
+            failure?.let { throw it }
+            marks += hostId to until
+        }
+        override suspend fun clearMoshFailure(hostId: Long) { cleared++ }
+    }
+
     private class Rig(val holder: HostConnections, val port: FakePort, val hostListener: HostListener, val host: Host) {
         val active get() = holder.host(host.id)!!
     }
@@ -44,15 +57,16 @@ class HostConnectionsTransportTest {
      */
     private suspend fun TestScope.rig(
         pref: TransportPref = TransportPref.AUTO, moshServer: String? = "/usr/bin/mosh-server", probed: Boolean = true,
-        pending: Boolean = false,
+        pending: Boolean = false, store: MoshFailureStore? = null, clock: () -> Long = { NOW }, failedUntil: Long = 0,
     ): Rig {
-        val host = testHost(transport = pref)
+        val host = testHost(transport = pref, moshFailedUntil = failedUntil)
         val port = FakePort()
         port.caps = port.caps.copy(moshServer = moshServer)
         if (!probed) port.capsFailure = IllegalStateException("probe not answered")
         if (pending) port.capsGate = CompletableDeferred()
         var listener: HostListener? = null
-        val holder = HostConnections({ _, l -> listener = l; port }, FakeTrust(), StandardTestDispatcher(testScheduler), UnconfinedTestDispatcher(testScheduler))
+        val holder = HostConnections({ _, l -> listener = l; port }, FakeTrust(), StandardTestDispatcher(testScheduler), UnconfinedTestDispatcher(testScheduler),
+            store, clock)
         holder.connect(host, byteArrayOf(1))
         port.nativeState = HostState.Connected(0u)
         listener!!.onHostStateChanged(HostState.Connected(0u))
@@ -373,5 +387,108 @@ class HostConnectionsTransportTest {
         waiting.await()
         assertEquals(1_000L, testScheduler.currentTime - started)
         assertNotNull(slow.active.capabilities.value)
+    }
+
+    // --- the follow-up: AUTO's 5 s budget and the 24 h memory of a failure ----------------------
+
+    private fun TestScope.timedOut(rig: Rig, index: Int = 0) = fail(rig, index, SessionFailure.TimedOut)
+
+    @Test
+    fun autoGivesMoshAFiveSecondBudgetAndAnExplicitChoiceKeepsTheDefault() = runTest {
+        val auto = rig()
+        auto.holder.openTerminal(auto.active, shell)
+        assertEquals(listOf<UInt?>(5_000u), auto.port.budgets)
+        assertEquals(AUTO_MOSH_BUDGET_MS, auto.port.budgets.single())
+
+        // Explicit Mosh: no budget (the 15 s default); explicit SSH: none either.
+        val mosh = rig(TransportPref.MOSH)
+        mosh.holder.openTerminal(mosh.active, shell)
+        assertEquals(listOf<UInt?>(null), mosh.port.budgets)
+        val ssh = rig(TransportPref.SSH)
+        ssh.holder.openTerminal(ssh.active, shell)
+        assertEquals(listOf<UInt?>(null), ssh.port.budgets)
+
+        // The SSH retry after a fallback has no budget to give.
+        timedOut(auto)
+        assertEquals(listOf<UInt?>(5_000u, null), auto.port.budgets)
+    }
+
+    @Test
+    fun aMoshTimeoutIsRememberedPerHostForTwentyFourHours() = runTest {
+        val store = Failures()
+        val rig = rig(store = store)
+        rig.holder.openTerminal(rig.active, shell)
+        timedOut(rig)
+        assertEquals(listOf(rig.host.id to NOW + MOSH_PAUSE_MS), store.marks)
+        assertEquals(24L * 60 * 60 * 1000, MOSH_PAUSE_MS)
+        assertEquals(NOW + MOSH_PAUSE_MS, rig.active.moshPausedUntil)
+    }
+
+    @Test
+    fun aHostWithAnUnexpiredFailureSkipsMoshUnderAutoWithANoteAndTriesAgainOnceItExpired() = runTest {
+        var now = NOW
+        val paused = rig(failedUntil = NOW + 1_000, clock = { now })
+        val first = paused.holder.openTerminal(paused.active, shell)
+        assertEquals(listOf(TerminalTransport.SSH), paused.port.transports) // Straight to SSH, no mosh attempt.
+        assertEquals(listOf<UInt?>(null), paused.port.budgets)
+        assertEquals(MOSH_PAUSED_NOTE, first.note.value)
+        assertFalse(first.fallbackEligible)
+
+        // The memory expires on its own: no clearing, the clock moves past it.
+        now = NOW + 1_001
+        val again = paused.holder.openTerminal(paused.active, TerminalTarget.Tmux("later"))
+        assertEquals(TerminalTransport.MOSH, paused.port.transports.last())
+        assertNull(again.note.value)
+        assertTrue(again.fallbackEligible)
+    }
+
+    @Test
+    fun anExplicitMoshPreferenceIgnoresTheMemory() = runTest {
+        val rig = rig(TransportPref.MOSH, failedUntil = NOW + 10_000)
+        rig.holder.openTerminal(rig.active, shell)
+        assertEquals(listOf(TerminalTransport.MOSH), rig.port.transports)
+    }
+
+    @Test
+    fun changingThePreferenceClearsThePersistedPause() = runTest {
+        val rig = rig(failedUntil = NOW + 10_000)
+        assertEquals(NOW + 10_000, rig.active.moshPausedUntil)
+        rig.holder.setTransport(rig.host.id, TransportPref.SSH)
+        assertEquals(0L, rig.active.moshPausedUntil)
+        rig.holder.setTransport(rig.host.id, TransportPref.AUTO)
+        rig.holder.openTerminal(rig.active, shell)
+        assertEquals(listOf(TerminalTransport.MOSH), rig.port.transports)
+    }
+
+    @Test
+    fun aMissingMoshServerIsNotRememberedForADayAndAStorageFailureChangesNothingElse() = runTest {
+        val store = Failures()
+        val missing = rig(store = store)
+        missing.holder.openTerminal(missing.active, shell)
+        fail(missing, 0, SessionFailure.NotInstalled("mosh-server"))
+        assertTrue(store.marks.isEmpty()) // The probe says so on every connection; installing it must just work.
+        assertEquals(0L, missing.active.moshPausedUntil)
+
+        val broken = Failures().also { it.failure = IllegalStateException("disk full") }
+        val rig = rig(store = broken)
+        val terminal = rig.holder.openTerminal(rig.active, shell)
+        timedOut(rig)
+        // The fallback itself still happened, and this connection remembers it in memory.
+        assertEquals(listOf(TerminalTransport.MOSH, TerminalTransport.SSH), rig.port.transports)
+        assertNotNull(terminal.note.value)
+        assertEquals(NOW + MOSH_PAUSE_MS, rig.active.moshPausedUntil)
+    }
+
+    @Test
+    fun aFallbackWithoutAStoreStillWorks() = runTest {
+        val rig = rig() // No store: nothing is persisted, the connection still remembers.
+        rig.holder.openTerminal(rig.active, shell)
+        timedOut(rig)
+        rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("x"))
+        assertEquals(listOf(TerminalTransport.MOSH, TerminalTransport.SSH, TerminalTransport.SSH), rig.port.transports)
+    }
+
+    private companion object {
+        const val NOW = 1_800_000_000_000L
     }
 }

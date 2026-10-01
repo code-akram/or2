@@ -1,6 +1,7 @@
 package io.github.code_akram.or2.app
 
 import io.github.code_akram.or2.connection.UserCloseListener
+import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TerminalTransport
@@ -109,6 +110,15 @@ fun decideReattach(last: LastTerminal?, sessions: List<OpenSession>, liveHosts: 
     sessions.firstOrNull { it.alive && it.hostId == last.hostId && it.target == last.target }?.let { return Reattach.Show(it.id) }
     return if (last.hostId in liveHosts) Reattach.Reopen(last) else Reattach.Resume(last)
 }
+
+/**
+ * Whether coming back to a process that died on a terminal screen resumes at once (the grouped
+ * unlock, then the host connects and the remembered target reopens, with no further tap): there is
+ * a remembered terminal whose host still exists with a key and is not connected. Without a key
+ * nothing could unlock; the Resume card is all that is left.
+ */
+fun shouldAutoResume(last: LastTerminal?, hosts: List<Host>, connectedHosts: Set<Long>): Boolean =
+    last != null && last.hostId !in connectedHosts && hosts.any { it.id == last.hostId && it.keyId != null }
 
 /** The next step of a Resume once the user tapped it and the host is being unlocked and connected. */
 enum class ResumeStep { WAIT, OPEN, ABORT }
