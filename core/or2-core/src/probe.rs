@@ -8,8 +8,9 @@
 //! bounded exec lists its sessions ([`herdr_sessions`]): a wedged herdr must not take down the
 //! discovery of everything else. The host driver caches the answer for the connection's
 //! lifetime (Rust has no storage) and re-reads only the session list when `capabilities()` is
-//! queried ([`with_fresh_sessions`]).
+//! queried ([`SessionsCache`], which also remembers the last list that was read).
 
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use crate::herdr::{self, DiscoveryError};
@@ -120,22 +121,73 @@ async fn list_within<H: RemoteHost>(
     }
 }
 
-/// `cached` with herdr's session list read again, so `running` and new or stopped sessions
-/// show; programs and locale are never searched twice. A listing that fails keeps the cached
-/// list; only a closed connection is an error.
-pub async fn with_fresh_sessions<H: RemoteHost>(
-    host: &H,
-    cached: &HostCapabilities,
-) -> Result<HostCapabilities, RemoteError> {
-    let mut caps = cached.clone();
-    if let Some(herdr) = &cached.herdr {
-        match herdr_sessions(host, herdr).await {
-            Ok(sessions) => caps.herdr_sessions = sessions,
-            Err(RemoteError::Closed) => return Err(RemoteError::Closed),
-            Err(_) => {}
-        }
+/// The last session list read successfully, kept apart from the probe's immutable programs and
+/// locale. Until a read succeeds, the list the probe itself found is the one reported.
+///
+/// [`SessionsCache::capabilities`] reads the list again on every call, so `running` and new or
+/// stopped sessions show. A listing that fails (herdr gone, hung, garbage) reports the LAST
+/// successful list, not the one from connect time: the app treats the list as authoritative
+/// (a session missing from it has its watch stopped), so a transient failure must neither drop
+/// a session found since connecting nor bring back one that has gone. Reads can overlap, so each
+/// takes a ticket when it starts and a result is applied only if no read that started later
+/// has already been applied; a slow older read can never overwrite a newer list.
+#[derive(Debug, Default)]
+pub struct SessionsCache {
+    state: Mutex<CacheState>,
+}
+
+#[derive(Debug, Default)]
+struct CacheState {
+    /// The last ticket handed out.
+    issued: u64,
+    /// The ticket of the read whose list is stored.
+    applied: u64,
+    /// `None` until a read succeeds.
+    list: Option<Vec<HerdrSessionInfo>>,
+}
+
+impl SessionsCache {
+    pub fn new() -> Self {
+        Self::default()
     }
-    Ok(caps)
+
+    /// `cached` with herdr's session list read again and remembered; programs and locale are
+    /// never searched twice. A listing that fails reports the last successful list; only a
+    /// closed connection is an error. Without herdr nothing is listed or run.
+    pub async fn capabilities<H: RemoteHost>(
+        &self,
+        host: &H,
+        cached: &HostCapabilities,
+    ) -> Result<HostCapabilities, RemoteError> {
+        let mut caps = cached.clone();
+        let Some(herdr) = &cached.herdr else {
+            return Ok(caps);
+        };
+        let ticket = {
+            let mut state = self.lock();
+            state.issued += 1;
+            state.issued
+        };
+        let listed = herdr_sessions(host, herdr).await;
+        let mut state = self.lock();
+        match listed {
+            Ok(sessions) if ticket > state.applied => {
+                state.applied = ticket;
+                state.list = Some(sessions);
+            }
+            Err(RemoteError::Closed) => return Err(RemoteError::Closed),
+            // A newer read already stored its list, or this read failed.
+            Ok(_) | Err(_) => {}
+        }
+        if let Some(list) = &state.list {
+            caps.herdr_sessions = list.clone();
+        }
+        Ok(caps)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, CacheState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// Parses the probe's output. Lenient by design: lines that are not the probe's are ignored,
@@ -356,35 +408,86 @@ mod tests {
         assert_eq!(result, Err(RemoteError::Closed));
     }
 
-    #[tokio::test]
-    async fn fresh_sessions_replace_the_cached_list_and_a_failing_listing_keeps_it() {
+    const OTHER: &str =
+        r#"{"sessions":[{"name":"other","running":false,"socket_path":"/s/other.sock"}]}"#;
+
+    fn names(caps: &HostCapabilities) -> Vec<&str> {
+        caps.herdr_sessions
+            .iter()
+            .map(|session| session.name.as_str())
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fresh_sessions_replace_the_list_and_a_failing_listing_keeps_the_last_one() {
         let cached = probe(&Stub {
             herdr: Herdr::Sessions(ONE),
         })
         .await
         .unwrap();
-        let fresh = with_fresh_sessions(
-            &Stub {
-                herdr: Herdr::Sessions(r#"{"sessions":[{"name":"other","running":false,"socket_path":"/s/other.sock"}]}"#),
-            },
-            &cached,
-        )
-        .await
-        .unwrap();
-        assert_eq!(fresh.herdr_sessions[0].name, "other");
-        assert_eq!(fresh.tmux, cached.tmux, "programs are never searched again");
-        for herdr in [Herdr::Fails, Herdr::Sessions("not json")] {
-            let kept = with_fresh_sessions(&Stub { herdr }, &cached).await.unwrap();
-            assert_eq!(kept, cached);
-        }
-        assert_eq!(
-            with_fresh_sessions(
+        let sessions = SessionsCache::new();
+        // Before any read succeeded, a failing listing reports what the probe found.
+        let kept = sessions
+            .capabilities(
                 &Stub {
-                    herdr: Herdr::ConnectionGone
+                    herdr: Herdr::Fails,
                 },
-                &cached
+                &cached,
             )
-            .await,
+            .await
+            .unwrap();
+        assert_eq!(kept, cached);
+
+        let fresh = sessions
+            .capabilities(
+                &Stub {
+                    herdr: Herdr::Sessions(OTHER),
+                },
+                &cached,
+            )
+            .await
+            .unwrap();
+        assert_eq!(names(&fresh), ["other"]);
+        assert_eq!(fresh.tmux, cached.tmux, "programs are never searched again");
+        // The list found since connecting is kept through a failing listing, not the probe's.
+        for herdr in [Herdr::Fails, Herdr::Sessions("not json"), Herdr::Hangs] {
+            let kept = sessions
+                .capabilities(&Stub { herdr }, &cached)
+                .await
+                .unwrap();
+            assert_eq!(names(&kept), ["other"]);
+        }
+        // A session that has gone does not come back from the connect-time list either.
+        let gone = sessions
+            .capabilities(
+                &Stub {
+                    herdr: Herdr::Sessions(r#"{"sessions":[]}"#),
+                },
+                &cached,
+            )
+            .await
+            .unwrap();
+        assert!(gone.herdr_sessions.is_empty());
+        let kept = sessions
+            .capabilities(
+                &Stub {
+                    herdr: Herdr::Fails,
+                },
+                &cached,
+            )
+            .await
+            .unwrap();
+        assert!(kept.herdr_sessions.is_empty());
+
+        assert_eq!(
+            sessions
+                .capabilities(
+                    &Stub {
+                        herdr: Herdr::ConnectionGone
+                    },
+                    &cached
+                )
+                .await,
             Err(RemoteError::Closed)
         );
         // Without herdr there is nothing to list and nothing is run.
@@ -393,14 +496,85 @@ mod tests {
             herdr_sessions: Vec::new(),
             ..cached
         };
-        let same = with_fresh_sessions(
-            &Stub {
-                herdr: Herdr::ConnectionGone,
-            },
-            &no_herdr,
-        )
+        let same = sessions
+            .capabilities(
+                &Stub {
+                    herdr: Herdr::ConnectionGone,
+                },
+                &no_herdr,
+            )
+            .await
+            .unwrap();
+        assert_eq!(same, no_herdr);
+    }
+
+    /// A host whose herdr listings are answered in the order they start, each held until its
+    /// gate opens.
+    struct Gated {
+        replies:
+            Mutex<std::collections::VecDeque<(tokio::sync::oneshot::Receiver<()>, &'static str)>>,
+    }
+
+    impl RemoteHost for Gated {
+        type Stream = tokio::io::DuplexStream;
+
+        async fn exec_rendered(&self, line: &str) -> Result<ExecOutput, RemoteError> {
+            assert_eq!(line, "'/fake/herdr' 'session' 'list' '--json'");
+            let (gate, json) = self.replies.lock().unwrap().pop_front().expect("a reply");
+            let _ = gate.await;
+            Ok(output(0, json))
+        }
+
+        async fn open_unix(&self, _: &str) -> Result<Self::Stream, RemoteError> {
+            Err(RemoteError::Closed)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_older_read_that_finishes_last_cannot_overwrite_a_newer_list() {
+        let cached = probe(&Stub {
+            herdr: Herdr::Sessions(ONE),
+        })
         .await
         .unwrap();
-        assert_eq!(same, no_herdr);
+        let (open_older, older_gate) = tokio::sync::oneshot::channel();
+        let (open_newer, newer_gate) = tokio::sync::oneshot::channel();
+        // The older read (started first) is answered with the stale list, after the newer one.
+        let host = Gated {
+            replies: Mutex::new(
+                [(older_gate, ONE), (newer_gate, OTHER)]
+                    .into_iter()
+                    .collect(),
+            ),
+        };
+        let sessions = SessionsCache::new();
+        let (older, newer, ()) = tokio::join!(
+            sessions.capabilities(&host, &cached),
+            sessions.capabilities(&host, &cached),
+            async {
+                tokio::task::yield_now().await;
+                open_newer.send(()).unwrap();
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                open_older.send(()).unwrap();
+            }
+        );
+        assert_eq!(names(&newer.unwrap()), ["other"]);
+        assert_eq!(
+            names(&older.unwrap()),
+            ["other"],
+            "the stale read reports the newer list it lost to"
+        );
+        let after = sessions
+            .capabilities(
+                &Stub {
+                    herdr: Herdr::Fails,
+                },
+                &cached,
+            )
+            .await
+            .unwrap();
+        assert_eq!(names(&after), ["other"]);
     }
 }

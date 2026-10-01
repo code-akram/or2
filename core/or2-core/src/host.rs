@@ -225,7 +225,8 @@ pub struct HostCapabilities {
     pub mosh_server: Option<String>,
     pub utf8_locale: String,
     /// Empty when herdr is missing, has no sessions or could not list them. Read afresh on
-    /// every `capabilities()` query; live state comes from `watch_herdr`.
+    /// every `capabilities()` query (a failed read reports the last list that succeeded); live
+    /// state comes from `watch_herdr`.
     pub herdr_sessions: Vec<HerdrSessionInfo>,
 }
 

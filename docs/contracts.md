@@ -395,9 +395,16 @@ fail and be retried at full cost on every terminal open. Only a connection that 
 mid-probe fails it. `name`, `running` and `default` are carried over; an unreadable listing
 (including one with an entry that has no `socket_path`) is a failed listing, not a partial
 one. (2) The cache holds programs and locale; **`capabilities()` reads herdr's
-session list afresh on every call** (`probe::with_fresh_sessions`), so `running` and sessions
+session list afresh on every call** (`probe::SessionsCache`), so `running` and sessions
 started or stopped after connecting show on the host screen. A listing that fails (herdr
-gone, hung, garbage) keeps the last list rather than emptying it. Live per-pane state is
+gone, hung, garbage) reports the **last list that was read successfully**, not the one from
+connect time (until a read succeeds, the probe's own list): the app treats the list as
+authoritative and stops the watch of a session missing from it, so a transient failure must
+neither drop a session found since connecting nor bring back one that has gone. Reads can
+overlap (several Refresh calls); each takes a ticket when it starts and a result is applied
+only if no read that started later has already been applied, so a slow older read never
+overwrites a newer list (and then reports the newer one). The programs and locale stay in the
+immutable probe result. Live per-pane state is
 still `watch_herdr`'s job; terminal opens and watches use only the cached paths.
 
 ## Host connection (`or2_core::host`)

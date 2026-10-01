@@ -182,6 +182,16 @@ const PROBE_WITH_HERDR: &str =
     "or2:tmux:/fake/tmux\nor2:herdr:/fake/herdr\nor2:locale:C.UTF-8\nor2:end\n";
 const PROBE_WITHOUT_PROGRAMS: &str = "or2:tmux:\nor2:herdr:\nor2:locale:C.UTF-8\nor2:end\n";
 
+/// What `herdr session list --json` prints.
+#[derive(Clone, Copy)]
+enum HerdrList {
+    /// The captured listing of the herdr client's tests.
+    Fixture,
+    Json(&'static str),
+    /// herdr exits with an error.
+    Fails,
+}
+
 /// What the server does with a `direct-streamlocal@openssh.com` open.
 #[derive(Clone, Debug)]
 enum Streamlocal {
@@ -202,6 +212,7 @@ struct Shared {
     probes: AtomicUsize,
     /// What the capability probe prints.
     probe: Mutex<&'static str>,
+    herdr_list: Mutex<HerdrList>,
     /// The capability probe starts (and is counted) but never finishes.
     probe_hangs: AtomicBool,
     /// Refuse session channels like an sshd at `MaxSessions`.
@@ -309,8 +320,21 @@ impl server::Handler for Server {
         let command = String::from_utf8_lossy(command).into_owned();
         if command.contains("'session' 'list' '--json'") {
             session.channel_success(channel)?;
-            session.data(channel, HERDR_LISTING.as_bytes().to_vec())?;
-            return finish(session, channel, 0);
+            let listing = *self.shared.herdr_list.lock().unwrap();
+            return match listing {
+                HerdrList::Fixture => {
+                    session.data(channel, HERDR_LISTING.as_bytes().to_vec())?;
+                    finish(session, channel, 0)
+                }
+                HerdrList::Json(json) => {
+                    session.data(channel, json.as_bytes().to_vec())?;
+                    finish(session, channel, 0)
+                }
+                HerdrList::Fails => {
+                    session.extended_data(channel, 1, b"herdr: boom\n".to_vec())?;
+                    finish(session, channel, 1)
+                }
+            };
         }
         if command.starts_with("sh -c") {
             self.shared.probes.fetch_add(1, Ordering::SeqCst);
@@ -456,6 +480,7 @@ impl Fixture {
             listing: Mutex::new(Listing::Sessions),
             probes: AtomicUsize::new(0),
             probe: Mutex::new(probe),
+            herdr_list: Mutex::new(HerdrList::Fixture),
             probe_hangs: AtomicBool::new(false),
             refuse_channels: AtomicBool::new(false),
             stall_auth: AtomicBool::new(false),
@@ -1336,4 +1361,38 @@ fn stopping_a_watch_during_the_capability_probe_closes_it_at_once_without_unavai
     assert_eq!(caps.tmux.as_deref(), Some("/fake/tmux"));
     fixture.handle.disconnect();
     assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+}
+
+#[test]
+fn a_failed_session_listing_reports_the_last_list_read_not_the_one_from_connect_time() {
+    const WITH_FRESH: &str = r#"{"sessions":[{"name":"default","running":true,"default":true,"socket_path":"/s/d.sock"},{"name":"fresh","running":true,"socket_path":"/s/f.sock"}]}"#;
+    const ONLY_DEFAULT: &str = r#"{"sessions":[{"name":"default","running":true,"default":true,"socket_path":"/s/d.sock"}]}"#;
+    let fixture = Fixture::connected_with(Duration::from_secs(5), PROBE_WITH_HERDR);
+    let sessions = |fixture: &Fixture| -> Vec<String> {
+        runtime()
+            .block_on(fixture.handle.capabilities())
+            .unwrap()
+            .herdr_sessions
+            .into_iter()
+            .map(|session| session.name)
+            .collect()
+    };
+    let set = |list| *fixture.shared.herdr_list.lock().unwrap() = list;
+    // Connected while herdr lists the captured sessions.
+    assert_eq!(sessions(&fixture), ["default", "work", "idle"]);
+    // A session appears, then the next listing times out or fails: the list stays.
+    set(HerdrList::Json(WITH_FRESH));
+    assert_eq!(sessions(&fixture), ["default", "fresh"]);
+    set(HerdrList::Fails);
+    assert_eq!(sessions(&fixture), ["default", "fresh"]);
+    set(HerdrList::Json("not json"));
+    assert_eq!(sessions(&fixture), ["default", "fresh"]);
+    // A session that went away does not come back from the connect-time list.
+    set(HerdrList::Json(ONLY_DEFAULT));
+    assert_eq!(sessions(&fixture), ["default"]);
+    set(HerdrList::Fails);
+    assert_eq!(sessions(&fixture), ["default"]);
+    // The probe itself ran once.
+    assert_eq!(fixture.shared.probes.load(Ordering::SeqCst), 1);
+    fixture.handle.disconnect();
 }

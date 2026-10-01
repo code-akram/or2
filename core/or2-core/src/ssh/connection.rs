@@ -104,6 +104,8 @@ pub(super) struct SshHost {
     handle: Handle<Client<HostEvent>>,
     exec_timeout: Duration,
     capabilities: OnceCell<HostCapabilities>,
+    /// The last herdr session list read successfully (the probe's own list until then).
+    sessions: probe::SessionsCache,
 }
 
 impl SshHost {
@@ -504,10 +506,12 @@ fn dispatch(
             runtime().spawn(async move {
                 let _tracker = tracker;
                 // Programs and locale are the cached probe; herdr's session list is read
-                // again so `running` and new sessions show.
+                // again so `running` and new sessions show, and a failed read reports the
+                // last list that was read, not the one from connect time.
                 let query = async {
                     let cached = host.capabilities().await.map_err(host_error)?;
-                    probe::with_fresh_sessions(&*host, cached)
+                    host.sessions
+                        .capabilities(&*host, cached)
                         .await
                         .map_err(host_error)
                 };
@@ -707,6 +711,7 @@ async fn hold(
         handle,
         exec_timeout: options.exec_timeout,
         capabilities: OnceCell::new(),
+        sessions: probe::SessionsCache::new(),
     });
     if events
         .send(HostEvent::Connected {
