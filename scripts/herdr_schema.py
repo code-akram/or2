@@ -20,13 +20,18 @@ Normalization also makes the client tolerant, because herdr may grow:
     [{method, params}]`, which typify renders as an untyped struct. Only the `oneOf` is kept
     (titled `RequestBody`); typify generates an adjacently tagged enum (`method`, `params`)
     and or2's wire layer adds the `id`.
+
+The `event` and `subscription_event` families are deliberately left out: typify renders their
+internally tagged `EventData` as an enum that rejects an unknown event type, and nothing
+consumes event payloads (events are invalidations). A consumer that needs them must add the
+families here together with an open event-type tag.
 """
 
 import copy
 import json
 import sys
 
-FAMILIES = ["request", "success_response", "error_response", "event", "subscription_event"]
+FAMILIES = ["request", "success_response", "error_response"]
 DROPPED_KEYWORDS = {"pattern", "propertyNames", "maxProperties", "minProperties"}
 SENT_BY_CLIENT = {"request"}
 

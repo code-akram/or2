@@ -58,7 +58,7 @@ pub const HERDR_VERSION: &str = "$version";
 /// The herdr API protocol number this code was generated from.
 pub const PROTOCOL: u32 = $protocol;
 EOF
-  for family in request success_response error_response event subscription_event; do
+  for family in request success_response error_response; do
     cargo typify -B -o "$work/$family.rs" "$work/families/$family.json" >&2
     printf '\n/// Types generated from the `%s` schema.\npub mod %s {\n' "$family" "$family"
     grep -v '^#!\[' "$work/$family.rs"
