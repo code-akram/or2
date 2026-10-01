@@ -54,6 +54,9 @@ pub(crate) struct Client<E> {
     /// Told why the SSH session ended, once, if it ends after the handshake. Hosts use it to
     /// notice loss that no channel is awaiting.
     pub(crate) ended: Option<oneshot::Sender<SessionFailure>>,
+    /// Test only: freezes this connection's reader at the next channel-open confirmation.
+    #[cfg(test)]
+    pub(crate) reader_gate: Arc<std::sync::Mutex<Option<TestReaderGate>>>,
 }
 
 impl<E> Client<E> {
@@ -63,12 +66,33 @@ impl<E> Client<E> {
             events,
             checked: false,
             ended: None,
+            #[cfg(test)]
+            reader_gate: Arc::default(),
         }
     }
 }
 
+#[cfg(test)]
+pub(crate) type TestReaderGate = (oneshot::Sender<()>, oneshot::Receiver<()>);
+
 impl<E: From<HostKeyRequest> + Send + 'static> client::Handler for Client<E> {
     type Error = ClientError;
+
+    #[cfg(test)]
+    async fn channel_open_confirmation(
+        &mut self,
+        _: russh::ChannelId,
+        _: u32,
+        _: u32,
+        _: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let gate = self.reader_gate.lock().unwrap().take();
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
+        Ok(())
+    }
 
     async fn check_server_key(
         &mut self,

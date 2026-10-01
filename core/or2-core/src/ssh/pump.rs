@@ -15,6 +15,7 @@ use std::time::Duration;
 use russh::client;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
+use super::connection::{OpenedChannel, OpenedWriter};
 use crate::session::{CloseReason, Command, SessionDriver, SessionFailure, SessionState};
 use crate::submit::SubmitSequencer;
 use crate::term::TerminalSize;
@@ -282,16 +283,17 @@ impl TerminalPump {
 ///
 /// The channel ending with an exit status or signal is `RemoteExited`; ending without one is
 /// loss.
-pub(crate) async fn pump_channel(
-    channel: russh::Channel<client::Msg>,
+pub(super) async fn pump_channel(
+    channel: OpenedChannel,
     events: &mpsc::Sender<Event>,
     writes: &mut mpsc::UnboundedReceiver<Write>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<CloseReason, SessionFailure> {
-    let (mut reader, writer) = channel.split();
-    // An abort or any other cancellation of this future closes the channel; the paths below that
-    // end it themselves disarm the guard.
-    let mut writer = CloseOnCancel(Some(writer));
+    let (mut reader, mut writer): (_, OpenedWriter) = channel.split();
+    // An abort or any other cancellation of this future closes the channel through the
+    // connection. Only the server's own `Close` (the read side ending) disarms the guard: every
+    // other way out, the local input ending included, hands the channel to the connection's
+    // close task, which on a connection that is gone simply ends.
     let mut exit_status = None;
     let mut exit_signal = false;
     let reading = async {
@@ -340,53 +342,35 @@ pub(crate) async fn pump_channel(
     // Keep one writer alive across reads: never restart a partially completed data() call.
     // The read end, shutdown or the enclosing cancellation ends it once, permanently.
     let ended = tokio::select! {
-        result = reading => Some(result),
-        result = writing => Some(result),
+        result = reading => Some((true, result)),
+        result = writing => Some((false, result)),
         () = shutdown => None,
     };
     match ended {
-        // The server closed the channel or the connection broke: nothing left to close.
-        Some(result) => {
+        // The read side ended: the server closed the channel (or the connection broke under
+        // it), nothing left to close.
+        Some((true, result)) => {
             writer.disarm();
             result
         }
+        // The write side ended (the local input is gone, or a write failed) while the server
+        // has not closed anything: the channel is still ours to close.
+        Some((false, result)) => {
+            close_queued(writer).await;
+            result
+        }
         None => {
-            // Best effort: the host may already be gone.
-            if let Some(writer) = writer.disarm() {
-                let _ = tokio::time::timeout(CHANNEL_CLOSE_GRACE, writer.close()).await;
-            }
+            close_queued(writer).await;
             Ok(CloseReason::Disconnected)
         }
     }
 }
 
-/// The write half of a running terminal channel, closed in the background if dropped while
-/// armed (the pump was cancelled): a raw channel does not close itself, and the program on it
-/// would run on.
-struct CloseOnCancel(Option<russh::ChannelWriteHalf<client::Msg>>);
-
-impl CloseOnCancel {
-    fn disarm(&mut self) -> Option<russh::ChannelWriteHalf<client::Msg>> {
-        self.0.take()
-    }
-}
-
-impl std::ops::Deref for CloseOnCancel {
-    type Target = russh::ChannelWriteHalf<client::Msg>;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref().expect("an armed channel writer")
-    }
-}
-
-impl Drop for CloseOnCancel {
-    fn drop(&mut self) {
-        if let Some(writer) = self.0.take() {
-            super::runtime().spawn(async move {
-                let _ = tokio::time::timeout(CHANNEL_CLOSE_GRACE, writer.close()).await;
-            });
-        }
-    }
+/// Hands the channel to the connection's close task and waits for the `Close` to be queued, but
+/// only so long: the task finishes it if the queue is full, and the session's `Closed` must not
+/// wait for that.
+async fn close_queued(writer: OpenedWriter) {
+    let _ = tokio::time::timeout(CHANNEL_CLOSE_GRACE, writer.close()).await;
 }
 
 /// Waits for the server's reply to a channel request (`pty-req`, `shell`, `exec`). Output that

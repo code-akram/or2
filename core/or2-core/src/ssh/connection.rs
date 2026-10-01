@@ -142,6 +142,9 @@ pub(super) struct SshHost {
     /// This connection's own `Arc`, for the `&self` callers (the [`RemoteHost`] methods) that
     /// start an open.
     me: Weak<SshHost>,
+    /// Test only: see `Client::reader_gate`.
+    #[cfg(test)]
+    reader_gate: Arc<Mutex<Option<super::client::TestReaderGate>>>,
 }
 
 /// Every established SSH connection of the process, for [`network_changed`]. Weak: a closed
@@ -261,18 +264,35 @@ impl SshHost {
         PendingOpen(reply)
     }
 
-    /// Closes a channel nobody owns any more, in the background and bounded, as a task of the
-    /// connection (so it ends with it). Nothing to do once the connection is over.
-    fn close_in_background(&self, channel: russh::Channel<russh_client::Msg>) {
+    /// The one way a channel is closed. `closing` owns the channel (`async move { channel
+    /// .close().await }`) and is moved into a task of the connection, which awaits it with NO
+    /// deadline: russh's `close` waits for room in its bounded command queue, and dropping it
+    /// (a cancelled caller, a timeout) before the `Close` is queued would leave the channel open
+    /// on the server for the connection's lifetime. The task ends when the `Close` is queued, or
+    /// with the connection ([`SshHost::end_opens`]), whose channels go with it. The receiver
+    /// resolves once the `Close` is queued (an error if it could not be: the connection is over);
+    /// a caller that needs the ordering awaits it with a deadline of its own, and the task keeps
+    /// the obligation if the caller stops waiting.
+    fn close_owned(
+        &self,
+        closing: impl Future<Output = Result<(), russh::Error>> + Send + 'static,
+    ) -> oneshot::Receiver<()> {
+        let (queued, receiver) = oneshot::channel();
         let mut opens = self.opens.lock().unwrap_or_else(PoisonError::into_inner);
+        // Once the connection is over nothing is spawned: `closing` is dropped with its channel
+        // and the receiver reads as an error.
         if let Some(set) = opens.as_mut() {
+            while set.try_join_next().is_some() {}
             set.spawn_on(
                 async move {
-                    let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
+                    if closing.await.is_ok() {
+                        let _ = queued.send(());
+                    }
                 },
                 runtime().handle(),
             );
         }
+        receiver
     }
 
     /// The connection is over: stop every open still waiting (their callers see `Disconnect`),
@@ -381,14 +401,77 @@ impl OpenedChannel {
         self.channel.take().expect("an armed opened channel")
     }
 
-    /// Closes the channel deliberately (the guard is then disarmed, also if the close is
-    /// cancelled or fails). The caller bounds it.
+    /// Closes the channel deliberately: hands it to the connection's close task
+    /// ([`SshHost::close_owned`]) and waits until the `Close` is queued. The guard is disarmed
+    /// at once; the caller may bound or cancel the wait, and the task keeps the obligation.
     pub(super) async fn close(mut self) -> Result<(), russh::Error> {
-        self.channel
+        let channel = self.channel.take().expect("an armed opened channel");
+        close_via(&self.host, async move { channel.close().await }).await
+    }
+
+    /// Splits the channel for a pump that reads and writes it concurrently; the write half stays
+    /// guarded.
+    pub(super) fn split(mut self) -> (russh::ChannelReadHalf, OpenedWriter) {
+        let (reader, writer) = self
+            .channel
             .take()
             .expect("an armed opened channel")
-            .close()
-            .await
+            .split();
+        (
+            reader,
+            OpenedWriter {
+                writer: Some(writer),
+                host: self.host.clone(),
+            },
+        )
+    }
+}
+
+/// Hands `closing` to the connection (if it is still there) and waits until the `Close` is
+/// queued.
+async fn close_via(
+    host: &Weak<SshHost>,
+    closing: impl Future<Output = Result<(), russh::Error>> + Send + 'static,
+) -> Result<(), russh::Error> {
+    // A host that is gone took its channels with it.
+    let host = host.upgrade().ok_or(russh::Error::Disconnect)?;
+    host.close_owned(closing)
+        .await
+        .map_err(|_| russh::Error::Disconnect)
+}
+
+/// The write half of an [`OpenedChannel`] a pump is running: the same duty, the same guard.
+pub(super) struct OpenedWriter {
+    writer: Option<russh::ChannelWriteHalf<russh_client::Msg>>,
+    host: Weak<SshHost>,
+}
+
+impl OpenedWriter {
+    /// The server closed the channel or the connection broke: nothing left to close.
+    pub(super) fn disarm(&mut self) {
+        self.writer = None;
+    }
+
+    /// Like [`OpenedChannel::close`].
+    pub(super) async fn close(mut self) -> Result<(), russh::Error> {
+        let writer = self.writer.take().expect("an armed channel writer");
+        close_via(&self.host, async move { writer.close().await }).await
+    }
+}
+
+impl std::ops::Deref for OpenedWriter {
+    type Target = russh::ChannelWriteHalf<russh_client::Msg>;
+
+    fn deref(&self) -> &Self::Target {
+        self.writer.as_ref().expect("an armed channel writer")
+    }
+}
+
+impl Drop for OpenedWriter {
+    fn drop(&mut self) {
+        if let (Some(writer), Some(host)) = (self.writer.take(), self.host.upgrade()) {
+            drop(host.close_owned(async move { writer.close().await }));
+        }
     }
 }
 
@@ -410,7 +493,7 @@ impl Drop for OpenedChannel {
     fn drop(&mut self) {
         // A host that is gone took its channels with it.
         if let (Some(channel), Some(host)) = (self.channel.take(), self.host.upgrade()) {
-            host.close_in_background(channel);
+            drop(host.close_owned(async move { channel.close().await }));
         }
     }
 }
@@ -452,7 +535,7 @@ impl SshHost {
     /// close is bounded too.
     async fn run_exec(
         &self,
-        channel: russh::Channel<russh_client::Msg>,
+        channel: OpenedChannel,
         line: &str,
         deadline: Instant,
     ) -> Result<ExecOutput, RemoteError> {
@@ -469,10 +552,10 @@ impl SshHost {
     }
 }
 
-/// A session channel running an exec. Dropped while armed (the exec future was cancelled),
-/// it closes the channel in the background; `finished` disarms it once the server has closed
-/// the channel itself.
-struct ExecChannel(Option<russh::Channel<russh_client::Msg>>);
+/// A session channel running an exec. Dropped while armed (the exec future was cancelled) the
+/// [`OpenedChannel`] inside closes the channel through the connection; `finished` disarms it
+/// once the server has closed the channel itself.
+struct ExecChannel(Option<OpenedChannel>);
 
 impl ExecChannel {
     fn channel(&mut self) -> &mut russh::Channel<russh_client::Msg> {
@@ -480,23 +563,14 @@ impl ExecChannel {
     }
 
     fn finished(mut self) {
-        self.0 = None;
+        drop(self.0.take().map(OpenedChannel::into_inner));
     }
 
-    /// Best effort and bounded: the connection may already be gone.
+    /// Waits (bounded) until the `Close` is queued; the connection finishes it if that takes
+    /// longer, or if this is cancelled.
     async fn close(mut self) {
         if let Some(channel) = self.0.take() {
             let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
-        }
-    }
-}
-
-impl Drop for ExecChannel {
-    fn drop(&mut self) {
-        if let Some(channel) = self.0.take() {
-            runtime().spawn(async move {
-                let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
-            });
         }
     }
 }
@@ -544,8 +618,7 @@ impl RemoteHost for SshHost {
             .await
             .map_err(|_| RemoteError::TimedOut)?
             .map_err(remote_error)?;
-        // `ExecChannel` takes over the duty to close it, with no `await` in between.
-        self.run_exec(channel.into_inner(), line, deadline).await
+        self.run_exec(channel, line, deadline).await
     }
 
     /// OpenSSH `direct-streamlocal@openssh.com`. A socket that is missing or refuses the
@@ -1187,6 +1260,8 @@ async fn hold(
     let (ended_sender, mut ended) = oneshot::channel();
     let mut client = Client::new(trusted_host_keys, events.clone());
     client.ended = Some(ended_sender);
+    #[cfg(test)]
+    let reader_gate = Arc::clone(&client.reader_gate);
     let mut handle = russh_client::connect_stream(config(), stream, client)
         .await
         .map_err(handshake_failure)?;
@@ -1203,6 +1278,8 @@ async fn hold(
         servers: mosh_session::ServerDebt::default(),
         opens: Mutex::new(Some(JoinSet::new())),
         me: me.clone(),
+        #[cfg(test)]
+        reader_gate,
     });
     register(&host);
     // However this function ends, also when the host driver aborts it, the opens that are still

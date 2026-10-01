@@ -313,6 +313,7 @@ struct Shared {
     /// Whether the server answers `pty-req` and `shell` (it never does by default: the setup
     /// timeout tests need a server that stays silent).
     shell_answers: AtomicBool,
+    withheld_stage: Mutex<Option<&'static str>>,
 }
 
 struct Server {
@@ -464,6 +465,12 @@ impl server::Handler for Server {
         _: &[(russh::Pty, u32)],
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        if let Some(tx) = self.shared.channel_events.lock().unwrap().as_ref() {
+            let _ = tx.send(("pty", channel));
+        }
+        if *self.shared.withheld_stage.lock().unwrap() == Some("pty") {
+            return Ok(());
+        }
         if self.shared.shell_answers.load(Ordering::SeqCst) {
             session.channel_success(channel)?;
         }
@@ -476,6 +483,12 @@ impl server::Handler for Server {
         channel: russh::ChannelId,
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        if let Some(tx) = self.shared.channel_events.lock().unwrap().as_ref() {
+            let _ = tx.send(("shell", channel));
+        }
+        if *self.shared.withheld_stage.lock().unwrap() == Some("shell") {
+            return Ok(());
+        }
         if self.shared.shell_answers.load(Ordering::SeqCst) {
             session.channel_success(channel)?;
         }
@@ -690,6 +703,7 @@ impl Fixture {
             open_gate: Mutex::new(None),
             unix_gate: Mutex::new(None),
             shell_answers: AtomicBool::new(false),
+            withheld_stage: Mutex::new(None),
         });
         let (listener, port) = runtime().block_on(async {
             let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -1516,14 +1530,8 @@ fn a_stalled_outbound_path_cannot_hold_an_exec_or_the_probe_past_the_exec_timeou
     let ssh = fixture.ssh();
     // Two channels confirmed while the path still works: one for the exec under test, one to
     // fill russh's outbound queue.
-    let exec_channel = runtime()
-        .block_on(ssh.start_open().wait())
-        .unwrap()
-        .into_inner();
-    let filler_channel = runtime()
-        .block_on(ssh.start_open().wait())
-        .unwrap()
-        .into_inner();
+    let exec_channel = runtime().block_on(ssh.start_open().wait()).unwrap();
+    let filler_channel = runtime().block_on(ssh.start_open().wait()).unwrap();
 
     stall.stall();
     let filler = runtime().spawn(async move {
@@ -2061,7 +2069,8 @@ fn pending_opens_end_on_host_close_without_retaining_the_host() {
         drop(pending);
         drop(ssh);
         drop(fixture);
-        assert!(weak.upgrade().is_none(), "an ended open retained the host");
+        // The aborted connection task releases its reference a moment after `Closed`.
+        wait_for(|| weak.upgrade().is_none());
     }
 }
 
@@ -2212,4 +2221,419 @@ fn an_aborted_terminal_task_closes_a_channel_still_waiting_for_its_focus_exactly
         },
         true,
     );
+}
+
+// A diagnostic-only gate freezes russh's shared loop after delivering the open confirmation.
+// The ten-slot command queue is filled with keepalives: no sleep or status polling.
+fn close_with_a_full_command_queue(mode: &str) {
+    let mut fixture = Fixture::connected(Duration::from_secs(5));
+    let ssh = fixture.ssh();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    let (entered, reader_entered) = oneshot::channel();
+    let (release, reader_release) = oneshot::channel();
+    *ssh.reader_gate.lock().unwrap() = Some((entered, reader_release));
+    let channel = runtime().block_on(async {
+        let mut pending = ssh.start_open();
+        let channel = timeout(Duration::from_secs(5), pending.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(5), reader_entered)
+            .await
+            .unwrap()
+            .unwrap();
+        // russh::client::connect_stream creates channel(10). The loop is at the gate and
+        // cannot consume these messages; each enqueue is bounded in case the setup is wrong.
+        for _ in 0..10 {
+            timeout(Duration::from_secs(1), ssh.handle.send_keepalive(false))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        channel
+    });
+    let id = events.recv_timeout(Duration::from_secs(5)).unwrap().1;
+    runtime().block_on(async {
+        match mode {
+            "guard_cancel" => {
+                let mut closing = Box::pin(channel.close());
+                std::future::poll_fn(|cx| {
+                    assert!(std::future::Future::poll(closing.as_mut(), cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                drop(closing);
+            }
+            "guard_timeout" => {
+                assert!(timeout(CHANNEL_CLOSE_GRACE, channel.close()).await.is_err());
+            }
+            "guard_drop_timeout" => {
+                drop(channel);
+                // Past the old 250 ms deadline the close task still owns the channel.
+                tokio::time::sleep(CHANNEL_CLOSE_GRACE * 2).await;
+                assert_eq!(ssh.outstanding_opens(), 1);
+            }
+            "pump_cancel" | "pump_timeout" => {
+                let (tx, _rx) = mpsc::channel(32);
+                let (_writes, mut outgoing) = mpsc::unbounded_channel();
+                let mut pump = Box::pin(crate::ssh::pump::pump_channel(
+                    channel,
+                    &tx,
+                    &mut outgoing,
+                    std::future::ready(()),
+                ));
+                if mode == "pump_cancel" {
+                    std::future::poll_fn(|cx| {
+                        assert!(std::future::Future::poll(pump.as_mut(), cx).is_pending());
+                        std::task::Poll::Ready(())
+                    })
+                    .await;
+                    drop(pump);
+                } else {
+                    assert_eq!(
+                        timeout(Duration::from_secs(2), pump)
+                            .await
+                            .unwrap()
+                            .unwrap(),
+                        CloseReason::Disconnected
+                    );
+                }
+            }
+            "exec_cancel" => {
+                let mut exec = Box::pin(ExecChannel(Some(channel)).close());
+                std::future::poll_fn(|cx| {
+                    assert!(std::future::Future::poll(exec.as_mut(), cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                drop(exec);
+            }
+            "guard_cancel_control" => {
+                let mut closing = Box::pin(channel.close());
+                std::future::poll_fn(|cx| {
+                    assert!(std::future::Future::poll(closing.as_mut(), cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                release.send(()).unwrap();
+                timeout(Duration::from_secs(2), closing)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                return;
+            }
+            _ => unreachable!(),
+        }
+        release.send(()).unwrap();
+    });
+    // A completed fresh exec is a barrier: the reader recovered and processed the full queue.
+    runtime()
+        .block_on(ssh.exec_rendered("tmux list-sessions"))
+        .unwrap();
+    let until = std::time::Instant::now() + Duration::from_millis(700);
+    let mut closes = 0;
+    while let Ok(event) =
+        events.recv_timeout(until.saturating_duration_since(std::time::Instant::now()))
+    {
+        if event == ("close", id) {
+            closes += 1;
+        }
+    }
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+    assert_eq!(
+        closes, 1,
+        "{mode}: close lost while the shared SSH connection recovered"
+    );
+}
+
+#[test]
+fn a_cancelled_guard_close_with_a_full_queue_still_closes_the_channel() {
+    close_with_a_full_command_queue("guard_cancel");
+}
+#[test]
+fn a_timed_out_guard_close_with_a_full_queue_still_closes_the_channel() {
+    close_with_a_full_command_queue("guard_timeout");
+}
+#[test]
+fn a_dropped_guard_with_a_full_queue_still_closes_the_channel() {
+    close_with_a_full_command_queue("guard_drop_timeout");
+}
+#[test]
+fn a_cancelled_pump_with_a_full_queue_still_closes_the_channel() {
+    close_with_a_full_command_queue("pump_cancel");
+}
+#[test]
+fn a_pump_stop_with_a_full_queue_still_closes_the_channel() {
+    close_with_a_full_command_queue("pump_timeout");
+}
+#[test]
+fn a_cancelled_exec_close_with_a_full_queue_still_closes_the_channel() {
+    close_with_a_full_command_queue("exec_cancel");
+}
+#[test]
+fn a_guard_close_the_queue_lets_finish_closes_the_channel_once() {
+    close_with_a_full_command_queue("guard_cancel_control");
+}
+
+#[test]
+fn a_guard_dropped_after_the_host_is_gone_does_nothing() {
+    for unix in [false, true] {
+        let mut fixture = Fixture::connected(Duration::from_secs(5));
+        let ssh = fixture.ssh();
+        let weak = Arc::downgrade(&ssh);
+        let guard = runtime().block_on(async {
+            ssh.start_open_of(if unix {
+                OpenKind::Streamlocal("/run/herdr.sock".into())
+            } else {
+                OpenKind::Session
+            })
+            .wait()
+            .await
+            .unwrap()
+        });
+        fixture.handle.disconnect();
+        assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+        drop(ssh);
+        drop(fixture);
+        wait_for(|| weak.upgrade().is_none());
+        drop(guard); // Weak cannot upgrade: no panic, no retained host.
+    }
+}
+
+#[test]
+fn a_terminal_disconnect_with_a_full_queue_still_closes_its_channel_once_the_queue_drains() {
+    let mut fixture = Fixture::connected(Duration::from_secs(5));
+    let ssh = fixture.ssh();
+    fixture.shared.shell_answers.store(true, Ordering::SeqCst);
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    let (tx, states) = sync::channel();
+    let terminal = fixture
+        .handle
+        .open_terminal_with(
+            TerminalTarget::Shell,
+            TerminalTransport::Ssh,
+            TerminalSize::new(80, 24).unwrap(),
+            Arc::new(SessionRecorder(tx)),
+        )
+        .unwrap();
+    while states.recv_timeout(Duration::from_secs(5)).unwrap() != SessionState::Connected {}
+    let id = loop {
+        if let ("session", id) = events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            break id;
+        }
+    };
+    let (entered, reader_entered) = oneshot::channel();
+    let (release, reader_release) = oneshot::channel();
+    *ssh.reader_gate.lock().unwrap() = Some((entered, reader_release));
+    let blocker = runtime().block_on(async {
+        let guard = ssh
+            .start_open_of(OpenKind::Streamlocal("/run/herdr.sock".into()))
+            .wait()
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), reader_entered)
+            .await
+            .unwrap()
+            .unwrap();
+        for _ in 0..10 {
+            ssh.handle.send_keepalive(false).await.unwrap();
+        }
+        guard
+    });
+    terminal.disconnect();
+    assert_eq!(session_closed(&states), CloseReason::Disconnected);
+    release.send(()).unwrap();
+    drop(blocker);
+    runtime()
+        .block_on(ssh.exec_rendered("tmux list-sessions"))
+        .unwrap();
+    let until = std::time::Instant::now() + Duration::from_millis(700);
+    let mut closes = 0;
+    while let Ok(event) =
+        events.recv_timeout(until.saturating_duration_since(std::time::Instant::now()))
+    {
+        if event == ("close", id) {
+            closes += 1;
+        }
+    }
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+    assert_eq!(
+        closes, 1,
+        "public Disconnect reported Closed but left its terminal channel open on the recovered host"
+    );
+}
+
+#[test]
+fn a_terminal_task_aborted_while_pty_or_shell_reply_is_pending_closes_its_channel_once() {
+    for stage in ["pty", "shell"] {
+        let mut fixture = Fixture::connected(Duration::from_secs(5));
+        let ssh = fixture.ssh();
+        fixture.shared.shell_answers.store(true, Ordering::SeqCst);
+        *fixture.shared.withheld_stage.lock().unwrap() = Some(stage);
+        let (tx, events) = sync::channel();
+        *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+        let (sender, _incoming) = mpsc::channel(32);
+        let (_writes, outgoing) = mpsc::unbounded_channel();
+        let (_size, latest_size) = watch::channel(TerminalSize::new(80, 24).unwrap());
+        let (_stop, stop) = watch::channel(false);
+        let task = runtime().spawn(async move {
+            super::terminal_session::channel_task(
+                ssh,
+                TerminalTarget::Shell,
+                &sender,
+                outgoing,
+                latest_size,
+                stop,
+            )
+            .await
+        });
+        let id = loop {
+            let (kind, id) = events.recv_timeout(Duration::from_secs(5)).unwrap();
+            if kind == stage {
+                break id;
+            }
+        };
+        task.abort();
+        assert!(runtime().block_on(task).unwrap_err().is_cancelled());
+        let until = std::time::Instant::now() + Duration::from_millis(700);
+        let mut closes = 0;
+        while let Ok(event) =
+            events.recv_timeout(until.saturating_duration_since(std::time::Instant::now()))
+        {
+            if event == ("close", id) {
+                closes += 1;
+            }
+        }
+        assert_eq!(
+            closes, 1,
+            "abort while {stage} reply pending must close once"
+        );
+        runtime()
+            .block_on(fixture.handle.list_tmux_sessions())
+            .unwrap();
+        fixture.handle.disconnect();
+        assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+    }
+}
+
+#[test]
+fn a_running_pump_cancelled_under_a_full_queue_still_closes_the_channel() {
+    let mut fixture = Fixture::connected(Duration::from_secs(5));
+    let ssh = fixture.ssh();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    let (entered, reader_entered) = oneshot::channel();
+    let (release, reader_release) = oneshot::channel();
+    *ssh.reader_gate.lock().unwrap() = Some((entered, reader_release));
+    runtime().block_on(async {
+        let channel = ssh.start_open().wait().await.unwrap();
+        timeout(Duration::from_secs(5), reader_entered)
+            .await
+            .unwrap()
+            .unwrap();
+        for _ in 0..10 {
+            timeout(Duration::from_secs(1), ssh.handle.send_keepalive(false))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let (tx, _rx) = mpsc::channel(32);
+        let (_writes, mut outgoing) = mpsc::unbounded_channel();
+        let mut pump = Box::pin(crate::ssh::pump::pump_channel(
+            channel,
+            &tx,
+            &mut outgoing,
+            std::future::pending::<()>(),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(pump.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(pump);
+        release.send(()).unwrap();
+    });
+    let id = events.recv_timeout(Duration::from_secs(5)).unwrap().1;
+    runtime()
+        .block_on(ssh.exec_rendered("tmux list-sessions"))
+        .unwrap();
+    let until = std::time::Instant::now() + Duration::from_millis(700);
+    let mut closes = 0;
+    while let Ok(event) =
+        events.recv_timeout(until.saturating_duration_since(std::time::Instant::now()))
+    {
+        if event == ("close", id) {
+            closes += 1;
+        }
+    }
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+    assert_eq!(closes, 1);
+}
+
+#[test]
+fn a_pump_whose_local_input_ended_closes_its_channel_on_the_healthy_connection() {
+    let mut fixture = Fixture::connected(Duration::from_secs(5));
+    let ssh = fixture.ssh();
+    fixture.shared.shell_answers.store(true, Ordering::SeqCst);
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    let (sender, mut incoming) = mpsc::channel(32);
+    let (writes, outgoing) = mpsc::unbounded_channel();
+    let (_size, size) = watch::channel(TerminalSize::new(80, 24).unwrap());
+    let (_stop, stop) = watch::channel(false);
+    let host = ssh.clone();
+    let task = runtime().spawn(async move {
+        super::terminal_session::channel_task(
+            host,
+            TerminalTarget::Shell,
+            &sender,
+            outgoing,
+            size,
+            stop,
+        )
+        .await
+    });
+    runtime().block_on(async {
+        loop {
+            if matches!(
+                timeout(Duration::from_secs(5), incoming.recv())
+                    .await
+                    .unwrap(),
+                Some(crate::ssh::pump::Event::Connected)
+            ) {
+                break;
+            }
+        }
+    });
+    let id = loop {
+        if let ("session", id) = events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            break id;
+        }
+    };
+    drop(writes); // Local terminal producer ended; no server Close or connection loss.
+    assert!(matches!(
+        runtime().block_on(task).unwrap(),
+        CloseReason::Failed(SessionFailure::ConnectionLost(_))
+    ));
+    runtime()
+        .block_on(ssh.exec_rendered("tmux list-sessions"))
+        .unwrap();
+    assert!(!ssh.is_closed());
+    let until = std::time::Instant::now() + Duration::from_millis(700);
+    let mut closes = 0;
+    while let Ok(event) =
+        events.recv_timeout(until.saturating_duration_since(std::time::Instant::now()))
+    {
+        if event == ("close", id) {
+            closes += 1;
+        }
+    }
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+    assert_eq!(closes, 1, "local input EOF must not abandon a live channel");
 }
