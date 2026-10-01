@@ -118,6 +118,10 @@ class ConnectionServiceDeviceTest {
         runBlocking(Dispatchers.Main) { app.connections.connect(host, byteArrayOf(1)) }
         await("the service to run") { ServiceRunState.Process.running }
         await("the notification") { notification() != null }
+        // The service posts a placeholder ("or2", nothing known yet) the moment it starts, which is what a
+        // first read can see, and the real content right after it (`ServiceController.begin` shows the
+        // current snapshot, then every snapshot the connections publish): wait for the update, bounded.
+        await("the notification to name the host") { notification()?.extras?.getString("android.title") == "Connected to Service fixture" }
         val shown = notification()!!
         assertEquals("Connected to Service fixture", shown.extras.getString("android.title"))
         assertEquals(listOf("Disconnect all"), shown.actions.map { it.title.toString() })
