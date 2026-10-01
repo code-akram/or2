@@ -393,8 +393,8 @@ storage); the first finds `tmux`, `herdr` and `mosh-server`:
 `/usr/local/bin`, `/usr/bin`, `/bin`, `$HOME/.nix-profile/bin`, `/run/current-system/sw/bin`.
 It also reports a UTF-8 locale (`C.UTF-8`, else the first `*.UTF-8`/`*.utf8` in `locale -a`,
 else `en_US.UTF-8`). Every later tmux/herdr/mosh command uses the absolute path found: the
-host driver passes `HostCapabilities.herdr` to `herdr::run`, `herdr::watch` and
-`herdr::focus_pane` (as `mosh::bootstrap` takes `caps`), so no client repeats the PATH search.
+host driver passes `HostCapabilities.herdr` to `herdr::run_in` and `herdr::focus_pane_in` (as
+`mosh::bootstrap` takes `caps`), so no client repeats the PATH search.
 The probe is a fixed script run with `exec_script`.
 
 Lane A1: `or2_core::probe::PROBE_SCRIPT` and `probe::parse` (`probe::probe(&host)` runs them).
@@ -2034,6 +2034,9 @@ Phone acceptance (Wi-Fi, OnePlus/OxygenOS 16, about 117 ms RTT to the host) foun
 far from 2 s and two Android behaviours that defeat "stays connected". This section records what
 changed; the rules it touches are also updated where they live (probe, herdr, mosh, Android).
 
+The FFI is unchanged (API stays **10**): the latency work is inside `or2-core`, the timing markers use the
+existing callbacks, and the Android changes are app-side.
+
 ### Latency fixture and measured numbers
 
 `core/or2-core/tests/latency.rs` (feature set of the other sshd tests; needs `sshd` and
@@ -2152,3 +2155,20 @@ back (an `Unreachable` message of the form `address N: <outcome>; address M: ...
 racing"). A host with the **sleeps** flag whose connection ended `Unreachable`, `TimedOut` or lost reads
 as muted `Asleep` rather than an error (the detail still shows underneath); a rejected key or host key
 is a failure whatever the flag says. Tests: `SessionMessagesTest`, `HomeModelTest`.
+
+### Not done / for the phone
+
+- The measured numbers are over a modelled 120 ms link on the runner; the phone's own times (its CPU,
+  the ZeroTier path, the UDP round trip of a mosh start) are what `or2.timing` is for: read
+  `connect host=N connected / capabilities / live`, `tap ... focused / terminal-connected / frame`
+  and `resume ...` on a debug build, and compare each leg with the round trips counted above.
+- The cold-launch resume, the up-front battery request (and OxygenOS's own dialog), and the Home card
+  have run only on fakes and compile-checked device tests (`HomeUiDeviceTest`); the biometric prompt
+  at a cold start is the thing to watch.
+- The per-address timeout and the `.local` retry are tested against scripted resolvers and a
+  blackholing transport; the real Android resolver (and a first mDNS lookup that fails after 1.5 s) is
+  the phone's to confirm.
+- `tests/mosh_live.rs::terminate_stops_a_server_nobody_connected_to` failed once in one full workspace
+  run (a UDP-port-to-pid lookup of the test's own helper) and passed on every rerun, alone and in the
+  suite; it does not touch this change and is recorded here rather than hidden.
+

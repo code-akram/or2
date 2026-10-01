@@ -133,6 +133,6 @@ async fn race_skips_a_refused_address_at_once_and_reports_every_failure() {
             .all(|error| error.kind() == ErrorKind::ConnectionRefused)
     );
     let text = failure.to_string();
-    assert!(text.contains("address 0: ConnectionRefused"), "{text}");
-    assert!(text.contains("address 1: ConnectionRefused"), "{text}");
+    assert!(text.contains("address 0: connection refused"), "{text}");
+    assert!(text.contains("address 1: connection refused"), "{text}");
 }
