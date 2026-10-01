@@ -70,6 +70,7 @@ source scripts/env.sh
 cargo fmt --manifest-path core/Cargo.toml --all --check
 cargo test --manifest-path core/Cargo.toml --workspace --all-features --locked
 cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
+scripts/gen-licenses.sh --check
 android/gradlew -p android :app:assembleDebug :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:lintDebug
 ```
 
@@ -239,6 +240,31 @@ for Android arm64. Install that Zig version on `PATH` for a fresh setup and chec
 before building. The dependency's Rust build script drives Zig; no checked-in terminal binary
 or Kotlin protocol implementation is used.
 
+## Open-source licences
+
+or2 ships other projects' code, so it ships their licences. `scripts/gen-licenses.sh` (python3 and
+cargo only; no network and no extra tool) generates, from the locked dependency graphs:
+
+| File | Content | Source |
+|---|---|---|
+| `android/app/src/main/assets/licenses/rust.json` | the crates linked into `libor2_ffi.so` (name, version, SPDX expression, repository, full licence and notice texts), the Zig-built libghostty-vt components (Ghostty, Highway, simdutf, uucode, the UTF-8 decoder, Zig's runtime) and the Rust standard library | `cargo tree -p or2-ffi --target aarch64-linux-android -e normal` (the features that build uses; build-script and dev dependencies ship no code and are left out) joined with `cargo metadata --locked --offline`; the texts are the `LICENSE*`/`COPYING*`/`NOTICE*` files in each crate's source in the cargo registry or checkout (for a crate that bundles C sources, such as `aws-lc-sys`, those of the bundled code too) |
+| `android/app/src/main/assets/licenses/android.json` | the release runtime classpath: coordinates, SPDX licence, project URL, the licence text and any `LICENSE`/`NOTICE` at the root of the artifact | every `releaseRuntimeClasspath` line of `android/app/gradle.lockfile` (the strict lock) and each artifact's POM from the offline Gradle cache (`$GRADLE_USER_HOME` or `~/.gradle`; parent POMs for inherited licences). An artifact whose POM licence is not in the script's table, or that has no POM in the cache, stops the generator |
+| `android/app/src/main/assets/licenses/notices.md` | a copy of `THIRD_PARTY_NOTICES.md` (authoritative for vendored code and components built outside Cargo and Gradle) | the file itself |
+| `android/app/src/main/assets/licenses/COPYING` | a copy of `LICENSE` (or2's GPL-3.0 text, shown by About or2) | the file itself |
+| `core/or2-pair/THIRD_PARTY.md` | the same for the `or2-pair` host CLI: all targets, one numbered copy of each distinct text | `cargo tree -p or2-pair --target all -e normal`; written only when that package exists in the workspace |
+
+A crate that ships no licence file (russh, uniffi, ...) is shown with the SPDX standard text of its
+declared licence from `scripts/licenses/spdx/`, flagged `fallback` with a note. The Ghostty
+components are not Cargo crates: their texts live in `scripts/licenses/ghostty/` (read from the
+pinned Ghostty commit) and the generator stops when `libghostty-vt-sys` starts building a different
+Ghostty commit, so a bump must re-read them. Run `scripts/gen-licenses.sh` after any dependency
+change and commit the result; `scripts/gen-licenses.sh --check` fails when a generated file is
+stale and is part of the verification list above. The generated data is the source of the app's
+Open source licenses screen. `LicenseDataTest` parses the real files and fails when a listed licence
+has no GPL-3.0-compatible alternative, `MiniJsonTest` covers the JSON reader, and the device test
+`AboutUiDeviceTest` opens About or2 and the list and finds a known library (compile-checked while
+no phone is available).
+
 ## herdr client
 
 `core/or2-core/src/herdr/generated.rs` is generated; do not edit it. After a herdr update run
@@ -262,7 +288,7 @@ screens; `am start -n io.github.code_akram.or2/.gallery.UiGalleryActivity --es s
 opens one directly. Names: `home`, `home-empty`, `host-cards` (unlocking, checking,
 authenticating, connected with a blocked agent, failed, idle), `inbox`, `inbox-empty`,
 `picker-herdr`, `picker-tmux`, `picker-recent`, `host-form`, `host-form-edit`, `keys`,
-`keys-empty`, `hostkey-first`, `hostkey-changed`, `add-host` (the two-card sheet), `pair-scan`,
+`keys-empty`, `about`, `licenses`, `hostkey-first`, `hostkey-changed`, `add-host` (the two-card sheet), `pair-scan`,
 `pair-scan-denied`, `pair-review`, `pair-review-new` (with a failure), `pair-progress`, `pair-install`
 (Easy pair; the camera preview itself is not in the gallery), `terminal`, `terminal-arrowpad`,
 `terminal-composer` (opens with a message typed and the keyboard up, to show the caret and the

@@ -66,4 +66,13 @@ class NavigationTest {
         // A pair screen saved first is dropped under Home, like any pushed screen.
         assertEquals(listOf(Destination.Home, Destination.EasyPair), NavStack.decode("pair").entries)
     }
+
+    @Test
+    fun aboutAndTheLicenseListArePushedOnHomeAndSurviveSavedState() {
+        val stack = NavStack().push(Destination.About).push(Destination.Licenses)
+        assertEquals("home|about|licenses", stack.encode())
+        assertEquals(stack, NavStack.decode(stack.encode()))
+        assertEquals(NavStack().push(Destination.About), stack.back())
+        assertEquals(listOf(Destination.Home, Destination.About), NavStack.decode("about").entries)
+    }
 }
