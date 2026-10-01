@@ -331,7 +331,7 @@ not configured by the scaffold; M1 development uses the debug APK.
 
 Scope: M2 plus the Rust half of M3's mosh. Lanes, ownership and interfaces are in
 [contracts: M2](contracts.md#m2-hosts-multiplexers-and-mosh). One SSH connection per host
-carries terminals, tmux/probe exec channels and herdr streamlocal channels (FFI API 6; API 7 adds `submit_text`).
+carries terminals, tmux/probe exec channels and herdr streamlocal channels (FFI API 7).
 
 - [x] Lane 0: `remote`, `host`, `herdr::view` and tmux contract types; FFI API 4 surface;
   `contract_probe_host`; Kotlin JVM contract test.
@@ -342,11 +342,33 @@ carries terminals, tmux/probe exec channels and herdr streamlocal channels (FFI 
 - [x] Lane A3: vendored mosh-rs behind `DatagramTransport`, `Screen` over libghostty,
   bootstrap and session driver; live tests against local `mosh-server`.
 - [x] Lane B: Room v2 migration, multi-address hosts, host connection holder, inbox, host
-  screen with tmux picker, session switcher. JVM tests (including the loopback-sshd cases against
-  the real host driver), the device test sources and the lint/build gate pass, and the phone
-  checks in [build](build.md) are pending.
-- [ ] Integration, review and phone acceptance: inbox on both hosts, tap a blocked agent and
-  answer it, attach tmux, multi-address fallback.
+  screen with tmux picker, session switcher.
+- [x] UI system ([ui](ui.md)): Catppuccin theme, Moshi-grade screens and terminal chrome
+  (toolbar, arrow pad, composer), small default cell size with pinch zoom, debug UI gallery.
+- [x] Integration, internal review per lane, external adversarial review (Codex, 9 findings,
+  all fixed) and phone acceptance.
+
+**M2 result: complete (2026-10-01).** Final checks on `main`: `cargo fmt`, Clippy with
+`-D warnings`, 349 Rust tests with live sshd, tmux, herdr and mosh-server required; Gradle
+build, 141 JVM tests and lint; 67 instrumented tests on the OnePlus 10 Pro (Android 16).
+Phone acceptance against the owner's real accounts (key authorized with the owner's explicit
+approval, `no-agent-forwarding,no-X11-forwarding`):
+- The M1 database (host, Keystore-bound key, trust) migrated to v2 on the phone without loss;
+  a pre-upgrade copy was taken first.
+- "Connect all": one fingerprint unlocked three hosts sharing a key (Arch as `akram` and as the
+  test account, the Mac by name with a second address). First-use prompts for the two new hosts
+  were approved on screen and the stored fingerprints matched the hosts' real ED25519 keys.
+- v0 step 1: the inbox showed live herdr agents from both hosts (working, idle, unknown).
+- v0 step 2: tapping an agent focused its herdr pane (verified through herdr) and opened it;
+  the composer's single Send submitted a prompt that the agent (Codex) answered in 3 s. The
+  first attempt exposed that agent TUIs treat text+Enter in one burst as a paste; `submit_text`
+  (bracketed paste or text, a 100 ms pause, then a separate Enter) fixed it and was re-verified.
+- tmux: create and attach on the test account rendered correctly.
+
+Not yet verified on the phone: the 2-second inbox target was not timed; a dead first address
+falling back to the second (covered by Rust racing tests, not observed on the phone); mosh (no
+FFI until M3); v0 step 3 (background for 10 minutes and return), which needs M3's foreground
+service and mosh.
 
 ## Decisions
 
