@@ -663,7 +663,7 @@ async fn a_directory_seeds_the_watch_and_the_focus_and_a_stale_path_is_rediscove
         let (gate, host, herdr, directory) = (&gate, &host, &herdr, &directory);
         async move {
             gate.focus(
-                &**host,
+                host,
                 herdr.herdr(),
                 directory,
                 Some(&herdr.name),
@@ -690,7 +690,7 @@ async fn a_directory_seeds_the_watch_and_the_focus_and_a_stale_path_is_rediscove
     stale.seed(list_sessions(&stale_host, herdr.herdr()).await.unwrap());
     let gate = FocusGate::new();
     gate.focus(
-        &*host,
+        &host,
         herdr.herdr(),
         &stale,
         Some(&herdr.name),

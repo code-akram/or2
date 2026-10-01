@@ -306,7 +306,7 @@ async fn prepare(
     // `mosh-server` runs follows herdr's focus), so they share their round trips. A focus that
     // fails (the pane is gone) leaves a server nobody will use: it is stopped before the
     // failure is reported.
-    let (focused, bootstrapped) = tokio::join!(focus.run(host), bootstrap);
+    let (focused, bootstrapped) = tokio::join!(focus.run(shared), bootstrap);
     let result = match (focused, bootstrapped) {
         (Ok(()), bootstrapped) => bootstrapped.map(Some),
         (Err(failure), Ok(params)) => {

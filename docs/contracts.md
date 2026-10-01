@@ -818,22 +818,29 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
   connection-less `herdr::focus_pane`, which uses a directory of its own) takes the socket from the
   directory and sends one `pane.focus` request on a short-lived stream (10 s bound): two round
   trips (open, request) and no listing. **`herdr::FocusGate`** (one per connection) keeps the app's
-  focus and the terminal's own from both reaching herdr, and **serializes a session's focuses**: a
-  herdr session ends on the pane whose request it received last, so each focus queues behind the
-  session's earlier ones (a per-session async mutex, first in, first out) and is sent only after
-  they were answered; the order requests reach herdr is the order they were asked, whatever the
-  socket-open latencies. A focus for the same pane as the session's **latest queued or running**
-  focus **joins it** and shares its answer (a failure included); if a focus of another pane was
-  asked since it is a request of its own, queued after it (A, B, A sends A, B, A). A cancelled
-  leader (queued or running) leaves the queue without blocking it, and its followers ask for
-  themselves. A terminal's focus (`from_terminal`) is satisfied by an acknowledgement younger than
-  `focus::RECENT` (2 s) for the same pane only if that was **the last focus completed in the
-  session and nothing newer is queued or running there**: asking for a focus clears the session's
-  remembered acknowledgement, a completed one is remembered only by the focus that finished last,
-  and a failed or cancelled one leaves none (herdr may have acted on it). Focus A, focus B, open a
+  focus and the terminal's own from both reaching herdr. A herdr session ends on the pane whose
+  request it received last, so every decision about a session's focuses is made by **one actor
+  task per session** (spawned by the first request; it ends when idle with no acknowledgement
+  left to keep). Callers (`FocusGate::focus(&Arc<host>, herdr, &Arc<Directory>, session, pane,
+  accept_recent)`) send `(pane, reply)` to it over a channel; nothing else touches its state. It
+  owns a FIFO of pending requests (a pane and the callers waiting for it), the one request in
+  flight, and `recent`: the pane herdr was last successfully focused to by us, valid only while
+  the FIFO is empty and nothing is in flight. A request for the pane of the FIFO's tail (or of the
+  in-flight request, FIFO empty) **joins** it and shares its answer (a failure included); a
+  terminal's (`accept_recent`) request with the FIFO empty, nothing in flight and `recent` the
+  same pane and younger than `focus::RECENT` (2 s) is answered from memory; anything else is
+  queued and clears `recent` (A, B, A sends A, B, A). Requests are sent strictly one at a time in
+  FIFO order, so the order they reach herdr is the order they were asked, whatever the
+  socket-open latencies. On success `recent` is the pane only if the FIFO is empty by then; on
+  failure it is cleared (herdr may have acted). **Cancellation** only drops a caller's reply
+  channel and never mutates the actor from the caller side: a queued request whose callers have
+  all gone is skipped (never sent, not pending), one with a live caller is sent, and a request
+  already in flight completes and updates `recent` like any other (a cancelled tail therefore
+  neither blocks the queue nor lets an older pane's acknowledgement stand while a newer request is
+  pending, and a same-pane request after it still joins the pending one). Focus A, focus B, open a
   terminal on A therefore sends a focus of A; with A's request held open while B starts, B is sent
-  after A, and a terminal on B is then satisfied from memory but one on A is not. Sessions are
-  independent (a held focus in one does not delay another). The app's own request
+  after A, and a terminal on B is then satisfied from memory but one on A is not. Sessions have
+  their own actors and are independent (a held focus in one does not delay another). The app's own request
   (`HostHandle::focus_herdr_pane`) is never answered from memory, because the user's desktop may
   have moved the focus meanwhile. It changes what the user's
   herdr clients show; tests use isolated named sessions only. An error response with the code

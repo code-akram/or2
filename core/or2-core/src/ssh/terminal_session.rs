@@ -124,7 +124,7 @@ pub(super) struct PaneFocus {
 impl PaneFocus {
     /// Focuses the pane, joining the app's own focus if it is in flight and accepting one it
     /// acknowledged a moment ago (the connection's [`herdr::FocusGate`]).
-    pub(super) async fn run(&self, host: &SshHost) -> Result<(), SessionFailure> {
+    pub(super) async fn run(&self, host: &Arc<SshHost>) -> Result<(), SessionFailure> {
         host.focus_pane(&self.herdr, self.session.as_deref(), &self.pane_id, true)
             .await
             .map_err(herdr_failure)

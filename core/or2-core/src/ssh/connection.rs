@@ -184,7 +184,7 @@ impl SshHost {
     /// is a terminal's own focus before it starts, which a focus the app acknowledged a moment
     /// ago satisfies; the app's request is never answered from memory (see [`herdr::FocusGate`]).
     pub(super) async fn focus_pane(
-        &self,
+        self: &Arc<Self>,
         herdr: &str,
         session: Option<&str>,
         pane_id: &str,
@@ -869,7 +869,7 @@ async fn list_tmux(host: &SshHost) -> Result<Vec<TmuxSession>, HostError> {
 
 /// `HostHandle::focus_herdr_pane`: one `pane.focus` through the probed herdr path.
 async fn focus_herdr_pane(
-    host: &SshHost,
+    host: &Arc<SshHost>,
     session: Option<String>,
     pane_id: String,
 ) -> Result<(), HostError> {
