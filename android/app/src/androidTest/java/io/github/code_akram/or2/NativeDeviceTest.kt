@@ -5,18 +5,24 @@ import io.github.code_akram.or2.ffi.CellWidth
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.ConnectException
 import io.github.code_akram.or2.ffi.ConnectRequest
+import io.github.code_akram.or2.ffi.HostAddress
+import io.github.code_akram.or2.ffi.HostConnectRequest
+import io.github.code_akram.or2.ffi.HostListener
+import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.KeyException
 import io.github.code_akram.or2.ffi.Renderer
 import io.github.code_akram.or2.ffi.SessionListener
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalException
 import io.github.code_akram.or2.ffi.buildInfo
+import io.github.code_akram.or2.ffi.contractProbeHost
 import io.github.code_akram.or2.ffi.contractProbeSession
 import io.github.code_akram.or2.ffi.generateEd25519Key
 import io.github.code_akram.or2.ffi.importPrivateKey
 import io.github.code_akram.or2.ffi.terminalSize
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -30,7 +36,7 @@ class NativeDeviceTest {
     @Test
     fun loadsPackagedArm64LibraryAndRoundTripsThroughUniFfi() {
         val info = buildInfo()
-        assertEquals(3u, info.apiVersion)
+        assertEquals(4u, info.apiVersion)
         assertEquals(34u, info.minimumAndroidSdk)
         assertEquals(Renderer.CANVAS, info.renderer)
         val size = terminalSize(97u, 31u)
@@ -97,5 +103,28 @@ class NativeDeviceTest {
             assertEquals(SessionState.Closed(CloseReason.Disconnected), listener.next())
         }
         assertFalse(Thread.currentThread() in listener.threads)
+    }
+
+    @Test
+    fun answersHostQueriesThroughUniFfiAsyncOnArt() {
+        val key = generateEd25519Key("device")
+        val states = LinkedBlockingQueue<HostState>()
+        val listener = object : HostListener {
+            override fun onHostStateChanged(state: HostState) {
+                states.add(state)
+            }
+        }
+        val request = HostConnectRequest(listOf(HostAddress("probe.invalid", 22u)), "akram", key.privateKey, emptyList())
+        contractProbeHost(request, listener).use { host ->
+            val prompt = states.poll(5, TimeUnit.SECONDS) as HostState.AwaitingHostKeyDecision
+            host.approveHostKey(prompt.presented.fingerprint)
+            assertEquals(HostState.Authenticating, states.poll(5, TimeUnit.SECONDS))
+            assertEquals(HostState.Connected(0u), states.poll(5, TimeUnit.SECONDS))
+            val capabilities = runBlocking { host.capabilities() }
+            assertEquals("/usr/bin/tmux", capabilities.tmux)
+            assertEquals(listOf("main", "build"), runBlocking { host.listTmuxSessions() }.map { it.name })
+            host.disconnect()
+            assertEquals(HostState.Closed(CloseReason.Disconnected), states.poll(5, TimeUnit.SECONDS))
+        }
     }
 }
