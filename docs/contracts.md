@@ -1211,3 +1211,85 @@ calls the removed M1 `connect` export. The loopback-sshd JVM tests (`HostConnect
   watches. Those tests skip without `/usr/bin/sshd` unless `OR2_REQUIRE_SSHD` is set.
 - `MigrationDeviceTest.theDevicesSqliteSupportsDropColumn` checks on the phone that its SQLite
   is at least 3.35 (the version `DROP COLUMN` needs); no JVM test can.
+
+# M3: stays connected
+
+M3 makes sessions survive the phone's life: a foreground service owns every connection, mosh
+carries terminals across network changes, and the app returns to the same pane. FFI API
+becomes **8**. Everything in M1/M2 still applies unless changed here.
+
+## Lanes
+
+| Lane | Owns | Depends on |
+|---|---|---|
+| M3-A: Rust and FFI | mosh terminals on a host connection, transport choice, link health, roaming, `network_changed`, host-close semantics for mosh | this section |
+| M3-B: Android | foreground service owning `HostConnections`, network callback, per-host transport preference (Room v3), Auto fallback, reattach, battery-optimisation prompt, notification | M3-A's API 8 surface (via `contract_probe_host`) |
+| UI-C: compact UI | smaller default type scale, controls and popups everywhere ([ui](ui.md)) | none |
+
+M3-A lands its FFI surface and probe support first (a small commit), so M3-B builds against
+real generated bindings; the implementation follows on the same branch.
+
+## Mosh terminals (`or2_core`, FFI)
+
+```rust
+#[derive(uniffi::Enum)] pub enum TerminalTransport { Ssh, Mosh }
+
+impl HostConnection {
+    fn open_terminal(&self, target: TerminalTarget, transport: TerminalTransport,
+                     columns: u16, rows: u16, listener: Box<dyn SessionListener>)
+        -> Result<Arc<Session>, HostError>;
+}
+impl Session {
+    fn transport(&self) -> TerminalTransport;
+    /// mosh: open a new UDP socket now (the network changed). SSH: no-op.
+    fn roam(&self);
+}
+#[uniffi::export] pub fn network_changed();   // every live mosh session roams; every host
+                                              // connection sends an SSH keepalive at once
+pub trait SessionListener {                   // added method
+    /// mosh only, at most once a second and only when a value changes.
+    fn on_link_health(&self, health: LinkHealth) -> Result<(), ListenerError>;
+}
+#[derive(uniffi::Record)] pub struct LinkHealth { since_heard_ms: u64, since_ack_ms: u64 }
+```
+
+- **Bootstrap** runs over the host's SSH connection with the probed `mosh-server` and UTF-8
+  locale (`mosh::bootstrap`), then `mosh::start_with` pinned to the host's
+  `peer_addr()` (the IP the SSH connection actually reached, never re-resolved). The target's
+  command (tmux attach, herdr) is passed as mosh-server's command. A missing `mosh-server`
+  closes the session `Failed { NotInstalled { program: "mosh-server" } }`; no authenticated
+  datagram within the connect timeout closes it `Failed { TimedOut }` (UDP blocked) after
+  `mosh::terminate` cleans up the server. Any failure before `Connected` terminates the server.
+- **Host close does not close mosh sessions.** A mosh session needs the SSH connection only to
+  start. If the host connection is lost, its mosh sessions keep running; if the user
+  disconnects the host, its mosh sessions close too (`Disconnected`, shutdown handshake so the
+  server exits). SSH-transport terminals keep M2's rule.
+- **Roaming:** Kotlin calls `network_changed()` from its connectivity callback (default network
+  changed or lost-then-available). New sockets follow the process's current default network.
+- `contract_probe_host` supports `Mosh` deterministically (connects, echoes like SSH, reports a
+  fixed health sequence, `roam()` is counted and shown in the echo row).
+
+## Android
+
+- **Foreground service** (type `specialUse`, subtype documented in the manifest) owns the
+  application's `HostConnections` while any host or session is open; it stops itself when the
+  last one closes. Its ongoing notification shows hosts and sessions and offers "Disconnect
+  all". Request `POST_NOTIFICATIONS` (Android 13+) the first time a connection starts; the
+  service still runs if it is denied.
+- **Battery optimisation:** a one-time explanation and `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`
+  the first time a session is open while the app goes to the background; never nag again.
+- **Network callback:** `ConnectivityManager.registerDefaultNetworkCallback` → `network_changed()`
+  on every default-network change; debounce 500 ms.
+- **Transport preference** per host in Room v3 (`transport`: `AUTO` default, `SSH`, `MOSH`), real
+  `Migration(2, 3)` with a migration test. AUTO uses mosh when `capabilities().mosh_server` is
+  present and falls back to SSH (remembered for that connection, explained in muted text) when
+  mosh fails with `TimedOut` or `NotInstalled`. The terminal header's transport badge shows the
+  actual transport; link health greys the badge and shows "Last heard 12 s ago" when
+  `since_heard_ms > 5000`.
+- **Keys stay per-use.** No private key is retained to reconnect in the background. When the app
+  returns to the foreground and an inbox host's SSH connection was lost, the app offers one
+  grouped unlock (one biometric per distinct key) to reconnect; mosh terminals need no unlock.
+- **Reattach:** the app remembers the last focused terminal (host id, target, transport) in
+  app-private preferences. On return, if that session is alive it is shown directly
+  (`request_full_frame`); if only its host is connected, the same target is reopened (herdr pane
+  focused first); otherwise Home shows a "Resume" card that does both after unlocking.

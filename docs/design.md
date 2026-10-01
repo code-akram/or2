@@ -370,6 +370,19 @@ falling back to the second (covered by Rust racing tests, not observed on the ph
 FFI until M3); v0 step 3 (background for 10 minutes and return), which needs M3's foreground
 service and mosh.
 
+### M3 implementation checklist
+
+Interfaces are in [contracts: M3](contracts.md#m3-stays-connected) (FFI API 8).
+
+- [ ] M3-A: mosh terminals on host connections (transport choice, peer pinning, bootstrap,
+  terminate on early failure), link health, `roam`/`network_changed`, mosh survives host loss.
+- [ ] M3-B: foreground service owning connections, notification, network callback, Room v3
+  transport preference with AUTO fallback, grouped reconnect unlock, reattach to the last pane,
+  battery-optimisation prompt.
+- [ ] UI-C: compact default scale everywhere (type, controls, popups, arrow pad).
+- [ ] Integration, external review and phone acceptance, including v0 step 3 (background
+  10 minutes over mobile data, return to the same pane without re-typing).
+
 ## Decisions
 
 | Decision | Choice | Why |
