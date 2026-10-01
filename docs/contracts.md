@@ -691,8 +691,11 @@ from that task, and may be bounded or cancelled by the caller (the terminal's `C
 guards, `ExecChannel`'s drop and a cancelled or aborted pump or terminal task start the same task.
 A guard is disarmed only by `into_inner` (a hand-over to the next owner with no `await` in
 between: `open_unix` into a `ChannelStream`, which russh itself closes on drop with an unbounded
-send, and `ExecChannel::finished`, once the server has closed the channel) or when the server
-closed the channel or the connection broke (`pump_channel`). A terminal task that the host aborts
+send, and `ExecChannel::finished`, once the server has closed the channel) or when the server's
+own `Close` ended the pump's read side (`pump_channel`). Nothing else disarms: the pump's local
+input ending (the terminal's write queue closed while the connection stays healthy), a failed
+write, a stop and a cancellation all hand the channel to the close task, which on a connection
+that is gone simply ends. There is no exception to the invariant. A terminal task that the host aborts
 (the 2 x `CHANNEL_CLOSE_GRACE` wait in `drive` ran out) therefore still closes its channel, once,
 wherever it was; a terminal `Closed` can precede the `Close` reaching the server when the queue is
 full, never replace it. Tests (the queue is filled by freezing the shared reader at an open
@@ -705,7 +708,9 @@ confirmation and sending ten keepalives): `a_cancelled_guard_close_with_a_full_q
 `a_terminal_disconnect_with_a_full_queue_still_closes_its_channel_once_the_queue_drains`; and
 `an_aborted_terminal_task_closes_a_running_channel_exactly_once`,
 `an_aborted_terminal_task_closes_a_channel_still_waiting_for_its_focus_exactly_once`,
-`a_terminal_task_aborted_while_pty_or_shell_reply_is_pending_closes_its_channel_once`, with the
+`a_terminal_task_aborted_while_pty_or_shell_reply_is_pending_closes_its_channel_once`,
+`a_pump_whose_local_input_ended_closes_its_channel_on_the_healthy_connection`,
+`a_running_pump_cancelled_under_a_full_queue_still_closes_the_channel`, with the
 controls `a_guard_close_the_queue_lets_finish_closes_the_channel_once` and
 `a_guard_dropped_after_the_host_is_gone_does_nothing`.
 

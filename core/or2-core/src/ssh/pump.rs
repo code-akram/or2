@@ -291,7 +291,9 @@ pub(super) async fn pump_channel(
 ) -> Result<CloseReason, SessionFailure> {
     let (mut reader, mut writer): (_, OpenedWriter) = channel.split();
     // An abort or any other cancellation of this future closes the channel through the
-    // connection; the paths below that know the server closed it disarm the guard.
+    // connection. Only the server's own `Close` (the read side ending) disarms the guard: every
+    // other way out, the local input ending included, hands the channel to the connection's
+    // close task, which on a connection that is gone simply ends.
     let mut exit_status = None;
     let mut exit_signal = false;
     let reading = async {
@@ -340,23 +342,35 @@ pub(super) async fn pump_channel(
     // Keep one writer alive across reads: never restart a partially completed data() call.
     // The read end, shutdown or the enclosing cancellation ends it once, permanently.
     let ended = tokio::select! {
-        result = reading => Some(result),
-        result = writing => Some(result),
+        result = reading => Some((true, result)),
+        result = writing => Some((false, result)),
         () = shutdown => None,
     };
     match ended {
-        // The server closed the channel or the connection broke: nothing left to close.
-        Some(result) => {
+        // The read side ended: the server closed the channel (or the connection broke under
+        // it), nothing left to close.
+        Some((true, result)) => {
             writer.disarm();
             result
         }
+        // The write side ended (the local input is gone, or a write failed) while the server
+        // has not closed anything: the channel is still ours to close.
+        Some((false, result)) => {
+            close_queued(writer).await;
+            result
+        }
         None => {
-            // Wait for the `Close` to be queued, but only so long: the connection finishes it
-            // if the queue is full, and the session's `Closed` must not wait for that.
-            let _ = tokio::time::timeout(CHANNEL_CLOSE_GRACE, writer.close()).await;
+            close_queued(writer).await;
             Ok(CloseReason::Disconnected)
         }
     }
+}
+
+/// Hands the channel to the connection's close task and waits for the `Close` to be queued, but
+/// only so long: the task finishes it if the queue is full, and the session's `Closed` must not
+/// wait for that.
+async fn close_queued(writer: OpenedWriter) {
+    let _ = tokio::time::timeout(CHANNEL_CLOSE_GRACE, writer.close()).await;
 }
 
 /// Waits for the server's reply to a channel request (`pty-req`, `shell`, `exec`). Output that
