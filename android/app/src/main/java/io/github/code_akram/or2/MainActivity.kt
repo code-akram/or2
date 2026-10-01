@@ -30,12 +30,14 @@ import io.github.code_akram.or2.connection.KeyUnlocker
 import io.github.code_akram.or2.connection.MissingKeyException
 import io.github.code_akram.or2.connection.connectGrouped
 import io.github.code_akram.or2.data.Host
+import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.ffi.ClientKeyMaterial
 import io.github.code_akram.or2.ffi.HostConnectException
 import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.KeyException
 import io.github.code_akram.or2.ffi.generateEd25519Key
 import io.github.code_akram.or2.keys.VaultException
+import io.github.code_akram.or2.pair.PairViewModel
 import io.github.code_akram.or2.keys.authenticateCipher
 import io.github.code_akram.or2.keys.encryptKey
 import io.github.code_akram.or2.keys.importAndWipe
@@ -57,6 +59,7 @@ import android.graphics.Color as AndroidColor
 class MainActivity : FragmentActivity() {
     private val app get() = application as Or2Application
     private lateinit var model: AppViewModel
+    private lateinit var pairModel: PairViewModel
     private var busy by mutableStateOf(false)
 
     /**
@@ -106,6 +109,10 @@ class MainActivity : FragmentActivity() {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T = AppViewModel(app.database.dao(), app.vault::delete) as T
         })[AppViewModel::class.java]
+        pairModel = ViewModelProvider(this, object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T = PairViewModel(app.database.dao(), ::describeKeyError) as T
+        })[PairViewModel::class.java]
         val actions = AppActions(
             saveHost = ::saveHost,
             // The connection ends only once the host is really gone from storage.
@@ -122,6 +129,9 @@ class MainActivity : FragmentActivity() {
             requestBatteryExemption = ::requestBatteryExemption,
             answerBatteryExplanation = ::answerBatteryExplanation,
             takeColdResume = app.sessionMarker::takeColdResume,
+            pair = pairModel.flow,
+            deviceLabel = Build.MODEL.takeIf { it.isNotBlank() } ?: "Android phone",
+            generatePairKey = { label, comment -> createKey(label) { generateEd25519Key(comment) } },
         )
         setContent {
             val hosts by model.hosts.collectAsStateWithLifecycle()
@@ -166,26 +176,39 @@ class MainActivity : FragmentActivity() {
     }
 
     private fun saveKey(label: String, produce: () -> ClientKeyMaterial) = operation {
-        // The entire material lifetime stays inside this worker block: cancellation at a
-        // withContext return must never strand plaintext returned by native generation/import.
-        withContext(Dispatchers.IO) {
-            val id = UUID.randomUUID().toString()
-            var saved = false
-            try {
-                val record = encryptKey(id, label.trim(), produce()) {
-                    val cipher = app.vault.createCipher(id)
-                    withContext(Dispatchers.Main) { authenticateCipher(this@MainActivity, cipher, "Save SSH key") }
-                }
-                ensureActive()
-                withContext(NonCancellable) {
-                    app.database.dao().insertKey(record)
-                    saved = true
-                }
-            } finally {
-                if (!saved) app.vault.delete(id)
-            }
-        }
+        createKey(label, produce)
         model.message("Key saved. Copy or share its public key for manual installation.")
+    }
+
+    /**
+     * Encrypts and stores a new key (one biometric prompt) and returns its record. The entire material lifetime
+     * stays inside this worker block: cancellation at a withContext return must never strand plaintext returned
+     * by native generation/import. Used by the keys screen and by Easy pair's "new key".
+     */
+    private suspend fun createKey(label: String, produce: () -> ClientKeyMaterial): KeyRecord = withContext(Dispatchers.IO) {
+        val id = UUID.randomUUID().toString()
+        var saved = false
+        try {
+            val record = encryptKey(id, label.trim(), produce()) {
+                val cipher = app.vault.createCipher(id)
+                withContext(Dispatchers.Main) { authenticateCipher(this@MainActivity, cipher, "Save SSH key") }
+            }
+            ensureActive()
+            withContext(NonCancellable) {
+                app.database.dao().insertKey(record)
+                saved = true
+            }
+            record
+        } finally {
+            if (!saved) app.vault.delete(id)
+        }
+    }
+
+    /** What the pairing screen says when its new key could not be made (the biometric was cancelled, the vault refused). */
+    private fun describeKeyError(error: Throwable): String = when (error) {
+        is KeyException -> keyErrorMessage(error)
+        is VaultException, is GeneralSecurityException -> vaultErrorMessage(error)
+        else -> "The key could not be created. Try again."
     }
 
     /**

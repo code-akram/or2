@@ -733,12 +733,12 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
 
 ## herdr (`or2_core::herdr`)
 
-- **Types** are generated from `herdr api schema --json` by `scripts/gen-herdr-types.sh`
-  (`scripts/herdr_schema.py` normalizes, then cargo-typify). The normalized schema
+- **Types** are generated from `herdr api schema --json` by `cargo xtask gen-herdr-types`
+  (`core/xtask/src/herdr.rs` normalizes, then cargo-typify). The normalized schema
   `herdr/schema.json` (with the herdr version and protocol it came from: 0.9.3, protocol 22)
   and `herdr/generated.rs` are checked in; `generated.rs` has one module per schema family
   (`request`, `success_response`, `error_response`) and the
-  constants `HERDR_VERSION` and `PROTOCOL`. Never hand-edit it: fix the script and
+  constants `HERDR_VERSION` and `PROTOCOL`. Never hand-edit it: fix the generator and
   regenerate (`--offline` regenerates from the checked-in schema, `--check` verifies both
   files). Normalization decisions: `$ref`s become local; validation keywords a client has no use
   for (`pattern`, `propertyNames`, `maxProperties`, `minProperties`) are dropped, so one odd map
@@ -753,7 +753,7 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
   event it cannot decode. The schema's `event` and `subscription_event` families are not
   generated: their internally tagged `EventData` rejects an unknown event type, which would
   break the unknown-value rule for a later consumer (notifications) that trusted it. That
-  consumer adds the families to `scripts/herdr_schema.py` with an open event-type tag.
+  consumer adds the families to `core/xtask/src/herdr.rs` with an open event-type tag.
 - **Discovery:** `<herdr> session list --json` over `RemoteHost::exec` gives each session's name,
   `default`, `running` and `socket_path` (or2 reads only those; other fields are ignored).
   `herdr::list_sessions(host, herdr) -> Result<Vec<SessionEntry>, DiscoveryError>` is the one
@@ -2324,13 +2324,16 @@ terminal QR rendering).
 4. **Listens once** on `pair` (a random port, bound only to the LAN/overlay addresses listed,
    never 0.0.0.0 on a public interface) for at most 120 s. Exchange (newline-delimited JSON):
    server → `{"v":1,"nonce":<base64 32B>}`; phone → `{"v":1,"key":"<openssh public key line>",
-   "device":"<label>","mac":<base64 HMAC-SHA256(otp, nonce || key)>}`; server verifies the HMAC
+   "device":"<label>","mac":<base64 HMAC-SHA256(otp, nonce || key)>}` (superseded: see "The exchange" below,
+   version 2 with domain-separated MACs and an authenticated verdict); server verifies the HMAC
    in constant time, prints the key's SHA-256 fingerprint and the device label, and asks
    `Authorize this key for <user>? [y/N]`. On `y` it appends
    `no-agent-forwarding,no-X11-forwarding <key> or2-<device>-<date>` to `authorized_keys`
    (creating `~/.ssh` 0700 / file 0600 if needed, backing up the file first, skipping
-   duplicates) and replies `{"ok":true}`; otherwise `{"ok":false,"reason":…}`. One attempt;
-   any failure or timeout ends the listener. The OTP never crosses the network.
+   duplicates) and replies `{"ok":true,"mac":…}`; otherwise `{"ok":false,"reason":…,"mac":…}`. One
+   *verified* attempt (a request whose HMAC verifies; junk, probes and wrong proofs do not count; see
+   "One attempt" below); a failure after that, or the timeout, ends the listener. The OTP never
+   crosses the network.
    `--no-listen` prints the QR without a listener (the phone then shows its public key line for
    the user to install by hand).
 
@@ -2357,3 +2360,238 @@ listener timeout and one-shot behaviour, bind-address policy. Rust core: parser 
 tests, exchange against the real CLI listener in-process (loopback). Kotlin: review-screen and
 persistence logic with fakes; JVM end-to-end against a CLI listener on loopback; device test
 compiles (camera needs the phone).
+
+## Easy pair: implementation and decisions (FFI API 12)
+
+Implemented on `easy-pair`: `core/or2-pair` (the CLI), `or2_core::pair`, `or2-ffi`'s `pair` module
+and the Android screens. The user guide is [Pair a host](pairing.md). Where the text above left room,
+or where the code differs from it, this section is the contract.
+
+### The pairing code
+
+`or2-pair:1?name=<label>&user=<u>&port=<p>&a=<addr>…&hk=<algo> <base64>&pair=<ip>:<port>…&otp=<base32>`
+
+- Values are percent-encoded (`A-Za-z0-9-._~` and `:` stay, everything else `%XX`; `+` is a plus, never a
+  space). At most 1024 bytes **and at most eight `a` addresses**: the CLI drops the lowest-priority addresses
+  (the last) until both limits hold and says so (the note and a `[left out: over the phone's limits]` mark
+  on each address). Before anything is drawn or printed the CLI also checks the whole code against the same
+  rules as the phone's parser (`Payload::validate`: labels of 1 to 64 characters without control characters,
+  address characters and length, no duplicates, one plain host key, one to four dialable `pair` addresses
+  that are not wildcard, multicast or broadcast, `pair` and `otp` together, total size) and refuses with a
+  message naming the field (`RunError::InvalidCode`) rather than print a code the phone would reject. The
+  tests hold the two parsers in step: everything `validate` refuses the real parser refuses too.
+- `a` is one to eight addresses (names or IP literals, no duplicates), each at the one SSH `port`, in the
+  order the phone tries them. `hk` is one plain public key (`ssh-ed25519`, `ecdsa-sha2-nistp256/384/521`
+  or `ssh-rsa`) with no comment. `name` and `user` are 1 to 64 characters without control characters.
+- `pair` is one to **four** IP literals (`<v4>:<port>` or `[<v6>]:<port>`, never a name, never a wildcard
+  or multicast address), in preference order; the phone races them through `Transport`. The spec above
+  says one; several are a superset, used when the listener is bound to a LAN and an overlay address.
+- `otp` is exactly 26 canonical uppercase base32 characters (128 bits, no padding).
+- **`--no-listen` omits `pair` and `otp`** (both or neither; one without the other is invalid). The phone
+  then saves the host with its key trusted and shows its own public key line to install by hand.
+- The parser is strict: unknown fields, repeated single fields, a bad escape, a non-IP `pair`, an
+  unsupported version (`UnsupportedVersion`, distinct from `Malformed`) are all refused with a typed error.
+
+### The exchange
+
+```text
+host  -> {"v":2,"nonce":"<base64, 32 bytes>"}
+phone -> {"v":2,"key":"<algo> <base64>","device":"<label>","mac":"<base64 request MAC>"}
+host  -> {"ok":true,"mac":"<base64 verdict MAC>"}
+       | {"ok":false,"reason":"key|declined|timeout|failed|busy","mac":"<base64 verdict MAC>"}
+       | {"ok":false,"reason":"request|authentication"}            (unsigned, see below)
+
+request MAC = HMAC-SHA256(otp, "or2-pair/2 request" 0x00 || nonce || key)
+verdict MAC = HMAC-SHA256(otp, "or2-pair/2 verdict" 0x00 || nonce || verdict 0x00 || fingerprint)
+```
+
+**Protocol version 2 (this section supersedes version 1, which had no host proof).** The exchange version
+(`v`, not the URI's `or2-pair:1`; the code format did not change) is 2 in all three messages: a phone that
+meets a `v` other than 2 in the hello reports `Protocol` ("the host does not speak this pairing protocol"),
+and a host refuses a request whose `v` is not 2 as `request`. An older phone or host therefore fails
+cleanly; update both.
+
+`otp` here is the 16 decoded bytes; `key` is the exact text of the field, as sent (the phone sends
+`<algorithm> <base64>` and drops the key's comment); `device` is not under the MAC (the host's person sees
+and confirms the key's fingerprint, which is). `verdict` is `ok` or the refusal reason; `fingerprint` is the
+`SHA256:…` fingerprint of the key the phone sent (empty when the host could not parse it). The domain tags
+differ, so a request MAC can never be replayed as a verdict, nor a verdict from another exchange (other
+nonce) or about another key. Lines are bounded (256 bytes for the hello, 512 for the reply, 2048 for the
+request). The host verifies the request with `Mac::verify_slice` (constant time) **before** it looks at or
+shows anything about the key.
+
+**The host's answer is authenticated.** The phone verifies the verdict MAC in constant time (`Otp::verify_verdict`)
+before it reports success or a refusal, so a responder that does not know the password cannot make the phone
+save a host and trust its key, nor spend its code with a forged refusal. An answer with a missing or wrong MAC
+is `PairError::HostNotAuthenticated` ("the host's answer could not be verified"): nothing is saved, the secret
+is **not** wiped, and the same code can be tried again while the host listens. Refusals the host makes to a
+peer that has not proven it knows the password (`request`, `authentication`) carry **no** MAC on purpose: a
+signed `authentication` for a key of the peer's choosing would be a valid refusal an attacker could replay to a
+phone that sent that key. As a consequence a phone holding a wrong or old code sees `HostNotAuthenticated`, not
+"wrong code". `busy` (a second verified request while the first is being confirmed) is signed.
+
+**Timing.** The phone gives every connect, the hello and the write 10 s (`PairTiming::step`). The wait for
+the verdict is the host's own 120 s window plus a margin (125 s), because that wait is a person typing `y`;
+a flat 10 s there would make the confirmation impossible. The host's whole window is 120 s from the moment
+the port is bound (before the QR is drawn or printed, so slow output shortens the window rather than
+extending it; the "Listening ... for N s" line shows what is left), and it is also the deadline of the
+confirmation question. The deadline is checked before every `accept` and again after it: a socket that was
+already queued when the window ended is closed unanswered, never greeted, and the greeting and the request
+read are clamped to the time that is left.
+
+**One attempt.** The listener serves one *attempt*. An attempt is a request that is well formed, within the
+size limit **and whose HMAC verifies** (only the holder of the one-time password can make one); whatever
+happens from then on (bad key, `n`, timeout, success, a write error) ends the listener. Everything before a
+verified request is *not* an attempt and does not end the pairing: silence, a bare newline, junk, an
+unfinished or oversized line, a request of another version and a wrong proof are each answered
+(`{"ok":false,"reason":"request"|"authentication"}`) or ignored, and counted for the final report. This
+replaces the earlier "any bytes start an attempt" deviation, under which one probe of a port scanner burnt the
+code. The only way to end the listener without a verified request is its 120 s window.
+
+**Concurrency and bounds.** Every accepted connection is handled on its own thread, so an idle socket holds
+only its own slot and an honest phone is served at once (the previous one-at-a-time loop let one silent peer
+hold every phone behind it for 8-10 s, longer than the phone's 10 s wait for the greeting). What an
+unauthenticated peer can cost is bounded: each connection has 8 s in total (`PRE_AUTH`) to deliver its one
+request line (at most 2048 bytes); at most 16 connections are handled at once and 4 per peer address (the
+phone races up to four endpoints), further ones are closed unanswered rather than left queued; a peer address
+whose requests were refused 5 times is no longer greeted; every thread looks at a stop flag between short
+reads, so the listener ends promptly. Only the first verified request is taken: a second verified request
+while the first is being confirmed is answered `{"ok":false,"reason":"busy"}` (the phone reports it as a
+generic refusal). The confirmation and the write run on the listener's own thread.
+
+**The account.** The login in the code, the name in the prompt and the home whose `~/.ssh/authorized_keys`
+is written are one value (`or2_pair::account::Account`), resolved from the operating system's account
+database for the **effective user** of the process (`getpwuid_r(geteuid())`; Windows: `USERNAME` and
+`USERPROFILE`). `$HOME` and `$USER` are ignored, so `sudo` with a retained `HOME` cannot split them.
+`--user` may only repeat that name: any other value is refused before anything is checked, printed or
+bound (`--user X is not the account this runs as (Y)`). There is no privileged "pair for another user"
+mode; run `or2-pair` as that user. The prompt also shows the file that will change. On the phone, the
+`user` of a code that has a listener is read-only in the review (the host authorizes that account only);
+a `--no-listen` code still lets the user choose the login to install the key for.
+
+**Confirmation.** `Authorize this key for <user>? [y/N]`, answered only by `y` or `yes`. It is asked on the
+terminal and only if standard input is a terminal (otherwise the CLI refuses to listen): `yes | or2-pair`
+cannot answer. The `Confirm` trait is public so tests can answer; there is no flag or variable that says
+yes, and the shipped binary has no test hook (the auto-confirming `or2-pair-testhost` is a separate binary
+behind the `test-support` feature, never built by `cargo install` or a plain build).
+
+**`authorized_keys`.** As specified, plus: the line is rebuilt from the validated key (algorithm and key
+data parsed and checked; nothing else from the phone is written), the device label is reduced to ASCII
+letters, digits, `.`, `_`, `-` (at most 32 characters; the same text is shown at the prompt, so a label
+cannot inject terminal escapes or a second line), the date in the comment is UTC, a missing final newline is
+repaired, the backup is `authorized_keys.or2-backup-<UTC date>-<time>` (mode 0600, never overwrites an
+earlier one), and a key already present (any options, any comment) changes nothing, not even a backup.
+"Already present" means an *entry* whose parsed key type and decoded key data equal the key's: each line is
+read as `[options] keytype base64 [comment]` (options may hold quoted whitespace and `\"`), comment lines and
+malformed lines (an unterminated quote, no key data) are ignored, and a key that merely appears in another
+entry's comment or in a quoted option is not an authorization, so pairing it adds it.
+
+**`authorized_keys` is written through checked handles (Unix).** The home directory is opened once; `~/.ssh`
+and the file are opened relative to it with `O_NOFOLLOW` (and `O_DIRECTORY` for `~/.ssh`), never by path
+again. A symbolic link at either name is refused with a message, not followed. `~/.ssh` and the file must
+belong to the account (the home to the account or root, as sshd allows), the file must be a regular file with
+no other hard link, and a missing file is created with `O_CREAT|O_EXCL` (mode 0600, forced after the umask).
+The file is read, backed up (the backup is created exclusively, also relative to the `~/.ssh` handle) and
+appended to (one `write` on an `O_APPEND` handle; a failed write truncates back to the old length) through
+those same handles, under an advisory `flock`, so a path replaced after the checks changes nothing. Files over
+8 MiB are not read. On Windows only symbolic links and junctions are refused, by path; ownership and ACL
+checks are not done there.
+
+**StrictModes is enforced, not just warned about.** sshd ignores `authorized_keys` when the file, `~/.ssh`
+or the home directory is writable by group or others (mode `& 022`). `or2-pair` checks the same three
+things on the handles it holds, before it reads or backs up anything, and **refuses** (nothing is changed,
+no backup is made) with the path, the mode and the command that fixes it (`chmod go-w <path>`); it never
+changes a mode behind the person's back. The same check runs in the up-front "Checks" (a warning there), and
+at the end the phone is told `{"ok":false,"reason":"failed"}` (signed), which the phone reports as "the host
+could not add the key" (`Refusal::HostFailed`, FFI `PairError.HostFailed`) rather than as a protocol problem.
+A file with mode 0600, 0640 or 0644 is appended to and keeps its mode.
+
+### Bind policy: what "non-public" means
+
+The listener binds only addresses that are *not public*: IPv4 10/8, 172.16/12, 192.168/16, carrier-grade NAT
+100.64/10, link-local 169.254/16, loopback; IPv6 fc00::/7, fe80::/10, `::1`; and any address on an interface
+named `zt*`, `tailscale*` or `ZeroTier*` (an overlay's own network is private to its members whatever range
+it uses). By default it binds the *listed* overlay and LAN interface addresses (one shared port) and never a
+public address, a wildcard or a name. `--bind <ip>` (repeatable) chooses addresses explicitly, including
+public ones and `0.0.0.0`/`::`, with a warning; a wildcard bind advertises the host's own overlay and LAN
+addresses. Container bridges and VM networks (`docker*`, `br-*`, `veth*`, `virbr*`, `vmnet*`, `bridge*`, ...)
+are neither listed nor bound. IPv6 interface addresses are not listed yet. `--address` only changes the
+*order* in the code: naming one of the host's own addresses (to put it first) keeps its interface, its kind and
+its listener, and naming an address that is not bindable (public, a bridge, a name) does not make it bindable.
+
+### Why a Net trait in the CLI
+
+AGENTS.md routes all network traffic through `Transport`. `or2-pair` is a host-side tool, not the app's
+network path: it has no phone, no overlay binding and no async runtime, and it must not depend on
+`or2-core` (which carries russh and the Zig-built terminal engine) for `cargo install`. All of its sockets
+(the sshd probe and the listener) sit behind one small trait in `core/or2-pair/src/net.rs`, the only file
+that opens a socket, so the listener is replaceable in tests and the rule's intent (no scattered sockets)
+holds. The **phone** side uses `or2_core::pair` over `Transport` (`DirectTcp` through `race`).
+
+### FFI (API 12; 11 before the verdict MAC)
+
+- `parse_pair_payload(text) -> PairOffer` (`PairParseError`: `NotPairingCode`, `UnsupportedVersion`, `TooLong`,
+  `Malformed`, `MissingField`/`DuplicateField`/`InvalidField {field}`, `UnknownField`).
+- `PairOffer { name, username, port, addresses, host_key: PublicKeyInfo, exchange: Option<PairExchange> }`;
+  `PairExchange { endpoints, secret: PairSecret }`. **The one-time password never reaches Kotlin**:
+  `PairSecret` is an opaque Rust object (`wipe()`, `is_wiped()`; redacted `Debug`; the generated
+  `toString()` prints a pointer). `exchange` is `None` for a `--no-listen` code.
+- `async pair_submit_key(offer, public_key_line, device_label) -> Result<(), PairError>` (`NoExchange`, `Wiped`,
+  `InvalidOffer`, `InvalidKey`, `InvalidDevice`, `Unreachable`, `TimedOut`, `Protocol`, `ConnectionLost`,
+  `Declined`, `AuthenticationFailed`, `KeyNotAccepted`, `HostTimedOut`, `BadRequest`, `Refused`, and (API 12)
+  `HostNotAuthenticated`). It wipes the
+  secret on success and when the host refused with a verified answer (the code is spent); after network failures
+  and after `HostNotAuthenticated` the secret stays so
+  the same code can be retried while the host listens. Cancelling the coroutine closes the connection.
+- The text of a code is a JVM `String` and cannot be wiped (like a passphrase); it is never logged, never put
+  in saved state, and dropped when the flow leaves the screens.
+
+### Android
+
+- **Add host** (Home's FAB, the empty-state card, the inbox) opens a sheet with two cards: **Easy pair with
+  QR** (kicker `FASTEST`, "Recommended · ~1 min") and **Set up manually** (the existing form, unchanged).
+- **Scan**: CameraX (`camera-core`, `-camera2`, `-lifecycle`, `-view` 1.5.3, Apache-2.0) and ZXing core 3.5.4
+  (Apache-2.0, pure Java); no Google Play Services or ML Kit. The camera permission is requested when the
+  scan screen opens (the user chose to scan), once; a denial leaves the paste field. `CAMERA` is declared with
+  `uses-feature ... required=false`. Frames are analysed on a private thread (newest only, 1280x720), a
+  light-on-dark code is read by a second attempt on the inverted image, and nothing is recorded.
+- **Review**: name and user (editable), the addresses (read only), the host key's fingerprint, and the key to
+  authorize (an existing key, or **New key**: Ed25519 generated and saved first, with the usual biometric
+  prompt, so a failed exchange leaves a key that a retry reuses). **Confirm on the host**: the phone key's
+  fingerprint and a cancel button while the host's person answers.
+- **After `ok`** the host is saved with its addresses (the offer's port on each), user and key, and the code's
+  `hk` is stored as its trusted host key **in one Room transaction** (`AppDao.saveHostWithTrust`, no schema
+  change) before anything connects; then the usual connect runs (one biometric unlock; no first-use prompt).
+  A different key presented later is the M1 changed-key path. If saving fails after the host accepted the key,
+  the retry saves without a second exchange (the code is spent).
+- A code without a listener saves the host and trust at once and shows the key line (Copy, Share) to install.
+- The flow (`pair/PairFlow.kt`) is logic over `PairBackend` and `PairStore`; it lives in a `ViewModel`
+  (a rotation or the permission dialog does not lose the code) and is cancelled, and the code wiped, when the
+  pairing screens are left.
+
+### Tests
+
+CLI unit tests (103), tests of the built binary (`tests/cli.rs`, 6 with `--all-features`: usage, exit codes, a
+`--user` that is not the account, no listening without a terminal, and `--check`, which only a `test-support`
+build runs because only that build can be pointed at a throwaway account with `OR2_PAIR_TEST_HOME` and
+`OR2_PAIR_TEST_USER`) and a loopback end-to-end suite in a temporary home (`tests/e2e.rs`, 28: the
+or2-core client against the CLI listener in process, with an automatic-yes `Confirm` that lives only in the
+tests): payload round trip through the strict parser, address ordering, MAC good/bad/replayed/swapped-key,
+`authorized_keys` create/permissions/backup/duplicate/newline repair/two-in-a-second, listener timeout,
+one-shot behaviour, bind policy (including a public-only host, an explicit public bind and `--address` naming
+a detected address), `--no-listen`, `--check`, non-interactive refusal, and an independent QR decoder (`rqrr`)
+reading the drawing. The security review's findings each have tests that failed first: a `--user` that is not
+the account, symbolic-link / hard-link / foreign-owner / swapped-path writes, junk and wrong-proof probes
+before the phone, idle sockets held open while a phone pairs (with a short phone timer), a forged or flipped
+verdict (a proxy that turns the host's refusal into a success), a queued socket after a slow print, a
+group-writable key file, twelve interfaces round-tripped through the real parser, and key-looking comments.
+`or2_core::pair`: 34 table and exchange tests (every field, timing on a paused clock, bounded reads, racing,
+independent-HMAC vectors for both MAC domains, every forged-verdict shape).
+Kotlin JVM: `PairFlowTest` (fakes), `QrDecoderTest` (ZXing's writer through the decoder: stride, inverted,
+rotated, noisy, 1 KB), `PairMessagesTest`, `HostRecordsTest` (`saveHostWithTrust`), `ManifestTest`,
+`NavigationTest`, and `PairEndToEndTest`: `or2-pair-testhost` on loopback in a temporary home, the real native
+parser and exchange, the flow, then a real `connect_host` to a disposable sshd with the paired host key
+(Connected with no prompt) and the paired key. `PairUiDeviceTest` compiles (the camera needs the phone).
+
+Open: the camera path itself (CameraX binding, autofocus, a QR on a real monitor) and the permission dialog
+have not been run on a phone; a Windows host has not been run at all.

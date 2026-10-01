@@ -25,12 +25,16 @@ internal class OpenSshFixture : AutoCloseable {
     val directory: Path = Files.createTempDirectory("or2-sshd-")
     val port: Int
     val fingerprint: String
+
+    /** The host's public key line (`ssh-ed25519 …`), for tests that pair with it. */
+    val hostPublicKey: String
     private var process: Process? = null
 
     init {
         try {
             val host = generateEd25519Key("")
             fingerprint = host.publicKey.fingerprint
+            hostPublicKey = host.publicKey.openssh
             try {
                 Files.write(directory.resolve("host_key"), host.privateKey)
                 Files.setPosixFilePermissions(directory.resolve("host_key"), PosixFilePermissions.fromString("rw-------"))

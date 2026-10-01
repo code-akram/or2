@@ -10,7 +10,9 @@ Rules for humans and agents working in this repo. Read `docs/design.md` first.
 - **Rust has no storage.** Hosts, settings and keys are persisted by the Android app; Rust
   receives what it needs per call.
 - **Everything network goes through the `Transport` trait.** No direct `TcpStream::connect` or
-  `UdpSocket::bind` outside transport implementations.
+  `UdpSocket::bind` outside transport implementations. (The host-side `or2-pair` CLI is not the
+  app's network path: its few sockets sit behind one trait in `core/or2-pair/src/net.rs`; see
+  contracts, "Easy pair". The phone side of pairing uses `Transport`.)
 - **herdr types are generated from `herdr api schema --json`.** Never hand-write them. Ignore
   unknown fields.
 - **No Google Play Services or FCM.** Keep the app F-Droid-clean.

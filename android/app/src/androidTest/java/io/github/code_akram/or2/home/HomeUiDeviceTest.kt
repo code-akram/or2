@@ -20,6 +20,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.MainActivity
+import io.github.code_akram.or2.assertTouchTargetAtLeast
 import io.github.code_akram.or2.connection.HostConnections
 import io.github.code_akram.or2.connection.UiPort
 import io.github.code_akram.or2.connection.UiTrust
@@ -63,6 +64,7 @@ class HomeUiDeviceTest {
                     addHost = { calls += "add" }, editHost = { calls += "edit:${it.id}" }, connectHost = { calls += "connect:${it.id}" },
                     disconnectHost = { calls += "disconnect:${it.id}" }, deleteHost = { calls += "delete:${it.id}" },
                     openInbox = { calls += "inbox" }, openKeys = { calls += "keys" }, connectAll = { calls += "all" },
+                    openAbout = { calls += "about" },
                     resume = resume, onResume = { calls += "resume" },
                     batteryCard = batteryCard, allowBattery = { calls += "allow-battery" }, dismissBattery = { calls += "dismiss-battery" },
                 )
@@ -189,8 +191,9 @@ class HomeUiDeviceTest {
         compose.onNodeWithTag("inbox-badge").assertIsDisplayed()
         compose.onNodeWithTag("nav-inbox").performClick()
         compose.onNodeWithTag("nav-keys").performClick()
+        compose.onNodeWithTag("nav-about").assertTouchTargetAtLeast().performClick()
         compose.onNodeWithTag("home-add-host").performClick()
-        compose.runOnIdle { assertEquals(listOf("inbox", "all", "inbox", "keys", "add"), calls) }
+        compose.runOnIdle { assertEquals(listOf("inbox", "all", "inbox", "keys", "about", "add"), calls) }
     }
 
     @Test

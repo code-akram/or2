@@ -77,7 +77,7 @@ class HomeSession(
 class HomeResume(val title: String, val detail: String)
 
 /**
- * The start screen: only trailing icon buttons on top (agents inbox, keys), then SESSIONS (live
+ * The start screen: only trailing icon buttons on top (agents inbox, keys, about), then SESSIONS (live
  * thumbnails of open terminals; tap resumes), CONNECTIONS (host cards; long press for options)
  * and status chips, and a FAB that adds a host. Stateless: the caller supplies everything.
  */
@@ -101,6 +101,7 @@ fun HomeScreen(
     openKeys: () -> Unit,
     connectAll: () -> Unit,
     modifier: Modifier = Modifier,
+    openAbout: () -> Unit = {},
     resume: HomeResume? = null,
     onResume: () -> Unit = {},
     /** The battery exemption was declined: a small, dismissible card offers it again, blocking nothing. */
@@ -124,6 +125,7 @@ fun HomeScreen(
                     }
                 }
                 IconAction(Or2Icons.Key, "SSH keys", openKeys, Modifier.testTag("nav-keys"))
+                IconAction(Or2Icons.Info, "About or2", openAbout, Modifier.testTag("nav-about"))
             })
             Column(Modifier.padding(horizontal = Or2Dimens.Gutter)) {
                 if (resume != null) {

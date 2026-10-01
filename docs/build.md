@@ -70,8 +70,29 @@ source scripts/env.sh
 cargo fmt --manifest-path core/Cargo.toml --all --check
 cargo test --manifest-path core/Cargo.toml --workspace --all-features --locked
 cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
+cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- gen-herdr-types --offline --check
+cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- gen-licenses --check
 android/gradlew -p android :app:assembleDebug :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:lintDebug
 ```
+
+Repository tooling is the `core/xtask` crate (Rust; no scripts in other languages). Inside `core/` the
+cargo alias in `core/.cargo/config.toml` makes it `cargo xtask <task>`; from the repository root run the
+same task as `cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- <task>` (the form
+used above). The tasks are `gen-herdr-types` and `gen-licenses`; each regenerates checked-in files and
+has a `--check` mode that writes nothing and fails when they are stale. `xtask` is a workspace member
+but is not linked into the app library, so it never appears in the licence data. Its unit tests run
+with the rest of the workspace.
+
+`core/or2-pair` (the Easy pair host CLI, a workspace crate that does not depend on `or2-core` at run
+time) has unit tests next to the code and `tests/e2e.rs`: the whole CLI flow in a thread against the
+`or2-core` client over loopback, in a temporary home and a temporary `/etc/ssh` with made-up interfaces
+(nothing of the user's `~/.ssh`, sshd, tmux or herdr is read; its sshd probe asks a port nobody listens on).
+The confirmation is a test double (`Auto`) that only exists in the tests; the shipped binary has no such
+flag. An independent QR decoder (`rqrr`, dev-only) reads the drawn code back. `cargo build -p or2-pair
+--release` builds the tool for the host (`target/release/or2-pair`); `cargo install --path core/or2-pair
+--locked` installs it, and `packaging/homebrew/or2-pair.rb` builds it from source for Homebrew. The
+`or2-pair-testhost` binary (feature `test-support`, so never part of an install) is the same flow with an
+automatic yes, for the Kotlin end-to-end test below.
 
 Rust integration tests (`core/or2-core/tests/`): `host.rs` runs host connections against a
 disposable loopback `sshd` (trust, address racing, probe, exec caps and timeout, streamlocal (missing socket, forbidden
@@ -127,7 +148,11 @@ signal are errors. It needs only `sh`, `ps` and `sleep`.
 
 Gradle builds the host library, generates Kotlin under `app/build/generated/uniffi/kotlin`,
 and cross-builds the release Rust library into `app/build/generated/uniffi/jniLibs/arm64-v8a`.
-The app has minSdk 34, compile/targetSdk 36, and no Google Play Services/FCM dependencies.
+The app has minSdk 34, compile/targetSdk 36, and no Google Play Services/FCM dependencies. Easy pair adds
+CameraX 1.5.3 (`camera-core`, `camera-camera2`, `camera-lifecycle`, `camera-view`; Apache-2.0) and ZXing core 3.5.4
+(Apache-2.0); the lockfile has no `gms`, `firebase` or `play-services` entries (check it with `grep -i` after
+changing dependencies), and `CAMERA` is declared with `uses-feature ... required=false` so a device without a
+camera can still paste a code.
 The Gradle wrapper verifies its distribution checksum. `core/Cargo.lock` and
 `android/app/gradle.lockfile` pin dependency graphs; Gradle locking is strict.
 Only update locks intentionally, using `--write-locks` when changing dependencies.
@@ -184,6 +209,15 @@ Tests that wait on those callbacks wait for the specific thing (a frame whose ro
 recovered link health) with a bounded timeout, never for a fixed sleep or for `frameReady.first()`,
 which replays its last signal; `linkHealth` is a StateFlow that conflates, so only the lossless
 listener in `HostContractTest` asserts the whole health sequence.
+Easy pair (`pair/`): `PairFlowTest` (scan, review, key choice, submit, save-before-connect, failure and retry,
+the wipe of the code) on fakes with the real native parser, `QrDecoderTest` (ZXing's writer into the camera
+decoder: row stride, light-on-dark, rotated, noisy, 1 KB), `PairMessagesTest`, `HostRecordsTest` (the
+host-with-trust transaction), and `PairEndToEndTest`: Gradle builds `or2-pair-testhost` first
+(`buildPairTesthost`, passed to the tests as `or2.pair.testhost`), the test starts it on loopback in a
+temporary home, pairs through the flow with the real native exchange, copies what the CLI wrote into the
+fixture sshd's `AuthorizedKeysFile` (sshd reads its own file, not `~/.ssh`) and connects with the paired host
+key trusted: `Connected` with no prompt. It needs `sshd` (`OR2_REQUIRE_SSHD`). `PairUiDeviceTest` renders the
+sheet and the screens from fabricated state; the camera itself needs the phone.
 `HostConnectionsNativeTest` (the holder over the production connector: first-use trust persisted
 before approval, trusted reconnect, changed-key reject, retained closed handles, and a mosh terminal that
 survives an SSH loss and a reconnect and then still answers, until an explicit disconnect or "Disconnect
@@ -215,13 +249,43 @@ for Android arm64. Install that Zig version on `PATH` for a fresh setup and chec
 before building. The dependency's Rust build script drives Zig; no checked-in terminal binary
 or Kotlin protocol implementation is used.
 
+## Open-source licences
+
+or2 ships other projects' code, so it ships their licences. `cargo xtask gen-licenses` (Rust: cargo
+only, no network and no extra tool) generates, from the locked dependency graphs:
+
+| File | Content | Source |
+|---|---|---|
+| `android/app/src/main/assets/licenses/rust.json` | the crates linked into `libor2_ffi.so` (name, version, SPDX expression, repository, full licence and notice texts), the Zig-built libghostty-vt components (Ghostty, Highway, simdutf, uucode, the UTF-8 decoder, Zig's runtime) and the Rust standard library | `cargo tree -p or2-ffi --target aarch64-linux-android -e normal` (the features that build uses; build-script and dev dependencies ship no code and are left out) joined with `cargo metadata --locked --offline`; the texts are the `LICENSE*`/`COPYING*`/`NOTICE*` files in each crate's source in the cargo registry or checkout (for a crate that bundles C sources, such as `aws-lc-sys`, those of the bundled code too) |
+| `android/app/src/main/assets/licenses/android.json` | the release runtime classpath: coordinates, SPDX licence, project URL, the licence text and any `LICENSE`/`NOTICE` at the root of the artifact | every `releaseRuntimeClasspath` line of `android/app/gradle.lockfile` (the strict lock) and each artifact's POM from the offline Gradle cache (`$GRADLE_USER_HOME` or `~/.gradle`; parent POMs for inherited licences). An artifact whose POM licence is not in the generator's table, or that has no POM in the cache, stops the generator |
+| `android/app/src/main/assets/licenses/notices.md` | a copy of `THIRD_PARTY_NOTICES.md` (authoritative for vendored code and components built outside Cargo and Gradle) | the file itself |
+| `android/app/src/main/assets/licenses/COPYING` | a copy of `LICENSE` (or2's GPL-3.0 text, shown by About or2) | the file itself |
+| `core/or2-pair/THIRD_PARTY.md` | the same for the `or2-pair` host CLI: all targets, one numbered copy of each distinct text | `cargo tree -p or2-pair --target all -e normal` (the crates it links, with their texts) |
+
+A Maven artifact whose POM lists a second licence for code it bundles (camera-core and libyuv) is shown
+with `AND` and that project's own text, kept in `core/xtask/licenses/libyuv/`; a licence name the generator
+does not know still stops it.
+
+A crate that ships no licence file (russh, uniffi, ...) is shown with the SPDX standard text of its
+declared licence from `core/xtask/licenses/spdx/`, flagged `fallback` with a note. The Ghostty
+components are not Cargo crates: their texts live in `core/xtask/licenses/ghostty/` (read from the
+pinned Ghostty commit) and the generator stops when `libghostty-vt-sys` starts building a different
+Ghostty commit, so a bump must re-read them. Run `cargo xtask gen-licenses` after any dependency
+change and commit the result; `cargo xtask gen-licenses --check` fails when a generated file is
+stale and is part of the verification list above. The generated data is the source of the app's
+Open source licenses screen. `LicenseDataTest` parses the real files and fails when a listed licence
+has no GPL-3.0-compatible alternative, `MiniJsonTest` covers the JSON reader, and the device test
+`AboutUiDeviceTest` opens About or2 and the list and finds a known library (compile-checked while
+no phone is available).
+
 ## herdr client
 
 `core/or2-core/src/herdr/generated.rs` is generated; do not edit it. After a herdr update run
-`scripts/gen-herdr-types.sh` (needs `python3`, `rustfmt` and `cargo install cargo-typify
+`cargo xtask gen-herdr-types` (needs `rustfmt` and `cargo install cargo-typify
 --version 0.10.0-alpha.1 --locked`; `--herdr PATH` picks the binary, `--offline` regenerates
 from the checked-in `schema.json`, `--check` fails when the checked-in files are stale), then
-review the diff of `schema.json` and the protocol note in `docs/contracts.md`.
+review the diff of `schema.json` and the protocol note in `docs/contracts.md`. The normalization
+lives in `core/xtask/src/herdr.rs` and has unit tests.
 
 `core/or2-core/tests/herdr_live.rs` runs the client against a real herdr: each test starts its
 own `herdr --session or2-test-<pid>-<n> server` (every `HERDR_*` variable removed, so it never
@@ -238,7 +302,9 @@ screens; `am start -n io.github.code_akram.or2/.gallery.UiGalleryActivity --es s
 opens one directly. Names: `home`, `home-empty`, `host-cards` (unlocking, checking,
 authenticating, connected with a blocked agent, failed, idle), `inbox`, `inbox-empty`,
 `picker-herdr`, `picker-tmux`, `picker-recent`, `host-form`, `host-form-edit`, `keys`,
-`keys-empty`, `hostkey-first`, `hostkey-changed`, `terminal`, `terminal-arrowpad`,
+`keys-empty`, `about`, `licenses`, `hostkey-first`, `hostkey-changed`, `add-host` (the two-card sheet), `pair-scan`,
+`pair-scan-denied`, `pair-review`, `pair-review-new` (with a failure), `pair-progress`, `pair-install`
+(Easy pair; the camera preview itself is not in the gallery), `terminal`, `terminal-arrowpad`,
 `terminal-composer` (opens with a message typed and the keyboard up, to show the caret and the
 lit send button). The terminal screens run the native contract probe and replace its first
 frame with a Catppuccin demo session (`gallery/DemoFrames.kt`). Use it to screenshot the phone
@@ -306,6 +372,11 @@ resize and remount snapshots; `TerminalVisualDeviceTest` captures renderer fixtu
 frame timings.
 
 Manual phone checks still required:
+- Easy pair: run `or2-pair` on a host, Add host, Easy pair with QR; the camera permission dialog appears
+  once, the preview reads the QR off the monitor (light and dark terminals), a pasted code works, a denied
+  camera leaves the paste field; the review shows the host key fingerprint the host printed; Pair and add host
+  shows "Confirm on the host" with the phone key's fingerprint; answering `y` saves the host and connects with
+  no first-use prompt; `n` leaves nothing saved; `--no-listen` shows the key line to install.
 - Upgrade: install the M1 build, add a key and a host, trust its key, then install the M2 build
   over it. The host, key and trusted key must all survive (the key must still unlock), and the
   host must reconnect without a new host-key prompt.

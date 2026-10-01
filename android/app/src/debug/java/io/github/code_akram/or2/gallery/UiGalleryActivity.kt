@@ -27,6 +27,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.code_akram.or2.about.AboutRoute
+import io.github.code_akram.or2.about.LicensesRoute
 import io.github.code_akram.or2.app.AppScaffold
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
@@ -51,6 +53,15 @@ import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TmuxSession
 import io.github.code_akram.or2.ffi.contractProbeSession
 import io.github.code_akram.or2.ffi.generateEd25519Key
+import io.github.code_akram.or2.ffi.parsePairPayload
+import io.github.code_akram.or2.pair.AddHostSheet
+import io.github.code_akram.or2.pair.CameraAccess
+import io.github.code_akram.or2.pair.KeyChoice
+import io.github.code_akram.or2.pair.PairInstallKeyScreen
+import io.github.code_akram.or2.pair.PairProgressScreen
+import io.github.code_akram.or2.pair.PairReview
+import io.github.code_akram.or2.pair.PairReviewScreen
+import io.github.code_akram.or2.pair.PairScanScreen
 import io.github.code_akram.or2.home.HomeScreen
 import io.github.code_akram.or2.home.HomeSession
 import io.github.code_akram.or2.home.HostCard
@@ -134,8 +145,18 @@ class UiGalleryActivity : ComponentActivity() {
             "picker-recent" -> Picker(PickerTab.RECENT)
             "host-form" -> HostFormScreen(null, listOf(key1, key2), false, {}, {})
             "host-form-edit" -> HostFormScreen(multiHost, listOf(key1, key2), false, {}, {})
+            "add-host" -> AddHostSheet(easyPair = {}, manual = {}, dismiss = {})
+            "pair-scan" -> PairScanScreen(null, CameraAccess(granted = false, denied = false) {}, {}, back = {})
+            "pair-scan-denied" -> PairScanScreen("That is not an or2 pairing code. Run or2-pair on the host and scan the code it prints.",
+                CameraAccess(granted = false, denied = true) {}, {}, back = {})
+            "pair-review" -> pairReview(listOf(key1, key2), KeyChoice.Existing("k1"), error = null)
+            "pair-review-new" -> pairReview(emptyList(), KeyChoice.New, error = "The host declined the key, so nothing was changed. Run or2-pair again to retry.")
+            "pair-progress" -> PairProgressScreen("dev", key1.fingerprint, cancel = {})
+            "pair-install" -> PairInstallKeyScreen("workstation", key1.openssh, key1.fingerprint, done = {})
             "keys" -> KeysScreen(listOf(key1, key2), false, { _, _ -> }, { _, _, _ -> }, {})
             "keys-empty" -> KeysScreen(emptyList(), false, { _, _ -> }, { _, _, _ -> }, {})
+            "about" -> AboutRoute(back = {}, openLicenses = {})
+            "licenses" -> LicensesRoute(back = {})
             "hostkey-first" -> HostKey(changed = false)
             "hostkey-changed" -> HostKey(changed = true)
             "terminal" -> Terminal(pad = false, composer = false)
@@ -146,6 +167,19 @@ class UiGalleryActivity : ComponentActivity() {
     }
 
     // --- data ----------------------------------------------------------------------------
+
+    /** A review from a made-up pairing code (the real parser, so the fingerprint is the key's own). */
+    @Composable
+    private fun pairReview(keys: List<KeyRecord>, choice: KeyChoice, error: String?) {
+        val offer = remember {
+            parsePairPayload(
+                "or2-pair:1?name=workstation&user=dev&port=22&a=100.101.102.103&a=192.168.1.20&a=workstation.local" +
+                    "&hk=ssh-ed25519%20AAAAC3NzaC1lZDI1NTE5AAAAIAc39XUWT33SvSLy6vA7I83%2BXgmwnHmYtMQRjLeaZ2U7" +
+                    "&pair=192.168.1.20:41234&otp=AAAQEAYEAUDAOCAJBIFQYDIOB4",
+            )
+        }
+        PairReviewScreen(PairReview(offer, offer.name, offer.username, choice, error), keys, edit = { _, _, _ -> }, submit = {}, back = {})
+    }
 
     private val key1 = KeyRecord("k1", "Phone key", "ssh-ed25519", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPhoneKeyExampleExampleExampleExample0123 phone",
         "SHA256:7vK2mQ9xRpL3aTn0sWZ4cEdHfY8uJbNqXoGiVtB1MkA", "phone", byteArrayOf(), byteArrayOf())
@@ -333,7 +367,8 @@ class UiGalleryActivity : ComponentActivity() {
     companion object {
         val screens = listOf(
             "home", "home-empty", "host-cards", "inbox", "inbox-empty", "picker-herdr", "picker-tmux", "picker-recent",
-            "host-form", "host-form-edit", "keys", "keys-empty", "hostkey-first", "hostkey-changed",
+            "host-form", "host-form-edit", "keys", "keys-empty", "about", "licenses", "hostkey-first", "hostkey-changed",
+            "add-host", "pair-scan", "pair-scan-denied", "pair-review", "pair-review-new", "pair-progress", "pair-install",
             "terminal", "terminal-arrowpad", "terminal-composer",
         )
     }
