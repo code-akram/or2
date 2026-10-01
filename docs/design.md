@@ -379,7 +379,10 @@ Interfaces are in [contracts: M3](contracts.md#m3-stays-connected) (FFI API 8).
 - [ ] M3-B: foreground service owning connections, notification, network callback, Room v3
   transport preference with AUTO fallback, grouped reconnect unlock, reattach to the last pane,
   battery-optimisation prompt.
-- [ ] UI-C: compact default scale everywhere (type, controls, popups, arrow pad).
+- [x] UI-C: compact default scale everywhere (type, controls, popups, arrow pad).
+- [ ] M3 follow-up: `resume_mosh` with Keystore-protected tickets, broader roaming triggers,
+  5 s Auto fallback remembered per host, non-blocking return, manifest permissions
+  ([contracts](contracts.md#m3-follow-up-advisor-review-owner-decisions-2026-10-01)).
 - [ ] Integration, external review and phone acceptance, including v0 step 3 (background
   10 minutes over mobile data, return to the same pane without re-typing).
 

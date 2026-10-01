@@ -1312,3 +1312,46 @@ pub trait SessionListener {                   // added method
   app-private preferences. On return, if that session is alive it is shown directly
   (`request_full_frame`); if only its host is connected, the same target is reopened (herdr pane
   focused first); otherwise Home shows a "Resume" card that does both after unlocking.
+
+## M3 follow-up (advisor review, owner decisions 2026-10-01)
+
+A Fable 5.1 strategy review found that, with ZeroTier carrying both hosts, the default network
+rarely changes on Wi-Fi↔mobile handover, and that OxygenOS process death is the most likely way
+to fail v0 step 3. These changes land after lanes M3-A and M3-B:
+
+- **`resume_mosh` (owner approved).** After a mosh session reaches `Connected`, Kotlin persists
+  its `MoshResumeTicket { host_id, target, transport, server_port, key, peer_ip, server_pid }`
+  encrypted with a dedicated **non-authentication-bound** AES-256-GCM Keystore key (hardware
+  backed, StrongBox preferred, never exportable, excluded from backup). FFI:
+  `resume_mosh(ticket: MoshResumeTicket, columns, rows, listener) -> Result<Arc<Session>, …>`
+  starts a mosh client from the ticket with no SSH connection and no biometric. Trade-off
+  accepted by the owner: a single session's mosh key rests on the device protected only by the
+  Keystore; it opens only that session and is revoked by killing that `mosh-server`. Tickets
+  are deleted when the session closes for any reason other than process death, when the user
+  disconnects the host, and when the host's addresses or key change. SSH keys stay per-use.
+- **Roaming triggers:** `network_changed()` also fires on default-network
+  `onCapabilitiesChanged`/`onLinkPropertiesChanged` (transport set or interface changes) and on
+  every return to the foreground (debounced 500 ms).
+- **Auto fallback:** mosh's connect deadline for the Auto decision is 5 s (explicit Mosh keeps
+  15 s); a failure is remembered in Room per host (`mosh_failed_until`, 24 h) and always runs
+  `mosh::terminate`.
+- **Return never blocks:** a live or resumable mosh pane is shown immediately; reconnecting an
+  inbox host whose SSH dropped is a non-modal chip (one grouped biometric when tapped). A host
+  marked by the user as "sleeps" (e.g. the MacBook) shows its lost SSH as muted "asleep".
+- **Multi-address mosh:** mosh pins to the address SSH actually reached. Document in the host
+  form: list the address that works on every network first.
+- **Manifest:** `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`, `POST_NOTIFICATIONS`,
+  `ACCESS_NETWORK_STATE`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`.
+
+### M3 acceptance protocol
+
+Setup recorded once: battery exemption for or2 (and the ZeroTier app if used), OxygenOS sleep
+standby setting, mobile data only, screen off while waiting, target the always-on host.
+1. Cold open → inbox populated (logcat timestamps); ≤ 2 s when SSH is alive, else "unlock + N s".
+2. Tap an agent → first frame of its pane ≤ 2 s; composer submit answered.
+3. Background 10 min, screen off; at T+10 record service alive, process PID, SSH close time,
+   max `since_heard_ms`.
+4. Return: time to first full frame, number of prompts (target 0), focused pane matches
+   (verified through herdr).
+5. Variants: Wi-Fi→mobile mid-wait; airplane mode 2 min; process killed (`am kill`/force) →
+   `resume_mosh` path. Three runs each, report p50 and max.
