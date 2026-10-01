@@ -126,6 +126,42 @@ class ReattachTest {
     }
 
     @Test
+    fun aRecreatedActivityWaitingOnTheExplanationShowsItAgainInsteadOfStayingBusy() {
+        // The process died while the explanation was up: nothing was answered, nothing recorded,
+        // and the new process's prompt starts with no explanation on screen.
+        val store = MemoryPrefStore()
+        val restored = BatteryPrompt(store) { false }
+        assertFalse(restored.explaining.value)
+        assertEquals(BatteryStage.EXPLANATION, restored.restoreStage())
+        assertTrue(restored.explaining.value) // On screen again, awaiting the answer.
+        restored.explained()
+        assertFalse(restored.explaining.value)
+        // Same process (rotation): the explanation is still up and restoring it changes nothing.
+        val live = BatteryPrompt(MemoryPrefStore()) { false }
+        live.explain()
+        assertEquals(BatteryStage.EXPLANATION, live.restoreStage())
+        assertTrue(live.explaining.value)
+    }
+
+    @Test
+    fun aRestoredConnectAfterTheExplanationWaitsForTheSystemRequestAndNeverRelaunchesIt() {
+        val store = MemoryPrefStore()
+        val prompt = BatteryPrompt(store) { false }
+        prompt.explain()
+        prompt.explained() // "Allow" was tapped: the system dialog is (or was) up.
+        val restored = BatteryPrompt(store) { false }
+        assertEquals(BatteryStage.SYSTEM_REQUEST, restored.restoreStage())
+        assertFalse(restored.explaining.value) // Nothing of ours to show; the result callback carries on.
+    }
+
+    @Test
+    fun aRestoredConnectWhoseAppBecameExemptJustConnects() {
+        val restored = BatteryPrompt(MemoryPrefStore()) { true }
+        assertEquals(BatteryStage.PROCEED, restored.restoreStage())
+        assertFalse(restored.explaining.value)
+    }
+
+    @Test
     fun anAlreadyExemptAppIsNeverAskedAndNeverShowsTheCard() {
         val prompt = BatteryPrompt(MemoryPrefStore()) { true }
         assertFalse(prompt.shouldExplain())

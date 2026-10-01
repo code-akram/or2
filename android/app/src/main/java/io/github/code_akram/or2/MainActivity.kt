@@ -23,6 +23,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.github.code_akram.or2.app.AppActions
 import io.github.code_akram.or2.app.AppViewModel
+import io.github.code_akram.or2.app.BatteryStage
 import io.github.code_akram.or2.app.Or2App
 import io.github.code_akram.or2.app.Or2Application
 import io.github.code_akram.or2.connection.KeyUnlocker
@@ -128,6 +129,14 @@ class MainActivity : FragmentActivity() {
             val message by model.message.collectAsStateWithLifecycle()
             val loaded by model.loaded.collectAsStateWithLifecycle()
             Or2App(hosts, keys, message, busy, app.connections, actions, loaded)
+        }
+        // A connect that waited on the battery flow: the explanation is memory-only, so a restored
+        // process has none on screen. Put it back (or carry on), or `busy` would never end.
+        if (pendingBattery != null) {
+            when (app.battery.restoreStage()) {
+                BatteryStage.EXPLANATION, BatteryStage.SYSTEM_REQUEST -> Unit // The answer, or the launcher's result, carries on.
+                BatteryStage.PROCEED -> continueAfterBattery()
+            }
         }
     }
 

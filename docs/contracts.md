@@ -2100,6 +2100,14 @@ used to appear as a modal dialog over the terminal on the first return from the 
   (and its fingerprint prompt) goes on when the system dialog closes; "Not now" (or back, or a device
   with no such screen) goes straight on. The explanation is recorded as asked when it is answered, **once,
   ever**, whatever the answer; an already exempt app is never asked.
+- **Surviving recreation and process death.** The saved host ids (`pending_battery`) keep `busy` set
+  across a recreated activity, so what stage the flow was in must be recoverable:
+  `BatteryPrompt.restoreStage()`, called from `onCreate` when `pendingBattery` was restored, reads it from
+  the persisted "asked" flag (the explanation itself is memory-only). *Not asked yet*: the explanation
+  never got an answer, so it is raised again (`EXPLANATION`; a rotation in the same process finds it
+  still up). *Asked*: "Allow" launched the system request, whose result the re-registered launcher
+  delivers and carries the connect on (`SYSTEM_REQUEST`); the request is never launched twice. *Not asked
+  and the app is exempt meanwhile*: nothing to ask, the connect goes on (`PROCEED`). Test: `ReattachTest`.
 - **Never on return.** `onStop`/`onStart` no longer touch the battery prompt: nothing modal appears
   over a terminal.
 - **If it was not granted.** `BatteryPrompt.card` is true when the exemption was declined (or the

@@ -18,6 +18,9 @@ class NotificationPermissionPolicy(private val store: PrefStore) {
     }
 }
 
+/** See [BatteryPrompt.restoreStage]. */
+enum class BatteryStage { EXPLANATION, SYSTEM_REQUEST, PROCEED }
+
 /**
  * The battery-optimisation exemption, asked for **up front**: OxygenOS lets the SSH connections die
  * within minutes of the app going to the background unless the app is exempt, and a dialog on the
@@ -49,6 +52,28 @@ class BatteryPrompt(private val store: PrefStore, private val isExempt: () -> Bo
     /** The explanation is on screen now. */
     fun explain() {
         mutableExplaining.value = true
+    }
+
+    /**
+     * Where a connect that was waiting on the battery flow stands when its activity is recreated
+     * (rotation, or the process was killed and restored): the explanation lives in memory only, so a
+     * new process has none on screen, and a connect left `busy` with nothing to answer would never end.
+     * [BatteryStage.EXPLANATION] raises the explanation again (it was never answered, so nothing was
+     * recorded); [BatteryStage.SYSTEM_REQUEST] means "Allow" was tapped and the system's request was
+     * launched (the explanation is recorded as asked), whose result is delivered to the activity's
+     * launcher: it is never launched twice; [BatteryStage.PROCEED] means there is nothing to ask any
+     * more (the app became exempt meanwhile), so the connect goes on.
+     */
+    fun restoreStage(): BatteryStage = when {
+        store.getBoolean(ASKED) -> BatteryStage.SYSTEM_REQUEST
+        isExempt() -> {
+            mutableExplaining.value = false
+            BatteryStage.PROCEED
+        }
+        else -> {
+            mutableExplaining.value = true
+            BatteryStage.EXPLANATION
+        }
     }
 
     /** The user answered the explanation (either way): it is never shown again. */
