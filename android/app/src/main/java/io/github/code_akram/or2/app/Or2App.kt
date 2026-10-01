@@ -43,6 +43,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.code_akram.or2.about.AboutRoute
+import io.github.code_akram.or2.about.LicensesRoute
 import io.github.code_akram.or2.connection.ActiveHost
 import io.github.code_akram.or2.connection.ActiveTerminal
 import io.github.code_akram.or2.connection.HostConnections
@@ -394,6 +396,7 @@ fun Or2App(
                         deleteHost = actions.deleteHost,
                         openInbox = { navigate(nav.push(Destination.Inbox)) },
                         openKeys = { navigate(nav.push(Destination.Keys)) },
+                        openAbout = { navigate(nav.push(Destination.About)) },
                         connectAll = { connect(connectable.map { it.host }) },
                         resume = resumeCard, onResume = { resumeLast() },
                         batteryCard = batteryCard, allowBattery = actions.requestBatteryExemption, dismissBattery = actions.battery::dismissCard,
@@ -413,6 +416,8 @@ fun Or2App(
                     openKeys = { navigate(nav.push(Destination.Keys)) },
                     addHost = { navigate(nav.push(Destination.HostForm(0))) },
                 )
+                Destination.About -> AboutRoute(back = ::pop, openLicenses = { navigate(nav.push(Destination.Licenses)) })
+                Destination.Licenses -> LicensesRoute(back = ::pop)
                 Destination.Keys -> KeysScreen(keys, busy, actions.generateKey, actions.importKey, actions.deleteKey, back = ::pop)
                 is Destination.HostForm -> {
                     val previous = hosts.find { it.id == current.hostId }

@@ -56,4 +56,13 @@ class NavigationTest {
         assertEquals(listOf(Destination.Home, Destination.HostPage(1)), NavStack.decode("hosts|host:1").entries)
         assertEquals(Destination.HostForm(0), NavStack.decode("home|hostform:0").current)
     }
+
+    @Test
+    fun aboutAndTheLicenseListArePushedOnHomeAndSurviveSavedState() {
+        val stack = NavStack().push(Destination.About).push(Destination.Licenses)
+        assertEquals("home|about|licenses", stack.encode())
+        assertEquals(stack, NavStack.decode(stack.encode()))
+        assertEquals(NavStack().push(Destination.About), stack.back())
+        assertEquals(listOf(Destination.Home, Destination.About), NavStack.decode("about").entries)
+    }
 }

@@ -27,6 +27,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.code_akram.or2.about.AboutRoute
+import io.github.code_akram.or2.about.LicensesRoute
 import io.github.code_akram.or2.app.AppScaffold
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
@@ -136,6 +138,8 @@ class UiGalleryActivity : ComponentActivity() {
             "host-form-edit" -> HostFormScreen(multiHost, listOf(key1, key2), false, {}, {})
             "keys" -> KeysScreen(listOf(key1, key2), false, { _, _ -> }, { _, _, _ -> }, {})
             "keys-empty" -> KeysScreen(emptyList(), false, { _, _ -> }, { _, _, _ -> }, {})
+            "about" -> AboutRoute(back = {}, openLicenses = {})
+            "licenses" -> LicensesRoute(back = {})
             "hostkey-first" -> HostKey(changed = false)
             "hostkey-changed" -> HostKey(changed = true)
             "terminal" -> Terminal(pad = false, composer = false)
@@ -333,7 +337,7 @@ class UiGalleryActivity : ComponentActivity() {
     companion object {
         val screens = listOf(
             "home", "home-empty", "host-cards", "inbox", "inbox-empty", "picker-herdr", "picker-tmux", "picker-recent",
-            "host-form", "host-form-edit", "keys", "keys-empty", "hostkey-first", "hostkey-changed",
+            "host-form", "host-form-edit", "keys", "keys-empty", "about", "licenses", "hostkey-first", "hostkey-changed",
             "terminal", "terminal-arrowpad", "terminal-composer",
         )
     }
