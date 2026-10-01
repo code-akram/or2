@@ -1,0 +1,521 @@
+//! The whole CLI flow against the or2-core client, in process, over loopback, in a temporary
+//! home: what `or2-pair` prints, listens on and writes, and what the phone sees.
+
+mod common;
+
+use std::io;
+use std::net::IpAddr;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use or2_core::pair::{PairError, PairOffer, PairParseError, Refusal};
+use or2_pair::confirm::Answer;
+use or2_pair::net::{Net, PairListener, StdNet};
+use or2_pair::run::{Exit, RunError};
+
+use common::*;
+
+const WINDOW: Duration = Duration::from_secs(20);
+
+#[test]
+fn a_phone_pairs_end_to_end_and_its_key_lands_in_authorized_keys() {
+    let world = World::new();
+    let confirm = Auto::new(Answer::Yes);
+    let key = phone_key();
+    let result = pair(&world, &options(), &confirm, WINDOW, |ready| {
+        phone_pairs(&ready.payload, &key, "Pixel 8")
+    });
+    assert_eq!(result.phone, Some(Ok(())));
+    assert_eq!(result.exit.unwrap(), Exit::Paired);
+
+    // The file: created private, one line, options and comment as specified, the phone's key.
+    let keys = world.authorized_keys().unwrap();
+    assert_eq!(
+        keys,
+        format!("no-agent-forwarding,no-X11-forwarding {key} or2-Pixel-8-2026-07-01\n")
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &str| {
+            std::fs::metadata(world.home.path().join(path))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode(".ssh"), 0o700);
+        assert_eq!(mode(".ssh/authorized_keys"), 0o600);
+    }
+
+    // The person was asked once, with the phone's fingerprint and the sanitized label.
+    let asked = confirm.asked.lock().unwrap();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].user, "alice");
+    assert_eq!(asked[0].device, "Pixel-8");
+    assert!(asked[0].fingerprint.starts_with("SHA256:"));
+    assert!(asked[0].peer.starts_with("127.0.0.1:"));
+
+    // What was printed: the checks, the host, a QR and the code itself, and the verdict.
+    let out = &result.output;
+    for needle in [
+        "Checks",
+        "sshd is not answering on port 1",
+        HOST_FINGERPRINT,
+        "10.147.17.5",
+        "192.168.1.20",
+        "testhost.local",
+        "or2-pair:1?name=Test%20Host",
+        "Listening on 127.0.0.1:",
+        "Authorized Pixel-8",
+    ] {
+        assert!(out.contains(needle), "missing {needle:?} in:\n{out}");
+    }
+    assert!(
+        !out.contains("172.17.0.1"),
+        "container bridges are not listed"
+    );
+}
+
+#[test]
+fn the_code_round_trips_through_the_strict_parser() {
+    let world = World::new();
+    let result = pair(
+        &world,
+        &options(),
+        &Auto::new(Answer::No),
+        // Nobody connects: the listener times out quickly.
+        Duration::from_millis(300),
+        |ready| {
+            let offer = PairOffer::parse(&ready.payload).unwrap();
+            (ready, offer)
+        },
+    );
+    let (ready, offer) = result.phone.unwrap();
+    assert_eq!(offer.name, "Test Host");
+    assert_eq!(offer.username, "alice");
+    assert_eq!(offer.port, 1);
+    let addresses: Vec<_> = offer.addresses.iter().map(|a| a.host()).collect();
+    assert_eq!(
+        addresses,
+        ["10.147.17.5", "192.168.1.20", "testhost.local"],
+        "overlay, then LAN, then the mDNS name"
+    );
+    assert_eq!(offer.host_key.fingerprint(), HOST_FINGERPRINT);
+    let exchange = offer.exchange.unwrap();
+    assert_eq!(exchange.endpoints.len(), 1);
+    assert_eq!(
+        exchange.endpoints[0].host(),
+        ready.listening[0].ip().to_string()
+    );
+    assert_eq!(exchange.endpoints[0].port(), ready.listening[0].port());
+    assert!(ready.payload.len() <= 1024);
+}
+
+#[test]
+fn declining_on_the_host_refuses_the_phone_and_changes_nothing() {
+    let world = World::new();
+    let key = phone_key();
+    let result = pair(
+        &world,
+        &options(),
+        &Auto::new(Answer::No),
+        WINDOW,
+        |ready| phone_pairs(&ready.payload, &key, "phone"),
+    );
+    assert_eq!(
+        result.phone,
+        Some(Err(PairError::Refused(Refusal::Declined)))
+    );
+    assert_eq!(result.exit.unwrap(), Exit::Declined);
+    assert!(world.authorized_keys().is_none());
+    assert!(!world.home.path().join(".ssh").exists());
+}
+
+#[test]
+fn a_wrong_password_is_refused_and_ends_the_listener() {
+    let world = World::new();
+    let confirm = Auto::new(Answer::Yes);
+    let key = phone_key();
+    let result = pair(&world, &options(), &confirm, WINDOW, |ready| {
+        // A code that differs from the host's only in its password.
+        let mut parts: Vec<String> = ready.payload.split('&').map(str::to_owned).collect();
+        let last = parts.last_mut().unwrap();
+        *last = "otp=AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned();
+        phone_pairs(&parts.join("&"), &key, "phone")
+    });
+    assert_eq!(
+        result.phone,
+        Some(Err(PairError::Refused(Refusal::AuthenticationFailed)))
+    );
+    assert_eq!(result.exit.unwrap(), Exit::Refused);
+    assert!(
+        confirm.asked.lock().unwrap().is_empty(),
+        "nothing was shown to the person"
+    );
+    assert!(world.authorized_keys().is_none());
+}
+
+#[test]
+fn the_listener_serves_one_attempt_and_then_closes() {
+    let world = World::new();
+    let confirm = Auto::new(Answer::Yes);
+    let key = phone_key();
+    let result = pair(&world, &options(), &confirm, WINDOW, |ready| {
+        let offer = PairOffer::parse(&ready.payload).unwrap();
+        let first = phone_submits(&offer, &key, "phone");
+        // The same code, used again after the host finished: nobody is listening any more.
+        let again = phone_submits(&offer, &key, "phone");
+        (first, again)
+    });
+    let (first, again) = result.phone.unwrap();
+    assert_eq!(first, Ok(()));
+    assert_eq!(again, Err(PairError::Unreachable));
+    assert_eq!(world.authorized_keys().unwrap().lines().count(), 1);
+    assert_eq!(confirm.asked.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_connection_that_never_speaks_does_not_use_up_the_attempt() {
+    let world = World::new();
+    let confirm = Auto::new(Answer::Yes);
+    let key = phone_key();
+    let result = pair(&world, &options(), &confirm, WINDOW, |ready| {
+        // A port scanner: connects, hears the hello, hangs up.
+        drop(std::net::TcpStream::connect(ready.listening[0]).unwrap());
+        phone_pairs(&ready.payload, &key, "phone")
+    });
+    assert_eq!(result.phone, Some(Ok(())));
+    assert_eq!(result.exit.unwrap(), Exit::Paired);
+}
+
+#[test]
+fn nobody_pairing_ends_at_the_window_with_nothing_changed() {
+    let world = World::new();
+    let started = Instant::now();
+    let result = pair(
+        &world,
+        &options(),
+        &Auto::new(Answer::Yes),
+        Duration::from_millis(300),
+        |_| (),
+    );
+    assert_eq!(result.exit.unwrap(), Exit::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(result.output.contains("Timed out"));
+    assert!(world.authorized_keys().is_none());
+}
+
+#[test]
+fn an_already_authorized_key_is_acknowledged_without_a_second_line() {
+    let world = World::new();
+    let key = phone_key();
+    let ssh = world.home.path().join(".ssh");
+    std::fs::create_dir(&ssh).unwrap();
+    std::fs::write(ssh.join("authorized_keys"), format!("{key} old\n")).unwrap();
+    let result = pair(
+        &world,
+        &options(),
+        &Auto::new(Answer::Yes),
+        WINDOW,
+        |ready| phone_pairs(&ready.payload, &key, "phone"),
+    );
+    assert_eq!(result.phone, Some(Ok(())));
+    assert_eq!(result.exit.unwrap(), Exit::Paired);
+    assert_eq!(world.authorized_keys().unwrap(), format!("{key} old\n"));
+    assert!(result.output.contains("already authorized"));
+}
+
+#[test]
+fn an_existing_file_is_backed_up_and_appended_to() {
+    let world = World::new();
+    let key = phone_key();
+    let ssh = world.home.path().join(".ssh");
+    std::fs::create_dir(&ssh).unwrap();
+    std::fs::write(ssh.join("authorized_keys"), "# mine\n").unwrap();
+    let result = pair(
+        &world,
+        &options(),
+        &Auto::new(Answer::Yes),
+        WINDOW,
+        |ready| phone_pairs(&ready.payload, &key, "phone"),
+    );
+    assert_eq!(result.exit.unwrap(), Exit::Paired);
+    let keys = world.authorized_keys().unwrap();
+    assert!(keys.starts_with("# mine\n"));
+    assert_eq!(keys.lines().count(), 2);
+    let backups: Vec<_> = std::fs::read_dir(&ssh)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("authorized_keys.or2-backup-"))
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(ssh.join(&backups[0])).unwrap(),
+        "# mine\n"
+    );
+}
+
+#[test]
+fn no_listen_prints_a_code_with_no_exchange_and_opens_nothing() {
+    let world = World::new();
+    let mut options = options();
+    options.bind.clear();
+    options.no_listen = true;
+    let result = pair(&world, &options, &Auto::new(Answer::Yes), WINDOW, |_| ());
+    assert!(result.phone.is_none(), "no listener, so never ready");
+    assert_eq!(result.exit.unwrap(), Exit::CodeOnly);
+    let code = result
+        .output
+        .lines()
+        .find(|line| line.starts_with("or2-pair:1?"))
+        .expect("the code is printed as text");
+    assert!(!code.contains("pair=") && !code.contains("otp="));
+    let offer = PairOffer::parse(code).unwrap();
+    assert!(offer.exchange.is_none());
+    assert!(result.output.contains("No listener"));
+    assert!(world.authorized_keys().is_none());
+}
+
+#[test]
+fn listening_needs_a_person_to_ask() {
+    let world = World::new();
+    let result = pair_with(
+        &world,
+        &options(),
+        &Auto::new(Answer::Yes),
+        WINDOW,
+        &StdNet,
+        false,
+        |_| (),
+    );
+    assert!(matches!(result.exit, Err(RunError::NotInteractive)));
+    // It is fine without a listener.
+    let mut options = options();
+    options.bind.clear();
+    options.no_listen = true;
+    let result = pair_with(
+        &world,
+        &options,
+        &Auto::new(Answer::Yes),
+        WINDOW,
+        &StdNet,
+        false,
+        |_| (),
+    );
+    assert_eq!(result.exit.unwrap(), Exit::CodeOnly);
+}
+
+#[test]
+fn check_only_reports_and_changes_nothing() {
+    let world = World::new();
+    let mut options = options();
+    options.check_only = true;
+    let result = pair(&world, &options, &Auto::new(Answer::Yes), WINDOW, |_| ());
+    assert_eq!(result.exit.unwrap(), Exit::Checked);
+    assert!(result.output.contains("Checks") && result.output.contains("Nothing was changed"));
+    assert!(!result.output.contains("or2-pair:1?"));
+    assert!(!world.home.path().join(".ssh").exists());
+}
+
+/// Records what the CLI asks the network layer to bind and then refuses.
+struct Recording(Mutex<Vec<Vec<IpAddr>>>);
+
+impl Net for Recording {
+    fn probe_ssh(&self, _: u16) -> io::Result<String> {
+        Ok("SSH-2.0-Fake".into())
+    }
+    fn listen(&self, ips: &[IpAddr], _: u16) -> io::Result<Box<dyn PairListener>> {
+        self.0.lock().unwrap().push(ips.to_vec());
+        Err(io::Error::other("recorded"))
+    }
+}
+
+#[test]
+fn by_default_only_overlay_and_lan_addresses_are_bound() {
+    let world = World::new();
+    let net = Recording(Mutex::default());
+    let mut options = options();
+    options.bind.clear();
+    let result = pair_with(
+        &world,
+        &options,
+        &Auto::new(Answer::Yes),
+        WINDOW,
+        &net,
+        true,
+        |_| (),
+    );
+    assert!(matches!(result.exit, Err(RunError::Listen(_))));
+    let bound = net.0.lock().unwrap();
+    let expected: Vec<IpAddr> = vec![
+        "10.147.17.5".parse().unwrap(),
+        "192.168.1.20".parse().unwrap(),
+    ];
+    assert_eq!(
+        *bound,
+        [expected],
+        "no loopback, no docker bridge, no names"
+    );
+}
+
+#[test]
+fn a_host_with_only_a_public_address_refuses_to_listen_by_default() {
+    // The same fake world but the only interface is public: nothing is bindable.
+    struct PublicOnly;
+    impl Net for PublicOnly {
+        fn probe_ssh(&self, _: u16) -> io::Result<String> {
+            Ok("SSH-2.0-Fake".into())
+        }
+        fn listen(&self, _: &[IpAddr], _: u16) -> io::Result<Box<dyn PairListener>> {
+            panic!("must not listen");
+        }
+    }
+    let world = World::new();
+    let mut options = options();
+    options.bind.clear();
+    // Name the public address explicitly as an advertised one, and give no private interface:
+    // `common::interfaces` has private ones, so use --address only plus a world without them.
+    options.addresses = vec!["203.0.113.9".into()];
+    let result = run_with_interfaces(
+        &world,
+        &options,
+        &PublicOnly,
+        vec![or2_pair::addresses::Iface {
+            name: "eth1".into(),
+            ip: "203.0.113.9".parse().unwrap(),
+        }],
+    );
+    assert!(matches!(result, Err(RunError::NoBindAddress)), "{result:?}");
+}
+
+fn run_with_interfaces(
+    world: &World,
+    options: &or2_pair::args::Options,
+    net: &dyn Net,
+    interfaces: Vec<or2_pair::addresses::Iface>,
+) -> Result<Exit, RunError> {
+    use or2_pair::checks::Platform;
+    use or2_pair::date::DateTime;
+    use or2_pair::run::{Env, run};
+    let confirm = Auto::new(Answer::Yes);
+    let random = |buf: &mut [u8]| buf.fill(1);
+    let now = || DateTime::from_unix(0);
+    let env = Env {
+        version: "test",
+        home: world.home.path().to_path_buf(),
+        user: Some("alice".into()),
+        hostname: Some("box".into()),
+        etc_ssh: world.etc.path().to_path_buf(),
+        program_dirs: vec![],
+        interfaces,
+        platform: Platform::Linux,
+        net,
+        keyscan: &NoKeyscan,
+        confirm: &confirm,
+        can_ask: true,
+        color: false,
+        random: &random,
+        now: &now,
+        window: Duration::from_millis(100),
+        on_ready: None,
+    };
+    run(options, &env, &mut Vec::new())
+}
+
+#[test]
+fn an_explicit_public_bind_is_allowed_with_a_warning() {
+    // 203.0.113.9 is not ours, so the real bind fails, but only after the warning.
+    let world = World::new();
+    let mut options = options();
+    options.bind = vec!["203.0.113.9".parse().unwrap()];
+    let result = pair(&world, &options, &Auto::new(Answer::Yes), WINDOW, |_| ());
+    assert!(matches!(result.exit, Err(RunError::Listen(_))));
+    // The warning went to the output before the bind was attempted.
+    assert!(
+        result.output.contains("is a public address"),
+        "{}",
+        result.output
+    );
+}
+
+#[test]
+fn a_missing_host_key_stops_before_anything_is_listed_or_listened() {
+    let world = World::new();
+    std::fs::remove_file(world.etc.path().join("ssh_host_ed25519_key.pub")).unwrap();
+    let result = pair(&world, &options(), &Auto::new(Answer::Yes), WINDOW, |_| ());
+    assert!(matches!(result.exit, Err(RunError::HostKey(_))));
+    assert!(!result.output.contains("or2-pair:1?"));
+}
+
+#[test]
+fn the_printed_qr_decodes_to_the_pairing_code() {
+    let world = World::new();
+    let mut options = options();
+    options.bind.clear();
+    options.no_listen = true;
+    let result = pair(&world, &options, &Auto::new(Answer::Yes), WINDOW, |_| ());
+    // Colourless unicode on a dark terminal: ink is the *light* module.
+    let drawing: Vec<&str> = result
+        .output
+        .lines()
+        .skip_while(|line| !line.contains("Scan this"))
+        .skip(2)
+        .take_while(|line| !line.is_empty())
+        .collect();
+    let code = result
+        .output
+        .lines()
+        .find(|line| line.starts_with("or2-pair:1?"))
+        .unwrap();
+    assert_eq!(decode(&drawing), code);
+}
+
+/// Turns the half-block drawing back into pixels (ink = light module on a dark terminal) and
+/// reads it with an independent QR decoder.
+fn decode(lines: &[&str]) -> String {
+    let scale = 4;
+    let width = lines[0].chars().count();
+    let height = lines.len() * 2;
+    let mut pixels = vec![0u8; width * height];
+    for (row, line) in lines.iter().enumerate() {
+        for (col, c) in line.chars().enumerate() {
+            let (top_ink, bottom_ink) = match c {
+                '█' => (true, true),
+                '▀' => (true, false),
+                '▄' => (false, true),
+                _ => (false, false),
+            };
+            // Ink is light on a dark terminal: a dark module is the absence of ink.
+            pixels[(row * 2) * width + col] = if top_ink { 255 } else { 0 };
+            pixels[(row * 2 + 1) * width + col] = if bottom_ink { 255 } else { 0 };
+        }
+    }
+    let mut image =
+        rqrr::PreparedImage::prepare_from_greyscale(width * scale, height * scale, |x, y| {
+            pixels[(y / scale) * width + x / scale]
+        });
+    let grids = image.detect_grids();
+    assert_eq!(grids.len(), 1, "one QR code in the drawing");
+    let (_, content) = grids[0].decode().expect("the QR decodes");
+    content
+}
+
+#[test]
+fn the_parser_names_what_is_wrong_with_a_code_from_a_newer_host_tool() {
+    let world = World::new();
+    let mut options = options();
+    options.bind.clear();
+    options.no_listen = true;
+    let result = pair(&world, &options, &Auto::new(Answer::Yes), WINDOW, |_| ());
+    let code = result
+        .output
+        .lines()
+        .find(|line| line.starts_with("or2-pair:1?"))
+        .unwrap()
+        .replacen("or2-pair:1?", "or2-pair:2?", 1);
+    assert_eq!(
+        PairOffer::parse(&code).unwrap_err(),
+        PairParseError::UnsupportedVersion
+    );
+}
