@@ -1862,7 +1862,13 @@ The app records its pid and stops it over the next SSH connection to that host.
   status is read: `terminate` fails (`RemoteError::Failed`, `CommandFailed` over the FFI) when the script
   could not inspect the process (`ps` missing, or failing while `kill -0` shows the pid alive; status 3),
   when the signal was refused and the process is still there (status 4), on any other nonzero status and
-  on a signalled exit. An empty `ps` answer counts as gone only when `kill -0` agrees. Both ledgers (the
+  on a signalled exit. An empty `ps` answer counts as gone only from a `ps` that has shown it can
+  answer a query by pid (it names the script's own shell) and only when `kill -0` does not find the
+  pid either; with a `ps` that cannot, the stop fails (status 3) even if `kill -0` fails, because
+  `kill -0` fails alike for a gone process and for one the user may not signal. After a refused
+  `TERM` the second `ps` is read as strictly as the first: a status above 1 is a failure (status 4);
+  only a clean answer naming no process (status 0 or 1, from the `ps` that already named it) counts as
+  gone. Both ledgers (the
   host's `ServerDebt`, the Android record) therefore keep the debt of a stop that did not happen. An error
   (`CommandFailed`: no free SSH channel, a slow host, a failed stop; `Closed`: the connection ended;
   `InvalidName` for pid 0) means it may still run. Not-connected hosts answer `NotConnected`. The stop is a plain exec: it does not go through

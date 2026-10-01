@@ -205,8 +205,13 @@ const STOP_NOT_SIGNALLED: u32 = 4;
 
 /// The shell run on the host (no quote or backslash: it goes through `render_script`). Status 0
 /// means signalled, already gone, or not a mosh-server. `ps -p` exits 1 when no such process
-/// exists, but also on a `ps` that merely does not understand `-p` (BusyBox), so an empty
-/// answer only counts as "gone" when `kill -0` agrees.
+/// exists, but also on a `ps` that merely does not understand `-p` (BusyBox), and `kill -0`
+/// fails both for a process that is gone and for one the user may not signal. So an empty
+/// answer counts as "gone" only from a `ps` that has shown it can answer a query by pid (it
+/// names this shell), and then only when `kill -0` does not find the process either; with a
+/// `ps` that cannot, the debt stays. After a refused signal, the second look must be as
+/// trustworthy: this `ps` already named the process, so its status above 1 is a failure, and
+/// only a clean answer with no process (status 0 or 1) means gone.
 fn stop_script(pid: u32) -> String {
     format!(
         r#"if ! command -v ps >/dev/null 2>&1; then echo ps-is-not-available >&2; exit {STOP_NO_PS}; fi
@@ -214,13 +219,19 @@ name=$(ps -p {pid} -o comm= 2>/dev/null)
 st=$?
 if [ "$st" -gt 1 ]; then echo ps-failed >&2; exit {STOP_NO_PS}; fi
 if [ -z "$name" ]; then
+  own=$(ps -p $$ -o comm= 2>/dev/null)
+  ost=$?
+  if [ "$ost" -ne 0 ] || [ -z "$own" ]; then echo ps-cannot-query-a-pid >&2; exit {STOP_NO_PS}; fi
   if kill -0 {pid} 2>/dev/null; then echo ps-cannot-name-a-running-process >&2; exit {STOP_NO_PS}; fi
   exit 0
 fi
 case "$name" in
   *mosh-server)
     if kill -TERM {pid} 2>/dev/null; then exit 0; fi
-    if [ -z "$(ps -p {pid} -o comm= 2>/dev/null)" ]; then exit 0; fi
+    again=$(ps -p {pid} -o comm= 2>/dev/null)
+    st=$?
+    if [ "$st" -gt 1 ]; then echo ps-failed-after-kill >&2; exit {STOP_NOT_SIGNALLED}; fi
+    if [ -z "$again" ]; then exit 0; fi
     echo kill-failed >&2
     exit {STOP_NOT_SIGNALLED} ;;
 esac

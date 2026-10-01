@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use or2_core::mosh::terminate;
 use or2_core::remote::{ExecOutput, LocalHost, RemoteError, RemoteHost};
+use tokio::io::DuplexStream;
 
 /// Runs every command with a fixed `PATH`, like an sshd session started with that environment.
 struct Hermetic {
@@ -210,4 +211,93 @@ async fn a_server_that_vanishes_between_the_name_check_and_the_signal_is_not_an_
         ),
     );
     terminate(&host, vanished_pid(dir.path())).await.unwrap();
+}
+
+/// Runs the production stop script under `/bin/sh` behind shell functions that stand in for `ps`
+/// and `kill`, for the faults a real host cannot be made to show on demand (a permission
+/// boundary). Nothing is signalled and no network is used.
+struct ScriptHost {
+    prelude: String,
+}
+
+impl RemoteHost for ScriptHost {
+    type Stream = DuplexStream;
+
+    async fn exec_rendered(&self, _: &str) -> Result<ExecOutput, RemoteError> {
+        unreachable!("terminate runs a script")
+    }
+
+    async fn exec_script(&self, script: &str) -> Result<ExecOutput, RemoteError> {
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("{}\n{script}", self.prelude))
+            .output()
+            .unwrap();
+        Ok(ExecOutput {
+            status: output.status.code().map(|code| code as u32),
+            stdout: output.stdout.into(),
+            stderr: output.stderr.into(),
+        })
+    }
+
+    async fn open_unix(&self, _: &str) -> Result<DuplexStream, RemoteError> {
+        unreachable!("terminate runs a script")
+    }
+}
+
+#[tokio::test]
+async fn a_failed_signal_and_failed_second_ps_must_keep_the_debt() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("seen");
+    // The first look names a mosh-server, `kill` is denied and the second look itself fails.
+    let host = ScriptHost {
+        prelude: format!(
+            "ps() {{ if [ -e '{0}' ]; then return 2; fi; : > '{0}'; echo mosh-server; }}\n\
+             kill() {{ echo Permission-denied >&2; return 1; }}",
+            marker.display()
+        ),
+    };
+    assert!(
+        terminate(&host, 4242).await.is_err(),
+        "failed TERM plus unusable second ps was counted as success"
+    );
+}
+
+#[tokio::test]
+async fn an_unusable_ps_and_kill_zero_permission_denial_must_keep_the_debt() {
+    // `kill -0` fails for a gone process and for one the user may not signal alike, so it cannot
+    // stand in for a `ps` that cannot answer.
+    let host = ScriptHost {
+        prelude: "ps() { return 1; }\nkill() { echo Operation-not-permitted >&2; return 1; }"
+            .into(),
+    };
+    assert!(
+        terminate(&host, 4242).await.is_err(),
+        "kill -0 permission denial was treated as confirmed absence"
+    );
+}
+
+#[tokio::test]
+async fn a_capable_ps_that_finds_no_process_is_trusted_even_if_kill_zero_is_denied() {
+    // A pid that is gone or another user's: `ps` names this shell but not the pid.
+    let host = ScriptHost {
+        prelude:
+            "ps() { case \"$2\" in 4242) return 1;; *) echo sh;; esac; }\nkill() { return 1; }"
+                .into(),
+    };
+    terminate(&host, 4242).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_signal_with_a_clean_empty_second_ps_is_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("seen");
+    let host = ScriptHost {
+        prelude: format!(
+            "ps() {{ if [ -e '{0}' ]; then return 1; fi; : > '{0}'; echo mosh-server; }}\n\
+             kill() {{ return 1; }}",
+            marker.display()
+        ),
+    };
+    terminate(&host, 4242).await.unwrap();
 }
