@@ -340,8 +340,10 @@ carries terminals, tmux/probe exec channels and herdr streamlocal channels (FFI 
   fixture and live isolated-session tests.
 - [x] Lane A3: vendored mosh-rs behind `DatagramTransport`, `Screen` over libghostty,
   bootstrap and session driver; live tests against local `mosh-server`.
-- [ ] Lane B: Room v2 migration, multi-address hosts, host connection holder, inbox, host
-  screen with tmux picker, session switcher.
+- [x] Lane B: Room v2 migration, multi-address hosts, host connection holder, inbox, host
+  screen with tmux picker, session switcher. JVM tests (including the loopback-sshd cases against
+  the real host driver), the device test sources and the lint/build gate pass, and the phone
+  checks in [build](build.md) are pending.
 - [ ] Integration, review and phone acceptance: inbox on both hosts, tap a blocked agent and
   answer it, attach tmux, multi-address fallback.
 

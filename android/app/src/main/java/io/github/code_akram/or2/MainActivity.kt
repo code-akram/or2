@@ -2,55 +2,31 @@ package io.github.code_akram.or2
 
 import android.net.Uri
 import android.os.Bundle
-import androidx.activity.compose.BackHandler
-import androidx.activity.compose.LocalActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.displayCutout
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.systemBars
-import androidx.compose.foundation.layout.union
-import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.unit.dp
-import androidx.core.view.WindowCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import io.github.code_akram.or2.app.AppActions
 import io.github.code_akram.or2.app.AppViewModel
+import io.github.code_akram.or2.app.Or2App
 import io.github.code_akram.or2.app.Or2Application
-import io.github.code_akram.or2.data.HostRecord
+import io.github.code_akram.or2.connection.KeyUnlocker
+import io.github.code_akram.or2.connection.MissingKeyException
+import io.github.code_akram.or2.connection.connectGrouped
+import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.ffi.ClientKeyMaterial
-import io.github.code_akram.or2.ffi.ConnectException
+import io.github.code_akram.or2.ffi.HostConnectException
+import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.KeyException
-import io.github.code_akram.or2.ffi.SessionException
 import io.github.code_akram.or2.ffi.generateEd25519Key
-import io.github.code_akram.or2.hosts.HostsScreen
-import io.github.code_akram.or2.keys.KeysScreen
+import io.github.code_akram.or2.hosts.connectionAffectedBy
 import io.github.code_akram.or2.keys.VaultException
 import io.github.code_akram.or2.keys.authenticateCipher
 import io.github.code_akram.or2.keys.encryptKey
@@ -58,10 +34,8 @@ import io.github.code_akram.or2.keys.importAndWipe
 import io.github.code_akram.or2.keys.keyErrorMessage
 import io.github.code_akram.or2.keys.readPrivateKey
 import io.github.code_akram.or2.keys.vaultErrorMessage
-import io.github.code_akram.or2.session.SessionHolder
-import io.github.code_akram.or2.session.SessionScreen
-import io.github.code_akram.or2.session.connectErrorMessage
-import io.github.code_akram.or2.session.sessionErrorMessage
+import io.github.code_akram.or2.session.hostConnectErrorMessage
+import io.github.code_akram.or2.session.hostErrorMessage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -87,36 +61,23 @@ class MainActivity : FragmentActivity() {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T = AppViewModel(app.database.dao(), app.vault::delete) as T
         })[AppViewModel::class.java]
+        val actions = AppActions(
+            saveHost = ::saveHost,
+            // The connection ends only once the host is really gone from storage.
+            deleteHost = { host -> model.deleteHost(host) { app.connections.release(host.id, closeTerminals = true) } },
+            generateKey = { label, comment -> saveKey(label) { generateEd25519Key(comment) } },
+            importKey = ::importKey,
+            deleteKey = model::deleteKey,
+            connect = ::connect,
+            approve = { active, prompt -> operation { app.connections.approve(active, prompt) } },
+            reject = { active -> operation { app.connections.reject(active) } },
+            message = model::message,
+        )
         setContent {
             val hosts by model.hosts.collectAsStateWithLifecycle()
             val keys by model.keys.collectAsStateWithLifecycle()
             val message by model.message.collectAsStateWithLifecycle()
-            val active by app.sessions.active.collectAsStateWithLifecycle()
-            var tab by rememberSaveable { mutableStateOf("Hosts") }
-            AppScaffold(app.sessions, tab, { tab = it }) {
-                message?.let {
-                    Text(it, color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = { model.message(null) }) { Text("Dismiss") }
-                }
-                if (busy) Text("Waiting for authentication or operation…")
-                when (tab) {
-                    "Hosts" -> HostsScreen(hosts, keys, busy, { host, previous ->
-                        if (active?.host?.id == host.id) app.sessions.disconnect()
-                        model.saveHost(host, previous)
-                    }, { host ->
-                        if (active?.host?.id == host.id) app.sessions.disconnect()
-                        model.deleteHost(host)
-                    }) { host ->
-                        tab = "Session"
-                        connectHost(host)
-                    }
-                    "Keys" -> KeysScreen(keys, busy, { label, comment ->
-                        saveKey(label) { generateEd25519Key(comment) }
-                    }, ::importKey, model::deleteKey)
-                    else -> SessionScreen(app.sessions, busy, { current, prompt -> operation { app.sessions.approve(current, prompt) } },
-                        { current -> operation { app.sessions.reject(current) } })
-                }
-            }
+            Or2App(hosts, keys, message, busy, app.connections, actions)
         }
     }
 
@@ -129,8 +90,9 @@ class MainActivity : FragmentActivity() {
             catch (error: Exception) {
                 model.message(when (error) {
                     is KeyException -> keyErrorMessage(error)
-                    is ConnectException -> connectErrorMessage(error)
-                    is SessionException -> sessionErrorMessage(error)
+                    is HostConnectException -> hostConnectErrorMessage(error)
+                    is HostException -> hostErrorMessage(error)
+                    is MissingKeyException -> error.message
                     is VaultException, is GeneralSecurityException -> vaultErrorMessage(error)
                     else -> "Operation failed. No host-key approval was sent. Retry or reconnect if the prompt expired."
                 })
@@ -167,56 +129,33 @@ class MainActivity : FragmentActivity() {
         model.message("Key saved. Copy or share its public key for manual installation.")
     }
 
-    private fun connectHost(host: HostRecord) = operation {
-        withContext(Dispatchers.IO) {
-            val key = host.keyId?.let { app.database.dao().key(it) }
+    /**
+     * Edits that change a live connection's destination, login or key end it, after they are
+     * saved; the inbox flag starts or stops its herdr watches; others leave it alone.
+     */
+    private fun saveHost(host: Host, previous: Host?) {
+        model.saveHost(host, previous) {
+            if (previous == null) return@saveHost
+            if (connectionAffectedBy(previous, host)) app.connections.release(host.id, closeTerminals = false)
+            else app.connections.setWatching(host.id, host.showInInbox)
+        }
+    }
+
+    private fun connect(hosts: List<Host>) = operation { connectGrouped(hosts, app.connections, biometricUnlocker) }
+
+    /** One strong-biometric prompt per call; the decrypted array is wiped when the block ends. */
+    private val biometricUnlocker = object : KeyUnlocker {
+        override suspend fun <T> withKey(keyId: String, block: suspend (ByteArray) -> T): T {
+            val key = app.database.dao().key(keyId)
                 ?: throw VaultException("Select a stored key for this host first.")
-            val cipher = app.vault.decryptCipher(key.id, key.iv)
-            val unlocked = withContext(Dispatchers.Main) { authenticateCipher(this@MainActivity, cipher, "Unlock SSH key") }
-            val bytes = unlocked.doFinal(key.ciphertext)
+            val cipher = withContext(Dispatchers.IO) { app.vault.decryptCipher(key.id, key.iv) }
+            val unlocked = authenticateCipher(this@MainActivity, cipher, "Unlock SSH key")
+            // Not cancellable: a cancelled return must never strand the plaintext before the try.
+            val bytes = withContext(Dispatchers.IO + NonCancellable) { unlocked.doFinal(key.ciphertext) }
             try {
-                withContext(Dispatchers.Main) { app.sessions.connect(host, bytes) }
+                return block(bytes)
             } finally {
                 bytes.fill(0)
-            }
-        }
-    }
-}
-
-/** Shared navigation chrome; terminal sessions use only system-bar/cutout insets, not form padding. */
-@Composable
-fun AppScaffold(holder: SessionHolder, tab: String, selectTab: (String) -> Unit, content: @Composable () -> Unit) {
-    val current by holder.active.collectAsStateWithLifecycle()
-    val hasConnected = key(current) { current?.hasConnected?.collectAsStateWithLifecycle()?.value == true }
-    val terminalVisible = tab == "Session" && hasConnected
-    val activity = LocalActivity.current
-    val view = LocalView.current
-    SideEffect {
-        activity?.let {
-            val controller = WindowCompat.getInsetsController(it.window, view)
-            controller.isAppearanceLightStatusBars = !terminalVisible
-            controller.isAppearanceLightNavigationBars = !terminalVisible
-        }
-    }
-    BackHandler(enabled = tab == "Session") { selectTab("Hosts") }
-    MaterialTheme(colorScheme = if (terminalVisible) darkColorScheme(background = Color.Black, surface = Color(0xff101010)) else lightColorScheme()) {
-        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Column(
-                modifier = Modifier.fillMaxSize()
-                    .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout))
-                    .then(if (tab == "Session") Modifier else Modifier.imePadding())
-                    .then(if (terminalVisible) Modifier else Modifier.padding(16.dp)),
-                verticalArrangement = Arrangement.spacedBy(if (terminalVisible) 0.dp else 12.dp),
-            ) {
-                if (!terminalVisible) {
-                    Text("or2", style = MaterialTheme.typography.headlineMedium)
-                    Row {
-                        listOf("Hosts", "Keys", "Session").forEach { name ->
-                            TextButton(onClick = { selectTab(name) }) { Text(if (tab == name) "• $name" else name) }
-                        }
-                    }
-                }
-                content()
             }
         }
     }

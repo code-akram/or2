@@ -6,17 +6,18 @@ import io.github.code_akram.or2.ffi.HostAddress
 import io.github.code_akram.or2.ffi.HostConnectRequest
 import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostState
+import io.github.code_akram.or2.ffi.KeyInput
+import io.github.code_akram.or2.ffi.KeyModifiers
 import io.github.code_akram.or2.ffi.Session
 import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalFrame
+import io.github.code_akram.or2.ffi.TerminalKey
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.connectHost
 import io.github.code_akram.or2.ffi.generateEd25519Key
 import java.net.InetAddress
 import java.net.ServerSocket
-import java.nio.file.Files
-import java.nio.file.Path
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
@@ -24,13 +25,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 /**
  * The production host connection (`connectHost`) through the real FFI against a disposable
  * loopback sshd (`OpenSshFixture`): address racing, first-use trust, suspend queries, a shell
- * terminal and close ordering. Skipped when `/usr/bin/sshd` is absent. Only temporary keys and
+ * terminal and close ordering. Skipped when `/usr/bin/sshd` is absent (a failure under `OR2_REQUIRE_SSHD`). Only temporary keys and
  * configuration are used; tmux sessions in the fixture would live on a private socket.
  */
 class HostConnectNativeTest {
@@ -52,7 +52,7 @@ class HostConnectNativeTest {
 
     @Test
     fun connectHostApprovesTrustQueriesAShellAndClosesTerminalsBeforeTheHost() {
-        assumeTrue("sshd is not installed", Files.isExecutable(Path.of("/usr/bin/sshd")))
+        assumeSshd()
         OpenSshFixture().use { fixture ->
             val key = generateEd25519Key("")
             try {
@@ -97,6 +97,10 @@ class HostConnectNativeTest {
                     assertEquals(31.toUShort(), resized.rows)
                     session.sendText("printf 'UTF-%s\\n' 'é界😀'\n")
                     awaitText(session, shell, grid, "UTF-é界😀")
+                    session.sendText("printf 'KEY-%s\\n' ")
+                    session.sendKey(KeyInput(TerminalKey.Character("a"), KeyModifiers(false, false, false, false)))
+                    session.sendKey(KeyInput(TerminalKey.Enter, KeyModifiers(false, false, false, false)))
+                    awaitText(session, shell, grid, "KEY-a")
 
                     // A second terminal shares the connection; ending the first leaves it up.
                     val second = RecordingListener().also { it.timeline = timeline; it.timelineTag = "second" }

@@ -1,11 +1,13 @@
-# M1 Android app: build and verify
+# Android app: build and verify
 
-The Compose app loads `or2-ffi` through generated UniFFI Kotlin/JNA bindings. Host settings,
-encrypted key records and trusted host keys live in Room. `or2-core` remains free of Android,
-UniFFI and persistence dependencies. The production connector calls the real `connect`
-export (the M1 single-session path, kept until lane B lands; FFI API 4's `connect_host` is real
-since lane A1 but not yet used by the app); the contract probes are used only by tests. The session screen embeds the Canvas terminal with IME and keys-row input,
-keeping the final displayed frame visible through `Closed`.
+The Compose app loads `or2-ffi` through generated UniFFI Kotlin/JNA bindings. Host settings
+(with their ordered address lists), encrypted key records and trusted host keys live in Room
+(schema version 2, exported to `android/app/schemas/`). `or2-core` remains free of Android,
+UniFFI and persistence dependencies. The production connector calls `connect_host` and opens
+terminals with `HostConnection.open_terminal`; the contract probes (`contract_probe_session`,
+`contract_probe_host`) are used only by tests. The terminal screen embeds the Canvas terminal
+with IME and keys-row input, keeping the final displayed frame visible through `Closed`; the
+inbox is the start destination.
 
 ## Shared user-local toolchain
 
@@ -106,7 +108,11 @@ The actual JVM `kotlin-stdlib` remains present and strictly locked. No runtime c
 dependency group is exempted from locking.
 
 Room 2.8.3 uses KSP 2.2.21-2.0.4 with Kotlin 2.2.21; generated DAO implementations are build
-outputs. Maven resolves the additional AndroidX biometric/fragment/lifecycle and coroutine
+outputs. The KSP argument `room.schemaLocation` writes the schema JSON for every database
+version to `android/app/schemas/` (commit them: they are the migration test fixtures, and
+`androidTest` packages them as assets). Changing an entity means bumping the version, adding a
+`Migration` and committing the new JSON. Version 1 is the shipped M1 shape. `sqlite-jdbc`
+(Apache-2.0, test-only) lets JVM tests run the migration SQL on real SQLite. Maven resolves the additional AndroidX biometric/fragment/lifecycle and coroutine
 artifacts without extra system tooling. To deliberately refresh all resolvable configuration
 locks after a dependency change, run `:app:dependencies --write-locks`, then the full build
 command above with `--write-locks`, then again **without** `--write-locks` to verify strict
@@ -115,15 +121,31 @@ resolution. Do not exempt KSP configurations from locking.
 The native JVM contract tests load the real host `.so` with desktop JNA. Holder/ViewModel tests
 use fakes to exercise callbacks before handle assignment, persist-before-approve, expired
 prompts, disconnect-versus-destruction, display disposal, factory cancellation, and private-array
-wipe timing. `SessionHolderNativeTest` uses the real production connector and a disposable
-loopback OpenSSH fixture for first-use trust, trusted reconnect, changed-key rejection and
-retained closed handles; it skips when `/usr/bin/sshd` is unavailable. No home SSH files or
-system sshd settings are read or modified. `HostConnectNativeTest` drives the production
-`connectHost` through the same fixture: address racing past a dead first address, host-key
-approval, suspend `capabilities()`/`listTmuxSessions()`, two shell terminals on one connection
-(echo, resize, exit status), trusted reconnect, changed-key reject, authentication failure
-and close ordering (terminals before the host). The fixture gives its sshd sessions a private
-`TMUX_TMPDIR`, so nothing in it can reach the user's tmux server. Key-operation tests use
+wipe timing. `HostConnectionsTest` covers the per-host rules on fakes: one connection per host,
+terminals sharing it (independent lifecycle, display lease, final frame through `Closed`),
+capability probe and herdr watches (the default session is watched with no name, and every
+listed session is watched whether running or not, because the probe is cached per connection;
+hidden hosts are not watched), and a key array shared by several hosts being wiped only after the
+last `connect_host` call. Fakes implement the app's `HostPort` (the generated `HostConnection`
+returns concrete `Session`/`HerdrWatch` classes). `UnlockPlanTest` covers biometric grouping
+(one prompt per distinct key record), `InboxModelTest` the inbox ordering and the flow that
+assembles it, `HostRecordsTest` trust clearing on any address-list change (over a fake of the
+DAO's primitives), and `MigrationSqlTest` runs the real v1 to v2 SQL with foreign keys on and
+compares the result with a fresh v2 database. `HostConnectionsProbeTest` drives the whole holder
+over the real FFI with `contract_probe_host` (host-key relay and persistence, capabilities,
+agents into the inbox, terminals and frames, disconnect ordering).
+`HostConnectionsNativeTest` (the holder over the production connector: first-use trust persisted
+before approval, trusted reconnect, changed-key reject, retained closed handles) and
+`HostConnectNativeTest` (the FFI itself: address racing past a dead first address, trust,
+suspend `capabilities()`/`listTmuxSessions()`, shell terminals with echo, resize, UTF-8, key
+input and exit status, close ordering with terminals before the host, authentication failure) run
+against a disposable loopback OpenSSH fixture (`OpenSshFixture.kt`, shared by both). They skip
+when `/usr/bin/sshd` is unavailable, unless `OR2_REQUIRE_SSHD` is set, which fails instead. The
+fixture's sshd sessions are hermetic: `TMUX_TMPDIR` is a private directory (no test can reach the
+user's tmux server), `$HOME` is the fixture directory, and `PATH` starts with a fake `herdr` that
+lists no sessions, so the holder's automatic capability probe and herdr watches (every connected
+inbox host gets them) can never find or subscribe to a real herdr session. No home SSH files or
+system sshd settings are read or modified. Key-operation tests use
 real key exports and AES-GCM on the JVM (not Android Keystore). Device tests
 load the packaged arm64 `.so` with Android JNA. Both cover the bootstrap geometry and errors,
 key generation/import errors, and a `contract_probe_session` lifecycle whose listener callbacks
@@ -177,27 +199,57 @@ Run ADB only after receiving an explicit device slot. An unplugged phone is expe
 absent; do not modify the bridge, tunnel or security settings. Compile instrumented tests on
 Arch with `assembleDebugAndroidTest` while the phone is unavailable.
 
-`PersistenceDeviceTest` uses an in-memory database: trust replacement, endpoint-change trust
-clearing, stale-destination rejection, and foreign-key cleanup. `VaultDeviceTest` creates and
+`PersistenceDeviceTest` uses an in-memory database: trust replacement, address-list changes
+(host, port, add, remove, reorder) clearing trust while label/key/inbox edits keep it,
+stale-destination rejection, and foreign-key cleanup. `MigrationDeviceTest` migrates a populated
+v1 database (keys, hosts, trusted keys) through Room's `MigrationTestHelper`, validating against
+`2.json`, opens it with the production database builder, and checks that the phone's SQLite is
+at least 3.35 (the migration uses `DROP COLUMN`; no JVM test can check the platform's version). `VaultDeviceTest` creates and
 deletes a disposable Keystore alias: it verifies hardware security level, per-use strong
 biometric policy, non-exportability and rejection without authentication (skips if strong
 biometrics are not enrolled). `EntryUiDeviceTest` displays first-use/changed-key dialogs using
-fake public-key metadata without a network or production DB writes, and checks the integrated
-session screen retains the same terminal view and final grid through `Closed` until dismissal.
-`TerminalDeviceTest` covers IME composition, keys, selection, resize and remount snapshots;
-`TerminalVisualDeviceTest` captures renderer fixtures and reports frame timings.
+fake public-key metadata without a network or production DB writes, checks the terminal screen
+and its switcher against fake host connections, and that the integrated screen retains the same
+terminal view and final grid through `Closed` until the session is closed. `InboxUiDeviceTest`,
+`HostScreenUiDeviceTest` and `HostFormUiDeviceTest` render the inbox, host screen (connection
+state, host-key prompt, shell, tmux list and name validation, herdr sessions) and the address-list
+host form from fabricated state. `TerminalDeviceTest` covers IME composition, keys, selection,
+resize and remount snapshots; `TerminalVisualDeviceTest` captures renderer fixtures and reports
+frame timings.
 
 Manual phone checks still required:
-- Hosts: empty/list/add/edit/delete; changing address or port clears trust.
+- Upgrade: install the M1 build, add a key and a host, trust its key, then install the M2 build
+  over it. The host, key and trusted key must all survive (the key must still unlock), and the
+  host must reconnect without a new host-key prompt.
+- Hosts: empty/list/add/edit/delete; the address list (add, remove, reorder, port per address,
+  at most 8); the inbox switch; changing any address or port clears trust, changing only the
+  label, key choice or inbox switch does not (a changed key or username ends a live connection).
 - Keys: Ed25519 generate; system-picker import, encrypted-file passphrase retry and format errors;
   copy/share the public line; delete and reselection on hosts.
 - Biometric CryptoObject encrypt/decrypt success and cancellation; missing enrollment and
   enrollment invalidation must produce clear recovery messages. Never change enrollment or
   device security settings just to test these without separate user authorization.
-- Activity recreation must keep established sessions; disconnect shows `Closed`, and "Close
-  session" releases the handle after the renderer leaves composition.
-- First-use and prominent changed-key warnings, previous fingerprints and closed/error states.
-  Use test fixtures, not real hosts, until separately authorized.
+- Unlock grouping: with several hosts that share one key, "Connect all" in the inbox shows one
+  biometric prompt and connects them all; hosts with different keys prompt once per key; a
+  cancelled prompt ends the batch with a clear message and leaves no half-open connection.
+- Host connection: first-use and prominent changed-key warnings (with previous fingerprints)
+  on the host screen, and as a dialog naming the host when another screen is showing; closed
+  and error states explain themselves; a host with several addresses connects through the first
+  that answers (the host screen names the address used) and falls back when the first is
+  unreachable. Use test fixtures, not real hosts, until separately authorized.
+- Inbox: agents from every host flagged for it appear, blocked first, then working, done and
+  idle; each row shows host, agent, workspace/tab, status and cwd; per-host status and the
+  connect/retry action; a host without herdr or a running session says so; tapping a row opens
+  that pane in a terminal and focuses it in herdr; the list follows agent changes live.
+- Host screen: Shell, tmux sessions (attach, create by name, invalid names refused with the
+  reason, a host without tmux explained, refresh) and herdr sessions (the default opens without
+  a name; a stopped session cannot be opened).
+- Several terminals on one connection: open a shell, a tmux session and a herdr pane, switch
+  with the switcher, go Back to the inbox or host screen and return without disconnecting;
+  disconnecting one session leaves the others and the connection; disconnecting the host closes
+  all of them and each keeps its final frame until closed.
+- Activity recreation must keep established connections and terminals; disconnect shows
+  `Closed`, and "Close" releases the handle after the renderer leaves composition.
 - Integrated terminal IME show/hide geometry, committed/composing text, keys row, selection,
   scrolling, recreation and final-frame retention; collect apply/draw and Window frame timings.
 - Capture representative screenshots and inspect them; visual verification and successful
@@ -208,11 +260,13 @@ requires BIOMETRIC_STRONG per operation and invalidates on new enrollment. No so
 device-credential fallback is allowed. Invalidated records remain for explanation/deletion;
 re-import or generate a new SSH key to recover. Private keys are never exported or backed up:
 `allowBackup=false` and cloud/device-transfer extraction rules exclude all app data.
-Session ownership is application-scoped in M1, not a foreground service; process death ends it.
-Disconnect leaves the active handle and final frame readable under `Closed`; "Close session"
-or connecting elsewhere retires it. A session-screen display lease delays native `close()`
-until the old screen leaves composition, then yields a main-loop turn for terminal disposal.
-Activity recreation/navigation alone does not retire sessions. MainActivity uses
-`adjustResize`; the root adds IME padding on host/key forms but not the session tab, where
+Connection and terminal ownership are application-scoped (`HostConnections`), not a foreground
+service; process death ends them. There is at most one connection per host and any number of
+terminals per connection. A disconnect leaves a terminal's handle and final frame readable under
+`Closed` until "Close" retires it; reconnecting a closed host replaces its connection object but
+leaves its terminals alone. A terminal-screen display lease delays native `close()` until the
+old screen leaves composition, then yields a main-loop turn for terminal disposal. Activity
+recreation and navigation alone neither disconnect nor retire anything. MainActivity uses
+`adjustResize`; the root adds IME padding everywhere except the terminal destination, where
 TerminalScreen owns IME insets.
 This does not prove SSH/IME/terminal acceptance or the broader v0 background-session test.

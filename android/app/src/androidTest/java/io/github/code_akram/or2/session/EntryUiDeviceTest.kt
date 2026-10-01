@@ -5,6 +5,7 @@ import android.view.ViewGroup
 import androidx.activity.compose.setContent
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -26,11 +27,18 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import io.github.code_akram.or2.AppScaffold
+import io.github.code_akram.or2.app.AppScaffold
+import io.github.code_akram.or2.app.Destination
+import io.github.code_akram.or2.connection.HostConnections
+import io.github.code_akram.or2.connection.UiPort
+import io.github.code_akram.or2.connection.UiSession
+import io.github.code_akram.or2.connection.UiTrust
+import io.github.code_akram.or2.connection.uiHost
 import io.github.code_akram.or2.MainActivity
+import io.github.code_akram.or2.data.Host
+import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.HostRecord
 import io.github.code_akram.or2.data.KeyRecord
-import io.github.code_akram.or2.data.TrustStore
 import io.github.code_akram.or2.ffi.*
 import io.github.code_akram.or2.hosts.HostsScreen
 import io.github.code_akram.or2.terminal.TerminalView
@@ -39,6 +47,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -59,8 +68,8 @@ class EntryUiDeviceTest {
 
     @Test
     fun newHostPreselectsTheOnlyKeyButEditingDoesNotChangeAnEmptyReference() {
-        var saved: HostRecord? = null
-        val previous = HostRecord(7, "Existing fixture", "fixture.invalid", 22, "fixture-user", null)
+        var saved: Host? = null
+        val previous = Host(HostRecord(7, "Existing fixture", "fixture-user", null), listOf(HostEndpoint("fixture.invalid", 22)))
         compose.runOnUiThread {
             compose.activity.setContent {
                 MaterialTheme { HostsScreen(listOf(previous), listOf(fixtureKey), false, { host, _ -> saved = host }, {}, {}) }
@@ -81,7 +90,7 @@ class EntryUiDeviceTest {
 
     @Test
     fun multipleKeysNeedAnExplicitChoiceAndExposeTheSelectedRadioState() {
-        var saved: HostRecord? = null
+        var saved: Host? = null
         // Duplicate labels must not make the test target a different choice.
         val second = fixtureKey.copy(id = "second-key")
         compose.runOnUiThread {
@@ -105,7 +114,7 @@ class EntryUiDeviceTest {
     @Test
     fun firstUseTrustIsExplicitAndRejectWorks() {
         var decision = ""
-        val prompt = SessionState.AwaitingHostKeyDecision(PublicKeyInfo("test", "public", "presented-fingerprint", ""), emptyList())
+        val prompt = HostState.AwaitingHostKeyDecision(PublicKeyInfo("test", "public", "presented-fingerprint", ""), emptyList())
         compose.runOnUiThread {
             compose.activity.setContent { MaterialTheme { HostTrustDialog(prompt, false, { decision = "approve" }, { decision = "reject" }) } }
         }
@@ -120,7 +129,7 @@ class EntryUiDeviceTest {
     fun changedTrustShowsAllPreviousFingerprintsAndReplacementLabel() {
         var decision = ""
         val old = listOf(PublicKeyInfo("old-a", "a", "previous-a", ""), PublicKeyInfo("old-b", "b", "previous-b", ""))
-        val prompt = SessionState.AwaitingHostKeyDecision(PublicKeyInfo("new", "c", "presented-fingerprint", ""), old)
+        val prompt = HostState.AwaitingHostKeyDecision(PublicKeyInfo("new", "c", "presented-fingerprint", ""), old)
         compose.runOnUiThread {
             compose.activity.setContent { MaterialTheme { HostTrustDialog(prompt, false, { decision = "approve" }, { decision = "reject" }) } }
         }
@@ -132,94 +141,83 @@ class EntryUiDeviceTest {
         assertEquals("approve", decision)
     }
 
-    @Test
-    fun authenticationRejectedBeforeConnectedHasNoTerminalOrKeyboardControls() {
-        val closed = SessionState.Closed(CloseReason.Failed(SessionFailure.AuthenticationRejected))
-        var frameTakes = 0
-        val session = object : SessionInterface, AutoCloseable {
-            override fun takeFrame(): TerminalFrame? { frameTakes++; return null }
-            override fun requestFullFrame() = Unit
-            override fun disconnect() = Unit
-            override fun close() = Unit
-            override fun resize(columns: UShort, rows: UShort) = Unit
-            override fun sendText(text: String) = Unit
-            override fun sendKey(input: KeyInput) = Unit
-            override fun scroll(scroll: ViewportScroll) = Unit
-            override fun state() = closed
-            override fun approveHostKey(fingerprint: String) = Unit
-            override fun rejectHostKey() = Unit
-        }
-        val store = object : TrustStore {
-            override suspend fun trustedKeys(hostId: Long) = emptyList<String>()
-            override suspend fun replaceTrust(host: HostRecord, presented: PublicKeyInfo) = Unit
-        }
-        val holder = SessionHolder(SessionConnector { _, listener ->
-            listener.onStateChanged(SessionState.Authenticating)
-            listener.onStateChanged(closed)
-            session
-        }, store, worker = Dispatchers.Unconfined)
+    private fun terminalHolder(port: UiPort): HostConnections {
+        val holder = HostConnections({ _, listener -> port.also { it.hostListener = listener } }, UiTrust(), worker = Dispatchers.Unconfined)
         compose.runOnUiThread {
-            runBlocking { holder.connect(HostRecord(1, "Fixture", "fixture.invalid", 22, "fixture", null), byteArrayOf(1)) }
-            compose.activity.setContent { AppScaffold(holder, "Session", {}) { SessionScreen(holder, false, { _, _ -> }, {}) } }
+            runBlocking { holder.connect(uiHost(), byteArrayOf(1)) }
+            port.native = HostState.Connected(0u)
+        }
+        return holder
+    }
+
+    @Test
+    fun terminalClosedBeforeConnectedHasNoTerminalOrKeyboardControls() {
+        val closed = SessionState.Closed(CloseReason.Failed(SessionFailure.ShellRejected))
+        val session = UiSession(closed)
+        val holder = terminalHolder(UiPort(closed) { session })
+        compose.runOnUiThread {
+            val terminal = holder.openTerminal(holder.host(1)!!, TerminalTarget.Shell)
+            compose.activity.setContent {
+                AppScaffold(Destination.Inbox, terminalVisible = false, fullScreen = true, selectTab = {}) {
+                    SessionScreen(holder, terminal, listOf(terminal), back = {}, select = {})
+                }
+            }
         }
         compose.onNodeWithText("or2").assertIsDisplayed()
+        compose.onNodeWithText("• Inbox").assertIsDisplayed()
         compose.onNodeWithText("Hosts").assertIsDisplayed()
         compose.onNodeWithText("Keys").assertIsDisplayed()
-        compose.onNodeWithText("Authentication rejected. Check the username and public-key authorization.").assertIsDisplayed()
+        compose.onNodeWithText("The server refused a terminal or shell.", substring = true).assertIsDisplayed()
         compose.onNodeWithText("Close session").assertIsDisplayed()
         compose.onNodeWithContentDescription("Terminal").assertDoesNotExist()
         compose.onNodeWithText("Keyboard").assertDoesNotExist()
         compose.onNodeWithText("Esc").assertDoesNotExist()
-        compose.runOnIdle { assertEquals(0, frameTakes) }
+        compose.runOnIdle { assertEquals(0, session.frameTakes) }
         compose.onNodeWithText("Close session").performClick()
     }
 
     @Test
-    fun sessionScreenRetainsTerminalAndLastGridThroughClosedUntilDismiss() {
+    fun theSwitcherListsOpenTerminalsAndSelectingOneSwitchesWithoutDisconnecting() {
+        val port = UiPort(SessionState.Connecting)
+        val holder = terminalHolder(port)
+        var selected: Long? = null
+        compose.runOnUiThread {
+            val shell = holder.openTerminal(holder.host(1)!!, TerminalTarget.Shell)
+            val tmux = holder.openTerminal(holder.host(1)!!, TerminalTarget.Tmux("work"))
+            compose.activity.setContent {
+                AppScaffold(Destination.Inbox, terminalVisible = false, fullScreen = true, selectTab = {}) {
+                    SessionScreen(holder, shell, listOf(shell, tmux), back = {}, select = { selected = it.id })
+                }
+            }
+        }
+        compose.onNodeWithTag("terminal-switcher").assertIsDisplayed()
+        compose.onNodeWithText("• Fixture · shell").assertIsDisplayed()
+        compose.onNodeWithText("Fixture · tmux work").performClick()
+        compose.runOnIdle {
+            assertEquals(2L, selected)
+            assertTrue(port.sessions.none { it.second.destroyed })
+        }
+    }
+
+    @Test
+    fun sessionScreenRetainsTerminalAndLastGridThroughClosedUntilClose() {
         fun View.terminal(): TerminalView? {
             if (this is TerminalView) return this
             if (this is ViewGroup) for (index in 0 until childCount) getChildAt(index).terminal()?.let { return it }
             return null
         }
-        lateinit var listener: SessionListener
-        var destroyed = false
-        var closes = 0
-        var pending: TerminalFrame? = null
-        val frame = TerminalFrame(1uL, 2u, 1u, true,
-            listOf(CellStyle(0xffffffu, 0u, null, Underline.NONE, false, false, false, false, false)),
-            listOf(TerminalRow(0u, false, listOf(TerminalCell("L", CellWidth.NARROW, 0u), TerminalCell("R", CellWidth.NARROW, 0u)))),
-            null, 0u, Scrollback(1uL, 0uL))
-        val session = object : SessionInterface, AutoCloseable {
-            override fun takeFrame(): TerminalFrame? {
-                check(!destroyed)
-                return pending.also { pending = null }
-            }
-            override fun requestFullFrame() { check(!destroyed); pending = frame; listener.onFrameReady() }
-            override fun disconnect() { check(!destroyed); listener.onStateChanged(SessionState.Closed(CloseReason.Disconnected)) }
-            override fun close() { destroyed = true; closes++ }
-            override fun resize(columns: UShort, rows: UShort) = Unit
-            override fun sendText(text: String) = Unit
-            override fun sendKey(input: KeyInput) = Unit
-            override fun scroll(scroll: ViewportScroll) = Unit
-            override fun state() = SessionState.Connected
-            override fun approveHostKey(fingerprint: String) = Unit
-            override fun rejectHostKey() = Unit
-        }
-        val store = object : TrustStore {
-            override suspend fun trustedKeys(hostId: Long) = emptyList<String>()
-            override suspend fun replaceTrust(host: HostRecord, presented: PublicKeyInfo) = Unit
-        }
-        val holder = SessionHolder(SessionConnector { _, callback ->
-            listener = callback
-            listener.onStateChanged(SessionState.Connected)
-            session
-        }, store, worker = Dispatchers.Unconfined)
-        var tab by mutableStateOf("Session")
+        val session = UiSession()
+        val holder = terminalHolder(UiPort { session })
+        var screen by mutableStateOf("terminal")
         compose.runOnUiThread {
-            runBlocking { holder.connect(HostRecord(1, "Fixture", "fixture.invalid", 22, "fixture", null), byteArrayOf(1)) }
+            holder.openTerminal(holder.host(1)!!, TerminalTarget.Shell)
             compose.activity.setContent {
-                AppScaffold(holder, tab, { tab = it }) {
-                    if (tab == "Session") SessionScreen(holder, false, { _, _ -> }, {}) else Text("Hosts fixture")
+                val terminals by holder.terminals.collectAsState()
+                val terminal = terminals.firstOrNull()
+                val connected = terminal?.hasConnected?.collectAsState()?.value == true
+                AppScaffold(Destination.Inbox, terminalVisible = screen == "terminal" && connected, fullScreen = screen == "terminal", selectTab = {}) {
+                    if (screen == "terminal") SessionScreen(holder, terminal, terminals, back = { screen = "inbox" }, select = {})
+                    else Text("Inbox fixture")
                 }
             }
         }
@@ -239,45 +237,46 @@ class EntryUiDeviceTest {
         compose.onNodeWithText("or2").assertDoesNotExist()
         compose.onNodeWithText("Hosts").assertDoesNotExist()
         compose.onNodeWithText("Keys").assertDoesNotExist()
-        compose.onNodeWithText("• Session").assertDoesNotExist()
         compose.runOnIdle {
             val insets = ViewCompat.getRootWindowInsets(view)!!.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             assertEquals(compose.activity.window.decorView.width - insets.left - insets.right, view.width)
         }
-        val retained = holder.active.value
-        compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        val retained = holder.terminals.value.single()
+        // Back leaves the terminal running: it is neither disconnected nor destroyed.
+        compose.onNodeWithTag("terminal-back").performClick()
         compose.onNodeWithText("or2").assertIsDisplayed()
-        compose.onNodeWithText("• Hosts").assertIsDisplayed()
-        compose.onNodeWithText("Hosts fixture").assertIsDisplayed()
+        compose.onNodeWithText("• Inbox").assertIsDisplayed()
+        compose.onNodeWithText("Inbox fixture").assertIsDisplayed()
         compose.runOnIdle {
-            assertSame(retained, holder.active.value)
-            assertEquals(SessionState.Connected, retained!!.state.value)
-            assertFalse(destroyed)
+            assertSame(retained, holder.terminals.value.single())
+            assertEquals(SessionState.Connected, retained.state.value)
+            assertFalse(session.destroyed)
         }
-        compose.onNodeWithText("Session").performClick()
+        compose.runOnUiThread { screen = "terminal" }
         view = awaitTerminal()
         compose.onNodeWithText("or2").assertDoesNotExist()
         compose.onNodeWithText("Disconnect").performClick()
         compose.onNodeWithText("Close").assertIsDisplayed()
-        compose.onNodeWithText("Disconnected").assertIsDisplayed()
+        compose.onNodeWithText("Disconnected", substring = true).assertIsDisplayed()
         compose.onNodeWithText("or2").assertDoesNotExist()
         compose.onNodeWithText("Keys").assertDoesNotExist()
         compose.runOnIdle {
             assertSame(view, compose.activity.window.decorView.terminal())
             assertEquals("LR", view.grid.rows.single().cells.joinToString("") { it.text })
-            assertFalse(destroyed)
+            assertFalse(session.destroyed)
         }
         compose.onNodeWithText("Close").performClick()
         compose.onNodeWithText("or2").assertIsDisplayed()
-        compose.onNodeWithText("Hosts").assertIsDisplayed()
         compose.onNodeWithText("Keys").assertIsDisplayed()
-        compose.onNodeWithText("• Session").assertIsDisplayed()
-        compose.onNodeWithText("No active session. Choose Connect on a host to unlock its key.").assertIsDisplayed()
+        compose.onNodeWithText("Inbox fixture").assertIsDisplayed()
         compose.waitUntil(5_000) {
             var closed = false
-            compose.runOnUiThread { closed = destroyed }
+            compose.runOnUiThread { closed = session.destroyed }
             closed
         }
-        compose.runOnIdle { assertEquals(1, closes) }
+        compose.runOnIdle {
+            assertEquals(1, session.closes)
+            assertTrue(holder.terminals.value.isEmpty())
+        }
     }
 }
