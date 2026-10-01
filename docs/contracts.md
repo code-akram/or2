@@ -452,9 +452,37 @@ Connecting ──▶ AwaitingHostKey ──▶ Authenticating ──▶ Connecte
 - `HostConnectRequest { addresses: Vec<Endpoint> (1..=8, preference order), username, key,
   trusted_host_keys }`. Trust belongs to the host, not to an address.
 - **Address racing.** Start address 0; start each next address 250 ms after the previous one
-  started or immediately when it fails. The first TCP connection wins; the others are dropped.
-  If all fail, close with `Unreachable` whose message lists each address's error (no secrets).
+  started or immediately when it fails (only the most recently started address's failure brings
+  the next forward). The first TCP connection wins; the others are dropped. **Each address has its
+  own allowance** of `transport::ADDRESS_TIMEOUT` (6 s, `HostOptions::address_timeout`), name
+  resolution included, inside the overall 20 s connect timeout: an address that silently drops
+  packets (an overlay IP with no route while its VPN is off, a sleeping machine) fails at its own
+  limit (`no answer within 6 s`) instead of holding the race until the overall timer, and the
+  attempts' limits run side by side, so with up to 8 addresses the race ends within about 8 s. If
+  all fail, close with `Unreachable` whose message lists **each address's outcome by position, in
+  words and with no host names or addresses**: `TCP connection failed: address 0: name not
+  resolved (mDNS) after 3 tries; address 1: no answer within 6 s` (`transport::describe_error`:
+  `connection refused`, `no route to the host` for ENETUNREACH/EHOSTUNREACH, which fail at once and
+  start the next address, `no answer`, or the text of an error `transport` raised). The app puts
+  the host names back for its own screen. If the **overall connect timer fires while the race is
+  still running** (an allowance longer than the timeout, a test), the close is also `Unreachable`,
+  `no address answered within 20 s: address 0: still trying after 20 s; ...`
+  (`transport::RaceReport`, which the race updates and the driver reads); `TimedOut` is only for a
+  TCP connection that then stalls in the SSH handshake or authentication.
   The SSH handshake runs only on the winner. `Connected.address_index` reports which one won.
+- **One endpoint** (`DirectTcp::connect`, `transport::dial`): the name is **resolved once** and the
+  resolved addresses are raced, they are not tried in turn. A `.local` name (mDNS; the first lookup
+  an app makes can fail after a second or two and succeed from the cache on the next) is resolved
+  up to 3 times within 4 s, 250 ms apart (`name not resolved (mDNS) after 3 tries`, or `within
+  4 s`); any other name once (`name not resolved`). **IPv6 link-local results without a scope id
+  are dropped** (an app socket cannot connect to them; the same name usually has an IPv4 address);
+  if nothing else remains, the endpoint fails with that explanation. The usable addresses race
+  Happy-Eyeballs style: families alternate starting with the resolver's first, 250 ms apart, a
+  refusal starts the next at once, and all of them stop at the endpoint's budget (5 s from the
+  start, inside the race's 6 s allowance, so the endpoint explains itself first). When every
+  resolved address fails the error is one line (`3 addresses: connection refused, no answer within
+  5 s`). `Resolver` and `Connector` are traits, so all of it is tested against a scripted resolver
+  on a paused clock (`transport_dial_tests.rs`, `transport_race_tests.rs`).
 - Host-key relay, connect timeout (20 s, paused while awaiting the user), keepalive (15 s, 3
   misses) and failure mapping are M1's. `CloseReason` is reused; `RemoteExited` never occurs
   for a host.

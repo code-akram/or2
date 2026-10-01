@@ -52,7 +52,10 @@ use crate::remote::{ExecOutput, OUTPUT_CAP, RemoteError, RemoteHost, SecretBytes
 use crate::session::{CloseReason, HostKeyPrompt, SessionDriver, SessionFailure};
 use crate::term::TerminalSize;
 use crate::tmux::{self, TmuxError};
-use crate::transport::{DatagramTransport, RACE_STAGGER, Transport, race};
+use crate::transport::{
+    ADDRESS_TIMEOUT, DatagramTransport, RACE_STAGGER, RaceReport, RaceTiming, Transport, race_with,
+    seconds,
+};
 
 /// Timings, adjustable so tests need not wait for the production values.
 #[derive(Debug, Clone, Copy)]
@@ -64,6 +67,9 @@ pub struct HostOptions {
     pub exec_timeout: Duration,
     /// Delay between address attempts. Production: `transport::RACE_STAGGER`.
     pub stagger: Duration,
+    /// How long one address may take (name resolution and TCP connect) before the race counts
+    /// it as unanswered. Production: `transport::ADDRESS_TIMEOUT`.
+    pub address_timeout: Duration,
     /// How long a mosh terminal waits for the server's first datagram before it closes
     /// `TimedOut` (UDP blocked) and stops the server. Production: `mosh::CONNECT_TIMEOUT`.
     pub mosh_connect_timeout: Duration,
@@ -75,6 +81,7 @@ impl Default for HostOptions {
             connect_timeout: Duration::from_secs(20),
             exec_timeout: crate::remote::EXEC_TIMEOUT,
             stagger: RACE_STAGGER,
+            address_timeout: ADDRESS_TIMEOUT,
             mosh_connect_timeout: crate::mosh::CONNECT_TIMEOUT,
         }
     }
@@ -526,8 +533,19 @@ async fn drive<T: Transport, D: DatagramTransport>(
     let (events, mut incoming) = mpsc::channel(32);
     let (shutdown, stop) = watch::channel(false);
     let mut network_ended = false;
+    // What each address has done, for a connect timeout that fires while the race still runs.
+    let report = RaceReport::new();
+    let race_report = report.clone();
     let mut network = tokio::spawn(async move {
-        let reason = network(transport, request, events.clone(), options, stop).await;
+        let reason = network(
+            transport,
+            request,
+            events.clone(),
+            options,
+            stop,
+            &race_report,
+        )
+        .await;
         let _ = events.send(HostEvent::Closed(reason)).await;
     });
     let (closing_sender, closing) = watch::channel(None);
@@ -605,7 +623,17 @@ async fn drive<T: Transport, D: DatagramTransport>(
                     }
                 },
                 () = sleep_until(deadline), if timing => {
-                    break Ok(CloseReason::Failed(SessionFailure::TimedOut));
+                    // No TCP connection yet: the host is unreachable, and each address says what
+                    // it did. Once one connected, the handshake or authentication is what hung.
+                    break Ok(CloseReason::Failed(if report.is_pending() {
+                        SessionFailure::Unreachable(format!(
+                            "no address answered within {}: {}",
+                            seconds(options.connect_timeout),
+                            report.describe()
+                        ))
+                    } else {
+                        SessionFailure::TimedOut
+                    }));
                 }
                 result = &mut network, if !network_ended => {
                     network_ended = true;
@@ -916,8 +944,13 @@ async fn network<T: Transport>(
     events: mpsc::Sender<HostEvent>,
     options: HostOptions,
     stop: watch::Receiver<bool>,
+    report: &RaceReport,
 ) -> CloseReason {
-    let raced = match race(&transport, &request.addresses, options.stagger).await {
+    let timing = RaceTiming {
+        stagger: options.stagger,
+        address_timeout: options.address_timeout,
+    };
+    let raced = match race_with(&transport, &request.addresses, timing, Some(report)).await {
         Ok(raced) => raced,
         Err(failure) => {
             return CloseReason::Failed(SessionFailure::Unreachable(format!(
