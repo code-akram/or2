@@ -46,6 +46,44 @@ fn ready(program: &str, require: &str, available: bool) -> bool {
     available
 }
 
+/// How many ports `Sshd` tries before giving up.
+const BIND_ATTEMPTS: usize = 5;
+
+/// A loopback port nothing listens on right now. Another process can take it before the caller
+/// binds it, so callers that must bind it retry (see [`Sshd`]).
+fn free_port() -> u16 {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Waits for sshd's "Server listening" line. `Err` carries the log when sshd exited or stayed
+/// silent for 5 s.
+fn wait_until_listening(child: &mut Child, log_path: &Path) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let log = fs::read_to_string(log_path).unwrap();
+        if log.contains("Server listening on") {
+            return Ok(());
+        }
+        if child.try_wait().unwrap().is_some() {
+            // Everything sshd wrote before it exited is in the file now.
+            return Err(fs::read_to_string(log_path).unwrap());
+        }
+        if Instant::now() >= deadline {
+            return Err(log);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Whether sshd's log says it could not bind its port (it then exits).
+fn bind_failed(log: &str) -> bool {
+    log.contains("Address already in use") || log.contains("Cannot bind any address")
+}
+
 pub struct Sshd {
     pub directory: tempfile::TempDir,
     child: Child,
@@ -70,16 +108,11 @@ impl Sshd {
         let host = ClientKey::generate_ed25519("");
         fs::write(path.join("host"), &*host.to_stored()).unwrap();
         fs::set_permissions(path.join("host"), fs::Permissions::from_mode(0o600)).unwrap();
-        let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
         fs::write(path.join("authorized"), "").unwrap();
         let tmux_dir = path.join("tmux");
         fs::create_dir(&tmux_dir).unwrap();
         let mut config = format!(
-            "Port {port}\nListenAddress {}\nHostKey {}\nAuthorizedKeysFile {}\nPidFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPrintMotd no\nPrintLastLog no\nSetEnv HOME={} HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR={} TMUX_TMPDIR={}\nLogLevel VERBOSE\n",
+            "ListenAddress {}\nHostKey {}\nAuthorizedKeysFile {}\nPidFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPrintMotd no\nPrintLastLog no\nSetEnv HOME={} HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR={} TMUX_TMPDIR={}\nLogLevel VERBOSE\n",
             Ipv4Addr::LOCALHOST,
             path.join("host").display(),
             path.join("authorized").display(),
@@ -110,36 +143,41 @@ impl Sshd {
         }
         config.push_str(extra);
         config.push('\n');
-        fs::write(path.join("config"), config).unwrap();
-        let log = fs::File::create(path.join("log")).unwrap();
-        let child = Command::new("/usr/bin/sshd")
-            .args(["-D", "-e", "-f"])
-            .arg(path.join("config"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(log)
-            .spawn()
-            .unwrap();
-        let mut fixture = Self {
-            directory,
-            child,
-            port,
-            host: host.public_key().openssh,
-            tmux_dir,
-        };
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let log = fs::read_to_string(fixture.directory.path().join("log")).unwrap();
-            if log.contains("Server listening on") {
-                break;
+        // A free port is found by binding and releasing it, so another process (often a loopback
+        // client's ephemeral port) can take it before sshd binds. sshd then exits with "Cannot
+        // bind any address": start it again on a new port.
+        let mut last_log = String::new();
+        for _ in 0..BIND_ATTEMPTS {
+            let port = free_port();
+            fs::write(path.join("config"), format!("Port {port}\n{config}")).unwrap();
+            let log_path = path.join("log");
+            let mut child = Command::new("/usr/bin/sshd")
+                .args(["-D", "-e", "-f"])
+                .arg(path.join("config"))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(fs::File::create(&log_path).unwrap())
+                .spawn()
+                .unwrap();
+            match wait_until_listening(&mut child, &log_path) {
+                Ok(()) => {
+                    return Self {
+                        directory,
+                        child,
+                        port,
+                        host: host.public_key().openssh,
+                        tmux_dir,
+                    };
+                }
+                Err(log) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    assert!(bind_failed(&log), "disposable sshd failed to start: {log}");
+                    last_log = log;
+                }
             }
-            assert!(
-                fixture.child.try_wait().unwrap().is_none() && Instant::now() < deadline,
-                "disposable sshd failed to start: {log}"
-            );
-            std::thread::sleep(Duration::from_millis(10));
         }
-        fixture
+        panic!("disposable sshd could not bind a port in {BIND_ATTEMPTS} attempts: {last_log}");
     }
 
     pub fn username() -> String {

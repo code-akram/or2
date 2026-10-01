@@ -18,8 +18,12 @@ import java.util.concurrent.TimeUnit
  * never find or subscribe to a real herdr session.
  */
 internal class OpenSshFixture : AutoCloseable {
+    private companion object {
+        const val BIND_ATTEMPTS = 5
+    }
+
     val directory: Path = Files.createTempDirectory("or2-sshd-")
-    val port: Int = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { it.localPort }
+    val port: Int
     val fingerprint: String
     private var process: Process? = null
 
@@ -46,10 +50,7 @@ internal class OpenSshFixture : AutoCloseable {
                 )
                 setExecutable(true)
             }
-            val config = directory.resolve("sshd_config")
-            config.toFile().writeText(
-                """
-                Port $port
+            val settings = """
                 ListenAddress ${InetAddress.getLoopbackAddress().hostAddress}
                 HostKey ${directory.resolve("host_key")}
                 AuthorizedKeysFile ${directory.resolve("authorized")}
@@ -63,18 +64,39 @@ internal class OpenSshFixture : AutoCloseable {
                 PrintLastLog no
                 SetEnv HOME=$directory HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR=$directory TMUX_TMPDIR=${directory.resolve("tmux")} PATH=$bin:/usr/bin:/bin
                 LogLevel VERBOSE
-                """.trimIndent() + "\n",
-            )
+                """.trimIndent() + "\n"
+            // A free port is found by binding and releasing it, so another process (often a
+            // loopback client's ephemeral port) can take it before sshd binds. sshd then exits
+            // with "Cannot bind any address": start it again on a new port.
+            val config = directory.resolve("sshd_config")
             val log = directory.resolve("log")
-            process = ProcessBuilder("/usr/bin/sshd", "-D", "-e", "-f", config.toString())
-                .redirectErrorStream(true).redirectOutput(log.toFile()).start()
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-            while (!log.toFile().readText().contains("Server listening on")) {
-                check(process!!.isAlive && System.nanoTime() < deadline) {
-                    "disposable sshd did not start: ${log.toFile().readText()}"
+            var bound = 0
+            for (attempt in 1..BIND_ATTEMPTS) {
+                val candidate = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { it.localPort }
+                config.toFile().writeText("Port $candidate\n$settings")
+                val started = ProcessBuilder("/usr/bin/sshd", "-D", "-e", "-f", config.toString())
+                    .redirectErrorStream(true).redirectOutput(log.toFile()).start()
+                process = started
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                while (!log.toFile().readText().contains("Server listening on")) {
+                    if (!started.isAlive) {
+                        started.waitFor() // Everything sshd wrote is in the file once it exited.
+                        val text = log.toFile().readText()
+                        val bindFailed = "Address already in use" in text || "Cannot bind any address" in text
+                        check(bindFailed && attempt < BIND_ATTEMPTS) { "disposable sshd did not start: $text" }
+                        break
+                    }
+                    check(System.nanoTime() < deadline) {
+                        "disposable sshd did not start: ${log.toFile().readText()}"
+                    }
+                    Thread.sleep(20)
                 }
-                Thread.sleep(20)
+                if (started.isAlive) {
+                    bound = candidate
+                    break
+                }
             }
+            port = bound
         } catch (failure: Throwable) {
             close()
             throw failure

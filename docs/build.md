@@ -80,7 +80,9 @@ directory and is killed with it), a temporary `$HOME` and a fake `herdr` script 
 real tmux or herdr server is ever contacted. `local.rs` runs the capability probe and tmux
 commands through `LocalHost` with a restricted `PATH` (programs the probe must find are fakes
 under the temporary `$HOME`, so a real herdr or mosh-server in `/usr/bin` cannot change the
-result). Tests skip (printing `SKIP`) when `/usr/bin/sshd` or `tmux` is absent, unless
+result). Both sshd fixtures (this one and the Kotlin `OpenSshFixture`) pick a free port by
+binding and releasing it; if another process takes it first, sshd exits with "Address already in
+use" and the fixture retries on a new port (up to 5 times). Tests skip (printing `SKIP`) when `/usr/bin/sshd` or `tmux` is absent, unless
 `OR2_REQUIRE_SSHD` / `OR2_REQUIRE_TMUX` is set, which fails instead: set both in CI so the
 suite is never vacuously green. The herdr terminal test also skips (printing why) on a machine
 with a real herdr in a standard directory, because the probe would find it whatever `$HOME`
