@@ -69,6 +69,15 @@ cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets --all-fea
 android/gradlew -p android :app:assembleDebug :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:lintDebug
 ```
 
+Rust integration tests that need a host tool skip, with a `SKIP:` message, when it is missing,
+so a runner without it passes vacuously. `core/or2-core/tests/mosh_live.rs` starts a real
+`mosh-server` on loopback (through `mosh::bootstrap` over `LocalHost`) and checks the
+roaming, resize and disconnect interop; it needs `mosh-server`, `/bin/bash` and the `kill`
+binary on `PATH`/at `/bin/bash`, and kills exactly the process ids it started, even when it
+panics. **CI must install mosh and set `OR2_REQUIRE_MOSH=1`** (any value), which turns the
+skip into a failure; otherwise that interop claim is never verified. It needs no network
+beyond 127.0.0.1 and does not touch `~/.ssh` or any sshd.
+
 Gradle builds the host library, generates Kotlin under `app/build/generated/uniffi/kotlin`,
 and cross-builds the release Rust library into `app/build/generated/uniffi/jniLibs/arm64-v8a`.
 The app has minSdk 34, compile/targetSdk 36, and no Google Play Services/FCM dependencies.

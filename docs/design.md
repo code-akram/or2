@@ -208,7 +208,8 @@ Consequences for `or2-core`:
   so `at-least/mosh` was not needed.
 - mosh keeps no scrollback of its own: the server sends diffs of the visible screen, which scroll
   only for lines that scrolled between two frames. A fast burst (`seq 1 200`) arrives as one
-  repaint and leaves no history in libghostty; a slow one leaves a little. Scrollback inside a
+  repaint and leaves no history in libghostty; a slow one leaves a little (libghostty caps it, so
+  an endless paced stream costs about 70 KB and 0.2 ms per snapshot at worst; see contracts). Scrollback inside a
   mosh session is therefore not like SSH; tmux or herdr provides history there.
 - `mosh-server -s` binds the UDP port to the address in the exec channel's `SSH_CONNECTION`, so
   the client must send to the address the SSH connection reached (with address racing, the
