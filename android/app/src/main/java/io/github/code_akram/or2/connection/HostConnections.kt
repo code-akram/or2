@@ -98,6 +98,9 @@ class ActiveHost internal constructor(val host: Host) {
     internal var retired = false
     internal var destroyed = false
     internal var disconnectRequested = false
+
+    /** Whether herdr watches should run: the host's inbox flag, which can change on a live connection. */
+    internal var watching = host.showInInbox
     val state = mutableState.asStateFlow()
     val hasConnected = mutableHasConnected.asStateFlow()
 
@@ -165,6 +168,12 @@ class HostConnections(
 
     fun terminal(id: Long): ActiveTerminal? = mutableTerminals.value.find { it.id == id }
 
+    /** A terminal on [hostId] for exactly [target] that has not closed or been told to, if any. */
+    fun findOpenTerminal(hostId: Long, target: TerminalTarget): ActiveTerminal? = mutableTerminals.value.find {
+        it.host.id == hostId && it.target == target && !it.retired && !it.disconnectRequested &&
+            it.state.value !is SessionState.Closed
+    }
+
     fun isLive(hostId: Long) = mutableHosts.value[hostId]?.isLive == true
 
     /** See [connect] for a list. */
@@ -212,6 +221,7 @@ class HostConnections(
                         if (state is HostState.Connected) current.mutableHasConnected.value = true
                         current.mutableState.value = state
                         if (state is HostState.Connected) probe(current)
+                        if (state is HostState.Closed) releaseWatches(current)
                     }
                 }
             }
@@ -228,7 +238,9 @@ class HostConnections(
             // Disconnect/dismiss may have happened while the synchronous factory was running.
             if (mutableHosts.value[host.id] !== current) retireHost(current)
             else if (current.disconnectRequested) port.disconnect()
-        } catch (error: Exception) {
+        } catch (error: Throwable) {
+            // Errors too (a missing native library, an out-of-memory while lowering): an attempt
+            // that never produced a live connection must not stay listed as Connecting.
             attempt?.ready?.completeExceptionally(error)
             if (attempt != null && mutableHosts.value[host.id] === attempt) mutableHosts.value -= host.id
             attempt?.let(::retireHost)
@@ -299,15 +311,28 @@ class HostConnections(
         current.mutableWatches.value = emptyList()
     }
 
+    /** Never throws: one watch that fails to stop must not abort a sync or a connection's teardown. */
     private fun stopWatch(watch: HerdrSessionWatch) {
         val handle = watch.handle ?: return
         watch.handle = null
         try {
             handle.stop()
+        } catch (_: Exception) {
+            // The watch ends with its connection anyway.
         } finally {
-            (handle as? AutoCloseable)?.close()
+            try {
+                (handle as? AutoCloseable)?.close()
+            } catch (_: Exception) {
+            }
         }
     }
+
+    /**
+     * The host closed: every watch is over, so release their native handles now. The watches stay
+     * listed with their final state; the connection object itself stays readable until the host
+     * is replaced or dismissed.
+     */
+    private fun releaseWatches(current: ActiveHost) = current.mutableWatches.value.forEach(::stopWatch)
 
     // --- capabilities and herdr watches -------------------------------------------------
 
@@ -326,29 +351,54 @@ class HostConnections(
         }
     }
 
-    /** Re-queries capabilities (new herdr sessions may have started) and updates the watches. */
+    /** Re-queries capabilities and brings the watches in line with them. */
     suspend fun refresh(current: ActiveHost) {
         if (current.state.value is HostState.Connected) probe(current)
     }
 
-    /** One watch per running herdr session; sessions that vanished lose theirs. */
+    /**
+     * Follows the host's inbox flag on a live connection: turning it off stops every watch (a
+     * hidden host should not cost channels and radio wakeups), turning it on starts them again.
+     */
+    fun setWatching(hostId: Long, watching: Boolean) {
+        val current = mutableHosts.value[hostId] ?: return
+        if (current.watching == watching) return
+        current.watching = watching
+        if (current.retired || current.state.value !is HostState.Connected) return
+        val port = current.mutablePort.value ?: return
+        val caps = current.mutableCapabilities.value ?: return
+        syncWatches(current, port, caps)
+    }
+
+    /**
+     * With herdr installed, the default session (watched unnamed) and every listed session get a
+     * watch whether or not it is running: the watch reports `NotRunning` and retries by itself, so
+     * a session started later is picked up without another probe (the connection caches the
+     * probe, so a refresh cannot see it). Sessions no longer listed lose theirs.
+     */
     private fun syncWatches(current: ActiveHost, port: HostPort, caps: HostCapabilities) {
-        val running = if (caps.herdr == null) emptyList() else caps.herdrSessions.filter { it.running }
-        val wanted = running.map { if (it.isDefault) null else it.name }.toSet()
+        val active = current.watching && caps.herdr != null && current.state.value !is HostState.Closed
+        val listed = if (active) caps.herdrSessions else emptyList()
+        val wanted = if (active) {
+            listOf(HerdrWatchSpec(null, listed.find { it.isDefault }?.name ?: "default")) +
+                listed.filterNot { it.isDefault }.map { HerdrWatchSpec(it.name, it.name) }
+        } else {
+            emptyList()
+        }
+        val sessions = wanted.map { it.session }.toSet()
         val kept = current.mutableWatches.value.filter { watch ->
-            (watch.session in wanted).also { if (!it) stopWatch(watch) }
+            (watch.session in sessions).also { if (!it) stopWatch(watch) }
         }.toMutableList()
-        for (info in running) {
-            val session = if (info.isDefault) null else info.name
-            if (kept.any { it.session == session }) continue
-            val watch = HerdrSessionWatch(session, info.name)
+        for (spec in wanted) {
+            if (kept.any { it.session == spec.session }) continue
+            val watch = HerdrSessionWatch(spec.session, spec.name)
             val listener = object : HerdrListener {
                 override fun onHerdrStateChanged(state: HerdrState) {
                     scope.launch { watch.mutableState.value = state }
                 }
             }
             try {
-                watch.handle = port.watchHerdr(session, listener)
+                watch.handle = port.watchHerdr(spec.session, listener)
             } catch (error: HostException) {
                 watch.mutableState.value = HerdrState.Unavailable(HerdrUnavailable.Failed, error.message.orEmpty())
             }
@@ -356,6 +406,8 @@ class HostConnections(
         }
         current.mutableWatches.value = kept
     }
+
+    private class HerdrWatchSpec(val session: String?, val name: String)
 
     /** tmux sessions on the host, most recently active first. */
     suspend fun listTmuxSessions(current: ActiveHost): List<TmuxSession> = current.ready.await().listTmuxSessions()

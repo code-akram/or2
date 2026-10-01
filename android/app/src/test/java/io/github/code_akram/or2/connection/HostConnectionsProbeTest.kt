@@ -70,23 +70,24 @@ class HostConnectionsProbeTest {
                     assertEquals(HostState.Connected(0u), withTimeout(5000) { active.state.first { it is HostState.Connected } })
                     assertTrue(active.hasConnected.value)
 
-                    // The capability probe runs once connected; the running default session is watched.
+                    // The capability probe runs once connected; the default and every listed session are watched.
                     val caps = withTimeout(5000) { active.capabilities.first { it != null } }!!
                     assertEquals("/usr/bin/tmux", caps.tmux)
                     assertEquals(listOf("default", "or2-probe"), caps.herdrSessions.map { it.name })
-                    assertEquals(listOf<String?>(null), active.watches.value.map { it.session }) // Default is unnamed.
+                    assertEquals(listOf<String?>(null, "or2-probe"), active.watches.value.map { it.session }) // Default is unnamed.
                     assertEquals(listOf("main", "build"), holder.listTmuxSessions(active).map { it.name })
 
-                    // Agents reach the inbox, most urgent status first.
-                    val inbox = withTimeout(5000) { holder.inbox(flowOf(listOf(host))).first { it.agentCount == 3 } }
+                    // Agents of both sessions (3 each) reach the inbox, most urgent status first.
+                    val inbox = withTimeout(5000) { holder.inbox(flowOf(listOf(host))).first { it.agentCount == 6 } }
                     val order = inbox.groups.map { it.status }
                     assertEquals(order.sortedBy { INBOX_STATUS_ORDER.indexOf(it) }, order)
                     assertTrue(AgentStatus.IDLE in order)
                     assertEquals(host.label, inbox.groups.first().items.first().hostLabel)
-                    assertEquals(inbox.hosts.single().agentCount, 3)
-                    val pane = inbox.groups.first().items.first()
+                    assertEquals(inbox.hosts.single().agentCount, 6)
+                    val pane = inbox.groups.flatMap { it.items }.first { it.session == null }
                     assertNull(pane.session) // Default session: opened without a name.
-                    withTimeout(5000) { active.watches.value.single().state.first { it is HerdrState.Live } }
+                    assertEquals(setOf<String?>(null, "or2-probe"), inbox.groups.flatMap { it.items }.map { it.session }.toSet())
+                    withTimeout(5000) { active.watches.value.forEach { it.state.first { state -> state is HerdrState.Live } } }
 
                     // Terminals: several on the one connection, each with its own lifecycle and frames.
                     val shell = holder.openTerminal(active, TerminalTarget.Shell)
@@ -108,7 +109,7 @@ class HostConnectionsProbeTest {
                     withTimeout(5000) { active.state.first { it is HostState.Closed } }
                     assertEquals(HostState.Closed(CloseReason.Disconnected), active.state.value)
                     assertEquals(SessionState.Closed(CloseReason.Disconnected), withTimeout(5000) { herdr.state.first { it is SessionState.Closed } })
-                    assertEquals(HerdrState.Closed, withTimeout(5000) { active.watches.value.single().state.first { it == HerdrState.Closed } })
+                    active.watches.value.forEach { assertEquals(HerdrState.Closed, withTimeout(5000) { it.state.first { state -> state == HerdrState.Closed } }) }
                     assertEquals(HostState.Closed(CloseReason.Disconnected), active.mutablePort.value!!.state()) // Not destroyed yet.
 
                     holder.dismissTerminal(shell)

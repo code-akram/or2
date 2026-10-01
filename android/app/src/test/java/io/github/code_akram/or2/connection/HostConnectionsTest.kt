@@ -10,6 +10,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -480,7 +481,7 @@ class HostConnectionsTest {
     // --- capabilities and herdr watches -------------------------------------------------------
 
     @Test
-    fun connectedHostProbesCapabilitiesAndWatchesEachRunningHerdrSessionOnce() = runTest {
+    fun connectedHostWatchesTheDefaultAndEveryListedHerdrSessionWhetherRunningOrNot() = runTest {
         val port = FakePort().apply {
             caps = HostCapabilities("/usr/bin/tmux", "/home/x/.local/bin/herdr", null, "C.UTF-8", listOf(
                 HerdrSessionInfo("default", true, true), HerdrSessionInfo("work", true, false),
@@ -494,9 +495,10 @@ class HostConnectionsTest {
         listener.onHostStateChanged(HostState.Connected(0u))
         runCurrent()
         assertEquals(port.caps, active.capabilities.value)
-        // The default session is watched with a null name (never its listed name); stopped ones not at all.
-        assertEquals(listOf<String?>(null, "work"), port.watches.map { it.first })
-        assertEquals(listOf("default", "work"), active.watches.value.map { it.name })
+        // The default session is watched with a null name (never its listed name). A stopped one is
+        // watched too: its watch reports NotRunning and recovers when it starts.
+        assertEquals(listOf<String?>(null, "work", "idle"), port.watches.map { it.first })
+        assertEquals(listOf("default", "work", "idle"), active.watches.value.map { it.name })
 
         val view = HerdrView(1uL, 22u, null, emptyList(), emptyList(), emptyList(), emptyList())
         port.watches[1].second.onHerdrStateChanged(HerdrState.Live(view))
@@ -504,19 +506,154 @@ class HostConnectionsTest {
         assertEquals(HerdrState.Live(view), active.watches.value[1].state.value)
         assertEquals(HerdrState.Starting, active.watches.value[0].state.value)
 
-        // Refresh: a new session starts, one vanishes; existing watches are kept.
+        // Refresh: a session is no longer listed; existing watches are kept, the vanished ones stop.
         port.caps = port.caps.copy(herdrSessions = listOf(
             HerdrSessionInfo("default", true, true), HerdrSessionInfo("fresh", true, false)))
         holder.refresh(active)
-        assertEquals(listOf<String?>(null, "work", "fresh"), port.watches.map { it.first })
+        assertEquals(listOf<String?>(null, "work", "idle", "fresh"), port.watches.map { it.first })
         assertEquals(listOf("default", "fresh"), active.watches.value.map { it.name })
         assertEquals(1, port.watches[1].third.stops)
         assertEquals(1, port.watches[1].third.closes)
+        assertEquals(1, port.watches[2].third.stops)
         assertEquals(0, port.watches[0].third.stops)
 
         holder.dismissHost(host.id) // Retiring stops and releases every watch before the connection closes.
         assertTrue(port.watches.all { it.third.stops == 1 && it.third.closes == 1 })
         assertTrue(active.watches.value.isEmpty())
+    }
+
+    @Test
+    fun herdrNotRunningAtConnectStillGetsADefaultWatchSoItRecoversByItself() = runTest {
+        // The connection caches the probe: its session list is the connect-time snapshot, empty here.
+        val port = FakePort().apply { caps = caps.copy(herdrSessions = emptyList()) }
+        lateinit var listener: HostListener
+        val holder = holder(connector = { _, l -> listener = l; port })
+        holder.connect(host, byteArrayOf(1))
+        val active = holder.host(host.id)!!
+        listener.onHostStateChanged(HostState.Connected(0u))
+        runCurrent()
+        assertEquals(listOf<String?>(null), port.watches.map { it.first })
+        assertEquals(listOf("default"), active.watches.value.map { it.name })
+        val notRunning = HerdrState.Unavailable(HerdrUnavailable.NotRunning, "")
+        port.watches[0].second.onHerdrStateChanged(notRunning)
+        runCurrent()
+        assertEquals(notRunning, active.watches.value[0].state.value)
+        // herdr starts later: the same watch (no second one) goes live, whatever a refresh sees.
+        val view = HerdrView(1uL, 22u, null, emptyList(), emptyList(), emptyList(), emptyList())
+        port.watches[0].second.onHerdrStateChanged(HerdrState.Live(view))
+        holder.refresh(active)
+        runCurrent()
+        assertEquals(1, port.watches.size)
+        assertEquals(HerdrState.Live(view), active.watches.value.single().state.value)
+        holder.dismissHost(host.id)
+    }
+
+    @Test
+    fun watchesFollowTheInboxFlagOnALiveConnection() = runTest {
+        val port = FakePort()
+        lateinit var listener: HostListener
+        val hidden = testHost(showInInbox = false)
+        val holder = holder(connector = { _, l -> listener = l; port })
+        holder.connect(hidden, byteArrayOf(1))
+        val active = holder.host(hidden.id)!!
+        listener.onHostStateChanged(HostState.Connected(0u))
+        runCurrent()
+        assertNotNull(active.capabilities.value) // Still probed: the host screen shows it.
+        assertTrue(port.watches.isEmpty())
+        holder.setWatching(hidden.id, true)
+        assertEquals(listOf<String?>(null), port.watches.map { it.first })
+        holder.setWatching(hidden.id, true) // Idempotent.
+        assertEquals(1, port.watches.size)
+        holder.setWatching(hidden.id, false)
+        assertEquals(1, port.watches[0].third.stops)
+        assertEquals(1, port.watches[0].third.closes)
+        assertTrue(active.watches.value.isEmpty())
+        holder.setWatching(99, true) // Unknown host: nothing.
+        holder.dismissHost(hidden.id)
+    }
+
+    @Test
+    fun aWatchThatCannotStopNeverAbortsASyncOrTheTeardown() = runTest {
+        val port = FakePort().apply {
+            watchStopFailure = HostException.CommandFailed("stop")
+            caps = caps.copy(herdrSessions = listOf(HerdrSessionInfo("default", true, true), HerdrSessionInfo("work", true, false)))
+        }
+        lateinit var listener: HostListener
+        val holder = holder(connector = { _, l -> listener = l; port })
+        holder.connect(host, byteArrayOf(1))
+        val active = holder.host(host.id)!!
+        listener.onHostStateChanged(HostState.Connected(0u))
+        runCurrent()
+        port.caps = port.caps.copy(herdrSessions = listOf(HerdrSessionInfo("default", true, true), HerdrSessionInfo("fresh", true, false)))
+        holder.refresh(active)
+        assertNull(active.capabilitiesError.value) // The probe itself succeeded.
+        assertEquals(listOf("default", "fresh"), active.watches.value.map { it.name })
+        assertEquals(1, port.watches[1].third.closes) // Released despite the failed stop.
+        holder.dismissHost(host.id)
+        assertTrue(port.destroyed) // The connection still closed.
+        assertTrue(port.watches.all { it.third.closes == 1 })
+    }
+
+    @Test
+    fun closedHostReleasesItsWatchHandlesButKeepsTheRecords() = runTest {
+        val port = FakePort()
+        lateinit var listener: HostListener
+        val holder = holder(connector = { _, l -> listener = l; port })
+        holder.connect(host, byteArrayOf(1))
+        val active = holder.host(host.id)!!
+        listener.onHostStateChanged(HostState.Connected(0u))
+        runCurrent()
+        assertEquals(1, port.watches.size)
+        listener.onHostStateChanged(HostState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("x"))))
+        runCurrent()
+        assertEquals(1, port.watches[0].third.stops)
+        assertEquals(1, port.watches[0].third.closes)
+        assertEquals(1, active.watches.value.size) // The final state stays visible.
+        assertFalse(port.destroyed) // The connection object stays readable until replaced or dismissed.
+        holder.refresh(active) // Closed: nothing is probed or started again.
+        assertEquals(1, port.watches.size)
+        holder.dismissHost(host.id)
+        assertEquals(1, port.watches[0].third.closes) // Not released twice.
+        assertTrue(port.destroyed)
+    }
+
+    @Test
+    fun aNativeErrorDuringConnectNeverStrandsAConnectingEntry() = runTest {
+        var failing = true
+        val port = FakePort()
+        val holder = holder(connector = { _, _ -> if (failing) throw UnsatisfiedLinkError("no library") else port })
+        val key = byteArrayOf(1)
+        assertThrows(UnsatisfiedLinkError::class.java) { runBlocking { holder.connect(host, key) } }
+        assertArrayEquals(ByteArray(1), key) // Still wiped.
+        assertNull(holder.host(host.id))
+        assertFalse(holder.isLive(host.id))
+        failing = false
+        holder.connect(host, byteArrayOf(1)) // Connecting again works.
+        assertSame(port, holder.host(host.id)!!.mutablePort.value)
+        holder.dismissHost(host.id)
+    }
+
+    @Test
+    fun findOpenTerminalMatchesHostAndTargetAndSkipsClosedOrEndingOnes() = runTest {
+        val port = FakePort()
+        val holder = holder(connector = { _, _ -> port })
+        holder.connect(host, byteArrayOf(1))
+        connected(port)
+        val active = holder.host(host.id)!!
+        val pane = TerminalTarget.Herdr(null, "p1")
+        assertNull(holder.findOpenTerminal(host.id, pane))
+        val first = holder.openTerminal(active, pane)
+        val other = holder.openTerminal(active, TerminalTarget.Herdr("work", "p1"))
+        assertSame(first, holder.findOpenTerminal(host.id, TerminalTarget.Herdr(null, "p1")))
+        assertSame(other, holder.findOpenTerminal(host.id, TerminalTarget.Herdr("work", "p1")))
+        assertNull(holder.findOpenTerminal(host.id + 1, pane))
+        assertNull(holder.findOpenTerminal(host.id, TerminalTarget.Herdr(null, "p2")))
+        port.terminals[0].second.onStateChanged(SessionState.Closed(CloseReason.Disconnected))
+        runCurrent()
+        assertNull(holder.findOpenTerminal(host.id, pane)) // Closed: a tap opens a fresh one.
+        holder.disconnectTerminal(other)
+        assertNull(holder.findOpenTerminal(host.id, TerminalTarget.Herdr("work", "p1")))
+        holder.dismissHost(host.id)
     }
 
     @Test

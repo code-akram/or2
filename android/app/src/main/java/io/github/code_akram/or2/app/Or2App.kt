@@ -51,6 +51,7 @@ import io.github.code_akram.or2.hosts.HostsScreen
 import io.github.code_akram.or2.inbox.InboxScreen
 import io.github.code_akram.or2.inbox.InboxState
 import io.github.code_akram.or2.inbox.LinkStatus
+import io.github.code_akram.or2.inbox.dialogForOtherHost
 import io.github.code_akram.or2.inbox.inbox
 import io.github.code_akram.or2.inbox.linkStatuses
 import io.github.code_akram.or2.inbox.pendingHostKeys
@@ -127,8 +128,12 @@ fun Or2App(
                 openHost = { navigate(nav.push(Destination.HostPage(it.id))) },
                 openAgent = { item ->
                     val active = connections.host(item.hostId)
-                    if (active == null) actions.message("${item.hostLabel} is no longer connected.")
-                    else openTerminal(active, TerminalTarget.Herdr(item.session, item.paneId))
+                    val target = TerminalTarget.Herdr(item.session, item.paneId)
+                    // Tapping the same agent again returns to its open terminal.
+                    val open = connections.findOpenTerminal(item.hostId, target)
+                    if (open != null) navigate(nav.push(Destination.Terminal(open.id)))
+                    else if (active == null) actions.message("${item.hostLabel} is no longer connected.")
+                    else openTerminal(active, target)
                 },
                 openTerminals = openTerminalsRow,
             )
@@ -152,9 +157,9 @@ fun Or2App(
             )
         }
     }
-    // A prompt for a host whose screen is not showing still needs an answer.
-    val shownHost = (current as? Destination.HostPage)?.hostId
-    pending.firstOrNull { it.active.host.id != shownHost }?.let { (active, prompt) ->
+    // A prompt for a host whose screen is not showing still needs an answer, one dialog at a time:
+    // the shown host's own screen already has its dialog.
+    pending.dialogForOtherHost((current as? Destination.HostPage)?.hostId)?.let { (active, prompt) ->
         HostTrustDialog(prompt, busy, { actions.approve(active, prompt) }, { actions.reject(active) },
             hostLabel = hosts.find { it.id == active.host.id }?.label ?: active.host.label)
     }

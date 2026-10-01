@@ -210,6 +210,11 @@ class InboxModelTest {
         val pending = holder.pendingHostKeys().first()
         assertEquals(listOf(2L), pending.map { it.active.host.id })
         assertEquals(prompt, pending.single().prompt)
+        // One dialog at a time: the shown host's own screen carries its prompt.
+        assertEquals(2L, pending.dialogForOtherHost(null)!!.active.host.id)
+        assertEquals(2L, pending.dialogForOtherHost(1L)!!.active.host.id)
+        assertNull(pending.dialogForOtherHost(2L))
+        assertNull(emptyList<PendingHostKey>().dialogForOtherHost(1L))
         holder.hosts.value.keys.toList().forEach(holder::dismissHost)
         assertEquals(emptyList<PendingHostKey>(), holder.pendingHostKeys().first())
     }

@@ -69,8 +69,9 @@ class FakeWatch(val events: MutableList<String> = mutableListOf()) : HerdrWatchI
     var current: HerdrState = HerdrState.Starting
     var stops = 0
     var closes = 0
+    var stopFailure: Exception? = null
     override fun state() = current
-    override fun stop() { stops++; events += "stop" }
+    override fun stop() { stops++; events += "stop"; stopFailure?.let { throw it } }
     override fun close() { closes++; events += "close" }
 }
 
@@ -84,6 +85,7 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     var tmux = listOf<TmuxSession>()
     var openFailure: Exception? = null
     var watchFailure: Exception? = null
+    var watchStopFailure: Exception? = null
     var capabilityCalls = 0
     val terminals = mutableListOf<Triple<TerminalTarget, SessionListener, FakeSession>>()
     val watches = mutableListOf<Triple<String?, HerdrListener, FakeWatch>>()
@@ -110,7 +112,7 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     override fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface {
         check(!destroyed) { "Host connection object has already been destroyed" }
         watchFailure?.let { throw it }
-        return FakeWatch(events).also { watches += Triple(session, listener, it) }
+        return FakeWatch(events).also { it.stopFailure = watchStopFailure; watches += Triple(session, listener, it) }
     }
 }
 
@@ -118,6 +120,7 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
 class FakeDao : AppDao() {
     val events = mutableListOf<String>()
     var failDelete = false
+    var failSave = false
     val records = MutableStateFlow<List<HostRecord>>(emptyList())
     val addresses = MutableStateFlow<List<HostAddressRecord>>(emptyList())
     val trust = mutableListOf<TrustedHostKey>()
@@ -138,6 +141,7 @@ class FakeDao : AppDao() {
         events += "record:$id"
     }
     override suspend fun insertHost(host: HostRecord): Long {
+        if (failSave) error("storage failure")
         val id = if (host.id == 0L) nextId++ else host.id
         records.value += host.copy(id = id)
         return id
@@ -145,9 +149,11 @@ class FakeDao : AppDao() {
     override suspend fun insertAddresses(addresses: List<HostAddressRecord>) { this.addresses.value += addresses }
     override suspend fun deleteAddresses(hostId: Long) { addresses.value = addresses.value.filterNot { it.hostId == hostId } }
     override suspend fun updateHost(id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean) {
+        if (failSave) error("storage failure")
         records.value = records.value.map { if (it.id == id) HostRecord(id, label, username, keyId, showInInbox) else it }
     }
     override suspend fun deleteHost(id: Long) {
+        if (failDelete) error("storage failure")
         records.value = records.value.filterNot { it.id == id }
         addresses.value = addresses.value.filterNot { it.hostId == id }
         trust.removeAll { it.hostId == id }
