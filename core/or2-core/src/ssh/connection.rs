@@ -121,8 +121,11 @@ pub(super) struct SshHost {
     handle: Handle<Client<HostEvent>>,
     exec_timeout: Duration,
     capabilities: OnceCell<HostCapabilities>,
-    /// The last herdr session list read successfully (the probe's own list until then).
+    /// The last herdr session list read successfully (the probe's own list until then), which
+    /// the herdr watches and pane focuses find their sockets in.
     sessions: probe::SessionsCache,
+    /// Keeps the app's pane focus and the terminal's own from both reaching herdr.
+    pub(super) focus: herdr::FocusGate,
     /// The mosh servers this connection still has to stop (see [`mosh_session::ServerDebt`]).
     pub(super) servers: mosh_session::ServerDebt,
 }
@@ -159,7 +162,36 @@ impl SshHost {
     /// The probe's answer, run once per connection. A failed probe is not cached.
     pub(super) async fn capabilities(&self) -> Result<&HostCapabilities, RemoteError> {
         self.capabilities
-            .get_or_try_init(|| probe::probe(self))
+            .get_or_try_init(|| async {
+                let (capabilities, entries) = probe::probe_entries(self).await?;
+                // The listing the probe read is what the watches and focuses discover from.
+                if let Some(entries) = entries {
+                    self.sessions.directory().seed(entries);
+                }
+                Ok(capabilities)
+            })
+            .await
+    }
+
+    /// `herdr` focus of `pane_id`, the socket from this connection's directory. `from_terminal`
+    /// is a terminal's own focus before it starts, which a focus the app acknowledged a moment
+    /// ago satisfies; the app's request is never answered from memory (see [`herdr::FocusGate`]).
+    pub(super) async fn focus_pane(
+        &self,
+        herdr: &str,
+        session: Option<&str>,
+        pane_id: &str,
+        from_terminal: bool,
+    ) -> Result<(), herdr::HerdrError> {
+        self.focus
+            .focus(
+                self,
+                herdr,
+                self.sessions.directory(),
+                session,
+                pane_id,
+                from_terminal,
+            )
             .await
     }
 
@@ -819,7 +851,7 @@ async fn focus_herdr_pane(
             program: "herdr".into(),
         });
     };
-    herdr::focus_pane(host, path, session.as_deref(), &pane_id)
+    host.focus_pane(path, session.as_deref(), &pane_id, false)
         .await
         .map_err(|error| match error {
             herdr::HerdrError::PaneNotFound => HostError::PaneNotFound,
@@ -857,7 +889,8 @@ async fn watch_herdr(host: Arc<SshHost>, session: Option<String>, mut driver: He
                     driver.close();
                     return;
                 };
-                return herdr::run(host, herdr, session, driver).await;
+                let directory = Arc::clone(host.sessions.directory());
+                return herdr::run_in(host, herdr, directory, session, driver).await;
             }
             Err(error) => {
                 let _ = driver.transition(HerdrState::Unavailable {
@@ -947,6 +980,7 @@ async fn hold(
         exec_timeout: options.exec_timeout,
         capabilities: OnceCell::new(),
         sessions: probe::SessionsCache::new(),
+        focus: herdr::FocusGate::new(),
         servers: mosh_session::ServerDebt::default(),
     });
     register(&host);

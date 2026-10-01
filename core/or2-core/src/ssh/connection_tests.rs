@@ -352,6 +352,31 @@ impl server::Handler for Server {
                 }
             };
         }
+        if command.starts_with("sh -c") && command.contains("or2:list-begin") {
+            // The probe's second script: finds herdr and lists its sessions in one exec. It
+            // hangs with the first script when the test says the probe hangs.
+            session.channel_success(channel)?;
+            if self.shared.probe_hangs.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            let probe = *self.shared.probe.lock().unwrap();
+            let path = probe
+                .lines()
+                .find_map(|line| line.strip_prefix("or2:herdr:"))
+                .unwrap_or("");
+            let mut output = format!("or2:herdr:{path}\n");
+            if !path.is_empty() {
+                let listing = *self.shared.herdr_list.lock().unwrap();
+                let (json, status) = match listing {
+                    HerdrList::Fixture => (HERDR_LISTING, 0),
+                    HerdrList::Json(json) => (json, 0),
+                    HerdrList::Fails => ("", 1),
+                };
+                output.push_str(&format!("or2:list-begin\n{json}\nor2:list-end:{status}\n"));
+            }
+            session.data(channel, output.into_bytes())?;
+            return finish(session, channel, 0);
+        }
         if command.starts_with("sh -c") {
             self.shared.probes.fetch_add(1, Ordering::SeqCst);
             session.channel_success(channel)?;

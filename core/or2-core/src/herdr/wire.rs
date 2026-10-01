@@ -236,6 +236,24 @@ pub async fn call<H: RemoteHost>(
     .map_err(|_| WireError::TimedOut)?
 }
 
+/// [`call`] on a stream that is already open (the caller opened it, possibly alongside another
+/// stream, to save a round trip): sends the request and reads its response, bounded by
+/// `timeout`. The stream is left open.
+pub async fn call_on<S: AsyncRead + AsyncWrite + Unpin>(
+    reader: &mut LineReader<S>,
+    id: &str,
+    body: &RequestBody,
+    timeout: Duration,
+) -> Result<Value, WireError> {
+    let line = encode_request(id, body)?;
+    tokio::time::timeout(timeout, async {
+        reader.send(&line).await?;
+        reader.response().await
+    })
+    .await
+    .map_err(|_| WireError::TimedOut)?
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

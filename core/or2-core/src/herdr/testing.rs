@@ -62,6 +62,8 @@ struct State {
     exec: Result<ExecOutput, RemoteError>,
     exec_log: Vec<String>,
     open_error: Option<RemoteError>,
+    /// Sockets nothing listens on: opening one is `Io`, as a stale path is over OpenSSH.
+    dead_sockets: Vec<String>,
     opened: Vec<String>,
     snapshots: VecDeque<Step>,
     /// Per `events.subscribe`: `Some((code, message))` rejects it and closes the stream.
@@ -89,6 +91,7 @@ impl FakeHost {
                 exec: Ok(output(0, "", "")),
                 exec_log: Vec::new(),
                 open_error: None,
+                dead_sockets: Vec::new(),
                 opened: Vec::new(),
                 snapshots: VecDeque::new(),
                 subscribe_script: VecDeque::new(),
@@ -112,12 +115,25 @@ impl FakeHost {
         lock(&self.state).exec = Err(error);
     }
 
+    pub fn clear_exec_log(&self) {
+        lock(&self.state).exec_log.clear();
+    }
+
+    pub fn clear_focus_error(&self) {
+        lock(&self.state).focus_error = None;
+    }
+
     pub fn exec_log(&self) -> Vec<String> {
         lock(&self.state).exec_log.clone()
     }
 
     pub fn set_open_error(&self, error: Option<RemoteError>) {
         lock(&self.state).open_error = error;
+    }
+
+    /// Opening `path` fails like a socket nothing listens on (other paths are unaffected).
+    pub fn kill_socket(&self, path: &str) {
+        lock(&self.state).dead_sockets.push(path.to_owned());
     }
 
     /// Sockets opened so far.
@@ -200,6 +216,11 @@ impl RemoteHost for FakeHost {
             state.opened.push(path.to_owned());
             if let Some(error) = state.open_error.clone() {
                 return Err(error);
+            }
+            if state.dead_sockets.iter().any(|dead| dead == path) {
+                return Err(RemoteError::Io(
+                    "the socket could not be connected to on the host".into(),
+                ));
             }
         }
         let (client, server) = duplex(1 << 20);

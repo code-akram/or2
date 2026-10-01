@@ -20,6 +20,7 @@ pub mod view;
 pub mod wire;
 
 mod discovery;
+mod focus;
 mod project;
 #[cfg(test)]
 mod testing;
@@ -32,9 +33,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::mpsc;
 
 use crate::remote::{RemoteError, RemoteHost};
-use generated::request::{PaneTarget, RequestBody};
 
-pub use discovery::{DiscoveryError, SessionEntry, list_sessions};
+pub(crate) use discovery::parse_listing;
+pub use discovery::{Directory, DiscoveryError, SessionEntry, list_sessions};
+pub use focus::{FocusGate, focus_pane_in};
 pub use view::{Agent, AgentStatus, HerdrView, Pane, Tab, Workspace};
 /// The watch's intervals, for integration tests that cannot wait for the production ones.
 #[cfg(feature = "test-support")]
@@ -271,39 +273,39 @@ pub async fn run<H: RemoteHost>(
     watch::run(host, herdr, session, driver, watch::Timing::default()).await;
 }
 
+/// [`run`] with the connection's own [`Directory`]: the watch takes its first socket from it
+/// (the probe's listing, so a watch costs no `session list`) and re-discovers only after a
+/// failure.
+pub async fn run_in<H: RemoteHost>(
+    host: Arc<H>,
+    herdr: String,
+    directory: Arc<Directory>,
+    session: Option<String>,
+    driver: HerdrWatchDriver,
+) {
+    watch::run_in(
+        host,
+        herdr,
+        directory,
+        session,
+        driver,
+        watch::Timing::default(),
+    )
+    .await;
+}
+
 /// Focuses `pane_id` in `session` with one `pane.focus` request on a short-lived stream.
 /// `herdr` is the absolute path from the capability probe. It changes what the user's herdr
-/// clients show. A pane that no longer exists is [`HerdrError::PaneNotFound`].
+/// clients show. A pane that no longer exists is [`HerdrError::PaneNotFound`]. Reads the
+/// session listing for the socket every time; a host connection uses [`focus_pane_in`] with
+/// its [`Directory`] instead.
 pub async fn focus_pane<H: RemoteHost>(
     host: &H,
     herdr: &str,
     session: Option<&str>,
     pane_id: &str,
 ) -> Result<(), HerdrError> {
-    let socket = discovery::locate(host, herdr, session)
-        .await
-        .map_err(|error| match error {
-            DiscoveryError::Remote(error) => HerdrError::Remote(error),
-            other => HerdrError::Failed(other.to_string()),
-        })?;
-    wire::call(
-        host,
-        &socket,
-        "or2_focus",
-        &RequestBody::PaneFocus(PaneTarget {
-            pane_id: pane_id.to_owned(),
-        }),
-        watch::Timing::default().request,
-    )
-    .await
-    .map(|_| ())
-    .map_err(|error| match error {
-        wire::WireError::Remote(error) => HerdrError::Remote(error),
-        wire::WireError::Herdr { code, .. } if code == watch::PANE_NOT_FOUND => {
-            HerdrError::PaneNotFound
-        }
-        other => HerdrError::Failed(other.to_string()),
-    })
+    focus_pane_in(host, herdr, &Directory::new(), session, pane_id).await
 }
 
 #[cfg(test)]

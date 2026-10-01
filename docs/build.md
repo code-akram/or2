@@ -102,6 +102,15 @@ with a message otherwise, and `OR2_REQUIRE_SSHD`, `OR2_REQUIRE_TMUX` and `OR2_RE
 make the skips failures. It finds the `mosh-server`s its sshd started by the fixture's private
 `TMUX_TMPDIR` in their environment and kills exactly those, however the test ends.
 
+`core/or2-core/tests/latency.rs` measures the critical paths over a 120 ms round trip (a real
+sshd behind the relay with `Proxy::slow`, a fake `herdr` and a Unix-socket herdr server in the
+test, a real `mosh-server`): connect, `capabilities()`, the inbox's first `Live` view, a focus, an
+agent tap (focus then a mosh terminal, and both started together), an SSH terminal on a pane, an
+unreachable host not delaying another, and a terminal on a vanished pane failing without leaving
+a `mosh-server`. It prints a table with `-- --nocapture`, asserts the number of `herdr session
+list` runs and `pane.focus` requests exactly, and the times with generous bounds. It needs
+`sshd` and `mosh-server`.
+
 `core/or2-core/tests/mosh_live.rs` starts a real
 `mosh-server` on loopback (through `mosh::bootstrap` over `LocalHost`) and checks the
 roaming, resize and disconnect interop; it needs `mosh-server`, `/bin/bash` and the `kill`

@@ -386,8 +386,9 @@ pub trait RemoteHost: Send + Sync + 'static {
 
 ### Capability probe
 
-Non-interactive SSH does not load the user's `PATH`. One exec per connection, cached in memory
-for the connection's lifetime (Rust has no storage), finds `tmux`, `herdr` and `mosh-server`:
+Non-interactive SSH does not load the user's `PATH`. Two execs per connection **run at once**
+(one round trip pair, not two), cached in memory for the connection's lifetime (Rust has no
+storage); the first finds `tmux`, `herdr` and `mosh-server`:
 `command -v`, then `$HOME/.local/bin`, `$HOME/.cargo/bin`, `/opt/homebrew/bin`,
 `/usr/local/bin`, `/usr/bin`, `/bin`, `$HOME/.nix-profile/bin`, `/run/current-system/sw/bin`.
 It also reports a UTF-8 locale (`C.UTF-8`, else the first `*.UTF-8`/`*.utf8` in `locale -a`,
@@ -406,17 +407,23 @@ listed. The script contains no `'` or `\` (a test enforces it, because `render_s
 rejects them). A probe that fails to run is not cached, so the next query or watch retry runs
 it again.
 
-Lane A1 decisions, both from review: (1) herdr's session list is **not** part of the script.
-When herdr was found, `probe::herdr_sessions` lists the sessions with `herdr::list_sessions`
-(lane A2's one parser of `<herdr> session list --json`; the probe has no parser of its own) as
-a second exec bounded by `probe::HERDR_LIST_TIMEOUT` (5 s), so a wedged herdr costs only
+Lane A1 decisions, both from review: (1) herdr's session list is **not** part of that script.
+`probe::HERDR_SCRIPT` is a second fixed script, run in its own channel **at the same time** (the
+probe finished in two round trips instead of four): it finds herdr with the same search, prints
+`or2:herdr:<path>`, and when found `or2:list-begin`, `herdr session list --json`'s stdout and
+`or2:list-end:<exit status>`. The text between the markers is read by `herdr::parse_listing`
+(lane A2's one parser of `<herdr> session list --json`, shared with `herdr::list_sessions`; the
+probe has no parser of its own) and the whole exec is bounded by `probe::HERDR_LIST_TIMEOUT`
+(5 s), so a wedged herdr costs only
 `herdr_sessions` (empty), never tmux, mosh-server or the locale, and never makes the probe
 fail and be retried at full cost on every terminal open. Only a connection that closes
 mid-probe fails it. `name`, `running` and `default` are carried over; an unreadable listing
 (including one with an entry that has no `socket_path`) is a failed listing, not a partial
-one. (2) The cache holds programs and locale; **`capabilities()` reads herdr's
-session list afresh on every call** (`probe::SessionsCache`), so `running` and sessions
-started or stopped after connecting show on the host screen. A listing that fails (herdr
+one (the first script still reports herdr's path when the second hangs). (2) The cache holds
+programs and locale; **`capabilities()` reads herdr's session list afresh on every call**
+(`probe::SessionsCache`), so `running` and sessions started or stopped after connecting show on the
+host screen, **except the first call after the probe**: the probe's listing is as fresh as a read
+made now, so that call reports it without a third exec (`Directory::seed` / `take_unread`). A listing that fails (herdr
 gone, hung, garbage) reports the **last list that was read successfully**, not the one from
 connect time (until a read succeeds, the probe's own list): the app treats the list as
 authoritative and stops the watch of a session missing from it, so a transient failure must
@@ -425,7 +432,10 @@ overlap (several Refresh calls); each takes a ticket when it starts and a result
 only if no read that started later has already been applied, so a slow older read never
 overwrites a newer list (and then reports the newer one). The programs and locale stay in the
 immutable probe result. Live per-pane state is
-still `watch_herdr`'s job; terminal opens and watches use only the cached paths.
+still `watch_herdr`'s job; terminal opens and watches use only the cached paths. The listing the
+probe read (with each session's socket path, which never reaches Kotlin) also seeds the
+connection's `herdr::Directory` (next section), which is where the herdr watches and pane focuses
+find sockets.
 
 ## Host connection (`or2_core::host`)
 
@@ -586,9 +596,13 @@ Lane A1 (`ssh/terminal_session.rs`, `ssh/pump.rs`): the session is a thread `or2
 owning the engine and the `SessionDriver`, plus a task owning the channel; `ssh/pump.rs` is the
 terminal pump M1's one-connection session shares (`TerminalPump`: engine, reply budget,
 commands, frames; `pump_channel`: concurrent channel read and write). Order: for tmux and herdr
-the probe (cached), then for a herdr pane the focus, then the channel (`pty-req` at the
-requested size, `shell` or `exec`, then a window change if the size changed meanwhile), then
-`Connected`. Anything that fails before the channel exists (missing program, failed focus,
+the probe (cached), then the channel (`pty-req` at the requested size, `shell` or `exec`, then a
+window change if the size changed meanwhile), then `Connected`; a herdr pane's focus runs **beside
+the channel open** (they do not depend on each other: the herdr client follows herdr's focus, so a
+focus that lands a moment after the client starts only changes what it shows next), and the session
+is `Connected` when both are done. A focus that fails closes the channel that was opened and the
+session from `Connecting` with `CommandFailed` (`terminal_session::plan` returns the command and the
+pending `PaneFocus` separately). Anything that fails before the channel exists (missing program,
 failed probe) closes the session from `Connecting` without opening one. Every other way a
 session ends (user disconnect, host close, protocol failure) closes its channel first, so the
 program does not outlive the session on the host: a tmux client detaches, the tmux session
@@ -652,12 +666,24 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
   number; final); another failure or unreadable output is `Failed`; a missing or stopped
   session is `NotRunning`.
   `HostCapabilities.herdr_sessions` reports name, `running` and `is_default`; `socket_path` is
-  not reported to Kotlin. `run` and `focus_pane` rediscover it themselves on every attempt,
-  using the herdr path they are given.
+  not reported to Kotlin. **The connection's `herdr::Directory`** (one per host connection, inside
+  `probe::SessionsCache`) holds the last listing that was read successfully, seeded by the
+  capability probe: a watch's first attempt and every pane focus take a **running** session's
+  socket from it and run no `session list`. A session the list does not know or calls stopped is
+  not answered from it (it may have started since): that lookup reads the listing. A socket from
+  the directory that does not open (`Unreachable`, the path went stale) sends that attempt back to
+  the listing **once** (`Directory::invalidate`, then a fresh read); a socket from a listing read
+  just now that does not open is the answer (`Failed`, with the forwarding-policy hint), not a
+  reason to list again. Every later watch attempt (a retry after `Unavailable`, a recovery after
+  `events_lost` or a dropped stream) reads the listing again: failure is the only trigger for
+  re-discovery. The free functions `herdr::run`, `herdr::watch` and `herdr::focus_pane` (no
+  connection) use a directory of their own and so still read the listing first.
 - **Watch:** `herdr::watch(host, herdr, session, observer) -> HerdrWatchHandle` is `channel`
-  plus a task running `run`. One *attempt*: discover; open one long-lived streamlocal event
-  stream and `events.subscribe` (bounded by the 10 s request timeout), wait for the ack;
-  then reconcile: `session.snapshot` on a separate short-lived stream, install it, and read
+  plus a task running `run`. One *attempt*: find the socket (the connection's directory, see
+  Discovery); open two streamlocal streams at once, a long-lived one for events and a request
+  stream for the first snapshot; `events.subscribe` on the first (bounded by the 10 s request
+  timeout), wait for the ack;
+  then reconcile: `session.snapshot` on the request stream, install it, and read
   again while an event arrived during the read (events are invalidations, never patches).
   Reads are at least 100 ms apart and events that arrive before a read starts are covered by
   it. Any line on the event stream other than the ack, including an unparseable or unknown
@@ -681,9 +707,15 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
     only through lifecycle-driven reads, and the request is tried again with every later read),
     so a persistent rejection cannot make the view flap between `Live` and `Unavailable`.
   - *Connect cost.* The first view is installed after one subscribe and one snapshot, as in
-    the contract sequence; the per-pane resubscribe and its confirming read follow it, and
-    every later new pane costs one more of each (a subscription cannot grow). Not yet
-    measured over an OpenSSH-backed host: measure on the phone.
+    the contract sequence, and **nothing else delays it**: the socket comes from the directory (no
+    listing), the subscription's stream and the snapshot's stream are **opened together** (the
+    snapshot request itself still waits for the subscription's acknowledgement, so no event can be
+    missed), and the 100 ms between reads and the per-pane resubscribe with its confirming read
+    all follow the first delivery (a test asserts the first `Live` is delivered at the same
+    instant the bootstrap starts, with only those two requests served). Every later new pane costs
+    one more of each (a subscription cannot grow). Measured over a 120 ms round trip against a
+    real sshd: a watch is live 3 round trips after the capability probe (see the latency
+    fixture under "M3 polish").
   - *Unreachable socket.* `session list --json` says `running: true` but opening its socket
     fails with `Io`: that is `Failed`, not `NotRunning`, because the listing already settled
     whether the session runs. The likeliest cause over OpenSSH is the host's forwarding policy
@@ -748,8 +780,16 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
   `u64`; the FFI records are `HerdrView`, `HerdrWorkspace`, `HerdrTab`, `HerdrPane`,
   `HerdrAgent`. `cwd` is the pane's `cwd` (not `foreground_cwd`) and `title` its `title`
   (not `terminal_title`).
-- **Focus:** `herdr::focus_pane(host, herdr, session, pane_id)` rediscovers the socket and sends
-  one `pane.focus` request on a short-lived stream (10 s bound). It changes what the user's
+- **Focus:** `herdr::focus_pane_in(host, herdr, directory, session, pane_id)` (and the
+  connection-less `herdr::focus_pane`, which uses a directory of its own) takes the socket from the
+  directory and sends one `pane.focus` request on a short-lived stream (10 s bound): two round
+  trips (open, request) and no listing. **`herdr::FocusGate`** (one per connection) keeps the app's
+  focus and the terminal's own from both reaching herdr: a focus for a pane whose focus is already
+  in flight **joins it** and shares its answer (a failure included, and a cancelled leader leaves
+  its followers to focus for themselves), and a terminal's focus (`from_terminal`) is satisfied by
+  an acknowledgement younger than `focus::RECENT` (2 s) for the same pane; the app's own request
+  (`HostHandle::focus_herdr_pane`) is never answered from memory, because the user's desktop may
+  have moved the focus meanwhile. It changes what the user's
   herdr clients show; tests use isolated named sessions only. An error response with the code
   `pane_not_found` is `HerdrError::PaneNotFound` (the pane is gone); any other error response
   is `HerdrError::Failed`. The host exposes it as `HostHandle::focus_herdr_pane` (FFI API 6).
@@ -1335,8 +1375,10 @@ session `Failed { Internal { "mosh terminals land with M3-A" } }` is gone.
    --session <name>`, nothing for `Shell` (the login shell). `argv()` returns `None` for a
    command that carries environment assignments (an argument vector cannot), and the session
    closes `Failed { Internal }` rather than run the command without them; none do today. A
-   herdr pane is focused first, over
-   SSH, exactly as for an SSH terminal (`CommandFailed` on failure, before any server exists).
+   herdr pane is focused over SSH, exactly as for an SSH terminal, **beside** step 4 (the two do
+   not depend on each other; the app's own focus of the same pane, if in flight, is joined, and
+   one it finished moments ago satisfies it): a focus that fails (`CommandFailed`, the pane is
+   gone) stops the server step 4 already started before the session reports its failure.
 4. `mosh::bootstrap(host, caps, size, argv)` with the probed path and UTF-8 locale; then
    `mosh::run_session` (the driver of `mosh::start_with`, see below) with `DirectUdp` and
    `Link` pinned to `peer_addr()` with the bootstrap's port (`set_port`, so an IPv6 scope id
@@ -1366,9 +1408,8 @@ session `Failed { Internal { "mosh terminals land with M3-A" } }` is gone.
    it started can be stopped; cutting the exec shorter loses the pid and the server stays (the
    limitation documented under `mosh::terminate`). **A disconnect starts nothing new:**
    `prepare` carries a cancellation flag the abandon sets, checked after the capability probe
-   (before the pane focus) and after the focus (before the exec), so a disconnect during the
-   probe or the focus focuses no pane and starts no server; only an exec already running is
-   waited for.
+   (before the pane focus and the exec, which start together), so a disconnect during the probe
+   focuses no pane and starts no server; only an exec already running is waited for.
    **The host waits for this.** On a user disconnect of the host the host driver waits
    `SESSIONS_CLOSE_GRACE` (3 s) for its SSH terminals and watches as before, and for mosh
    sessions until `CLOSE_BUDGET` (8 s) after the close began (a second drain tracker, held by
@@ -1952,3 +1993,39 @@ standby setting, mobile data only, screen off while waiting, target the always-o
    connection (`resume_mosh`, resuming the dead client's session from a stored ticket, was rejected and is
    not implemented). Record the time to the first frame, the prompts, and that the orphan is gone. Three
    runs each, report p50 and max.
+
+## M3 polish: latency, battery, cold-launch resume (integrated on `m3/polish`)
+
+Phone acceptance (Wi-Fi, OnePlus/OxygenOS 16, about 117 ms RTT to the host) found the critical paths
+far from 2 s and two Android behaviours that defeat "stays connected". This section records what
+changed; the rules it touches are also updated where they live (probe, herdr, mosh, Android).
+
+### Latency fixture and measured numbers
+
+`core/or2-core/tests/latency.rs` (feature set of the other sshd tests; needs `sshd` and
+`mosh-server`) puts a real disposable OpenSSH behind the shared relay (`common::Proxy`) holding
+every chunk 60 ms each way (120 ms RTT), a fake `herdr` script that lists one running session, a
+real Unix-socket server speaking herdr's wire format (subscribe acknowledged, the checked-in
+snapshot, `pane.focus`, `pane_not_found` for `w9:p9`) and a real `mosh-server` (UDP is local: add
+one round trip on a real link). It prints the table below (`-- --nocapture`) and asserts the
+protocol work exactly (how many `herdr session list` runs, herdr connections and `pane.focus`
+requests) and the times with room for a loaded machine. Measured on the runner, before this
+change (main `9039f61`) and after, same fixture, same run:
+
+| Path (120 ms RTT) | before | after |
+|---|---|---|
+| `capabilities()` right after `Connected` | 928 ms (7.7 RTT, 3 sequential execs) | 283 ms (2.4 RTT, 2 execs at once) |
+| inbox: `Connected` to first `Live` view | 1815 ms (15.1 RTT, 3 `session list` runs) | 726 ms (6.1 RTT, 1 run) |
+| reuse: pane focus only | 564 ms (4.7 RTT) | 241-282 ms (2.0-2.4 RTT) |
+| tap: focus, then a mosh terminal on the pane, `Connected` | 1454 ms (12.1 RTT) | 608 ms (5.1 RTT) |
+| tap: focus and open started together | n/a | 322 ms (2.7 RTT) |
+| SSH terminal on a pane (focus beside the channel) | n/a | 523 ms (4.4 RTT) |
+
+What was cut: the probe's herdr listing runs beside the probe script (not after it) and seeds the
+connection's directory; `capabilities()` right after it does not list a third time; a watch and a
+focus take their socket from the directory (no `session list`, no discovery per call); a watch's
+two streams open together; the app's focus and the terminal's own focus are one request (the
+`FocusGate`); the pane focus runs beside the mosh bootstrap or the SSH channel open instead of
+before it. The unreachable-host test connects a second, healthy host while a first one accepts TCP
+and never answers the handshake (20 s timeout) and checks the healthy host's connect and inbox are
+unaffected: each host is its own driver thread, and the Android flows are per host.
