@@ -261,14 +261,17 @@ pub trait RemoteHost: Send + Sync + 'static {
 }
 ```
 
-- `RemoteCommand` is a program plus arguments, never a shell string. It renders as
-  `sh -c '<script>' or2 <args…>` with POSIX single-quote escaping, so it works whatever the
-  user's login shell is (bash, zsh, fish). Untrusted values (session names, pane ids) are only
-  ever positional arguments, never spliced into the script.
+- `RemoteCommand` is a program, arguments and environment assignments, never a shell string.
+  sshd hands the rendered string to the user's login shell (bash, zsh or fish), so it renders
+  as `env 'K=V' … 'program' 'arg' …`: every token single-quoted, an embedded `'` written as
+  `'\''`. That form means the same in POSIX shells and fish provided no token contains a
+  backslash or a control character, so rendering rejects those (`RemoteError::Unquotable`).
+  Fixed scripts (the capability probe) run as `sh -c '<script>'` and are tested to contain no
+  `'` or `\`. Untrusted values (session names, pane ids) are only ever separate arguments.
 - `ExecOutput { status: Option<u32>, stdout: Vec<u8>, stderr: Vec<u8> }`; output is capped at
   1 MiB per stream (excess fails with `RemoteError::OutputTooLarge`); each exec has a 10 s
   timeout (`RemoteError::TimedOut`).
-- `RemoteError`: `Closed`, `TimedOut`, `OutputTooLarge`, `Rejected(String)` (channel refused,
+- `RemoteError`: `Closed`, `TimedOut`, `OutputTooLarge`, `Unquotable`, `Rejected(String)` (channel refused,
   e.g. streamlocal forwarding disabled), `Io(String)`.
 - `LocalHost` (feature `test-support`, used by integration tests) implements `RemoteHost` with
   local processes and `UnixStream`. Production code never uses it.
@@ -326,7 +329,7 @@ budget, concurrent read/write. Closing a session closes only its channel.
 | `Herdr { session, pane_id }` | if `pane_id`: `herdr::focus_pane` first; then `<herdr>` (default session) or `<herdr> --session <name>` |
 
 Names are validated before anything runs (`InvalidName`): tmux names nonempty, at most 128
-bytes, no control characters, no `:` or `.`; herdr session names `[A-Za-z0-9_-]{1,64}`; pane
+bytes, no control characters, `\\`, `:` or `.`; herdr session names `[A-Za-z0-9_-]{1,64}`; pane
 ids `[A-Za-z0-9:_-]{1,128}`. A missing program fails with `NotInstalled { program }`.
 
 ### tmux
