@@ -158,7 +158,7 @@ The phone only believes an answer that proves the host knows the one-time code. 
 that when the code is old (an earlier run, a screenshot, a restart of `or2-pair`), when it is for
 another host, or when something else answered. Run `or2-pair` again and scan the new code; the
 phone's code is not used up, and `or2-pair` stays open and counts the refused connection. An
-older `or2-pair` or app (pairing protocol 1, before this check) is refused the same way: update both.
+older `or2-pair` or app (pairing protocol 1 or 2; the current one is 3) is refused the same way: update both.
 
 ### The host has no ED25519 key
 
