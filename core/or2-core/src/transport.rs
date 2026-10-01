@@ -1,16 +1,24 @@
-//! Network paths. SSH (and later mosh) reach hosts only through [`Transport`].
+//! Network paths. SSH reaches hosts only through [`Transport`] and mosh only through
+//! [`DatagramTransport`].
 //!
 //! A transport turns an [`Endpoint`] into a byte stream. Its `Stream` bound is exactly the bound
 //! `russh::client::connect_stream` requires, so any transport can carry an SSH connection.
-//! M1 has one implementation, [`DirectTcp`]. Address racing (M2), jump hosts and UDP for mosh
-//! (M3) are added as further implementations or methods when those milestones need them.
+//! [`DirectTcp`] is the one stream implementation so far. Address racing, jump hosts and the
+//! Android network binding are added as further implementations or methods when those
+//! milestones need them.
+//!
+//! mosh needs datagrams, and needs to open a new socket to the same endpoint whenever the
+//! network changes (that is its roaming), so a [`DatagramTransport`] opens one socket per
+//! `bind` and the mosh code never creates a socket itself. [`DirectUdp`] uses OS sockets.
 
 use std::future::Future;
 use std::io;
+use std::net::SocketAddr;
 use std::num::NonZeroU16;
+use std::task::{Context, Poll};
 
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpStream, UdpSocket};
 
 /// A validated host name or IP literal and a nonzero TCP port.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,9 +84,133 @@ impl Transport for DirectTcp {
     }
 }
 
+/// A datagram socket connected to one peer: it sends only to that peer and delivers only what
+/// that peer sent. Implementations never block.
+pub trait DatagramSocket: Send + Sync + 'static {
+    /// The local address datagrams leave from. Roaming shows up here as a changed port.
+    fn local_addr(&self) -> io::Result<SocketAddr>;
+
+    /// The peer's address; its family sizes the datagrams.
+    fn peer_addr(&self) -> io::Result<SocketAddr>;
+
+    /// Sends one datagram without waiting. A full socket buffer drops it, as the network may:
+    /// the caller sees `WouldBlock` and carries on, since mosh resends state, not packets.
+    fn try_send(&self, datagram: &[u8]) -> io::Result<usize>;
+
+    /// Polls for the next datagram, returning its length. Cancel-safe: dropping the future that
+    /// polls it loses nothing.
+    fn poll_recv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>>;
+}
+
+/// Opens datagram sockets to endpoints. Each `bind` returns a fresh socket from a fresh local
+/// port (or, on Android, a socket bound to whichever network is current), which is how a mosh
+/// session roams: the old socket keeps receiving whatever is still in flight to it while the
+/// new one carries what is sent from now on.
+pub trait DatagramTransport: Send + Sync + 'static {
+    type Socket: DatagramSocket;
+
+    /// Resolves `endpoint` and opens a socket connected to it. Dropping the returned future
+    /// cancels the attempt; callers apply their own timeout.
+    fn bind(&self, endpoint: &Endpoint) -> impl Future<Output = io::Result<Self::Socket>> + Send;
+}
+
+/// OS UDP sockets: LAN, or a VPN app such as ZeroTier that routes through the OS. Resolves the
+/// host and uses its first address, as mosh does.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DirectUdp;
+
+impl DatagramSocket for UdpSocket {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        UdpSocket::local_addr(self)
+    }
+
+    fn peer_addr(&self) -> io::Result<SocketAddr> {
+        UdpSocket::peer_addr(self)
+    }
+
+    fn try_send(&self, datagram: &[u8]) -> io::Result<usize> {
+        UdpSocket::try_send(self, datagram)
+    }
+
+    fn poll_recv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+        let mut read = ReadBuf::new(buf);
+        UdpSocket::poll_recv(self, cx, &mut read).map_ok(|()| read.filled().len())
+    }
+}
+
+impl DatagramTransport for DirectUdp {
+    type Socket = UdpSocket;
+
+    async fn bind(&self, endpoint: &Endpoint) -> io::Result<UdpSocket> {
+        let peer = tokio::net::lookup_host((endpoint.host(), endpoint.port()))
+            .await?
+            .next()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "host resolved to no addresses")
+            })?;
+        let local = if peer.is_ipv6() {
+            "[::]:0"
+        } else {
+            "0.0.0.0:0"
+        };
+        let socket = UdpSocket::bind(local).await?;
+        socket.connect(peer).await?;
+        // `try_send` only attempts the send once the reactor has reported the socket writable;
+        // wait for that here so the first datagram is not refused as `WouldBlock`.
+        socket.writable().await?;
+        Ok(socket)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn direct_udp_sockets_exchange_datagrams_with_their_peer_only() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = server.local_addr().unwrap().port();
+        let endpoint = Endpoint::new("127.0.0.1", port).unwrap();
+
+        let socket = DirectUdp.bind(&endpoint).await.unwrap();
+        assert_eq!(
+            DatagramSocket::peer_addr(&socket).unwrap(),
+            server.local_addr().unwrap()
+        );
+        DatagramSocket::try_send(&socket, b"ping").unwrap();
+        let mut buf = [0u8; 16];
+        let (n, from) = server.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"ping");
+        assert_eq!(from, DatagramSocket::local_addr(&socket).unwrap());
+
+        // A stranger's datagram never reaches a connected socket; the peer's does.
+        let stranger = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        stranger.send_to(b"nope", from).await.unwrap();
+        server.send_to(b"pong", from).await.unwrap();
+        let mut buf = [0u8; 16];
+        let n = std::future::poll_fn(|cx| DatagramSocket::poll_recv(&socket, cx, &mut buf))
+            .await
+            .unwrap();
+        assert_eq!(&buf[..n], b"pong");
+    }
+
+    #[tokio::test]
+    async fn every_bind_uses_a_fresh_local_port() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Endpoint::new("127.0.0.1", server.local_addr().unwrap().port()).unwrap();
+        let first = DirectUdp.bind(&endpoint).await.unwrap();
+        let second = DirectUdp.bind(&endpoint).await.unwrap();
+        assert_ne!(
+            DatagramSocket::local_addr(&first).unwrap().port(),
+            DatagramSocket::local_addr(&second).unwrap().port()
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_udp_reports_an_unresolvable_host_as_an_error() {
+        let endpoint = Endpoint::new("host.invalid", 9).unwrap();
+        assert!(DirectUdp.bind(&endpoint).await.is_err());
+    }
 
     #[test]
     fn endpoint_accepts_names_and_ip_literals() {
