@@ -239,27 +239,36 @@ async fn channel_task(
             None => Ok(()),
         }
     };
-    // The open's result is kept outside the join: a stop that drops the join while the focus is
-    // still pending must still close a channel that was accepted meanwhile (a raw channel does
-    // not close itself when dropped, and a leaked one counts against the server's `MaxSessions`).
-    let mut opening = None;
-    let open_step = async {
-        opening = Some(timeout(limit, host.open_channel()).await);
-    };
+    // The open is driven outside the join and its result kept outside it too: a stop that drops
+    // the join while the focus or the open is still pending must still close a channel that is
+    // accepted meanwhile (a raw channel does not close itself when dropped, and a leaked one
+    // counts against the server's `MaxSessions`).
+    let opening = std::sync::Mutex::new(None);
+    let mut open_step = std::pin::pin!(async {
+        let opened = timeout(limit, host.open_channel()).await;
+        *opening.lock().unwrap() = Some(opened);
+    });
     let joined = tokio::select! {
-        (focused, ()) = async { tokio::join!(focus_step, open_step) } => Some(focused),
+        (focused, ()) = async { tokio::join!(focus_step, &mut open_step) } => Some(focused),
         () = stopped(stop.clone()) => None,
     };
-    let opened = opening.take();
     let focused = match joined {
         Some(focused) => focused,
         None => {
-            if let Some(Ok(Ok(channel))) = opened {
+            // The server may have accepted the channel with the confirmation still in flight to
+            // us: dropping the open now would leave that channel open on the server. Let it
+            // finish for a moment, then close what it produced.
+            if opening.lock().unwrap().is_none() {
+                let _ = timeout(CHANNEL_CLOSE_GRACE, open_step.as_mut()).await;
+            }
+            let accepted = opening.lock().unwrap().take();
+            if let Some(Ok(Ok(channel))) = accepted {
                 let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
             }
             return CloseReason::Disconnected;
         }
     };
+    let opened = opening.lock().unwrap().take();
     let mut channel = match opened {
         Some(Ok(Ok(channel))) => channel,
         Some(Ok(Err(error))) => return CloseReason::Failed(open_failure(error)),
