@@ -73,6 +73,17 @@ cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets --all-fea
 android/gradlew -p android :app:assembleDebug :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:lintDebug
 ```
 
+`core/or2-pair` (the Easy pair host CLI, a workspace crate that does not depend on `or2-core` at run
+time) has unit tests next to the code and `tests/e2e.rs`: the whole CLI flow in a thread against the
+`or2-core` client over loopback, in a temporary home and a temporary `/etc/ssh` with made-up interfaces
+(nothing of the user's `~/.ssh`, sshd, tmux or herdr is read; its sshd probe asks a port nobody listens on).
+The confirmation is a test double (`Auto`) that only exists in the tests; the shipped binary has no such
+flag. An independent QR decoder (`rqrr`, dev-only) reads the drawn code back. `cargo build -p or2-pair
+--release` builds the tool for the host (`target/release/or2-pair`); `cargo install --path core/or2-pair
+--locked` installs it, and `packaging/homebrew/or2-pair.rb` builds it from source for Homebrew. The
+`or2-pair-testhost` binary (feature `test-support`, so never part of an install) is the same flow with an
+automatic yes, for the Kotlin end-to-end test below.
+
 Rust integration tests (`core/or2-core/tests/`): `host.rs` runs host connections against a
 disposable loopback `sshd` (trust, address racing, probe, exec caps and timeout, streamlocal (missing socket, forbidden
 forwarding), shell/tmux/herdr terminals, RSA keys and key input, certificate-only hosts,
@@ -127,7 +138,11 @@ signal are errors. It needs only `sh`, `ps` and `sleep`.
 
 Gradle builds the host library, generates Kotlin under `app/build/generated/uniffi/kotlin`,
 and cross-builds the release Rust library into `app/build/generated/uniffi/jniLibs/arm64-v8a`.
-The app has minSdk 34, compile/targetSdk 36, and no Google Play Services/FCM dependencies.
+The app has minSdk 34, compile/targetSdk 36, and no Google Play Services/FCM dependencies. Easy pair adds
+CameraX 1.5.3 (`camera-core`, `camera-camera2`, `camera-lifecycle`, `camera-view`; Apache-2.0) and ZXing core 3.5.4
+(Apache-2.0); the lockfile has no `gms`, `firebase` or `play-services` entries (check it with `grep -i` after
+changing dependencies), and `CAMERA` is declared with `uses-feature ... required=false` so a device without a
+camera can still paste a code.
 The Gradle wrapper verifies its distribution checksum. `core/Cargo.lock` and
 `android/app/gradle.lockfile` pin dependency graphs; Gradle locking is strict.
 Only update locks intentionally, using `--write-locks` when changing dependencies.
@@ -184,6 +199,15 @@ Tests that wait on those callbacks wait for the specific thing (a frame whose ro
 recovered link health) with a bounded timeout, never for a fixed sleep or for `frameReady.first()`,
 which replays its last signal; `linkHealth` is a StateFlow that conflates, so only the lossless
 listener in `HostContractTest` asserts the whole health sequence.
+Easy pair (`pair/`): `PairFlowTest` (scan, review, key choice, submit, save-before-connect, failure and retry,
+the wipe of the code) on fakes with the real native parser, `QrDecoderTest` (ZXing's writer into the camera
+decoder: row stride, light-on-dark, rotated, noisy, 1 KB), `PairMessagesTest`, `HostRecordsTest` (the
+host-with-trust transaction), and `PairEndToEndTest`: Gradle builds `or2-pair-testhost` first
+(`buildPairTesthost`, passed to the tests as `or2.pair.testhost`), the test starts it on loopback in a
+temporary home, pairs through the flow with the real native exchange, copies what the CLI wrote into the
+fixture sshd's `AuthorizedKeysFile` (sshd reads its own file, not `~/.ssh`) and connects with the paired host
+key trusted: `Connected` with no prompt. It needs `sshd` (`OR2_REQUIRE_SSHD`). `PairUiDeviceTest` renders the
+sheet and the screens from fabricated state; the camera itself needs the phone.
 `HostConnectionsNativeTest` (the holder over the production connector: first-use trust persisted
 before approval, trusted reconnect, changed-key reject, retained closed handles, and a mosh terminal that
 survives an SSH loss and a reconnect and then still answers, until an explicit disconnect or "Disconnect
@@ -238,7 +262,9 @@ screens; `am start -n io.github.code_akram.or2/.gallery.UiGalleryActivity --es s
 opens one directly. Names: `home`, `home-empty`, `host-cards` (unlocking, checking,
 authenticating, connected with a blocked agent, failed, idle), `inbox`, `inbox-empty`,
 `picker-herdr`, `picker-tmux`, `picker-recent`, `host-form`, `host-form-edit`, `keys`,
-`keys-empty`, `hostkey-first`, `hostkey-changed`, `terminal`, `terminal-arrowpad`,
+`keys-empty`, `hostkey-first`, `hostkey-changed`, `add-host` (the two-card sheet), `pair-scan`,
+`pair-scan-denied`, `pair-review`, `pair-review-new` (with a failure), `pair-progress`, `pair-install`
+(Easy pair; the camera preview itself is not in the gallery), `terminal`, `terminal-arrowpad`,
 `terminal-composer` (opens with a message typed and the keyboard up, to show the caret and the
 lit send button). The terminal screens run the native contract probe and replace its first
 frame with a Catppuccin demo session (`gallery/DemoFrames.kt`). Use it to screenshot the phone
@@ -306,6 +332,11 @@ resize and remount snapshots; `TerminalVisualDeviceTest` captures renderer fixtu
 frame timings.
 
 Manual phone checks still required:
+- Easy pair: run `or2-pair` on a host, Add host, Easy pair with QR; the camera permission dialog appears
+  once, the preview reads the QR off the monitor (light and dark terminals), a pasted code works, a denied
+  camera leaves the paste field; the review shows the host key fingerprint the host printed; Pair and add host
+  shows "Confirm on the host" with the phone key's fingerprint; answering `y` saves the host and connects with
+  no first-use prompt; `n` leaves nothing saved; `--no-listen` shows the key line to install.
 - Upgrade: install the M1 build, add a key and a host, trust its key, then install the M2 build
   over it. The host, key and trusted key must all survive (the key must still unlock), and the
   host must reconnect without a new host-key prompt.

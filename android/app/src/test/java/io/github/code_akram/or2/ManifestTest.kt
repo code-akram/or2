@@ -22,7 +22,7 @@ class ManifestTest {
         val declared = permissions.toSet()
         for (name in listOf(
             "FOREGROUND_SERVICE", "FOREGROUND_SERVICE_SPECIAL_USE", "POST_NOTIFICATIONS", "ACCESS_NETWORK_STATE",
-            "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS", "INTERNET", "USE_BIOMETRIC",
+            "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS", "INTERNET", "USE_BIOMETRIC", "CAMERA",
         )) {
             assertTrue("android.permission.$name is missing", "android.permission.$name" in declared)
         }
@@ -31,7 +31,17 @@ class ManifestTest {
     @Test
     fun noPermissionIsDeclaredTwiceAndNothingBeyondTheKnownListIsAsked() {
         assertEquals(permissions.toSet().size, permissions.size)
-        assertEquals(7, permissions.size) // A new permission is a decision: update this list and the docs.
+        assertEquals(8, permissions.size) // A new permission is a decision: update this list and the docs.
+    }
+
+    @Test
+    fun theCameraIsOptionalHardwareSoPastingStillWorksWithoutOne() {
+        // CAMERA is for Easy pair's scanner only; a device without a camera (or one that denies it) can paste the code.
+        for (feature in listOf("android.hardware.camera", "android.hardware.camera.autofocus")) {
+            val tag = Regex("<uses-feature android:name=\"${Regex.escape(feature)}\"[^>]*/>").find(manifest)?.value
+            assertTrue("$feature must be declared", tag != null)
+            assertTrue("$feature must not be required", tag!!.contains("android:required=\"false\""))
+        }
     }
 
     @Test

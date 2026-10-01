@@ -55,7 +55,8 @@ On the phone, over mobile data:
 or2/
 ├── core/                 Cargo workspace
 │   ├── or2-core/         transport · ssh · mosh · term · tmux · herdr
-│   └── or2-ffi/          uniffi surface, the only API Kotlin sees
+│   ├── or2-ffi/          uniffi surface, the only API Kotlin sees
+│   └── or2-pair/         host CLI for Easy pair (QR + one-shot key exchange); depends on nothing in the app
 ├── android/app/          Jetpack Compose UI
 ├── spikes/               M0 throwaway prototypes, not part of the workspace
 └── docs/
@@ -434,10 +435,18 @@ unplugged (Doze) background runs.
 
 ### Easy pair checklist
 
-- [ ] `or2-pair` CLI (macOS/Linux/Windows): checks, address gathering, terminal QR, one-shot
-  HMAC-authenticated key listener with on-host confirmation ([contracts](contracts.md#easy-pair-qr-onboarding)).
-- [ ] Phone: scan or paste, Rust parser and exchange, review screen, pinned host key, connect.
-- [ ] Docs: a "Pair a host" guide (one command + scan) and the manual setup guide.
+- [x] `or2-pair` CLI (macOS/Linux/Windows): checks, address gathering, terminal QR, one-shot
+  HMAC-authenticated key listener with on-host confirmation ([contracts](contracts.md#easy-pair-qr-onboarding),
+  [implementation](contracts.md#easy-pair-implementation-and-decisions-ffi-api-12)). Ticked on its unit tests and
+  the loopback end-to-end suite in a temporary home (Linux); a macOS or Windows host has not been run.
+- [x] Phone: scan or paste, Rust parser and exchange (FFI API 12), review screen, pinned host key, connect.
+  Ticked on the Rust and JVM tests (fakes, and the real native exchange against the CLI listener followed by a
+  real connect with the host key trusted) and the compile-checked device tests; the camera, its permission
+  dialog and a QR read off a real monitor are phone-only and unobserved.
+- [x] Docs: a ["Pair a host"](pairing.md) guide (one command + scan, troubleshooting, a Homebrew formula
+  built from source) and the [manual setup guide](manual-setup.md).
+- [ ] Phone acceptance of Easy pair: scan a real `or2-pair` code over Wi-Fi and over ZeroTier, with the
+  permission dialog, then connect.
 
 ## Decisions
 

@@ -86,6 +86,29 @@ class HostRecordsTest {
         assertThrows(IllegalStateException::class.java) { runBlocking { dao.saveHost(stale, stale) } }
     }
 
+    // --- Easy pair: a host and its trusted key in one step ---------------------------------------
+
+    @Test
+    fun aPairedHostIsStoredWithItsAddressesAndTrustedKeyAndIsNeverGivenAnIdByTheCaller() = runBlocking<Unit> {
+        val dao = FakeDao()
+        val id = dao.saveHostWithTrust(testHost(id = 99, addresses = twoAddresses), first)
+        assertEquals(1L, id) // The caller's id is ignored: a new row.
+        val stored = dao.host(id)!!
+        assertEquals(twoAddresses, stored.addresses)
+        assertEquals(listOf(first.openssh), dao.trustedKeys(id))
+        assertEquals("algorithm-a", dao.trust.single().algorithm)
+        // The first connection's trust check finds the key: nothing to prompt about.
+        assertEquals(1, dao.hosts().first().size)
+    }
+
+    @Test
+    fun aPairedHostStillNeedsAValidAddressList() = runBlocking<Unit> {
+        val dao = FakeDao()
+        assertThrows(IllegalArgumentException::class.java) { runBlocking { dao.saveHostWithTrust(testHost(id = 0, addresses = emptyList()), first) } }
+        assertTrue(dao.hosts().first().isEmpty())
+        assertTrue(dao.trust.isEmpty())
+    }
+
     // --- the follow-up: `sleeps` and the mosh failure memory ------------------------------------
 
     private val until = 1_800_086_400_000L

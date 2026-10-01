@@ -1,0 +1,43 @@
+[package]
+name = "or2-pair"
+description = "Pair a phone with this host: one command, one QR scan (or2 Easy pair)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "or2-pair"
+path = "src/main.rs"
+
+# A test-only host with an automatic "yes" for the Kotlin end-to-end test. Never built by
+# `cargo install` or a plain `cargo build`: it needs the feature.
+[[bin]]
+name = "or2-pair-testhost"
+path = "src/bin/or2-pair-testhost.rs"
+required-features = ["test-support"]
+
+[features]
+test-support = []
+
+[dependencies]
+base64.workspace = true
+data-encoding.workspace = true
+hmac.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+gethostname = "=1.1.0"
+if-addrs = "=0.15.0"
+qrcode = { version = "=0.14.1", default-features = false }
+
+# The account database and no-follow file operations (Unix only).
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
+
+[dev-dependencies]
+or2-core = { workspace = true }
+rqrr = { version = "=0.11.0", default-features = false }
+tempfile = "=3.27.0"
+tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }

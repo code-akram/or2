@@ -14,6 +14,9 @@ sealed interface Destination {
     data class HostForm(val hostId: Long) : Destination
     data class Terminal(val terminalId: Long) : Destination
 
+    /** Easy pair: scan or paste, review, send the key. Its state lives in the pairing flow, not here. */
+    data object EasyPair : Destination
+
     fun encode(): String = when (this) {
         Home -> "home"
         Inbox -> "inbox"
@@ -21,6 +24,7 @@ sealed interface Destination {
         is HostPage -> "host:$hostId"
         is HostForm -> "hostform:$hostId"
         is Terminal -> "terminal:$terminalId"
+        EasyPair -> "pair"
     }
 
     companion object {
@@ -28,6 +32,7 @@ sealed interface Destination {
             text == "home" || text == "hosts" -> Home // "hosts" is the M2 tab this screen replaced.
             text == "inbox" -> Inbox
             text == "keys" -> Keys
+            text == "pair" -> EasyPair
             text.startsWith("hostform:") -> text.removePrefix("hostform:").toLongOrNull()?.let(::HostForm)
             text.startsWith("host:") -> text.removePrefix("host:").toLongOrNull()?.let(::HostPage)
             text.startsWith("terminal:") -> text.removePrefix("terminal:").toLongOrNull()?.let(::Terminal)

@@ -129,6 +129,19 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   not Material's 24 dp padding and 280 dp minimum width. The host-key dialogs use it too.
 - **Inbox host rows:** the connect action (`Retry`, `Unlock`) is a chip-scale pill (28 dp, 12 sp), so it does not
   crowd the status text; herdr's note is mono 10.5 on the 16 sp line grid.
+- **Add host sheet:** Home's FAB (and the empty-state card and the inbox's add) opens a bottom sheet with a
+  handle and no title, holding two `ActionCard`s like Moshi's: `FASTEST` / **Easy pair with QR** (QR icon tile,
+  "Recommended · ~1 min") and `SSH-FLUENT` / **Set up manually** (server icon, "~3 min · needs hostname + key").
+  Compact scale throughout; the manual card opens the unchanged form.
+- **Easy pair screens:** a pushed screen with a light 16 sp title. The scan screen has a square camera card
+  (24 dp radius, `crust`) that holds the preview or, without the permission, the explanation and an
+  **Allow camera** pill; below it a pill **Paste pairing code** that swaps the camera for a mono field and a
+  full-width **Continue**; refusals are one `danger` line under the card. The review is a form: name and user
+  fields, the addresses as numbered mono rows in a grouped card, the host key's fingerprint in a `MonoBlock`
+  with one muted sentence, a radio group of keys (existing keys with their short fingerprints, then **New key**),
+  a `danger` line for the last failure and the full-width **Pair and add host** pill with a muted footnote.
+  Progress is a centred 32 dp spinner, a 20 sp **Confirm on the host**, the phone key's full fingerprint in a
+  `MonoBlock` and a **Cancel** pill; nothing modal.
 - **Segmented control:** 32 dp `surfaceTrack` pill, selected segment `surface` with `text`, others
   `textMuted`.
 - **Toggle:** `accent` track with a `text` knob when on (a `background` knob read as a hole); `surfaceTrack` with a muted knob when off.
