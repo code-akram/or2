@@ -82,8 +82,8 @@ class TerminalChromeState(padOpen: Boolean = false, composerOpen: Boolean = fals
 }
 
 /**
- * One key of the floating toolbar: a 48 dp rounded square in `surface` holding mono text or an
- * outline icon. [framed] false draws the bare icon (the composer and keyboard toggles). A latched
+ * One key of the floating toolbar: a 30 dp tall rounded pill in `surface` (in a 40 dp touch box)
+ * holding mono text or an outline icon. [framed] false draws the bare icon (the composer and keyboard toggles). A latched
  * modifier ([latched]) draws in `accent`.
  */
 @OptIn(ExperimentalFoundationApi::class)
@@ -94,7 +94,7 @@ fun ToolKey(
     onLongClick: (() -> Unit)? = null, compact: Boolean = false,
 ) {
     val on = latched == true || active
-    // The touch target is larger than the key drawn in it: 2 dp more on each side.
+    // The touch target is larger than the key drawn in it: 5 dp more above and below, 2 dp at the sides.
     Box(
         modifier.heightIn(min = if (compact) Or2Dimens.PadExtrasHeight else Or2Dimens.KeyTouch).widthIn(min = Or2Dimens.KeyWidth + 4.dp)
             .combinedClickable(role = Role.Button, onClick = onClick, onLongClick = onLongClick)
@@ -151,8 +151,8 @@ fun KeyToolbar(
     val haptics = LocalHapticFeedback.current
     fun tracked(label: String) = Modifier.testTag("key:$label").onGloballyPositioned { onKeyPositioned(label, it) }
     Row(
-        modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp).clip(Or2Shapes.Pill)
-            .background(Or2Colors.ToolbarPill).padding(horizontal = 6.dp, vertical = 4.dp),
+        modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp).clip(Or2Shapes.Pill)
+            .background(Or2Colors.ToolbarPill).padding(horizontal = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(
@@ -172,7 +172,7 @@ fun KeyToolbar(
             ToolKey("History: page up, hold for the bottom", actions.history, tracked("History"), icon = Or2Icons.History,
                 onLongClick = actions.jumpToBottom)
         }
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(4.dp))
         ToolKey("Composer", actions.toggleComposer, tracked("Composer"), icon = Or2Icons.Chat, framed = false, active = state.composerOpen)
         ToolKey("Keyboard", actions.toggleKeyboard, tracked("Keyboard"), icon = Or2Icons.Keyboard, framed = false)
     }
@@ -239,26 +239,26 @@ val ExtraKeys = NavigationKeys + SymbolKeys
 
 /**
  * The floating 3x3 cluster above the toolbar: Backspace, Up, Clear-line / Left, Enter, Right /
- * Down; 56 dp `surface` squares with 16 dp radius that auto-repeat on hold. A grab handle above
+ * Down; 40 dp `surface` squares with 12 dp radius that auto-repeat on hold. A grab handle above
  * collapses it, and a scrolling row below keeps the navigation and symbol keys one tap away.
  */
 @Composable
 fun ArrowPad(actions: PadActions, alt: Boolean, toggleAlt: () -> Unit, collapse: () -> Unit, modifier: Modifier = Modifier) {
     val haptics = LocalHapticFeedback.current
-    Column(modifier.testTag("arrow-pad"), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(modifier.testTag("arrow-pad"), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(Or2Dimens.PadGap)) {
         Box(
-            Modifier.heightIn(min = Or2Dimens.PadHandleTouch).widthIn(min = 72.dp).clickable(role = Role.Button, onClickLabel = "Collapse arrow pad", onClick = collapse)
+            Modifier.heightIn(min = Or2Dimens.PadHandleTouch).widthIn(min = 64.dp).clickable(role = Role.Button, onClickLabel = "Collapse arrow pad", onClick = collapse)
                 .semantics { contentDescription = "Collapse arrow pad" },
             contentAlignment = Alignment.Center,
         ) {
             Box(Modifier.size(width = Or2Dimens.TerminalHandleWidth, height = Or2Dimens.SheetHandleHeight).clip(Or2Shapes.Pill).background(Or2Colors.Subtle))
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(Or2Dimens.PadGap)) {
             RepeatKey("Backspace", actions.backspace, Modifier.testTag("pad:Backspace"), icon = Or2Icons.Backspace)
             RepeatKey("Up", actions.up, Modifier.testTag("pad:Up"), icon = Or2Icons.ArrowUp)
             RepeatKey("Clear line", actions.clearLine, Modifier.testTag("pad:Clear"), icon = Or2Icons.Eraser)
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(Or2Dimens.PadGap)) {
             RepeatKey("Left", actions.left, Modifier.testTag("pad:Left"), icon = Or2Icons.ArrowLeft)
             RepeatKey("Enter", actions.enter, Modifier.testTag("pad:Enter"), icon = Or2Icons.Enter, container = Or2Colors.Background)
             RepeatKey("Right", actions.right, Modifier.testTag("pad:Right"), icon = Or2Icons.ArrowRight)
@@ -271,7 +271,7 @@ fun ArrowPad(actions: PadActions, alt: Boolean, toggleAlt: () -> Unit, collapse:
                 // An edge fade on each side that has more keys behind it: the row scrolls.
                 .drawWithContent {
                     drawContent()
-                    val fade = 28.dp.toPx()
+                    val fade = 20.dp.toPx()
                     if (scroll.canScrollForward) {
                         drawRect(
                             Brush.horizontalGradient(listOf(Color.Transparent, Or2Colors.Background), startX = size.width - fade, endX = size.width),
@@ -285,7 +285,7 @@ fun ArrowPad(actions: PadActions, alt: Boolean, toggleAlt: () -> Unit, collapse:
                         )
                     }
                 }
-                .horizontalScroll(scroll).padding(horizontal = 8.dp).testTag("pad-extras"),
+                .horizontalScroll(scroll).padding(horizontal = 6.dp).testTag("pad-extras"),
             horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically,
         ) {
             ToolKey("Alt", { haptics.tick(!alt); toggleAlt() }, Modifier.testTag("key:Alt"), label = "Alt", latched = alt, framed = false, compact = true)
@@ -304,7 +304,7 @@ fun ArrowPad(actions: PadActions, alt: Boolean, toggleAlt: () -> Unit, collapse:
 // --- composer --------------------------------------------------------------------------------
 
 /**
- * The chat input: a rounded 24 dp card in `crust` (darker than the toolbar around it) docked above
+ * The chat input: a rounded 20 dp card in `crust` (darker than the toolbar around it) docked above
  * the IME with a mono placeholder, icon actions (paste, sessions, close) and a circular send button,
  * `surfaceTrack` until there is text, then `accent`. Sending writes the text plus Enter to the
  * session; this is the quick-reply path for a blocked agent. The text is the caller's ([text]), so
@@ -321,21 +321,21 @@ fun Composer(
     val haptics = LocalHapticFeedback.current
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
     Column(
-        modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp).clip(Or2Shapes.Composer)
-            .background(Or2Colors.Crust).padding(start = 20.dp, end = 8.dp, top = 16.dp, bottom = 4.dp).testTag("composer"),
+        modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 6.dp).clip(Or2Shapes.Composer)
+            .background(Or2Colors.Crust).padding(start = 14.dp, end = 4.dp, top = 10.dp, bottom = 2.dp).testTag("composer"),
     ) {
         BasicTextField(
             text, onTextChange, Modifier.fillMaxWidth().focusRequester(focusRequester).testTag("composer-input"),
-            textStyle = Or2Type.Mono.copy(color = Or2Colors.Text), cursorBrush = SolidColor(Or2Colors.Accent),
+            textStyle = Or2Type.Composer.copy(color = Or2Colors.Text), cursorBrush = SolidColor(Or2Colors.Accent),
             minLines = 1, maxLines = 5, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
             decorationBox = { inner ->
                 Box {
-                    if (text.isEmpty()) Text(placeholder, style = Or2Type.Mono, color = Or2Colors.TextMuted, maxLines = 1)
+                    if (text.isEmpty()) Text(placeholder, style = Or2Type.Composer, color = Or2Colors.TextMuted, maxLines = 1)
                     inner()
                 }
             },
         )
-        Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(0.dp)) {
                 ComposerAction(Or2Icons.Paste, "Paste into message", "composer-paste") { onTextChange(text + paste()) }
                 ComposerAction(Or2Icons.Sidebar, "Panes and sessions", "composer-panes", panes)
@@ -343,7 +343,7 @@ fun Composer(
             }
             val ready = text.isNotBlank() && canSend
             Box(
-                Modifier.size(Or2Dimens.ComposerAction).padding(2.dp).clip(Or2Shapes.Circle)
+                Modifier.size(Or2Dimens.ComposerTouch).padding((Or2Dimens.ComposerTouch - Or2Dimens.ComposerAction) / 2).clip(Or2Shapes.Circle)
                     .background(if (ready) Or2Colors.Accent else Or2Colors.SurfaceTrack)
                     .clickable(enabled = ready, role = Role.Button) {
                         haptics.performHapticFeedback(HapticFeedbackType.Confirm)
@@ -362,7 +362,7 @@ fun Composer(
 @Composable
 private fun ComposerAction(icon: ImageVector, description: String, tag: String, onClick: () -> Unit) {
     Box(
-        Modifier.size(Or2Dimens.ComposerAction).clip(Or2Shapes.Circle).clickable(role = Role.Button, onClick = onClick)
+        Modifier.size(Or2Dimens.ComposerTouch).clip(Or2Shapes.Circle).clickable(role = Role.Button, onClick = onClick)
             .semantics { contentDescription = description }.testTag(tag),
         contentAlignment = Alignment.Center,
     ) {

@@ -50,13 +50,13 @@ fun HostTrustDialog(
         },
         dismiss = { TextAction("Reject", reject, color = Or2Colors.Text, enabled = !busy, modifier = Modifier.testTag("hostkey-reject")) },
     ) {
-        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             hostLabel?.let { Text("Host: $it", style = Or2Type.Body, color = Or2Colors.Text) }
             if (changed) {
                 Or2Card(color = Or2Colors.AttentionSurface, border = BorderStroke(1.dp, Or2Colors.Danger)) {
                     Text(
                         "This may be an impersonation attack. Do not continue unless you independently verified the new key. Approving replaces ALL previous trusted keys.",
-                        style = Or2Type.Body, color = Or2Colors.Danger, modifier = Modifier.padding(16.dp),
+                        style = Or2Type.Body, color = Or2Colors.Danger, modifier = Modifier.padding(12.dp),
                     )
                 }
             } else {

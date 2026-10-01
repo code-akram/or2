@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -139,15 +138,15 @@ fun TerminalCard(
                 onVerticalDrag = { change, amount -> change.consume(); dragY = (dragY + amount).coerceAtLeast(0f) },
             )
         }.testTag("terminal-header")) {
-            // The grab handle overlaps the top of the 48 dp header row, so the header costs no extra height.
+            // The grab handle overlaps the top of the 36 dp header row, so the header costs no extra height.
             Box(Modifier.fillMaxWidth()) {
                 Box(
-                    Modifier.align(Alignment.TopCenter).padding(top = 6.dp)
+                    Modifier.align(Alignment.TopCenter).padding(top = 4.dp)
                         .size(width = Or2Dimens.TerminalHandleWidth, height = Or2Dimens.SheetHandleHeight)
                         .clip(Or2Shapes.Pill).background(Or2Colors.Subtle),
                 )
                 Row(
-                    Modifier.fillMaxWidth().heightIn(min = Or2Dimens.HeaderButtonTouch).padding(horizontal = 4.dp),
+                    Modifier.fillMaxWidth().heightIn(min = Or2Dimens.HeaderRow).padding(horizontal = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     RoundHeaderButton(Or2Icons.Minimize, "Minimise to home", Or2Colors.Attention, minimise, Modifier.testTag("terminal-back"))
@@ -156,7 +155,7 @@ fun TerminalCard(
                         title, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, maxLines = 1,
                         overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(horizontal = 4.dp).testTag("terminal-title"),
                     )
-                    TransportBadge(transport, Modifier.padding(end = 12.dp), small = true)
+                    TransportBadge(transport, Modifier.padding(end = 10.dp), small = true)
                 }
             }
         }
@@ -174,9 +173,9 @@ fun TerminalCard(
 
 @Composable
 private fun RoundHeaderButton(icon: ImageVector, description: String, color: Color, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    // A small round disc (18 dp, Moshi's size) with a full 48 dp touch target around it.
+    // A small round disc (14 dp) in a 36 dp target; the platform grows the touch target to 48 dp.
     Box(
-        modifier.minimumInteractiveComponentSize().clip(Or2Shapes.Circle).clickable(role = Role.Button, onClick = onClick)
+        modifier.size(Or2Dimens.HeaderButtonTouch).clip(Or2Shapes.Circle).clickable(role = Role.Button, onClick = onClick)
             .semantics { contentDescription = description },
         contentAlignment = Alignment.Center,
     ) {
@@ -203,7 +202,7 @@ private fun PendingTerminal(
 ) {
     Column(Modifier.fillMaxSize()) {
         TopBar(title = terminal.host.label, back = minimise, backIcon = Or2Icons.ChevronDown)
-        Column(Modifier.padding(horizontal = Or2Dimens.Gutter), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.padding(horizontal = Or2Dimens.Gutter), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(terminal.title + " · " + sessionMessage(state), style = Or2Type.Mono, color = Or2Colors.TextMuted,
                 modifier = Modifier.testTag("terminal-status"))
             PillButton(if (closed) "Close session" else "Disconnect", endSession, Modifier.testTag("terminal-end"))
@@ -226,7 +225,7 @@ private fun SessionList(current: ActiveTerminal, open: List<ActiveTerminal>, sel
                 trailing = if (other === current) ({
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         StatusDot(Or2Colors.Accent)
-                        Spacer(Modifier.width(8.dp))
+                        Spacer(Modifier.width(6.dp))
                         Text("Current", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
                     }
                 }) else null,
@@ -242,7 +241,7 @@ private fun SessionSwitcher(
     endSession: () -> Unit, dismiss: () -> Unit,
 ) {
     Or2Sheet(dismiss, title = "Sessions") {
-        Column(Modifier.padding(horizontal = Or2Dimens.Gutter).padding(bottom = Or2Dimens.Gutter), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Column(Modifier.padding(horizontal = Or2Dimens.Gutter).padding(bottom = Or2Dimens.Gutter), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             SessionList(current, open, select)
             GroupCard {
                 ListRow(

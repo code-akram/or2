@@ -173,7 +173,7 @@ class EntryUiDeviceTest {
         compose.onNodeWithTag("terminal-title").assertIsDisplayed()
         compose.onNodeWithText("Fixture: shell").assertIsDisplayed()
         compose.onNodeWithText("SSH").assertIsDisplayed() // The transport badge.
-        // The header's round buttons are drawn small (18 dp) but are full 48 dp touch targets.
+        // The header's round buttons are drawn small (a 14 dp disc in a 36 dp box) but are full 48 dp touch targets.
         listOf("terminal-back", "terminal-panes").forEach {
             compose.onNodeWithTag(it).assertTouchTargetAtLeast(48)
         }
