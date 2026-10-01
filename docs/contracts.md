@@ -469,21 +469,166 @@ activity_unix: i64 }`, sorted by most recent activity.
 
 ## mosh core (`or2_core::mosh`, no FFI in M2)
 
-- Vendor the mosh-rs library (pinned `90b37125f5e4a598be91dec37d23921b6865276e`, GPL-3.0-or-later)
-  without its CLI front ends or the `vt100-screen` feature; record it in
-  `THIRD_PARTY_NOTICES.md` and keep upstream file headers.
-- UDP goes through a new `DatagramTransport` trait in `transport.rs` (`DirectUdp`). mosh code
-  never binds sockets itself. Roaming rebinds through the transport.
-- mosh-rs's `Screen` is implemented over or2's libghostty `TerminalEngine`, so terminal state
-  stays in libghostty and frames reach Kotlin exactly as for SSH. Local-echo prediction is off
-  in M2.
-- `mosh::bootstrap(host: &impl RemoteHost, caps, size, target)` runs
-  `LANG=<utf8> <mosh-server> new -s -c 256 -l LANG=<utf8> -- <target command>` and parses
-  `MOSH CONNECT <port> <key>`. The key is a secret: `Zeroizing`, redacted `Debug`, never
-  logged.
-- `mosh::start(params, host_name, observer) -> SessionHandle` drives the standard session
-  lifecycle (`Connecting → Connected → Closed`). M3 adds the FFI choice and network-health
-  reporting.
+Lane A3 landed. `core/or2-core/src/mosh/` holds the vendored library under `ssp/` (see
+`THIRD_PARTY_NOTICES.md`; each file's header names the pinned mosh-rs commit
+`90b37125f5e4a598be91dec37d23921b6865276e` and what or2 changed) and or2's own modules
+beside it: `bootstrap`, `ghostty`, `link`, `driver`.
+
+```text
+bootstrap ──▶ MoshParams ──▶ start / start_with ──▶ SessionHandle (+ LinkControl)
+                                     │
+                       driver thread (owns the terminal)
+                          │                 │
+                  ssp::Session         link ── DatagramTransport (DirectUdp)
+                  (no sockets, no I/O)
+                          │
+                  ClientTerminal<GhosttyScreen>
+```
+
+**Vendored, not carried.** The CLI front ends, the platform terminal code, the `vt100-screen`
+feature and the prediction engine (with its `vte` and `unicode-width` dependencies) are not
+vendored. Local-echo prediction is off in M2; M3 can vendor the engine from the same commit if
+wanted, though it needs `Screen` to read cells back. Dependencies added to the workspace,
+pinned exactly: `aes 0.8.4`, `ocb3 0.1.0`, `base64 0.22.1`, `prost 0.14.4` (derive),
+`flate2 1.1.10` (the version `Cargo.lock` already held; upstream's lock has 1.1.9), and `hex
+0.4.3` for tests. All are MIT and/or Apache-2.0. Pure Rust: no OpenSSL, no system library.
+
+**`DatagramTransport` (`transport.rs`).** The TCP `Transport` is untouched.
+
+```rust
+pub trait DatagramSocket: Send + Sync + 'static {   // connected to one peer
+    fn local_addr(&self) -> io::Result<SocketAddr>;
+    fn peer_addr(&self) -> io::Result<SocketAddr>;
+    fn try_send(&self, datagram: &[u8]) -> io::Result<usize>;       // never blocks
+    fn poll_recv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>>;
+}
+pub trait DatagramTransport: Send + Sync + 'static {
+    type Socket: DatagramSocket;
+    fn bind(&self, endpoint: &Endpoint) -> impl Future<Output = io::Result<Self::Socket>> + Send;
+}
+pub struct DirectUdp;   // OS UDP sockets, first resolved address, fresh local port per bind
+```
+
+mosh code never creates a socket. A socket is *connected*: it sends only to, and receives only
+from, the peer, which replaces mosh-rs's `from == server` check. `DirectUdp::bind` waits for
+the socket to be writable so the first `try_send` is not refused. Roaming is a second `bind`:
+the new socket carries everything sent from then on, up to ten older sockets keep being read
+(a reply to a datagram sent from an old port returns to that port), and they are dropped after
+the newest has worked for 60 s. A failed rebind leaves the link as it was and is retried after
+1 s. A datagram refused as too large (`EMSGSIZE`) drops the datagram size to 500 and stays
+there, as mosh does. The Android network binding in M3 is another `DatagramTransport`.
+
+**`Screen` over libghostty (`mosh/ghostty.rs`, `ssp/screen.rs`, `ssp/terminal.rs`).**
+Terminal state stays in libghostty: `GhosttyScreen` wraps a `TerminalEngine`, so frames,
+`encode_key` and `scroll` are exactly the SSH ones. Decisions:
+
+- mosh keeps a copy of every state the server may still diff from, and a diff is applied to
+  the state it names, not to the newest. libghostty terminals cannot be cloned, so `Screen` is
+  not `Clone`: it has `snapshot()` and `restore()` (fallible), implemented with libghostty's
+  terminal snapshot encoding (`TerminalEngine::{snapshot, from_snapshot, track_continuation}`,
+  additive changes to `terminal.rs`). A snapshot of an 80x24 screen is about 1.2 KB and takes
+  7 µs to encode, 100 µs for a full copy (release build on the dev machine); scrollback adds
+  to it.
+- `ClientTerminal` keeps the newest state as the one **live** screen and mutates it in place
+  (so frames stay deltas and scrollback is kept); the usual diff starts from exactly that
+  state, which is snapshotted first because the server may diff from it again if our
+  acknowledgement is lost. Older states are held as snapshots and restored only when the
+  server diffs from one (the live screen is then replaced and the next frame is full). A
+  snapshot is skipped for states below the instruction's `throwaway_num`.
+- Every `Bytes` event of a diff is fed in order (upstream fed only the last).
+- **Geometry belongs to the renderer.** `Session::resize` queues the resize for the server and
+  resizes the local screen at once, so frames keep the size Kotlin asked for (the Frames
+  contract); the server's own resize reports are returned as events and not applied. A diff
+  computed for the old shape that lands on the new one corrects itself with the server's next
+  diff, which repaints every cell after a size change.
+- Replies the local terminal would generate are discarded: the server's emulator already
+  answered the program's queries and its diffs contain no queries.
+- A copy that fails (out of memory) closes the session with `Failed { Internal }` rather than
+  panicking.
+
+**Sans-IO session (`ssp/session.rs`).** `Session` owns no sockets: `handle_datagram` takes one
+received datagram (`Fault::Dropped` for a forged or corrupt one, which is ordinary;
+`Fault::Screen` is fatal), `tick` returns the datagrams due and whether to rebind, and
+`wait_time_ms` says when to call it again. `Tick::rebind` is true after ten seconds with no
+completed round trip (mosh's rule) or when `request_rebind` was called.
+
+**`mosh::bootstrap`.**
+
+```rust
+pub async fn bootstrap(host: &impl RemoteHost, caps: &HostCapabilities, size: TerminalSize,
+                       target: &[String]) -> Result<MoshParams, BootstrapError>;
+```
+
+Runs `env 'LANG=<utf8>' '<mosh-server>' 'new' '-s' '-c' '256' '-l' 'LANG=<utf8>' ['--'
+<target…>]` through `host.exec` (the locale through `RemoteCommand.env`). `mosh-server` and
+the UTF-8 locale come from the capability probe; no `mosh_server` is `NotInstalled` and runs
+nothing. `target` is the argv to run in the session, empty for the user's login shell; lane A1
+builds the tmux or herdr argv. `size` is carried into `MoshParams`: `mosh-server` has no size
+option (it starts at 80x24 and learns the real size from the client's first datagram, which the
+driver sends). `MOSH CONNECT <port> <key>` is read from stdout and `[mosh-server detached, pid
+= N]` from either stream. `MoshParams { port, key: MoshKey, size, server_pid: Option<u32> }`:
+`MoshKey` is `Zeroizing`, validated as a canonical 128-bit key, has a redacted `Debug` and no
+`Display`; stdout is zeroized after parsing and is never quoted in an error. The vendored
+`Base64Key` also zeroizes its bytes and printable forms; the AES key schedule inside `ocb3`
+0.1 is not zeroized on drop (the crate has no such support).
+`BootstrapError`: `NotInstalled`, `Remote(RemoteError)`, `Failed { status, detail }` (detail is
+a 400-byte excerpt of stderr, for example the missing-UTF-8-locale message), `NoConnectLine`,
+`InvalidPort`, `InvalidKey`; `into_failure()` maps them to `SessionFailure` (`NotInstalled`,
+`TimedOut`, `ConnectionLost`, otherwise `CommandFailed`).
+
+`-s` makes `mosh-server` bind to the server address in the exec channel's `SSH_CONNECTION`
+(wildcard with a warning when it is absent). The UDP host given to `start` must therefore be
+the address the SSH connection reached: with address racing, the winning address, not another
+name for the host.
+
+**`mosh::start`.**
+
+```rust
+pub fn start(params: MoshParams, host_name: &str, observer: Arc<dyn SessionObserver>)
+    -> Result<SessionHandle, EndpointError>;
+pub fn start_with<T: DatagramTransport>(transport: T, params: MoshParams, host_name: &str,
+    observer: Arc<dyn SessionObserver>, health: Option<Arc<dyn HealthObserver>>)
+    -> Result<(SessionHandle, LinkControl), EndpointError>;
+```
+
+`host_name` plus `params.port` is the endpoint; an invalid one fails synchronously. The
+dedicated `or2-mosh` thread owns the `TerminalEngine` and drives the standard lifecycle, with
+the same command, frame and publish rules as the SSH driver:
+
+- `Connecting` until the first datagram from the server authenticates (there is no handshake:
+  the SSH bootstrap agreed the key), then `Connected` and a full frame. No authenticated
+  datagram within `CONNECT_TIMEOUT` (15 s) is `Closed { Failed { TimedOut } }`; a socket that
+  cannot be opened is `Failed { Unreachable }`. A wrong key never authenticates, so it also
+  ends as `TimedOut`.
+- After that the session never gives up on its own: a dead network is mosh's point. It closes
+  with `RemoteExited { exit_status: None }` when the server announces the end of the session
+  (mosh does not carry the exit status), `Disconnected` after `Disconnect` or when every
+  handle is dropped, or `Failed { Internal }` if something breaks.
+- Disconnect runs mosh's shutdown handshake so the server's session ends instead of lingering
+  on the host, waiting at most one second for the acknowledgement.
+- `Text` is written with `text_bytes`; `Key` goes through `TerminalEngine::encode_key` with the
+  modes the server's diffs have set; `Scroll` and `FullFrame` as for SSH. Host-key commands
+  are ignored: mosh has no host key.
+- `LinkControl::roam()` is the hook for Android's network callback: open a new socket now
+  instead of after ten silent seconds. `HealthObserver::link_health(LinkHealth { since_heard_ms,
+  since_ack_ms })` is called about once a second from the driver thread: the hook for M3's
+  network-health reporting.
+
+**Findings.** mosh keeps no scrollback; see the M0 consequences in `design.md`. The live test
+needed `SSH_CONNECTION` set (this machine's own login session made `-s` bind a public address).
+
+**Tests.** Unit tests: vendored crypto/packet/sender/statesync/transport/key tests (the
+prediction and vt100 tests are not carried), `ClientTerminal` state logic with a text screen,
+`GhosttyScreen` snapshots (mid-escape-sequence and scrollback included), the bootstrap command
+line and parsing with a fake `RemoteHost`, `DirectUdp`, the socket set, and the driver against
+a fake server that speaks the server half of the protocol (lifecycle, input, resize, roam,
+remote end, disconnect, timeout, wrong key, forged datagrams). `tests/mosh_live.rs` (feature
+`test-support`) bootstraps a real local `mosh-server` over `LocalHost` with `SSH_CONNECTION`
+set to a loopback connection, connects over 127.0.0.1, runs a command, resizes and checks
+`stty size`, roams (the server's replies move to the new socket and stop on the old one) and
+disconnects (the server exits). A guard kills exactly the process ids it was given (the server
+and its shell, each re-checked against `/proc/<pid>/comm`) even on panic. It skips with a
+message without `mosh-server`; `OR2_REQUIRE_MOSH` makes the skip a failure.
 
 ## FFI API 4 (`or2-ffi`)
 
