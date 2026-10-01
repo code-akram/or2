@@ -248,15 +248,31 @@ impl SshHost {
                             host.handle.channel_open_direct_streamlocal(path).await
                         }
                     };
-                    // `host` is still held: a failed send means nobody waits any more.
-                    if let Err(Ok(channel)) = answer.send(opened) {
-                        let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
-                    }
+                    // The channel travels in a guard that closes it unless the caller takes it
+                    // out: a failed send (nobody waits any more) drops the guard here, and one
+                    // queued but never received is dropped with the receiver.
+                    let weak = Arc::downgrade(&host);
+                    drop(host);
+                    let _ = answer.send(opened.map(|channel| OpenedChannel::new(channel, weak)));
                 },
                 runtime().handle(),
             );
         }
         PendingOpen(reply)
+    }
+
+    /// Closes a channel nobody owns any more, in the background and bounded, as a task of the
+    /// connection (so it ends with it). Nothing to do once the connection is over.
+    fn close_in_background(&self, channel: russh::Channel<russh_client::Msg>) {
+        let mut opens = self.opens.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(set) = opens.as_mut() {
+            set.spawn_on(
+                async move {
+                    let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
+                },
+                runtime().handle(),
+            );
+        }
     }
 
     /// The connection is over: stop every open still waiting (their callers see `Disconnect`),
@@ -343,20 +359,60 @@ enum OpenKind {
     Streamlocal(String),
 }
 
+/// A confirmed channel that nobody has taken yet. Dropped, it closes the channel through the
+/// connection (a raw russh channel does not close itself, and a leaked one holds a `MaxSessions`
+/// slot); [`OpenedChannel::into_inner`] hands it over, and with it the duty to close it.
+struct OpenedChannel {
+    channel: Option<russh::Channel<russh_client::Msg>>,
+    host: Weak<SshHost>,
+}
+
+impl OpenedChannel {
+    fn new(channel: russh::Channel<russh_client::Msg>, host: Weak<SshHost>) -> Self {
+        Self {
+            channel: Some(channel),
+            host,
+        }
+    }
+
+    fn into_inner(mut self) -> russh::Channel<russh_client::Msg> {
+        self.channel.take().expect("an armed opened channel")
+    }
+}
+
+impl Drop for OpenedChannel {
+    fn drop(&mut self) {
+        // A host that is gone took its channels with it.
+        if let (Some(channel), Some(host)) = (self.channel.take(), self.host.upgrade()) {
+            host.close_in_background(channel);
+        }
+    }
+}
+
 /// A channel being opened by the connection ([`SshHost::start_open`]). Dropping it is
-/// safe at any moment: the connection closes the channel if the server confirms it later.
-pub(super) struct PendingOpen(
-    oneshot::Receiver<Result<russh::Channel<russh_client::Msg>, russh::Error>>,
-);
+/// safe at any moment: the connection closes the channel if the server confirms it later, and
+/// one that was confirmed but not yet taken is closed here.
+pub(super) struct PendingOpen(oneshot::Receiver<Result<OpenedChannel, russh::Error>>);
 
 impl PendingOpen {
-    /// Resolves with the server's answer. Cancel-safe: the answer is kept for the next call.
+    /// Resolves with the server's answer. Cancel-safe: the answer is kept for the next call, and
+    /// the channel leaves the guard in the same poll that receives it, so a channel is never
+    /// between owners across an `await`.
     pub(super) async fn wait(&mut self) -> Result<russh::Channel<russh_client::Msg>, russh::Error> {
         match (&mut self.0).await {
-            Ok(opened) => opened,
+            Ok(opened) => opened.map(OpenedChannel::into_inner),
             // The connection ended and took the open with it.
             Err(_) => Err(russh::Error::Disconnect),
         }
+    }
+}
+
+impl Drop for PendingOpen {
+    fn drop(&mut self) {
+        // Refuse further answers and dispose of one that is already queued: dropping its guard
+        // closes the channel.
+        self.0.close();
+        drop(self.0.try_recv());
     }
 }
 

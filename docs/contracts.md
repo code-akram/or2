@@ -664,6 +664,20 @@ after the exec's deadline (`TimedOut`) is closed by the connection, test
 direct-streamlocal open (`open_unix`: the herdr client, watch and focus sockets), test
 `a_streamlocal_open_confirmed_after_its_deadline_has_the_channel_closed`. Every channel open on
 the connection is therefore the connection's own task.
+**Ownership across the hand-off.** The task delivers the confirmed channel to the caller inside a
+guard (`OpenedChannel`) whose `Drop` closes it through the connection (a background task of the
+same set, bounded by `CHANNEL_CLOSE_GRACE`; nothing to do once the connection is over), and
+`PendingOpen::wait` takes the channel out of the guard in the same poll that receives it, so the
+caller's own duty to close starts at that moment and the channel is never unowned across an
+`await`. A caller cancelled after the task delivered but before it received (an exec or a
+streamlocal open dropped, a `PendingOpen` dropped) leaves the answer queued; `PendingOpen`'s
+`Drop` closes the oneshot and receives and drops a queued answer, so the guard closes the
+channel. Tests `a_delivered_session_open_dropped_unconsumed_is_closed`,
+`a_delivered_streamlocal_open_dropped_unconsumed_is_closed`,
+`an_exec_cancelled_after_its_open_was_delivered_has_the_channel_closed`,
+`a_streamlocal_open_cancelled_after_delivery_has_the_channel_closed` (and, as controls, the two
+`..._taken_and_closed_by_the_caller_is_closed` and
+`pending_opens_end_on_host_close_without_retaining_the_host`).
 
 ### tmux
 

@@ -1916,3 +1916,181 @@ fn a_streamlocal_open_confirmed_after_its_deadline_has_the_channel_closed() {
     assert!(runtime().block_on(async { ssh.open_unix("/run/herdr.sock").await.is_ok() }));
     fixture.handle.disconnect();
 }
+
+// Complete the producer without consuming its oneshot answer. Joining is an event wait,
+// so this deterministically reaches the delivery/cancellation race without sleeps or polling.
+fn dropped_or_consumed_delivered_open(kind: OpenKind, consume: bool) {
+    let mut fixture = Fixture::connected(Duration::from_secs(5));
+    let ssh = fixture.ssh();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    let mut pending = ssh.start_open_of(kind);
+    let mut tasks = ssh.opens.lock().unwrap().take().unwrap();
+    runtime().block_on(async {
+        timeout(Duration::from_secs(5), tasks.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    });
+    *ssh.opens.lock().unwrap() = Some(tasks);
+    if consume {
+        runtime().block_on(async {
+            pending.wait().await.unwrap().close().await.unwrap();
+        });
+    }
+    drop(pending);
+    let until = std::time::Instant::now() + Duration::from_millis(700);
+    let closed_channel = loop {
+        match events.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
+            Ok(("close", _)) => break true,
+            Ok(_) => {}
+            Err(_) => break false,
+        }
+    };
+    // Still a live shared connection, so disconnecting cannot hide the leak.
+    runtime()
+        .block_on(ssh.exec_rendered("tmux list-sessions"))
+        .unwrap();
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+    assert!(
+        closed_channel,
+        "a delivered but unconsumed confirmation was dropped without closing"
+    );
+}
+
+#[test]
+fn a_delivered_session_open_dropped_unconsumed_is_closed() {
+    dropped_or_consumed_delivered_open(OpenKind::Session, false);
+}
+
+#[test]
+fn a_delivered_streamlocal_open_dropped_unconsumed_is_closed() {
+    dropped_or_consumed_delivered_open(OpenKind::Streamlocal("/run/herdr.sock".into()), false);
+}
+
+#[test]
+fn a_delivered_session_open_taken_and_closed_by_the_caller_is_closed() {
+    dropped_or_consumed_delivered_open(OpenKind::Session, true);
+}
+
+#[test]
+fn a_delivered_streamlocal_open_taken_and_closed_by_the_caller_is_closed() {
+    dropped_or_consumed_delivered_open(OpenKind::Streamlocal("/run/herdr.sock".into()), true);
+}
+
+#[test]
+fn pending_opens_end_on_host_close_without_retaining_the_host() {
+    for unix in [false, true] {
+        let mut fixture = Fixture::connected(Duration::from_secs(5));
+        let ssh = fixture.ssh();
+        let weak = Arc::downgrade(&ssh);
+        let (tx, events) = sync::channel();
+        *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+        let (_release, gate) = oneshot::channel::<()>();
+        let mut pending = if unix {
+            *fixture.shared.unix_gate.lock().unwrap() = Some(gate);
+            ssh.start_open_of(OpenKind::Streamlocal("/run/herdr.sock".into()))
+        } else {
+            *fixture.shared.open_gate.lock().unwrap() = Some(gate);
+            ssh.start_open()
+        };
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(5)).unwrap().0,
+            "pending"
+        );
+        fixture.handle.disconnect();
+        assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+        assert!(runtime().block_on(async {
+            timeout(Duration::from_secs(2), pending.wait())
+                .await
+                .unwrap()
+                .is_err()
+        }));
+        assert_eq!(ssh.outstanding_opens(), 0);
+        assert!(ssh.opens.lock().unwrap().is_none());
+        assert!(ssh.me.upgrade().is_some());
+        assert_eq!(
+            runtime().block_on(ssh.exec_rendered("tmux list-sessions")),
+            Err(RemoteError::Closed)
+        );
+        assert!(matches!(
+            runtime().block_on(ssh.open_unix("/run/herdr.sock")),
+            Err(RemoteError::Closed)
+        ));
+        drop(pending);
+        drop(ssh);
+        drop(fixture);
+        assert!(weak.upgrade().is_none(), "an ended open retained the host");
+    }
+}
+
+fn cancel_public_open_after_delivery(unix: bool) {
+    let mut fixture = Fixture::connected(Duration::from_secs(5));
+    let ssh = fixture.ssh();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    let (release, gate) = oneshot::channel();
+    if unix {
+        *fixture.shared.unix_gate.lock().unwrap() = Some(gate);
+    } else {
+        *fixture.shared.open_gate.lock().unwrap() = Some(gate);
+    }
+    runtime().block_on(async {
+        let mut operation = Box::pin(async {
+            if unix {
+                ssh.open_unix("/run/herdr.sock").await.map(|_| ())
+            } else {
+                ssh.exec_rendered("tmux list-sessions").await.map(|_| ())
+            }
+        });
+        // Drive the public caller once, to start its channel open; the gate prevents an answer.
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(operation.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(5)).unwrap().0,
+            "pending"
+        );
+        let mut tasks = ssh.opens.lock().unwrap().take().unwrap();
+        release.send(()).unwrap();
+        timeout(Duration::from_secs(5), tasks.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        *ssh.opens.lock().unwrap() = Some(tasks);
+        // The producer delivered successfully, but the caller has not resumed to receive it.
+        drop(operation);
+    });
+    let until = std::time::Instant::now() + Duration::from_millis(700);
+    let closed_channel = loop {
+        match events.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
+            Ok(("close", _)) => break true,
+            Ok(_) => {}
+            Err(_) => break false,
+        }
+    };
+    runtime()
+        .block_on(ssh.exec_rendered("tmux list-sessions"))
+        .unwrap();
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+    assert!(
+        closed_channel,
+        "cancelled public open leaked delivered channel (unix={unix})"
+    );
+}
+
+#[test]
+fn an_exec_cancelled_after_its_open_was_delivered_has_the_channel_closed() {
+    cancel_public_open_after_delivery(false);
+}
+
+#[test]
+fn a_streamlocal_open_cancelled_after_delivery_has_the_channel_closed() {
+    cancel_public_open_after_delivery(true);
+}
