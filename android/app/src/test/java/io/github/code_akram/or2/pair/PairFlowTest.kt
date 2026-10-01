@@ -247,6 +247,7 @@ class PairFlowTest {
             PairException.Declined() to "declined",
             PairException.AuthenticationFailed() to "already have been used",
             PairException.HostNotAuthenticated() to "could not be verified",
+            PairException.HostFailed() to "could not add the key",
             PairException.HostTimedOut() to "Nobody confirmed",
             PairException.TimedOut() to "Nobody confirmed",
             PairException.Unreachable() to "same network",

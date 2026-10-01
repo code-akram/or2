@@ -2359,6 +2359,15 @@ those same handles, under an advisory `flock`, so a path replaced after the chec
 8 MiB are not read. On Windows only symbolic links and junctions are refused, by path; ownership and ACL
 checks are not done there.
 
+**StrictModes is enforced, not just warned about.** sshd ignores `authorized_keys` when the file, `~/.ssh`
+or the home directory is writable by group or others (mode `& 022`). `or2-pair` checks the same three
+things on the handles it holds, before it reads or backs up anything, and **refuses** (nothing is changed,
+no backup is made) with the path, the mode and the command that fixes it (`chmod go-w <path>`); it never
+changes a mode behind the person's back. The same check runs in the up-front "Checks" (a warning there), and
+at the end the phone is told `{"ok":false,"reason":"failed"}` (signed), which the phone reports as "the host
+could not add the key" (`Refusal::HostFailed`, FFI `PairError.HostFailed`) rather than as a protocol problem.
+A file with mode 0600, 0640 or 0644 is appended to and keeps its mode.
+
 ### Bind policy: what "non-public" means
 
 The listener binds only addresses that are *not public*: IPv4 10/8, 172.16/12, 192.168/16, carrier-grade NAT

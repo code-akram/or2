@@ -29,6 +29,8 @@ fun pairErrorMessage(error: PairException): String = when (error) {
     is PairException.ConnectionLost -> "The connection to the host ended early. Run or2-pair again and retry."
     is PairException.Protocol, is PairException.BadRequest, is PairException.Refused ->
         "The host did not understand the request. Update or2-pair on the host and try again."
+    is PairException.HostFailed ->
+        "The host could not add the key to authorized_keys. Read what or2-pair printed on the host (a permissions or link problem), fix it, run or2-pair again and retry."
     is PairException.KeyNotAccepted -> "The host does not accept this kind of key. Pick or generate an Ed25519 key."
     is PairException.InvalidKey -> "This key cannot be sent to the host. Pick another key."
     is PairException.InvalidDevice -> "This phone's name cannot be sent to the host."

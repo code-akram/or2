@@ -188,6 +188,9 @@ pub enum PairError {
     HostTimedOut,
     #[error("the host could not read the request")]
     BadRequest,
+    /// The host could not write `authorized_keys`; the person at the host sees why.
+    #[error("the host could not add the key")]
+    HostFailed,
     #[error("the host refused")]
     Refused,
 }
@@ -210,6 +213,7 @@ impl From<core::PairError> for PairError {
             E::Refused(R::KeyNotAccepted) => Self::KeyNotAccepted,
             E::Refused(R::TimedOut) => Self::HostTimedOut,
             E::Refused(R::BadRequest) => Self::BadRequest,
+            E::Refused(R::HostFailed) => Self::HostFailed,
             E::Refused(R::Other) => Self::Refused,
         }
     }

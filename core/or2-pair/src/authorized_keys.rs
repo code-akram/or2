@@ -140,7 +140,6 @@ pub use portable::writable;
 #[cfg(unix)]
 mod unix {
     use std::ffi::CString;
-    use std::fs;
     use std::fs::File;
     use std::io::{Read, Write};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -270,6 +269,24 @@ mod unix {
         stat.st_mode & libc::S_IFMT
     }
 
+    /// What sshd's StrictModes refuses: the home directory, `~/.ssh` and `authorized_keys`
+    /// writable by group or others. Appending to such a file would "work" and the phone would
+    /// still be turned away, so it is refused here, with the command that fixes it. Nothing is
+    /// changed behind the person's back.
+    fn check_strict_modes(stat: &libc::stat, path: &Path, what: &str) -> io::Result<()> {
+        // `st_mode` is 16 bits wide on macOS and 32 on Linux.
+        #[allow(clippy::useless_conversion)]
+        let mode = u32::from(stat.st_mode) & 0o7777;
+        if mode & 0o022 != 0 {
+            return Err(refuse(format!(
+                "{} ({what}) is writable by other users (mode {mode:04o}): sshd (StrictModes) ignores authorized_keys when it, ~/.ssh or the home directory can be written by group or others, so a key added now would still be refused. Run `chmod go-w {}` and pair again",
+                path.display(),
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// The home directory must be a directory of the account (or root's, as sshd allows).
     fn check_home(stat: &libc::stat, uid: u32, home: &Path) -> io::Result<()> {
         if stat.st_uid != uid && stat.st_uid != 0 {
@@ -279,7 +296,7 @@ mod unix {
                 stat.st_uid
             )));
         }
-        Ok(())
+        check_strict_modes(stat, home, "the home directory")
     }
 
     fn check_ssh_dir(stat: &libc::stat, uid: u32, dir: &Path) -> io::Result<()> {
@@ -290,7 +307,7 @@ mod unix {
                 stat.st_uid
             )));
         }
-        Ok(())
+        check_strict_modes(stat, dir, "the SSH directory")
     }
 
     fn check_file(stat: &libc::stat, uid: u32, file: &Path) -> io::Result<()> {
@@ -304,6 +321,7 @@ mod unix {
                 stat.st_uid
             )));
         }
+        check_strict_modes(stat, file, "the key file")?;
         if stat.st_nlink > 1 {
             return Err(refuse(format!(
                 "{} has another hard link ({} names for one file); appending would change the other name too. Replace it with a plain copy and run again",
@@ -439,26 +457,10 @@ mod unix {
     }
 
     /// Checks that `authorized_keys` (or, when it does not exist, `~/.ssh` or `~`) can be
-    /// written, and reports what `sshd`'s StrictModes would object to. Changes nothing.
-    pub fn writable(account: &Account) -> (Writable, Vec<String>) {
-        use std::os::unix::fs::PermissionsExt;
-        let mut notes = Vec::new();
-        let home_path = &account.home;
-        if let Ok(meta) = fs::metadata(home_path)
-            && meta.permissions().mode() & 0o022 != 0
-        {
-            notes.push(
-                "your home directory is writable by others: sshd (StrictModes) will ignore authorized_keys until you run chmod go-w ~"
-                    .to_owned(),
-            );
-        }
-        if let Ok(meta) = fs::symlink_metadata(ssh_dir(home_path))
-            && !meta.file_type().is_symlink()
-            && meta.permissions().mode() & 0o022 != 0
-        {
-            notes.push("~/.ssh is writable by others: run chmod 700 ~/.ssh".to_owned());
-        }
-        (inspect(account), notes)
+    /// written and that sshd (StrictModes) would honour it: the same checks `add` makes,
+    /// changing nothing. A refusal says what to fix.
+    pub fn writable(account: &Account) -> Writable {
+        inspect(account)
     }
 
     fn inspect(account: &Account) -> Writable {
@@ -610,11 +612,10 @@ mod portable {
         Err(io::Error::other("could not find a free backup name"))
     }
 
-    pub fn writable(account: &Account) -> (Writable, Vec<String>) {
+    pub fn writable(account: &Account) -> Writable {
         let home = &account.home;
         let file = path(home);
-        let result = if let Err(error) = not_a_link(&ssh_dir(home)).and_then(|()| not_a_link(&file))
-        {
+        if let Err(error) = not_a_link(&ssh_dir(home)).and_then(|()| not_a_link(&file)) {
             Writable::No(error.to_string())
         } else if file.exists() {
             match OpenOptions::new().append(true).open(&file) {
@@ -625,8 +626,7 @@ mod portable {
             Writable::Yes
         } else {
             Writable::No(format!("{} is not writable", home.display()))
-        };
-        (result, Vec::new())
+        }
     }
 }
 
@@ -641,7 +641,7 @@ mod tests {
         super::add(&Account::new("tester", home), key, device, now)
     }
 
-    fn writable(home: &Path) -> (Writable, Vec<String>) {
+    fn writable(home: &Path) -> Writable {
         super::writable(&Account::new("tester", home))
     }
 
@@ -724,7 +724,7 @@ mod tests {
             format!("{OTHER}\n")
         );
         // The check reports the same thing without changing anything.
-        let (result, _) = super::writable(&Account {
+        let result = super::writable(&Account {
             uid: other,
             ..account
         });
@@ -943,6 +943,97 @@ mod tests {
         assert_eq!(sanitize_device(&long).unwrap().len(), 32);
     }
 
+    // --- Finding 6: what sshd's StrictModes would ignore is refused, not appended to ---------
+
+    #[cfg(unix)]
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn existing_file(home: &Path, mode: u32) -> String {
+        fs::create_dir_all(ssh_dir(home)).unwrap();
+        let before = format!("{OTHER}\n");
+        fs::write(path(home), &before).unwrap();
+        chmod(&path(home), mode);
+        before
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_authorized_keys_writable_by_group_or_others_is_refused_and_left_alone() {
+        for mode in [0o664, 0o666, 0o662, 0o620] {
+            let home = tempfile::tempdir().unwrap();
+            let before = existing_file(home.path(), mode);
+            let error = add(home.path(), &key(ED25519), "phone", at()).unwrap_err();
+            let text = error.to_string();
+            assert!(
+                text.contains("writable by other users")
+                    && text.contains("StrictModes")
+                    && text.contains("chmod go-w"),
+                "{mode:o}: {text}"
+            );
+            assert_eq!(fs::read_to_string(path(home.path())).unwrap(), before);
+            assert_eq!(
+                fs::read_dir(ssh_dir(home.path())).unwrap().count(),
+                1,
+                "no backup of a file that was refused"
+            );
+            // The check says the same, without changing anything.
+            let result = writable(home.path());
+            assert!(
+                matches!(&result, Writable::No(why) if why.contains("chmod go-w")),
+                "{mode:o}: {result:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn modes_sshd_accepts_are_appended_to_and_keep_their_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        for mode in [0o600, 0o640, 0o644] {
+            let home = tempfile::tempdir().unwrap();
+            existing_file(home.path(), mode);
+            assert!(matches!(
+                add(home.path(), &key(ED25519), "phone", at()),
+                Ok(Added::Added { .. })
+            ));
+            let now = fs::metadata(path(home.path()))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(now & 0o777, mode);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_ssh_directory_or_home_writable_by_others_is_refused() {
+        for mode in [0o775, 0o777, 0o770 | 0o002] {
+            let home = tempfile::tempdir().unwrap();
+            existing_file(home.path(), 0o600);
+            chmod(&ssh_dir(home.path()), mode);
+            let error = add(home.path(), &key(ED25519), "phone", at()).unwrap_err();
+            assert!(
+                error.to_string().contains("writable by other users")
+                    && error.to_string().contains(".ssh"),
+                "{mode:o}: {error}"
+            );
+            chmod(&ssh_dir(home.path()), 0o700);
+            // The home directory itself.
+            chmod(home.path(), mode);
+            let error = add(home.path(), &key(ED25519), "phone", at()).unwrap_err();
+            assert!(
+                error.to_string().contains("writable by other users"),
+                "{mode:o}: {error}"
+            );
+            chmod(home.path(), 0o755);
+            assert!(add(home.path(), &key(ED25519), "phone", at()).is_ok());
+        }
+    }
+
     #[test]
     fn checks_report_writability_and_strict_modes_trouble() {
         let home = tempfile::tempdir().unwrap();
@@ -951,22 +1042,21 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(home.path(), fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let (result, notes) = writable(home.path());
-        assert_eq!(result, Writable::Yes);
-        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(writable(home.path()), Writable::Yes);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            // A home directory writable by group or others is a StrictModes refusal.
             fs::set_permissions(home.path(), fs::Permissions::from_mode(0o775)).unwrap();
-            let (_, notes) = writable(home.path());
-            assert_eq!(notes.len(), 1);
-            assert!(notes[0].contains("StrictModes"));
+            assert!(
+                matches!(writable(home.path()), Writable::No(why) if why.contains("StrictModes"))
+            );
             // A read-only existing file is reported, not changed.
             fs::set_permissions(home.path(), fs::Permissions::from_mode(0o755)).unwrap();
             fs::create_dir(ssh_dir(home.path())).unwrap();
             fs::write(path(home.path()), "").unwrap();
             fs::set_permissions(path(home.path()), fs::Permissions::from_mode(0o400)).unwrap();
-            let (result, _) = writable(home.path());
+            let result = writable(home.path());
             // Running as root can write a 0400 file; everyone else cannot.
             if !fs::OpenOptions::new()
                 .append(true)

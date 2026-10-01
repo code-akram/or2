@@ -459,6 +459,8 @@ pub enum Refusal {
     TimedOut,
     /// The host could not read the request.
     BadRequest,
+    /// The host could not write `authorized_keys` (its screen says why: permissions, a link...).
+    HostFailed,
     /// A reason this app does not know.
     Other,
 }
@@ -471,6 +473,7 @@ impl Refusal {
             Some("key") => Self::KeyNotAccepted,
             Some("timeout") => Self::TimedOut,
             Some("request") => Self::BadRequest,
+            Some("failed") => Self::HostFailed,
             _ => Self::Other,
         }
     }

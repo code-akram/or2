@@ -347,6 +347,47 @@ fn an_already_authorized_key_is_acknowledged_without_a_second_line() {
     assert!(result.output.contains("already authorized"));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_writable_by_others_authorized_keys_is_refused_with_the_fix_not_silently_appended_to() {
+    // Finding 6: sshd (StrictModes) would ignore this file; the pairing used to report success.
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new();
+    let key = phone_key();
+    let ssh = world.home.path().join(".ssh");
+    std::fs::create_dir(&ssh).unwrap();
+    std::fs::write(ssh.join("authorized_keys"), "# mine\n").unwrap();
+    std::fs::set_permissions(
+        ssh.join("authorized_keys"),
+        std::fs::Permissions::from_mode(0o666),
+    )
+    .unwrap();
+    let result = pair(
+        &world,
+        &options(),
+        &Auto::new(Answer::Yes),
+        WINDOW,
+        |ready| phone_pairs(&ready.payload, &key, "phone"),
+    );
+    assert_eq!(
+        result.phone,
+        Some(Err(PairError::Refused(Refusal::HostFailed)))
+    );
+    assert_eq!(result.exit.unwrap(), Exit::Failed);
+    assert!(
+        result.output.contains("writable by other users") && result.output.contains("chmod go-w"),
+        "{}",
+        result.output
+    );
+    assert_eq!(world.authorized_keys().unwrap(), "# mine\n");
+    // The check run before listening already said so.
+    assert!(
+        result.output.contains("warn") && result.output.contains("StrictModes"),
+        "{}",
+        result.output
+    );
+}
+
 #[test]
 fn an_existing_file_is_backed_up_and_appended_to() {
     let world = World::new();

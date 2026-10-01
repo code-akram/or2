@@ -732,6 +732,7 @@ async fn each_refusal_reason_has_its_own_error() {
         ("key", Refusal::KeyNotAccepted),
         ("timeout", Refusal::TimedOut),
         ("request", Refusal::BadRequest),
+        ("failed", Refusal::HostFailed),
         ("busy", Refusal::Other),
         ("who knows", Refusal::Other),
     ] {

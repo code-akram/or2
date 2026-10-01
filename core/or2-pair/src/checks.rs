@@ -139,14 +139,14 @@ fn sshd_hint(platform: Platform) -> &'static str {
 }
 
 fn authorized_keys(account: &Account) -> Vec<Check> {
-    let (writable, notes) = authorized_keys::writable(account);
     let file = authorized_keys::path(&account.home);
-    let mut out = vec![match writable {
-        Writable::Yes => check(Level::Ok, format!("{} can be written", file.display())),
+    vec![match authorized_keys::writable(account) {
+        Writable::Yes => check(
+            Level::Ok,
+            format!("{} can be written and sshd will honour it", file.display()),
+        ),
         Writable::No(why) => check(Level::Warn, why),
-    }];
-    out.extend(notes.into_iter().map(|note| check(Level::Warn, note)));
-    out
+    }]
 }
 
 fn firewall_hint(platform: Platform, mosh: bool) -> Option<String> {

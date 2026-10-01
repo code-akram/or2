@@ -132,8 +132,10 @@ Settings > Network > Firewall.
 ### The key was added but the phone is refused
 
 `sshd` ignores `authorized_keys` when your home directory, `~/.ssh` or the file is writable by
-others (StrictModes). The checks warn about it: `chmod go-w ~ && chmod 700 ~/.ssh &&
-chmod 600 ~/.ssh/authorized_keys`. On Windows, an administrator's keys live in
+group or others (StrictModes). `or2-pair` warns in its checks and, rather than add a key sshd
+would ignore, refuses at the prompt (the phone says the host could not add the key) with the
+path, the mode and the fix: `chmod go-w ~ && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys`.
+Fix it and run `or2-pair` again. On Windows, an administrator's keys live in
 `C:\ProgramData\ssh\administrators_authorized_keys`, which `or2-pair` does not touch: add the key
 there yourself (`--no-listen`).
 
