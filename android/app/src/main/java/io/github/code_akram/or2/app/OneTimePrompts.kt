@@ -1,5 +1,9 @@
 package io.github.code_akram.or2.app
 
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
 /**
  * `POST_NOTIFICATIONS` is requested once, the first time a connection starts (Android 13+). The
  * foreground service still runs when it is denied, and a denial is never asked again.
@@ -15,32 +19,69 @@ class NotificationPermissionPolicy(private val store: PrefStore) {
 }
 
 /**
- * The one-time battery-optimisation explanation. A session open while the app goes to the
- * background marks the prompt due ([onBackgrounded]); the next time the app is in the foreground
- * [takeIfDue] says whether to explain now and records that it was shown, whatever the user answers:
- * it never nags again. [isExempt] reads `PowerManager.isIgnoringBatteryOptimizations`; an app that
- * is already exempt is never asked (and counts as asked).
+ * The battery-optimisation exemption, asked for **up front**: OxygenOS lets the SSH connections die
+ * within minutes of the app going to the background unless the app is exempt, and a dialog on the
+ * return from the background was modal over the terminal. So the first time the user starts a
+ * connection, in the foreground, [shouldExplain] says whether our explanation shows before the
+ * biometric prompt ([explain] raises it, [explained] answers it; the system's own request follows an
+ * "Allow"). It is shown **once, ever**: [shouldExplain] is false from then on, whatever the answer.
+ *
+ * If the exemption is not in place afterwards ("Not now", or the system dialog was refused), [card]
+ * says so: Home shows a small non-blocking card ("Background connections may drop", with an Allow
+ * action that opens the system request again) until the user dismisses it ([dismissCard]) or the
+ * exemption arrives ([refresh], called when the app comes to the foreground). [isExempt] reads
+ * `PowerManager.isIgnoringBatteryOptimizations`; an app that is already exempt is never asked and
+ * never shows the card.
  */
 class BatteryPrompt(private val store: PrefStore, private val isExempt: () -> Boolean = { true }) {
-    fun onBackgrounded(sessionOpen: Boolean) {
-        if (!sessionOpen || store.getBoolean(ASKED) || store.getBoolean(DUE)) return
-        if (isExempt()) {
-            store.putBoolean(ASKED, true)
-            return
-        }
-        store.putBoolean(DUE, true)
+    private val mutableExplaining = MutableStateFlow(false)
+    private val mutableCard = MutableStateFlow(cardVisible())
+
+    /** Our explanation is on screen, waiting for the user's answer. */
+    val explaining: StateFlow<Boolean> = mutableExplaining.asStateFlow()
+
+    /** The Home card is visible: the exemption was declined (or never granted) and the card is not dismissed. */
+    val card: StateFlow<Boolean> = mutableCard.asStateFlow()
+
+    /** True when the explanation has never been shown and the app is not exempt: ask before the first connection. */
+    fun shouldExplain(): Boolean = !store.getBoolean(ASKED) && !isExempt()
+
+    /** The explanation is on screen now. */
+    fun explain() {
+        mutableExplaining.value = true
     }
 
-    /** True exactly once, when the explanation is due and should be shown now. */
-    fun takeIfDue(): Boolean {
-        if (!store.getBoolean(DUE) || store.getBoolean(ASKED)) return false
-        store.putBoolean(DUE, false)
+    /** The user answered the explanation (either way): it is never shown again. */
+    fun explained() {
         store.putBoolean(ASKED, true)
-        return !isExempt()
+        mutableExplaining.value = false
     }
+
+    /**
+     * The exemption was not given (the user said "Not now", the system dialog was refused or does not
+     * exist on this device): the card offers it again, without blocking anything.
+     */
+    fun declined() {
+        store.putBoolean(DECLINED, true)
+        refresh()
+    }
+
+    /** The user dismissed the card for good. */
+    fun dismissCard() {
+        store.putBoolean(CARD_DISMISSED, true)
+        refresh()
+    }
+
+    /** Re-reads whether the exemption is in place: the card goes away once it is. */
+    fun refresh() {
+        mutableCard.value = cardVisible()
+    }
+
+    private fun cardVisible() = store.getBoolean(DECLINED) && !store.getBoolean(CARD_DISMISSED) && !isExempt()
 
     private companion object {
         const val ASKED = "battery_asked"
-        const val DUE = "battery_due"
+        const val DECLINED = "battery_declined"
+        const val CARD_DISMISSED = "battery_card_dismissed"
     }
 }

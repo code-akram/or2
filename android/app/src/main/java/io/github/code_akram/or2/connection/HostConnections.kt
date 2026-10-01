@@ -132,6 +132,9 @@ class ActiveHost internal constructor(val host: Host) {
     internal var destroyed = false
     internal var disconnectRequested = false
 
+    /** The first herdr view of this connection was reported to the timing markers. */
+    internal var timedLive = false
+
     /**
      * Set when mosh failed on this connection under AUTO (UDP blocked, no `mosh-server`): later
      * AUTO terminals on it go straight to SSH. The note explains why, in muted text.
@@ -263,6 +266,8 @@ class HostConnections(
     private val clock: () -> Long = System::currentTimeMillis,
     /** The mosh servers this app started, so an orphan of a dead process is stopped at the next connection; null keeps none. */
     private val moshServers: MoshServerLedger? = null,
+    /** Debug timing markers (logcat tag `or2.timing`); the default records nothing. */
+    val timing: Timing = Timing(),
 ) {
     private val scope = CoroutineScope(SupervisorJob() + main)
 
@@ -342,12 +347,21 @@ class HostConnections(
             val current = ActiveHost(host)
             attempt = current
             replace(host.id, current)
+            // The unlock is done: this is where the time to a connected host is counted from.
+            val span = "connect host=${host.id}"
+            timing.begin(span, "unlocked")
             val listener = object : HostListener {
                 override fun onHostStateChanged(state: HostState) {
                     scope.launch {
                         // Preserve a transient Connected even if the UI observes only Closed.
                         if (state is HostState.Connected) current.mutableHasConnected.value = true
                         current.mutableState.value = state
+                        when (state) {
+                            HostState.Authenticating -> timing.mark(span, "authenticating")
+                            is HostState.Connected -> timing.mark(span, "connected")
+                            is HostState.Closed -> if (!current.mutableHasConnected.value) timing.end(span, "failed")
+                            else -> Unit
+                        }
                         if (state is HostState.Connected) {
                             reapOrphans(current)
                             probe(current)
@@ -551,6 +565,7 @@ class HostConnections(
             if (!owns(current) || current.retired) return
             current.mutableCapabilities.value = caps
             current.mutableCapabilitiesError.value = null
+            timing.mark("connect host=${current.host.id}", "capabilities")
             syncWatches(current, port, caps)
         } catch (error: CancellationException) {
             throw error
@@ -617,7 +632,14 @@ class HostConnections(
             val watch = HerdrSessionWatch(spec.session, spec.name)
             val listener = object : HerdrListener {
                 override fun onHerdrStateChanged(state: HerdrState) {
-                    scope.launch { watch.mutableState.value = state }
+                    scope.launch {
+                        watch.mutableState.value = state
+                        // The first herdr view of the host is when its inbox rows can appear.
+                        if (state is HerdrState.Live && !current.timedLive) {
+                            current.timedLive = true
+                            timing.mark("connect host=${current.host.id}", "live")
+                        }
+                    }
                 }
             }
             try {
@@ -704,8 +726,10 @@ class HostConnections(
         if (state == SessionState.Connected) {
             terminal.mutableHasConnected.value = true
             recordMoshServer(terminal)
+            timing.terminalConnected(terminal.id)
         }
         terminal.mutableState.value = state
+        if (state is SessionState.Closed) timing.forgetTerminal(terminal.id)
         if (state is SessionState.Closed) forgetMoshServer(terminal, state.reason)
         // Nothing is heard on a closed session: its last health must not keep saying "Last heard N s ago".
         if (state is SessionState.Closed) terminal.mutableLinkHealth.value = null
@@ -874,6 +898,7 @@ class HostConnections(
     fun dismissTerminal(terminal: ActiveTerminal) {
         if (terminal !in mutableTerminals.value) return
         userClose?.terminalClosed(terminal.host.id, terminal.target)
+        timing.forgetTerminal(terminal.id)
         mutableTerminals.value -= terminal
         retireTerminal(terminal)
         releaseLingering()

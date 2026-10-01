@@ -34,7 +34,7 @@ use tokio::time::{Instant, sleep, sleep_until, timeout};
 
 use super::connection::{Closing, SshHost, closed_reason};
 use super::runtime;
-use super::terminal_session::{not_installed, program, remote_failure};
+use super::terminal_session::{Planned, not_installed, plan, remote_failure};
 use crate::host::{TerminalTarget, UserCancel};
 use crate::mosh::{self, GOODBYE_TIMEOUT, MoshParams, Plan, run_session};
 use crate::remote::{RemoteError, RemoteHost};
@@ -240,7 +240,7 @@ fn owes_cleanup(connected: bool, reason: &CloseReason, server_gone: bool) -> boo
 }
 
 /// The probe, then (for tmux and herdr) the target's command, then `mosh-server new` running
-/// it. `NotInstalled { program: "mosh-server" }` is decided before anything else runs, so a
+/// it (beside the pane focus a herdr pane owes). `NotInstalled { program: "mosh-server" }` is decided before anything else runs, so a
 /// host without mosh does not get a pane focus first.
 ///
 /// `cancelled` is set when the user disconnects. It is checked before each step with a side
@@ -248,11 +248,12 @@ fn owes_cleanup(connected: bool, reason: &CloseReason, server_gone: bool) -> boo
 /// disconnect never focuses a pane or starts a server it would only have to stop. A step
 /// already running is not interrupted here (the caller bounds the wait).
 async fn prepare(
-    host: &SshHost,
+    shared: &Arc<SshHost>,
     target: &TerminalTarget,
     size: TerminalSize,
     cancelled: &AtomicBool,
 ) -> Result<Option<MoshParams>, SessionFailure> {
+    let host: &SshHost = shared;
     let capabilities = host.capabilities().await.map_err(remote_failure)?;
     if capabilities.mosh_server.is_none() {
         return Err(not_installed("mosh-server"));
@@ -260,7 +261,8 @@ async fn prepare(
     if cancelled.load(Ordering::SeqCst) {
         return Ok(None);
     }
-    let argv = match program(host, target).await? {
+    let Planned { command, focus } = plan(host, target).await?;
+    let argv = match command {
         // The command goes to mosh-server as its arguments, where an environment has no
         // place; SSH would run it. Today's targets have none, and one that did must not
         // silently run without it.
@@ -276,10 +278,27 @@ async fn prepare(
     if cancelled.load(Ordering::SeqCst) {
         return Ok(None);
     }
-    mosh::bootstrap(host, capabilities, size, &argv)
-        .await
-        .map(Some)
-        .map_err(mosh::BootstrapError::into_failure)
+    let bootstrap = async {
+        mosh::bootstrap(host, capabilities, size, &argv)
+            .await
+            .map_err(mosh::BootstrapError::into_failure)
+    };
+    let Some(focus) = focus else {
+        return bootstrap.await.map(Some);
+    };
+    // The pane focus and the server's start do not depend on each other (the herdr client
+    // `mosh-server` runs follows herdr's focus), so they share their round trips. A focus that
+    // fails (the pane is gone) leaves a server nobody will use: it is stopped before the
+    // failure is reported.
+    let (focused, started) = tokio::join!(focus.run(host), bootstrap);
+    match (focused, started) {
+        (Ok(()), started) => started.map(Some),
+        (Err(failure), Ok(params)) => {
+            stop_server(shared, params.server_pid, DEBT_PACING).await;
+            Err(failure)
+        }
+        (Err(failure), Err(_)) => Err(failure),
+    }
 }
 
 /// After a disconnect: lets the bootstrap finish if it is about to, so the server it started

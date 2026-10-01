@@ -1,19 +1,21 @@
-//! The capability probe: what a host offers, found with one exec.
+//! The capability probe: what a host offers, found with two concurrent execs.
 //!
 //! Non-interactive SSH does not load the user's `PATH`, so [`PROBE_SCRIPT`] looks for `tmux`,
 //! `herdr` and `mosh-server` with `command -v` and then in the usual user-local and package
 //! manager directories, and picks a UTF-8 locale. It is one fixed `sh` script run with
 //! [`RemoteHost::exec_script`], so it works over SSH and over
-//! [`LocalHost`](crate::remote::LocalHost) alike. When herdr was found, a second, separately
-//! bounded exec lists its sessions ([`herdr_sessions`]): a wedged herdr must not take down the
-//! discovery of everything else. The host driver caches the answer for the connection's
-//! lifetime (Rust has no storage) and re-reads only the session list when `capabilities()` is
-//! queried ([`SessionsCache`], which also remembers the last list that was read).
+//! [`LocalHost`](crate::remote::LocalHost) alike. [`HERDR_SCRIPT`] runs beside it, in its own
+//! channel and its own bound ([`HERDR_LIST_TIMEOUT`]): it finds herdr the same way and lists its
+//! sessions, so the listing costs no round trips after the first script and a wedged herdr
+//! cannot take down the discovery of everything else (the first script still reports herdr's
+//! path). The host driver caches the answer for the connection's lifetime (Rust has no
+//! storage), seeds the connection's [`Directory`] with the listing, and re-reads only the
+//! session list when `capabilities()` is queried ([`SessionsCache`]).
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::herdr::{self, DiscoveryError};
+use crate::herdr::{self, Directory, DiscoveryError, SessionEntry};
 use crate::host::{HerdrSessionInfo, HostCapabilities};
 use crate::remote::{RemoteError, RemoteHost};
 
@@ -55,22 +57,61 @@ echo "or2:locale:$or2_loc"
 echo "or2:end"
 "#;
 
+/// Finds herdr like [`PROBE_SCRIPT`] and runs its `session list --json` in the same exec:
+/// `or2:herdr:<path>`, then (when found) `or2:list-begin`, herdr's stdout, and
+/// `or2:list-end:<status>`. Same rendering contract: no `'`, no `\`.
+pub const HERDR_SCRIPT: &str = r#"
+or2_find() {
+  or2_path=$(command -v "$1" 2>/dev/null)
+  case "$or2_path" in
+    /*) ;;
+    *)
+      or2_path=
+      for or2_dir in "$HOME/.local/bin" "$HOME/.cargo/bin" /opt/homebrew/bin /usr/local/bin /usr/bin /bin "$HOME/.nix-profile/bin" /run/current-system/sw/bin; do
+        if [ -f "$or2_dir/$1" ] && [ -x "$or2_dir/$1" ]; then or2_path="$or2_dir/$1"; break; fi
+      done
+      ;;
+  esac
+}
+or2_find herdr
+echo "or2:herdr:$or2_path"
+if [ -n "$or2_path" ]; then
+  echo "or2:list-begin"
+  "$or2_path" session list --json 2>/dev/null
+  or2_status=$?
+  echo
+  echo "or2:list-end:$or2_status"
+fi
+"#;
+
 /// The locale reported when the host lists no UTF-8 one.
 const FALLBACK_LOCALE: &str = "en_US.UTF-8";
 
-/// Runs [`PROBE_SCRIPT`] on `host`, parses the answer and, when herdr was found, lists its
-/// sessions. A script that fails to run is an error; a missing program is `None` in the
-/// result; a herdr that cannot list its sessions (hung, failing, garbage) is found with no
-/// sessions. Only a connection that closes mid-probe fails the second step.
+/// Runs [`PROBE_SCRIPT`] and [`HERDR_SCRIPT`] on `host` at once and parses the answers. A
+/// script that fails to run is an error; a missing program is `None` in the result; a herdr that
+/// cannot list its sessions (hung, failing, garbage) is found with no sessions. Only a
+/// connection that closes mid-probe fails the second script.
 pub async fn probe<H: RemoteHost>(host: &H) -> Result<HostCapabilities, RemoteError> {
+    probe_entries(host).await.map(|(caps, _)| caps)
+}
+
+/// [`probe`], also returning the session listing the second script read (`None` when herdr is
+/// missing or its listing failed), with the sockets the host driver's [`Directory`] needs.
+pub async fn probe_entries<H: RemoteHost>(
+    host: &H,
+) -> Result<(HostCapabilities, Option<Vec<SessionEntry>>), RemoteError> {
     probe_within(host, HERDR_LIST_TIMEOUT).await
 }
 
 async fn probe_within<H: RemoteHost>(
     host: &H,
     herdr_limit: Duration,
-) -> Result<HostCapabilities, RemoteError> {
-    let output = host.exec_script(PROBE_SCRIPT).await?;
+) -> Result<(HostCapabilities, Option<Vec<SessionEntry>>), RemoteError> {
+    let (programs, herdr) = tokio::join!(
+        host.exec_script(PROBE_SCRIPT),
+        tokio::time::timeout(herdr_limit, host.exec_script(HERDR_SCRIPT)),
+    );
+    let output = programs?;
     if !output.success() {
         return Err(RemoteError::Io(format!(
             "the capability probe exited with status {:?}",
@@ -78,14 +119,39 @@ async fn probe_within<H: RemoteHost>(
         )));
     }
     let mut caps = parse(&String::from_utf8_lossy(&output.stdout));
-    if let Some(herdr) = &caps.herdr {
-        caps.herdr_sessions = match list_within(host, herdr, herdr_limit).await {
-            Ok(sessions) => sessions,
-            Err(RemoteError::Closed) => return Err(RemoteError::Closed),
-            Err(_) => Vec::new(),
-        };
+    let mut entries = None;
+    if caps.herdr.is_some() {
+        match herdr {
+            Ok(Ok(output)) => {
+                entries = parse_herdr_listing(&String::from_utf8_lossy(&output.stdout));
+            }
+            Ok(Err(RemoteError::Closed)) => return Err(RemoteError::Closed),
+            // A herdr that hangs or cannot run: found, with no sessions.
+            Ok(Err(_)) | Err(_) => {}
+        }
     }
-    Ok(caps)
+    if let Some(entries) = &entries {
+        caps.herdr_sessions = entries.iter().map(session_info).collect();
+    }
+    Ok((caps, entries))
+}
+
+fn session_info(entry: &SessionEntry) -> HerdrSessionInfo {
+    HerdrSessionInfo {
+        name: entry.name.clone(),
+        running: entry.running,
+        is_default: entry.default,
+    }
+}
+
+/// The listing [`HERDR_SCRIPT`] printed between its markers, read like a `session list --json`
+/// of its own. `None` when herdr was not found, the script was cut short, or the listing failed
+/// (any [`DiscoveryError`]).
+fn parse_herdr_listing(output: &str) -> Option<Vec<SessionEntry>> {
+    let (_, rest) = output.split_once("or2:list-begin\n")?;
+    let (listing, end) = rest.rsplit_once("\nor2:list-end:")?;
+    let status: u32 = end.lines().next()?.trim().parse().ok()?;
+    herdr::parse_listing(Some(status), listing.as_bytes(), b"").ok()
 }
 
 /// Lists herdr's sessions through [`herdr::list_sessions`] (the one parser of
@@ -96,59 +162,40 @@ pub async fn herdr_sessions<H: RemoteHost>(
     host: &H,
     herdr: &str,
 ) -> Result<Vec<HerdrSessionInfo>, RemoteError> {
-    list_within(host, herdr, HERDR_LIST_TIMEOUT).await
-}
-
-async fn list_within<H: RemoteHost>(
-    host: &H,
-    herdr: &str,
-    limit: Duration,
-) -> Result<Vec<HerdrSessionInfo>, RemoteError> {
-    let entries = tokio::time::timeout(limit, herdr::list_sessions(host, herdr))
+    let entries = tokio::time::timeout(HERDR_LIST_TIMEOUT, herdr::list_sessions(host, herdr))
         .await
         .map_err(|_| RemoteError::TimedOut)?;
     match entries {
-        Ok(entries) => Ok(entries
-            .into_iter()
-            .map(|entry| HerdrSessionInfo {
-                name: entry.name,
-                running: entry.running,
-                is_default: entry.default,
-            })
-            .collect()),
+        Ok(entries) => Ok(entries.iter().map(session_info).collect()),
         Err(DiscoveryError::Remote(error)) => Err(error),
         Err(other) => Err(RemoteError::Io(other.to_string())),
     }
 }
 
 /// The last session list read successfully, kept apart from the probe's immutable programs and
-/// locale. Until a read succeeds, the list the probe itself found is the one reported.
+/// locale, in the connection's [`Directory`] (which the herdr watches and pane focuses take their
+/// sockets from). Until a read succeeds, the list the probe itself found is the one reported.
 ///
 /// [`SessionsCache::capabilities`] reads the list again on every call, so `running` and new or
-/// stopped sessions show. A listing that fails (herdr gone, hung, garbage) reports the LAST
-/// successful list, not the one from connect time: the app treats the list as authoritative
-/// (a session missing from it has its watch stopped), so a transient failure must neither drop
-/// a session found since connecting nor bring back one that has gone. Reads can overlap, so each
-/// takes a ticket when it starts and a result is applied only if no read that started later
-/// has already been applied; a slow older read can never overwrite a newer list.
+/// stopped sessions show, except for the first call after the probe seeded the directory: that
+/// list is as fresh as a read made now. A listing that fails (herdr gone, hung, garbage)
+/// reports the LAST successful list, not the one from connect time: the app treats the list as
+/// authoritative (a session missing from it has its watch stopped), so a transient failure must
+/// neither drop a session found since connecting nor bring back one that has gone. Reads can
+/// overlap; the directory applies only the newest (see [`Directory`]).
 #[derive(Debug, Default)]
 pub struct SessionsCache {
-    state: Mutex<CacheState>,
-}
-
-#[derive(Debug, Default)]
-struct CacheState {
-    /// The last ticket handed out.
-    issued: u64,
-    /// The ticket of the read whose list is stored.
-    applied: u64,
-    /// `None` until a read succeeds.
-    list: Option<Vec<HerdrSessionInfo>>,
+    directory: Arc<Directory>,
 }
 
 impl SessionsCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The directory the herdr watches and focuses discover sockets through.
+    pub fn directory(&self) -> &Arc<Directory> {
+        &self.directory
     }
 
     /// `cached` with herdr's session list read again and remembered; programs and locale are
@@ -163,30 +210,18 @@ impl SessionsCache {
         let Some(herdr) = &cached.herdr else {
             return Ok(caps);
         };
-        let ticket = {
-            let mut state = self.lock();
-            state.issued += 1;
-            state.issued
-        };
-        let listed = herdr_sessions(host, herdr).await;
-        let mut state = self.lock();
-        match listed {
-            Ok(sessions) if ticket > state.applied => {
-                state.applied = ticket;
-                state.list = Some(sessions);
+        if !self.directory.take_unread() {
+            let read =
+                tokio::time::timeout(HERDR_LIST_TIMEOUT, self.directory.refresh(host, herdr)).await;
+            if let Ok(Err(DiscoveryError::Remote(RemoteError::Closed))) = read {
+                return Err(RemoteError::Closed);
             }
-            Err(RemoteError::Closed) => return Err(RemoteError::Closed),
-            // A newer read already stored its list, or this read failed.
-            Ok(_) | Err(_) => {}
+            // Any other failure, or a read that lost to a newer one, leaves the stored list.
         }
-        if let Some(list) = &state.list {
-            caps.herdr_sessions = list.clone();
+        if let Some(entries) = self.directory.entries() {
+            caps.herdr_sessions = entries.iter().map(session_info).collect();
         }
         Ok(caps)
-    }
-
-    fn lock(&self) -> MutexGuard<'_, CacheState> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -235,6 +270,7 @@ fn is_locale(locale: &str) -> bool {
 mod tests {
     use super::*;
     use crate::remote::{ExecOutput, render_script};
+    use std::sync::Mutex;
 
     #[test]
     fn the_script_renders_as_sh_dash_c_without_quotes_or_backslashes() {
@@ -311,6 +347,23 @@ mod tests {
         type Stream = tokio::io::DuplexStream;
 
         async fn exec_rendered(&self, line: &str) -> Result<ExecOutput, RemoteError> {
+            if line.starts_with("sh -c") && line.contains("or2:list-begin") {
+                // The probe's herdr script: path and listing in one exec.
+                let listed = |json: &str, status: u32| {
+                    Ok(output(
+                        0,
+                        &format!(
+                            "or2:herdr:/fake/herdr\nor2:list-begin\n{json}\nor2:list-end:{status}\n"
+                        ),
+                    ))
+                };
+                return match &self.herdr {
+                    Herdr::Sessions(json) => listed(json, 0),
+                    Herdr::Hangs => std::future::pending().await,
+                    Herdr::Fails => listed("", 1),
+                    Herdr::ConnectionGone => Err(RemoteError::Closed),
+                };
+            }
             if line.starts_with("sh -c") {
                 return Ok(output(
                     0,
@@ -576,5 +629,100 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(names(&after), ["other"]);
+    }
+
+    #[test]
+    fn the_herdr_script_obeys_the_rendering_contract_and_finds_herdr_like_the_probe() {
+        assert!(!HERDR_SCRIPT.contains(['\'', '\\']));
+        assert!(render_script(HERDR_SCRIPT).unwrap().starts_with("sh -c '"));
+        // The same search order, so the two scripts agree on where herdr is.
+        let search = |script: &str| {
+            let from = script.find("for or2_dir in").unwrap();
+            script[from..].lines().next().unwrap().to_owned()
+        };
+        assert_eq!(search(HERDR_SCRIPT), search(PROBE_SCRIPT));
+    }
+
+    #[test]
+    fn the_listing_between_the_markers_is_read_like_a_session_list_of_its_own() {
+        let listed = |json: &str, status: u32| {
+            format!("or2:herdr:/h\nor2:list-begin\n{json}\nor2:list-end:{status}\n")
+        };
+        let entries = parse_herdr_listing(&listed(ONE, 0)).unwrap();
+        assert_eq!(entries[0].name, "default");
+        assert_eq!(entries[0].socket_path, "/s/default.sock");
+        // herdr may pretty-print.
+        let pretty = "{\n \"sessions\": [\n  {\"name\": \"a\", \"socket_path\": \"/a\"}\n ]\n}";
+        assert_eq!(parse_herdr_listing(&listed(pretty, 0)).unwrap().len(), 1);
+        // A failing herdr, garbage, a script cut short and no herdr at all are no listing.
+        assert!(parse_herdr_listing(&listed("", 1)).is_none());
+        assert!(parse_herdr_listing(&listed("", 127)).is_none());
+        assert!(parse_herdr_listing(&listed("not json", 0)).is_none());
+        assert!(parse_herdr_listing("or2:herdr:/h\nor2:list-begin\n{\"sess").is_none());
+        assert!(parse_herdr_listing("or2:herdr:\n").is_none());
+        assert!(parse_herdr_listing("").is_none());
+    }
+
+    /// Both probe scripts wait for each other: serial execution would never get past the
+    /// barrier.
+    struct Barrier {
+        both: tokio::sync::Barrier,
+    }
+
+    impl RemoteHost for Barrier {
+        type Stream = tokio::io::DuplexStream;
+
+        async fn exec_rendered(&self, line: &str) -> Result<ExecOutput, RemoteError> {
+            self.both.wait().await;
+            Ok(if line.contains("or2:list-begin") {
+                output(
+                    0,
+                    &format!("or2:herdr:/fake/herdr\nor2:list-begin\n{ONE}\nor2:list-end:0\n"),
+                )
+            } else {
+                output(
+                    0,
+                    "or2:tmux:/fake/tmux\nor2:herdr:/fake/herdr\nor2:locale:C.UTF-8\nor2:end\n",
+                )
+            })
+        }
+
+        async fn open_unix(&self, _: &str) -> Result<Self::Stream, RemoteError> {
+            Err(RemoteError::Closed)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_probe_runs_its_two_scripts_at_once_and_hands_back_the_sockets() {
+        let host = Barrier {
+            both: tokio::sync::Barrier::new(2),
+        };
+        let (caps, entries) = tokio::time::timeout(Duration::from_secs(1), probe_entries(&host))
+            .await
+            .expect("the scripts did not run at the same time")
+            .unwrap();
+        assert_eq!(caps.tmux.as_deref(), Some("/fake/tmux"));
+        assert_eq!(caps.herdr_sessions.len(), 1);
+        assert_eq!(entries.unwrap()[0].socket_path, "/s/default.sock");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_first_capabilities_call_after_the_probe_does_not_list_again() {
+        let (caps, entries) = probe_entries(&Stub {
+            herdr: Herdr::Sessions(ONE),
+        })
+        .await
+        .unwrap();
+        let cache = SessionsCache::new();
+        cache.directory().seed(entries.unwrap());
+        // A listing that would fail if it ran: the first call must not run one.
+        let host = Stub {
+            herdr: Herdr::Sessions(OTHER),
+        };
+        let first = cache.capabilities(&host, &caps).await.unwrap();
+        assert_eq!(first.herdr_sessions, caps.herdr_sessions);
+        // The next call reads the listing.
+        let again = cache.capabilities(&host, &caps).await.unwrap();
+        assert_eq!(names(&again), ["other"]);
     }
 }

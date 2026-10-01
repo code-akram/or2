@@ -3,8 +3,9 @@
 //!
 //! A transport turns an [`Endpoint`] into a byte stream. Its `Stream` bound is exactly the bound
 //! `russh::client::connect_stream` requires, so any transport can carry an SSH connection.
-//! [`DirectTcp`] is the one stream implementation so far. [`race`] connects to a host's several
-//! addresses over any transport. Jump hosts and the Android network binding are added as
+//! [`DirectTcp`] is the one stream implementation so far (it resolves a name once, retrying a
+//! `.local` one, and races what it resolved: see [`dial`]). [`race`] connects to a host's several
+//! addresses over any transport, each with its own time limit. Jump hosts and the Android network binding are added as
 //! further implementations or methods when those milestones need them.
 //!
 //! mosh needs datagrams, and needs to open a new socket to the same endpoint whenever the
@@ -16,7 +17,7 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::num::NonZeroU16;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -24,6 +25,11 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep_until};
+
+#[path = "transport_dial.rs"]
+mod dial;
+
+pub use dial::{Connector, DialTiming, Resolver, SystemResolver, TcpConnector, dial};
 
 /// A validated host name or IP literal and a nonzero TCP port.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,18 +88,23 @@ pub trait Transport: Send + Sync + 'static {
 }
 
 /// OS sockets: LAN, or a VPN app such as ZeroTier that routes through the OS.
-/// Resolves the host and tries each address in order (tokio's behaviour).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DirectTcp;
 
 impl Transport for DirectTcp {
     type Stream = TcpStream;
 
+    /// Resolves the name once and races what it resolved ([`dial`]): a `.local` name is retried,
+    /// an IPv6 link-local address without a scope is skipped, and no address can hold the others.
     async fn connect(&self, endpoint: &Endpoint) -> io::Result<TcpStream> {
-        let stream = TcpStream::connect((endpoint.host(), endpoint.port())).await?;
-        // Interactive keystrokes are tiny writes; do not let Nagle delay them.
-        stream.set_nodelay(true)?;
-        Ok(stream)
+        dial(
+            &SystemResolver,
+            &TcpConnector,
+            endpoint,
+            DialTiming::default(),
+        )
+        .await
+        .map(|(stream, _)| stream)
     }
 
     fn peer_addr(&self, stream: &TcpStream) -> Option<SocketAddr> {
@@ -104,6 +115,30 @@ impl Transport for DirectTcp {
 /// Each further address starts this long after the previous one started, unless the previous
 /// one failed first.
 pub const RACE_STAGGER: Duration = Duration::from_millis(250);
+
+/// How long one address may take, name resolution included, before the race counts it as
+/// unanswered. Each address has its own allowance inside the host's overall connect timeout, so
+/// one address that silently drops packets (an overlay IP with no route, a sleeping machine) can
+/// never consume the whole budget while the others have already failed.
+pub const ADDRESS_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// The timing of a [`race`].
+#[derive(Debug, Clone, Copy)]
+pub struct RaceTiming {
+    /// See [`RACE_STAGGER`].
+    pub stagger: Duration,
+    /// See [`ADDRESS_TIMEOUT`].
+    pub address_timeout: Duration,
+}
+
+impl Default for RaceTiming {
+    fn default() -> Self {
+        Self {
+            stagger: RACE_STAGGER,
+            address_timeout: ADDRESS_TIMEOUT,
+        }
+    }
+}
 
 /// The winner of a [`race`]: its position in the address list, its stream and the remote
 /// address the transport says that stream reached ([`Transport::peer_addr`]).
@@ -120,15 +155,35 @@ pub struct RaceFailure {
     pub errors: Vec<io::Error>,
 }
 
+/// An address's error in words a person can act on, without the address: `connection refused`,
+/// `no route to the host`, `no answer within 6 s`, `name not resolved (mDNS) after 3 tries`.
+/// Errors this module raised carry their own text; an operating-system error is named by its
+/// kind.
+pub fn describe_error(error: &io::Error) -> String {
+    match error.kind() {
+        io::ErrorKind::ConnectionRefused => "connection refused".into(),
+        io::ErrorKind::NetworkUnreachable | io::ErrorKind::HostUnreachable => {
+            "no route to the host".into()
+        }
+        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted => {
+            "connection reset".into()
+        }
+        io::ErrorKind::TimedOut if error.raw_os_error().is_some() => "no answer".into(),
+        _ if error.raw_os_error().is_none() && error.get_ref().is_some() => error.to_string(),
+        kind => format!("{kind:?} ({error})"),
+    }
+}
+
 impl fmt::Display for RaceFailure {
-    /// `address 0: ConnectionRefused (Connection refused (os error 111)); address 1: ...`.
-    /// Positions and error kinds only: no host names, so the text is safe in diagnostics.
+    /// `address 0: connection refused; address 1: no answer within 6 s`. Positions and
+    /// outcomes only: no host names or addresses, so the text is safe in diagnostics (the app
+    /// puts the names back for its own screen).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (index, error) in self.errors.iter().enumerate() {
             if index > 0 {
                 f.write_str("; ")?;
             }
-            write!(f, "address {index}: {:?} ({error})", error.kind())?;
+            write!(f, "address {index}: {}", describe_error(error))?;
         }
         Ok(())
     }
@@ -136,35 +191,142 @@ impl fmt::Display for RaceFailure {
 
 impl std::error::Error for RaceFailure {}
 
-/// Connects to the first of `addresses` that answers. Address 0 starts at once; each next one
-/// starts `stagger` after the previous one started, or immediately when that previous one
-/// fails. The first connection wins and every other attempt is dropped, so a loser never
-/// keeps a socket. Dropping the future cancels all attempts. There is no timeout here: the
-/// caller bounds the race.
-pub async fn race<T: Transport>(
-    transport: &Arc<T>,
-    addresses: &[Endpoint],
+/// `6 s`, `5.5 s`.
+pub fn seconds(duration: Duration) -> String {
+    if duration.subsec_millis() == 0 {
+        format!("{} s", duration.as_secs())
+    } else {
+        format!("{:.1} s", duration.as_secs_f64())
+    }
+}
+
+/// What each address of a race has done so far, shared with whoever has to explain a race that
+/// is still running when its time is up (the host's overall connect timeout).
+#[derive(Debug, Clone, Default)]
+pub struct RaceReport {
+    state: Arc<Mutex<ReportState>>,
+}
+
+#[derive(Debug, Default)]
+struct ReportState {
+    addresses: Vec<Progress>,
+    over: bool,
+}
+
+#[derive(Debug, Clone)]
+enum Progress {
+    Waiting,
+    Trying(Instant),
+    Failed(String),
+}
+
+impl RaceReport {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ReportState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn begin(&self, count: usize) {
+        *self.lock() = ReportState {
+            addresses: vec![Progress::Waiting; count],
+            over: false,
+        };
+    }
+
+    fn started(&self, index: usize) {
+        if let Some(entry) = self.lock().addresses.get_mut(index) {
+            *entry = Progress::Trying(Instant::now());
+        }
+    }
+
+    fn failed(&self, index: usize, error: &io::Error) {
+        if let Some(entry) = self.lock().addresses.get_mut(index) {
+            *entry = Progress::Failed(describe_error(error));
+        }
+    }
+
+    fn finish(&self) {
+        self.lock().over = true;
+    }
+
+    /// True while the race has started and not yet produced a winner or a failure.
+    pub fn is_pending(&self) -> bool {
+        let state = self.lock();
+        !state.addresses.is_empty() && !state.over
+    }
+
+    /// Each address's outcome so far, in the words of [`RaceFailure`]: those that failed say
+    /// why, those still running say for how long (`still trying after 20 s`).
+    pub fn describe(&self) -> String {
+        let state = self.lock();
+        let mut out = String::new();
+        for (index, progress) in state.addresses.iter().enumerate() {
+            if index > 0 {
+                out.push_str("; ");
+            }
+            let what = match progress {
+                Progress::Waiting => "not tried yet".to_owned(),
+                Progress::Trying(since) => {
+                    format!("still trying after {}", seconds(since.elapsed()))
+                }
+                Progress::Failed(why) => why.clone(),
+            };
+            out.push_str(&format!("address {index}: {what}"));
+        }
+        out
+    }
+}
+
+/// What a [`race_attempts`] caller hears about an attempt.
+pub(crate) enum Step<'a> {
+    Started,
+    Failed(&'a io::Error),
+}
+
+/// The race itself, over any attempts: starts attempt 0 at once, each next one `stagger` after
+/// the previous one started or immediately when it fails, gives every attempt `attempt_timeout`
+/// (`TimedOut`, "no answer within ..."), and returns the first to succeed with its index.
+/// Every other attempt is dropped (a loser never keeps a socket), and so are all of them if the
+/// caller drops this future. When all fail, the errors in attempt order.
+pub(crate) async fn race_attempts<S, F, Fut>(
+    count: usize,
     stagger: Duration,
-) -> Result<Raced<T::Stream>, RaceFailure> {
+    attempt_timeout: Duration,
+    mut on_step: impl FnMut(usize, Step<'_>),
+    start: F,
+) -> Result<(usize, S), Vec<io::Error>>
+where
+    F: Fn(usize) -> Fut,
+    Fut: Future<Output = io::Result<S>> + Send + 'static,
+    S: Send + 'static,
+{
     // Dropping the set aborts every attempt still running.
-    type Attempt<S> = (usize, io::Result<(S, Option<SocketAddr>)>);
-    let mut attempts: JoinSet<Attempt<T::Stream>> = JoinSet::new();
-    let mut errors: Vec<Option<io::Error>> = addresses.iter().map(|_| None).collect();
+    type Attempt<S> = (usize, io::Result<S>);
+    let mut attempts: JoinSet<Attempt<S>> = JoinSet::new();
+    let mut errors: Vec<Option<io::Error>> = (0..count).map(|_| None).collect();
     let mut next = 0;
     let mut next_at = Instant::now();
     loop {
-        let starting = next < addresses.len();
+        let starting = next < count;
         tokio::select! {
             () = sleep_until(next_at), if starting => {
-                let transport = Arc::clone(transport);
-                let endpoint = addresses[next].clone();
                 let index = next;
+                let attempt = start(index);
+                on_step(index, Step::Started);
                 attempts.spawn(async move {
-                    let connected = transport.connect(&endpoint).await.map(|stream| {
-                        let peer = transport.peer_addr(&stream);
-                        (stream, peer)
-                    });
-                    (index, connected)
+                    let result = match tokio::time::timeout(attempt_timeout, attempt).await {
+                        Ok(result) => result,
+                        Err(_) => Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("no answer within {}", seconds(attempt_timeout)),
+                        )),
+                    };
+                    (index, result)
                 });
                 next += 1;
                 next_at = Instant::now() + stagger;
@@ -178,8 +340,9 @@ pub async fn race<T: Transport>(
                     Err(error) => std::panic::resume_unwind(error.into_panic()),
                 };
                 match result {
-                    Ok((stream, peer)) => return Ok(Raced { index, stream, peer }),
+                    Ok(stream) => return Ok((index, stream)),
                     Err(error) => {
+                        on_step(index, Step::Failed(&error));
                         errors[index] = Some(error);
                         // Only the most recently started attempt's failure brings the next
                         // one forward; an older failure leaves the schedule alone.
@@ -192,12 +355,80 @@ pub async fn race<T: Transport>(
             else => break,
         }
     }
-    Err(RaceFailure {
-        errors: errors
-            .into_iter()
-            .map(|error| error.unwrap_or_else(|| io::Error::other("not attempted")))
-            .collect(),
-    })
+    Err(errors
+        .into_iter()
+        .map(|error| error.unwrap_or_else(|| io::Error::other("not attempted")))
+        .collect())
+}
+
+/// Connects to the first of `addresses` that answers. Address 0 starts at once; each next one
+/// starts `stagger` after the previous one started, or immediately when that previous one
+/// fails. The first connection wins and every other attempt is dropped, so a loser never
+/// keeps a socket. Dropping the future cancels all attempts. Each address has
+/// [`ADDRESS_TIMEOUT`] to answer (its own failure, `no answer within 6 s`), so the race always
+/// ends: the caller's own timeout is the overall bound, not the only one.
+pub async fn race<T: Transport>(
+    transport: &Arc<T>,
+    addresses: &[Endpoint],
+    stagger: Duration,
+) -> Result<Raced<T::Stream>, RaceFailure> {
+    race_with(
+        transport,
+        addresses,
+        RaceTiming {
+            stagger,
+            ..RaceTiming::default()
+        },
+        None,
+    )
+    .await
+}
+
+/// [`race`] with the full [`RaceTiming`], and optionally a [`RaceReport`] that follows every
+/// address as the race goes (reset at the start, finished when the race ends).
+pub async fn race_with<T: Transport>(
+    transport: &Arc<T>,
+    addresses: &[Endpoint],
+    timing: RaceTiming,
+    report: Option<&RaceReport>,
+) -> Result<Raced<T::Stream>, RaceFailure> {
+    if let Some(report) = report {
+        report.begin(addresses.len());
+    }
+    let outcome = race_attempts(
+        addresses.len(),
+        timing.stagger,
+        timing.address_timeout,
+        |index, step| {
+            if let Some(report) = report {
+                match step {
+                    Step::Started => report.started(index),
+                    Step::Failed(error) => report.failed(index, error),
+                }
+            }
+        },
+        |index| {
+            let transport = Arc::clone(transport);
+            let endpoint = addresses[index].clone();
+            async move {
+                let stream = transport.connect(&endpoint).await?;
+                let peer = transport.peer_addr(&stream);
+                Ok((stream, peer))
+            }
+        },
+    )
+    .await;
+    if let Some(report) = report {
+        report.finish();
+    }
+    match outcome {
+        Ok((index, (stream, peer))) => Ok(Raced {
+            index,
+            stream,
+            peer,
+        }),
+        Err(errors) => Err(RaceFailure { errors }),
+    }
 }
 
 #[cfg(test)]

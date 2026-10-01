@@ -178,6 +178,10 @@ class TerminalView(context: Context) : View(context) {
     private var lastSize: GridSize? = null
     private var framePending = false
     private var requestedFull = false
+
+    /** Called once, after the first frame of this view was applied and invalidated (the timing markers). */
+    var onFirstFrame: () -> Unit = {}
+    private var firstFrameDrawn = false
     private var cursorVisible = true
     private val blink = object : Runnable {
         override fun run() {
@@ -198,6 +202,10 @@ class TerminalView(context: Context) : View(context) {
                     onBackgroundChanged(grid.background)
                 }
                 invalidate()
+                if (!firstFrameDrawn) {
+                    firstFrameDrawn = true
+                    onFirstFrame()
+                }
             } else {
                 requestSnapshot()
             }

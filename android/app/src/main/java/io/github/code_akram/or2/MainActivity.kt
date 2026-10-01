@@ -74,14 +74,27 @@ class MainActivity : FragmentActivity() {
             val hosts = ids.toList().mapNotNull { app.database.dao().host(it) }
             // Back to back with no suspension between: busy never reads false in between.
             busy = false
-            if (hosts.isNotEmpty()) startConnect(hosts)
+            if (hosts.isNotEmpty()) connectAfterNotifications(hosts)
         }
+    }
+
+    /**
+     * The hosts of a connect that waits for the battery-optimisation explanation (and the system's own
+     * request after it), by id, saved like [pendingConnect]: the dialog is up in the foreground before
+     * the first unlock, and a connect must survive the activity being recreated meanwhile.
+     */
+    private var pendingBattery: LongArray? = null
+    private val batteryExemption = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        // The system's dialog is closed; whatever it answered, the exemption is read afresh and connecting goes on.
+        if (app.isBatteryExempt()) app.battery.refresh() else app.battery.declined()
+        continueAfterBattery()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pendingConnect = savedInstanceState?.getLongArray(PENDING_CONNECT)
-        if (pendingConnect != null) busy = true
+        pendingBattery = savedInstanceState?.getLongArray(PENDING_BATTERY)
+        if (pendingConnect != null || pendingBattery != null) busy = true
         app.watchConnections()
         enableEdgeToEdge(
             // Dark only: transparent bars with light icons over the app's own background.
@@ -106,6 +119,8 @@ class MainActivity : FragmentActivity() {
             reattach = app.reattach,
             battery = app.battery,
             requestBatteryExemption = ::requestBatteryExemption,
+            answerBatteryExplanation = ::answerBatteryExplanation,
+            takeColdResume = app.sessionMarker::takeColdResume,
         )
         setContent {
             val hosts by model.hosts.collectAsStateWithLifecycle()
@@ -185,7 +200,50 @@ class MainActivity : FragmentActivity() {
             busy = true
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
+            connectAfterNotifications(hosts)
+        }
+    }
+
+    /**
+     * The battery-optimisation exemption is asked for up front, once: before the first unlock, in the
+     * foreground (not as a modal over a terminal on a later return). The explanation is Compose's
+     * (`battery.explaining`); "Allow" goes on to the system's own request, "Not now" to the connect.
+     */
+    private fun connectAfterNotifications(hosts: List<Host>) {
+        if (app.battery.shouldExplain()) {
+            pendingBattery = hosts.map { it.id }.toLongArray()
+            busy = true
+            app.battery.explain()
+        } else {
             startConnect(hosts)
+        }
+    }
+
+    private fun answerBatteryExplanation(allow: Boolean) {
+        if (!app.battery.explaining.value) return
+        app.battery.explained()
+        if (allow && launchBatteryRequest()) return // The result callback carries on.
+        app.battery.declined()
+        continueAfterBattery()
+    }
+
+    /** Opens the system's request; false when this device has no such screen. */
+    @SuppressLint("BatteryLife")
+    private fun launchBatteryRequest(): Boolean = try {
+        batteryExemption.launch(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+        true
+    } catch (_: ActivityNotFoundException) {
+        false
+    }
+
+    private fun continueAfterBattery() {
+        val ids = pendingBattery ?: return
+        pendingBattery = null
+        lifecycleScope.launch {
+            val hosts = ids.toList().mapNotNull { app.database.dao().host(it) }
+            // Back to back with no suspension between: busy never reads false in between.
+            busy = false
+            if (hosts.isNotEmpty()) startConnect(hosts)
         }
     }
 
@@ -196,29 +254,34 @@ class MainActivity : FragmentActivity() {
         // Whatever the network did while the app was away is settled by one roam (debounced with any
         // callback event that arrives with it).
         app.networkChanges.foregrounded()
+        // The exemption may have been given (or taken away) in Settings while the app was away.
+        app.battery.refresh()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         pendingConnect?.let { outState.putLongArray(PENDING_CONNECT, it) }
+        pendingBattery?.let { outState.putLongArray(PENDING_BATTERY, it) }
     }
 
     private fun startConnect(hosts: List<Host>) = operation { connectGrouped(hosts, app.connections, biometricUnlocker) }
 
     private companion object {
         const val PENDING_CONNECT = "pending_connect"
+        const val PENDING_BATTERY = "pending_battery"
     }
 
     /**
-     * The system's own "let this app ignore battery optimisations?" dialog; shown only after our
-     * explanation. Play Store policy restricts this request; or2 ships through F-Droid.
+     * The system's own "let this app ignore battery optimisations?" dialog, from Home's card (the
+     * explanation was shown once, before the first connection). Play Store policy restricts this request;
+     * or2 ships through F-Droid.
      */
     @SuppressLint("BatteryLife", "UseKtx")
     private fun requestBatteryExemption() {
         try {
             startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
         } catch (_: ActivityNotFoundException) {
-            // No such screen on this device; the explanation was the one and only ask.
+            // No such screen on this device; the card stays until it is dismissed.
         }
     }
 

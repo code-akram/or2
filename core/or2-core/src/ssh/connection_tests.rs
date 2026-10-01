@@ -88,11 +88,11 @@ fn unreachable_addresses_close_with_each_error_listed_from_a_rust_thread() {
         panic!("expected Unreachable")
     };
     assert!(
-        message.contains("address 0: ConnectionRefused"),
+        message.contains("address 0: connection refused"),
         "{message}"
     );
     assert!(
-        message.contains("address 1: ConnectionRefused"),
+        message.contains("address 1: connection refused"),
         "{message}"
     );
     assert!(
@@ -100,6 +100,84 @@ fn unreachable_addresses_close_with_each_error_listed_from_a_rust_thread() {
         "no host names in diagnostics"
     );
     assert!(matches!(handle.state(), HostState::Closed(_)));
+}
+
+/// A transport whose connections never complete: a host that silently drops every packet.
+struct Blackhole;
+
+impl Transport for Blackhole {
+    type Stream = tokio::io::DuplexStream;
+
+    async fn connect(&self, _: &crate::transport::Endpoint) -> std::io::Result<Self::Stream> {
+        std::future::pending().await
+    }
+}
+
+fn connect_over_blackhole(
+    options: HostOptions,
+    addresses: &[(&str, u16)],
+) -> (
+    HostHandle,
+    sync::Receiver<(HostState, std::thread::ThreadId)>,
+) {
+    let (observer, states) = recorder();
+    let handle = crate::ssh::connect_host_with(
+        Arc::new(Blackhole),
+        request(addresses, &[]),
+        observer,
+        options,
+    );
+    (handle, states)
+}
+
+#[test]
+fn a_connect_timeout_that_fires_while_the_race_runs_says_what_each_address_did() {
+    // The per-address allowance is longer than the connect timeout here, so the overall timer
+    // ends it: the host is unreachable (no address ever connected), not "timed out".
+    let (_handle, states) = connect_over_blackhole(
+        HostOptions {
+            connect_timeout: Duration::from_millis(400),
+            address_timeout: Duration::from_secs(60),
+            ..HostOptions::default()
+        },
+        &[("a.invalid", 22), ("b.invalid", 22)],
+    );
+    let CloseReason::Failed(SessionFailure::Unreachable(message)) = closed(&states) else {
+        panic!("expected Unreachable")
+    };
+    assert!(
+        message.contains("address 0: still trying after"),
+        "{message}"
+    );
+    assert!(
+        message.contains("address 1: still trying after"),
+        "{message}"
+    );
+    assert!(!message.contains("invalid"), "no host names: {message}");
+}
+
+#[test]
+fn each_address_gets_its_own_timeout_and_the_failure_lists_them_all() {
+    let started = std::time::Instant::now();
+    let (_handle, states) = connect_over_blackhole(
+        HostOptions {
+            connect_timeout: Duration::from_secs(30),
+            address_timeout: Duration::from_millis(300),
+            stagger: Duration::from_millis(100),
+            ..HostOptions::default()
+        },
+        &[("a.invalid", 22), ("b.invalid", 22)],
+    );
+    let CloseReason::Failed(SessionFailure::Unreachable(message)) = closed(&states) else {
+        panic!("expected Unreachable")
+    };
+    assert!(
+        message.contains("address 0: no answer within 0.3 s")
+            && message.contains("address 1: no answer within 0.3 s"),
+        "{message}"
+    );
+    // Far inside the overall timeout: one blackholed address cannot consume the whole budget.
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 #[test]
@@ -351,6 +429,31 @@ impl server::Handler for Server {
                     finish(session, channel, 1)
                 }
             };
+        }
+        if command.starts_with("sh -c") && command.contains("or2:list-begin") {
+            // The probe's second script: finds herdr and lists its sessions in one exec. It
+            // hangs with the first script when the test says the probe hangs.
+            session.channel_success(channel)?;
+            if self.shared.probe_hangs.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            let probe = *self.shared.probe.lock().unwrap();
+            let path = probe
+                .lines()
+                .find_map(|line| line.strip_prefix("or2:herdr:"))
+                .unwrap_or("");
+            let mut output = format!("or2:herdr:{path}\n");
+            if !path.is_empty() {
+                let listing = *self.shared.herdr_list.lock().unwrap();
+                let (json, status) = match listing {
+                    HerdrList::Fixture => (HERDR_LISTING, 0),
+                    HerdrList::Json(json) => (json, 0),
+                    HerdrList::Fails => ("", 1),
+                };
+                output.push_str(&format!("or2:list-begin\n{json}\nor2:list-end:{status}\n"));
+            }
+            session.data(channel, output.into_bytes())?;
+            return finish(session, channel, 0);
         }
         if command.starts_with("sh -c") {
             self.shared.probes.fetch_add(1, Ordering::SeqCst);

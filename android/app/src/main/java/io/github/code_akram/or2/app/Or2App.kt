@@ -109,9 +109,16 @@ class AppActions(
     val message: (String?) -> Unit,
     /** The last focused terminal, for reattach after the app returns to the foreground. */
     val reattach: ReattachMemory = ReattachMemory(MemoryPrefStore()),
-    /** The one-time battery-optimisation explanation; [requestBatteryExemption] opens the system dialog. */
+    /**
+     * The battery-optimisation exemption, asked up front before the first connection: its explanation
+     * ([BatteryPrompt.explaining], answered through [answerBatteryExplanation]) and the non-blocking Home card
+     * that remains when it was declined ([requestBatteryExemption] opens the system's own request).
+     */
     val battery: BatteryPrompt = BatteryPrompt(MemoryPrefStore()),
     val requestBatteryExemption: () -> Unit = {},
+    val answerBatteryExplanation: (allow: Boolean) -> Unit = {},
+    /** True once per process when the previous one died with sessions open ([SessionMarker]): the launcher resumes. */
+    val takeColdResume: () -> Boolean = { false },
 )
 
 /**
@@ -148,6 +155,8 @@ fun Or2App(
     val transports by remember(connections) { connections.transports() }.collectAsStateWithLifecycle(emptyMap())
     val closedStates by remember(connections) { connections.terminalClosedStates() }.collectAsStateWithLifecycle(emptyMap())
     val last by actions.reattach.last.collectAsStateWithLifecycle()
+    val batteryExplaining by actions.battery.explaining.collectAsStateWithLifecycle()
+    val batteryCard by actions.battery.card.collectAsStateWithLifecycle()
 
     // Hosts between the tap and the key being unlocked: their card says "Unlocking key...".
     var unlocking by remember { mutableStateOf(emptySet<Long>()) }
@@ -212,12 +221,15 @@ fun Or2App(
     fun enterReattached(activation: Activation) {
         enter(activation, replace = NavStack.decode(saved).current is Destination.Terminal)
     }
-    fun reopen(target: LastTerminal) = activations.launchReopen(target, hostLabel(target.hostId), ::enterReattached)
+    fun reopen(target: LastTerminal, span: String? = null) =
+        activations.launchReopen(target, hostLabel(target.hostId), span, ::enterReattached)
     fun resumeLast() {
         val target = last ?: return
         val host = hosts.find { it.id == target.hostId } ?: return
+        val span = "resume host=${target.hostId}"
+        connections.timing.begin(span)
         if (target.hostId in connectedHosts) {
-            reopen(target)
+            reopen(target, span)
         } else {
             pendingResume = target
             if (!busy) connect(listOf(host))
@@ -229,7 +241,12 @@ fun Or2App(
         when (resumeStep(resumeState, busy)) {
             ResumeStep.WAIT -> Unit
             ResumeStep.ABORT -> pendingResume = null
-            ResumeStep.OPEN -> { pendingResume = null; reopen(target) }
+            ResumeStep.OPEN -> {
+                pendingResume = null
+                val span = "resume host=${target.hostId}"
+                connections.timing.mark(span, "host-connected")
+                reopen(target, span.takeIf(connections.timing::isRunning))
+            }
         }
     }
 
@@ -261,15 +278,20 @@ fun Or2App(
     // on that terminal (the system killed it, and brought the user back through the recents list).
     // Start from Home and resume at once: one grouped unlock (the fingerprint), then the host connects
     // and the remembered target reopens, with no further tap. A cold start from the launcher has no
-    // saved destination and shows Home's Resume card instead.
+    // saved destination (OxygenOS drops a killed app from recents, so this is the usual way back): it
+    // resumes the same way when the previous process died with sessions open (`SessionMarker`, one-shot
+    // per process), and Home's Resume card is what remains when the fingerprint is cancelled.
     var recovered by remember { mutableStateOf(false) }
     LaunchedEffect(loaded) {
         if (!loaded || recovered) return@LaunchedEffect
         recovered = true
+        val coldStart = actions.takeColdResume()
         val top = NavStack.decode(saved).current
         if (top is Destination.Terminal && connections.terminal(top.terminalId) == null) {
             navigate(NavStack())
             if (shouldAutoResume(actions.reattach.last.value, hostsNow.value, connectedHosts)) resumeLast()
+        } else if (shouldAutoResumeOnLaunch(coldStart, actions.reattach.last.value, hostsNow.value, connectedHosts)) {
+            resumeLast()
         }
     }
 
@@ -281,7 +303,6 @@ fun Or2App(
     val activity = LocalActivity.current
     var returning by rememberSaveable { mutableStateOf(false) }
     var returned by remember { mutableStateOf(false) }
-    var batteryExplanation by rememberSaveable { mutableStateOf(false) }
     val chipOffer = remember(offeredIds, hosts, states) {
         if (offeredIds.isEmpty()) null
         else reconnectOffer(hosts.filter { it.id in offeredIds }, connections.hosts.value)
@@ -290,7 +311,6 @@ fun Or2App(
         if (activity?.isChangingConfigurations == true) return@LifecycleEventEffect
         returning = true
         stoppedOnTerminal = NavStack.decode(saved).current is Destination.Terminal
-        actions.battery.onBackgrounded(connections.hasOpenSession())
     }
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
         if (!returning) return@LifecycleEventEffect
@@ -301,7 +321,6 @@ fun Or2App(
         if (!returned || !loaded) return@LaunchedEffect
         returned = false
         val stored = hostsNow.value
-        if (actions.battery.takeIfDue()) batteryExplanation = true
         offeredIds = reconnectOffer(stored, connections.hosts.value)?.hosts?.map { it.id }?.toSet().orEmpty()
         val liveHosts = connections.hosts.value.filterValues { it.state.value is HostState.Connected }.keys
         val decision = decideReattach(
@@ -347,7 +366,7 @@ fun Or2App(
                     }
                     val cards = hosts.map { host ->
                         val state = states[host.id]
-                        HostCard(host, hostCardStatus(state, host.id in unlocking, blockedByHost[host.id] ?: 0, host.sleeps), linkStatus(state, host.sleeps))
+                        HostCard(host, hostCardStatus(state, host.id in unlocking, blockedByHost[host.id] ?: 0, host.sleeps, host.addresses), linkStatus(state, host.sleeps))
                     }
                     val connectable = cards.filter { it.host.keyId != null && it.link.canConnect }
                     HomeScreen(
@@ -376,6 +395,7 @@ fun Or2App(
                         openKeys = { navigate(nav.push(Destination.Keys)) },
                         connectAll = { connect(connectable.map { it.host }) },
                         resume = resumeCard, onResume = { resumeLast() },
+                        batteryCard = batteryCard, allowBattery = actions.requestBatteryExemption, dismissBattery = actions.battery::dismissCard,
                     )
                 }
                 Destination.Inbox -> InboxScreen(
@@ -432,17 +452,18 @@ fun Or2App(
         HostTrustDialog(prompt, busy, { actions.approve(active, prompt) }, { actions.reject(active) },
             hostLabel = hosts.find { it.id == active.host.id }?.label ?: active.host.label)
     }
-    if (batteryExplanation) {
+    // Up front, in the foreground, before the first unlock: never over a terminal on a later return.
+    if (batteryExplaining) {
         Or2Dialog(
-            onDismiss = { batteryExplanation = false }, title = "Keep sessions connected",
+            onDismiss = { actions.answerBatteryExplanation(false) }, title = "Keep sessions connected",
             confirm = {
-                TextAction("Allow", { batteryExplanation = false; actions.requestBatteryExemption() }, modifier = Modifier.testTag("battery-allow"))
+                TextAction("Allow", { actions.answerBatteryExplanation(true) }, modifier = Modifier.testTag("battery-allow"))
             },
-            dismiss = { TextAction("Not now", { batteryExplanation = false }, color = Or2Colors.Text, modifier = Modifier.testTag("battery-dismiss")) },
+            dismiss = { TextAction("Not now", { actions.answerBatteryExplanation(false) }, color = Or2Colors.Text, modifier = Modifier.testTag("battery-dismiss")) },
             modifier = Modifier.testTag("battery-dialog"),
         ) {
             Text(
-                "Android may stop or slow or2 while it is in the background and drop your sessions. " +
+                "Android may stop or slow or2 while it is in the background and drop your SSH connections. " +
                     "Allow or2 to ignore battery optimisation so they stay connected. This is asked only once.",
             )
         }

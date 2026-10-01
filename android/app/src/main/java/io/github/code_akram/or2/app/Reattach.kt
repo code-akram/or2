@@ -135,6 +135,50 @@ fun decideReattach(last: LastTerminal?, sessions: List<OpenSession>, liveHosts: 
 fun shouldAutoResume(last: LastTerminal?, hosts: List<Host>, connectedHosts: Set<Long>): Boolean =
     last != null && last.hostId !in connectedHosts && hosts.any { it.id == last.hostId && it.keyId != null }
 
+/**
+ * Whether a **cold launcher start** resumes at once, like the recents path: the previous process died
+ * with sessions open ([diedWithSessions], see [SessionMarker]), and there is a remembered terminal
+ * that [shouldAutoResume] accepts. OxygenOS removes a killed app from recents, so the launcher is
+ * how the user comes back, and the saved-destination path never sees that start. A target the user
+ * closed on purpose is not remembered ([ReattachMemory] forgets it), and a process that ended in
+ * order (Disconnect all, the last session closed) cleared the marker, so neither resumes.
+ */
+fun shouldAutoResumeOnLaunch(diedWithSessions: Boolean, last: LastTerminal?, hosts: List<Host>, connectedHosts: Set<Long>): Boolean =
+    diedWithSessions && shouldAutoResume(last, hosts, connectedHosts)
+
+/**
+ * A "sessions open" marker in app-private preferences, written while any terminal is open and
+ * cleared the moment none is (an orderly end: Disconnect all, the last close, a remote exit).
+ * A process that is killed leaves it set, so the next process finds [diedWithSessions] true.
+ * It is read once, when this object is created, **before** this process writes anything.
+ * [takeColdResume] hands that fact to the first activity that asks and to nobody after it, so a
+ * rotation or a recreated activity never resumes a second time.
+ */
+class SessionMarker(private val store: PrefStore) {
+    /** The previous process died with a session open. */
+    val diedWithSessions: Boolean = store.getBoolean(KEY)
+    private var taken = false
+    private var written = diedWithSessions
+
+    /** Records whether any terminal is open now; writes only on a change. */
+    fun onOpenSessions(open: Boolean) {
+        if (open == written) return
+        written = open
+        store.putBoolean(KEY, open)
+    }
+
+    /** True once per process, and only if the previous process died with sessions open. */
+    fun takeColdResume(): Boolean {
+        if (taken) return false
+        taken = true
+        return diedWithSessions
+    }
+
+    private companion object {
+        const val KEY = "sessions_open"
+    }
+}
+
 /** The next step of a Resume once the user tapped it and the host is being unlocked and connected. */
 enum class ResumeStep { WAIT, OPEN, ABORT }
 

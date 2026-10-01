@@ -65,6 +65,8 @@ fun TerminalScreen(
     openPanes: () -> Unit = {},
     onBackground: (Color) -> Unit = {},
     chrome: TerminalChromeState = remember { TerminalChromeState() },
+    /** The first frame of this display was drawn (reported to the timing markers). */
+    onFirstFrame: () -> Unit = {},
 ) {
     key(session) {
         val context = LocalContext.current
@@ -77,11 +79,14 @@ fun TerminalScreen(
         var pendingSend by remember { mutableStateOf<String?>(null) }
         val sessionState by state.collectAsState()
         val background by rememberUpdatedState(onBackground)
+        val firstFrame by rememberUpdatedState(onFirstFrame)
         DisposableEffect(view) {
+            view.onFirstFrame = { firstFrame() }
             view.onInputChanged = { ctrl = view.input.ctrl; alt = view.input.alt }
             view.onSelectionChanged = { selecting = view.selection != null }
             view.onBackgroundChanged = { background(Color(it.toInt() or (0xff shl 24))) }
             onDispose {
+                view.onFirstFrame = {}
                 view.onInputChanged = {}
                 view.onSelectionChanged = {}
                 view.onBackgroundChanged = {}

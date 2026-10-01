@@ -2,18 +2,22 @@
 //! drive the client, so the lifecycle is covered without a `mosh-server` binary. The live test
 //! against the real one is `tests/mosh_live.rs`.
 
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::task::{Context, Poll};
 use std::time::Instant as StdInstant;
 
 use prost::Message as _;
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc as async_mpsc;
 
 use crate::frame::{CellWidth, Frame};
 use crate::input::{Key, KeyInput, Modifiers};
 use crate::term::TerminalSize;
+use crate::transport::DatagramSocket;
 
 use super::super::bootstrap::MoshKey;
 use super::super::ssp::crypto::{Direction, Session as CryptoSession};
@@ -32,12 +36,12 @@ const OTHER_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAA";
 /// The server side of the protocol: it decrypts what the client sends and answers with host
 /// diffs that append bytes to the screen.
 struct FakeServer {
-    socket: UdpSocket,
+    wire: Wire,
     crypto: CryptoSession,
     packets: PacketState,
     assembly: FragmentAssembly,
     fragmenter: Fragmenter,
-    started: StdInstant,
+    started: Instant,
     /// The newest state we sent; the client holds it.
     sent: u64,
     /// The newest client state we have seen, which every reply acknowledges.
@@ -54,15 +58,132 @@ struct Heard {
     from: SocketAddr,
 }
 
+/// Where the fake server's datagrams travel: a real loopback UDP socket, or a pair of in-memory
+/// queues (see [`MemTransport`]), which need no I/O driver, so a paused clock is the only clock
+/// and a test never waits on real time.
+enum Wire {
+    Udp(UdpSocket),
+    Mem {
+        from_client: async_mpsc::UnboundedReceiver<Vec<u8>>,
+        to_client: async_mpsc::UnboundedSender<Vec<u8>>,
+    },
+}
+
+/// The source address an in-memory client appears to send from.
+const MEM_CLIENT: SocketAddr = SocketAddr::new(LOCALHOST, 40_000);
+
+impl Wire {
+    async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        match self {
+            Wire::Udp(socket) => socket.recv_from(buf).await,
+            Wire::Mem { from_client, .. } => {
+                // A dropped client is silence, like a UDP socket nobody writes to.
+                let Some(datagram) = from_client.recv().await else {
+                    return std::future::pending().await;
+                };
+                buf[..datagram.len()].copy_from_slice(&datagram);
+                Ok((datagram.len(), MEM_CLIENT))
+            }
+        }
+    }
+
+    async fn send_to(&self, datagram: &[u8], to: SocketAddr) -> io::Result<usize> {
+        match self {
+            Wire::Udp(socket) => socket.send_to(datagram, to).await,
+            Wire::Mem { to_client, .. } => {
+                let _ = to_client.send(datagram.to_vec());
+                Ok(datagram.len())
+            }
+        }
+    }
+}
+
+/// The client's end of an in-memory link: one socket, handed out by the first `bind`.
+struct MemTransport(Mutex<Option<MemSocket>>);
+
+struct MemSocket {
+    peer: SocketAddr,
+    to_server: async_mpsc::UnboundedSender<Vec<u8>>,
+    from_server: Mutex<async_mpsc::UnboundedReceiver<Vec<u8>>>,
+}
+
+impl DatagramSocket for MemSocket {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(MEM_CLIENT)
+    }
+
+    fn peer_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.peer)
+    }
+
+    fn try_send(&self, datagram: &[u8]) -> io::Result<usize> {
+        let _ = self.to_server.send(datagram.to_vec());
+        Ok(datagram.len())
+    }
+
+    fn poll_recv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+        let mut from_server = self.from_server.lock().unwrap();
+        match from_server.poll_recv(cx) {
+            Poll::Ready(Some(datagram)) => {
+                buf[..datagram.len()].copy_from_slice(&datagram);
+                Poll::Ready(Ok(datagram.len()))
+            }
+            // A closed link never delivers again.
+            Poll::Ready(None) | Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl DatagramTransport for MemTransport {
+    type Socket = MemSocket;
+
+    async fn bind(&self, endpoint: &Endpoint) -> io::Result<MemSocket> {
+        let mut socket = self
+            .0
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| io::Error::other("the in-memory link has one socket"))?;
+        socket.peer = SocketAddr::new(endpoint.host().parse().unwrap(), endpoint.port());
+        Ok(socket)
+    }
+}
+
 impl FakeServer {
     async fn new(key: &str) -> Self {
+        Self::with_wire(
+            key,
+            Wire::Udp(UdpSocket::bind("127.0.0.1:0").await.unwrap()),
+        )
+    }
+
+    /// A server on an in-memory link, with the transport that reaches it.
+    fn in_memory(key: &str) -> (Self, MemTransport) {
+        let (to_server, from_client) = async_mpsc::unbounded_channel();
+        let (to_client, from_server) = async_mpsc::unbounded_channel();
+        let server = Self::with_wire(
+            key,
+            Wire::Mem {
+                from_client,
+                to_client,
+            },
+        );
+        let socket = MemSocket {
+            peer: SocketAddr::new(LOCALHOST, 0),
+            to_server,
+            from_server: Mutex::new(from_server),
+        };
+        (server, MemTransport(Mutex::new(Some(socket))))
+    }
+
+    fn with_wire(key: &str, wire: Wire) -> Self {
         Self {
-            socket: UdpSocket::bind("127.0.0.1:0").await.unwrap(),
+            wire,
             crypto: CryptoSession::new(&Base64Key::from_printable(key).unwrap()),
             packets: PacketState::default(),
             assembly: FragmentAssembly::default(),
             fragmenter: Fragmenter::default(),
-            started: StdInstant::now(),
+            started: Instant::now(),
             sent: 0,
             client_num: 0,
             client: None,
@@ -70,7 +191,10 @@ impl FakeServer {
     }
 
     fn port(&self) -> u16 {
-        self.socket.local_addr().unwrap().port()
+        match &self.wire {
+            Wire::Udp(socket) => socket.local_addr().unwrap().port(),
+            Wire::Mem { .. } => 0,
+        }
     }
 
     fn now(&self) -> u64 {
@@ -82,7 +206,7 @@ impl FakeServer {
         let deadline = Instant::now() + wait;
         let mut buf = [0u8; 2048];
         loop {
-            let (n, from) = tokio::time::timeout_at(deadline, self.socket.recv_from(&mut buf))
+            let (n, from) = tokio::time::timeout_at(deadline, self.wire.recv_from(&mut buf))
                 .await
                 .ok()?
                 .unwrap();
@@ -174,7 +298,7 @@ impl FakeServer {
                     &outgoing.packet.to_plaintext(),
                 )
                 .unwrap();
-            self.socket.send_to(&datagram, to).await.unwrap();
+            self.wire.send_to(&datagram, to).await.unwrap();
         }
     }
 }
@@ -216,6 +340,30 @@ fn start_fake(
     (handle, control, states)
 }
 
+/// Runs a session as a task of the current runtime instead of on a thread of its own, so a test
+/// on a paused clock (`start_paused`) drives the protocol timers, the submit delay and the fake
+/// server on the one virtual clock. Pair it with [`FakeServer::in_memory`].
+fn start_here(transport: MemTransport, key: &str) -> (SessionHandle, mpsc::Receiver<SessionState>) {
+    let (sender, states) = mpsc::channel();
+    let (handle, mut driver) = crate::session::channel(Arc::new(Recorder(Mutex::new(sender))));
+    let params = params(1, key, 20, 5);
+    let plan = Plan {
+        transport: Arc::new(transport),
+        peer: SocketAddr::new(LOCALHOST, params.port),
+        params,
+        health: None,
+        roam: Arc::new(Notify::new()),
+        shutdown: Arc::new(Notify::new()),
+        connect_timeout: CONNECT_TIMEOUT,
+        deadline: None,
+    };
+    tokio::task::spawn_local(async move {
+        let ended = run_session(plan, &mut driver).await;
+        driver.close(ended.reason);
+    });
+    (handle, states)
+}
+
 /// The renderer's view: frames merged the way Kotlin merges them.
 #[derive(Default)]
 struct Grid {
@@ -249,7 +397,7 @@ impl Grid {
 
     /// Pulls frames until `done` holds for the merged screen.
     async fn wait(&mut self, handle: &SessionHandle, what: &str, done: impl Fn(&Grid) -> bool) {
-        let deadline = StdInstant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if let Some(taken) = handle.take_frame() {
                 self.merge(&taken.frame);
@@ -258,7 +406,7 @@ impl Grid {
                 return;
             }
             assert!(
-                StdInstant::now() < deadline,
+                Instant::now() < deadline,
                 "never saw {what}; screen: {:?}",
                 self.rows
             );
@@ -276,11 +424,11 @@ impl Grid {
 
 async fn state(states: &mpsc::Receiver<SessionState>) -> SessionState {
     // The receiver is std; poll it without blocking the runtime the fake server runs on.
-    let deadline = StdInstant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match states.try_recv() {
             Ok(state) => return state,
-            Err(mpsc::TryRecvError::Empty) if StdInstant::now() < deadline => {
+            Err(mpsc::TryRecvError::Empty) if Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             Err(error) => panic!("no state change: {error:?}"),
@@ -359,48 +507,57 @@ async fn a_session_connects_shows_output_takes_input_resizes_roams_and_ends() {
     );
 }
 
-#[tokio::test]
+/// Runs on a paused clock with the session and the fake server in one runtime and no socket
+/// between them: the protocol's send interval, the 100 ms before the Enter and every wait in the
+/// test are virtual, so how busy the machine is cannot change what the server hears (it used to
+/// depend on the driver thread being scheduled within the delay).
+#[tokio::test(start_paused = true)]
 async fn submit_sends_the_text_then_a_separate_enter_after_the_delay_in_order() {
-    let mut server = FakeServer::new(KEY).await;
-    let (handle, _control, states) = start_fake(server.port(), KEY, CONNECT_TIMEOUT);
-    server
-        .hear_until(|heard| heard.iter().any(|h| !h.resizes.is_empty()))
-        .await;
-    server.say(b"$ ").await;
-    assert_eq!(state(&states).await, SessionState::Connected);
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (mut server, transport) = FakeServer::in_memory(KEY);
+            let (handle, states) = start_here(transport, KEY);
+            server
+                .hear_until(|heard| heard.iter().any(|h| !h.resizes.is_empty()))
+                .await;
+            server.say(b"$ ").await;
+            assert_eq!(state(&states).await, SessionState::Connected);
 
-    // Bracketed paste off: typed text, then Enter alone. The user stream is cumulative until the
-    // server acknowledges, so the first instruction with the text must not yet hold the Enter.
-    let started = StdInstant::now();
-    handle.submit_text("ab\ncd".into()).unwrap();
-    let heard = server
-        .hear_until(|heard| heard.last().is_some_and(|h| h.keys.ends_with(b"\r")))
-        .await;
-    assert!(started.elapsed() >= crate::submit::SUBMIT_ENTER_DELAY);
-    assert!(
-        heard.iter().any(|h| h.keys == b"ab\rcd"),
-        "text alone first"
-    );
-    assert_eq!(heard.last().unwrap().keys, b"ab\rcd\r");
-    server.say(b"x").await; // acknowledges everything heard
+            // Bracketed paste off: typed text, then Enter alone. The user stream is cumulative until the
+            // server acknowledges, so the first instruction with the text must not yet hold the Enter.
+            let started = Instant::now();
+            handle.submit_text("ab\ncd".into()).unwrap();
+            let heard = server
+                .hear_until(|heard| heard.last().is_some_and(|h| h.keys.ends_with(b"\r")))
+                .await;
+            assert!(started.elapsed() >= crate::submit::SUBMIT_ENTER_DELAY);
+            assert!(
+                heard.iter().any(|h| h.keys == b"ab\rcd"),
+                "text alone first"
+            );
+            assert_eq!(heard.last().unwrap().keys, b"ab\rcd\r");
+            server.say(b"x").await; // acknowledges everything heard
 
-    // Bracketed paste on: one paste, a marker inside the text removed, then Enter; input sent
-    // straight after the submit lands after its Enter.
-    server.say(b"\x1b[?2004h").await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let tab = KeyInput::new(Key::Tab, Modifiers::default()).unwrap();
-    handle.submit_text("ab\x1b[201~\ncd".into()).unwrap();
-    handle.send_text("z".into()).unwrap();
-    handle.send_key(tab).unwrap();
-    let heard = server
-        .hear_until(|heard| heard.last().is_some_and(|h| h.keys.ends_with(b"\t")))
+            // Bracketed paste on: one paste, a marker inside the text removed, then Enter; input sent
+            // straight after the submit lands after its Enter. The mode is on once a frame shows the
+            // text that followed it in the same host diff (the engine applied the diff whole).
+            server.say(b"\x1b[?2004hM").await;
+            Grid::default().wait_for(&handle, "M").await;
+            let tab = KeyInput::new(Key::Tab, Modifiers::default()).unwrap();
+            handle.submit_text("ab\x1b[201~\ncd".into()).unwrap();
+            handle.send_text("z".into()).unwrap();
+            handle.send_key(tab).unwrap();
+            let heard = server
+                .hear_until(|heard| heard.last().is_some_and(|h| h.keys.ends_with(b"\t")))
+                .await;
+            assert!(
+                heard.iter().any(|h| h.keys == b"\x1b[200~ab\ncd\x1b[201~"),
+                "the paste alone first"
+            );
+            assert_eq!(heard.last().unwrap().keys, b"\x1b[200~ab\ncd\x1b[201~\rz\t");
+            handle.disconnect();
+        })
         .await;
-    assert!(
-        heard.iter().any(|h| h.keys == b"\x1b[200~ab\ncd\x1b[201~"),
-        "the paste alone first"
-    );
-    assert_eq!(heard.last().unwrap().keys, b"\x1b[200~ab\ncd\x1b[201~\rz\t");
-    handle.disconnect();
 }
 
 #[tokio::test]
@@ -486,7 +643,7 @@ async fn forged_datagrams_do_not_connect_a_session() {
     let (handle, _control, states) = start_fake(server.port(), KEY, Duration::from_millis(600));
     let heard = server.hear(Duration::from_secs(5)).await.unwrap();
     // Garbage from the right address does not authenticate.
-    server.socket.send_to(&[9u8; 80], heard.from).await.unwrap();
+    server.wire.send_to(&[9u8; 80], heard.from).await.unwrap();
     assert_eq!(
         state(&states).await,
         SessionState::Closed(CloseReason::Failed(SessionFailure::TimedOut))

@@ -52,7 +52,10 @@ use crate::remote::{ExecOutput, OUTPUT_CAP, RemoteError, RemoteHost, SecretBytes
 use crate::session::{CloseReason, HostKeyPrompt, SessionDriver, SessionFailure};
 use crate::term::TerminalSize;
 use crate::tmux::{self, TmuxError};
-use crate::transport::{DatagramTransport, RACE_STAGGER, Transport, race};
+use crate::transport::{
+    ADDRESS_TIMEOUT, DatagramTransport, RACE_STAGGER, RaceReport, RaceTiming, Transport, race_with,
+    seconds,
+};
 
 /// Timings, adjustable so tests need not wait for the production values.
 #[derive(Debug, Clone, Copy)]
@@ -64,6 +67,9 @@ pub struct HostOptions {
     pub exec_timeout: Duration,
     /// Delay between address attempts. Production: `transport::RACE_STAGGER`.
     pub stagger: Duration,
+    /// How long one address may take (name resolution and TCP connect) before the race counts
+    /// it as unanswered. Production: `transport::ADDRESS_TIMEOUT`.
+    pub address_timeout: Duration,
     /// How long a mosh terminal waits for the server's first datagram before it closes
     /// `TimedOut` (UDP blocked) and stops the server. Production: `mosh::CONNECT_TIMEOUT`.
     pub mosh_connect_timeout: Duration,
@@ -75,6 +81,7 @@ impl Default for HostOptions {
             connect_timeout: Duration::from_secs(20),
             exec_timeout: crate::remote::EXEC_TIMEOUT,
             stagger: RACE_STAGGER,
+            address_timeout: ADDRESS_TIMEOUT,
             mosh_connect_timeout: crate::mosh::CONNECT_TIMEOUT,
         }
     }
@@ -121,8 +128,11 @@ pub(super) struct SshHost {
     handle: Handle<Client<HostEvent>>,
     exec_timeout: Duration,
     capabilities: OnceCell<HostCapabilities>,
-    /// The last herdr session list read successfully (the probe's own list until then).
+    /// The last herdr session list read successfully (the probe's own list until then), which
+    /// the herdr watches and pane focuses find their sockets in.
     sessions: probe::SessionsCache,
+    /// Keeps the app's pane focus and the terminal's own from both reaching herdr.
+    pub(super) focus: herdr::FocusGate,
     /// The mosh servers this connection still has to stop (see [`mosh_session::ServerDebt`]).
     pub(super) servers: mosh_session::ServerDebt,
 }
@@ -159,7 +169,36 @@ impl SshHost {
     /// The probe's answer, run once per connection. A failed probe is not cached.
     pub(super) async fn capabilities(&self) -> Result<&HostCapabilities, RemoteError> {
         self.capabilities
-            .get_or_try_init(|| probe::probe(self))
+            .get_or_try_init(|| async {
+                let (capabilities, entries) = probe::probe_entries(self).await?;
+                // The listing the probe read is what the watches and focuses discover from.
+                if let Some(entries) = entries {
+                    self.sessions.directory().seed(entries);
+                }
+                Ok(capabilities)
+            })
+            .await
+    }
+
+    /// `herdr` focus of `pane_id`, the socket from this connection's directory. `from_terminal`
+    /// is a terminal's own focus before it starts, which a focus the app acknowledged a moment
+    /// ago satisfies; the app's request is never answered from memory (see [`herdr::FocusGate`]).
+    pub(super) async fn focus_pane(
+        &self,
+        herdr: &str,
+        session: Option<&str>,
+        pane_id: &str,
+        from_terminal: bool,
+    ) -> Result<(), herdr::HerdrError> {
+        self.focus
+            .focus(
+                self,
+                herdr,
+                self.sessions.directory(),
+                session,
+                pane_id,
+                from_terminal,
+            )
             .await
     }
 
@@ -494,8 +533,19 @@ async fn drive<T: Transport, D: DatagramTransport>(
     let (events, mut incoming) = mpsc::channel(32);
     let (shutdown, stop) = watch::channel(false);
     let mut network_ended = false;
+    // What each address has done, for a connect timeout that fires while the race still runs.
+    let report = RaceReport::new();
+    let race_report = report.clone();
     let mut network = tokio::spawn(async move {
-        let reason = network(transport, request, events.clone(), options, stop).await;
+        let reason = network(
+            transport,
+            request,
+            events.clone(),
+            options,
+            stop,
+            &race_report,
+        )
+        .await;
         let _ = events.send(HostEvent::Closed(reason)).await;
     });
     let (closing_sender, closing) = watch::channel(None);
@@ -573,7 +623,17 @@ async fn drive<T: Transport, D: DatagramTransport>(
                     }
                 },
                 () = sleep_until(deadline), if timing => {
-                    break Ok(CloseReason::Failed(SessionFailure::TimedOut));
+                    // No TCP connection yet: the host is unreachable, and each address says what
+                    // it did. Once one connected, the handshake or authentication is what hung.
+                    break Ok(CloseReason::Failed(if report.is_pending() {
+                        SessionFailure::Unreachable(format!(
+                            "no address answered within {}: {}",
+                            seconds(options.connect_timeout),
+                            report.describe()
+                        ))
+                    } else {
+                        SessionFailure::TimedOut
+                    }));
                 }
                 result = &mut network, if !network_ended => {
                     network_ended = true;
@@ -819,7 +879,7 @@ async fn focus_herdr_pane(
             program: "herdr".into(),
         });
     };
-    herdr::focus_pane(host, path, session.as_deref(), &pane_id)
+    host.focus_pane(path, session.as_deref(), &pane_id, false)
         .await
         .map_err(|error| match error {
             herdr::HerdrError::PaneNotFound => HostError::PaneNotFound,
@@ -857,7 +917,8 @@ async fn watch_herdr(host: Arc<SshHost>, session: Option<String>, mut driver: He
                     driver.close();
                     return;
                 };
-                return herdr::run(host, herdr, session, driver).await;
+                let directory = Arc::clone(host.sessions.directory());
+                return herdr::run_in(host, herdr, directory, session, driver).await;
             }
             Err(error) => {
                 let _ = driver.transition(HerdrState::Unavailable {
@@ -883,8 +944,13 @@ async fn network<T: Transport>(
     events: mpsc::Sender<HostEvent>,
     options: HostOptions,
     stop: watch::Receiver<bool>,
+    report: &RaceReport,
 ) -> CloseReason {
-    let raced = match race(&transport, &request.addresses, options.stagger).await {
+    let timing = RaceTiming {
+        stagger: options.stagger,
+        address_timeout: options.address_timeout,
+    };
+    let raced = match race_with(&transport, &request.addresses, timing, Some(report)).await {
         Ok(raced) => raced,
         Err(failure) => {
             return CloseReason::Failed(SessionFailure::Unreachable(format!(
@@ -947,6 +1013,7 @@ async fn hold(
         exec_timeout: options.exec_timeout,
         capabilities: OnceCell::new(),
         sessions: probe::SessionsCache::new(),
+        focus: herdr::FocusGate::new(),
         servers: mosh_session::ServerDebt::default(),
     });
     register(&host);

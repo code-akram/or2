@@ -1,11 +1,15 @@
 package io.github.code_akram.or2.app
 
 import android.app.Application
+import android.content.pm.ApplicationInfo
 import android.os.PowerManager
+import android.util.Log
 import androidx.room.Room
 import io.github.code_akram.or2.connection.HostConnections
 import io.github.code_akram.or2.connection.HostConnector
 import io.github.code_akram.or2.connection.MoshServerLedger
+import io.github.code_akram.or2.connection.TIMING_TAG
+import io.github.code_akram.or2.connection.Timing
 import io.github.code_akram.or2.data.AppDatabase
 import io.github.code_akram.or2.data.MIGRATION_1_2
 import io.github.code_akram.or2.data.MIGRATION_2_3
@@ -36,6 +40,18 @@ class Or2Application : Application() {
     val notificationPolicy by lazy { NotificationPermissionPolicy(prefs) }
     val battery by lazy { BatteryPrompt(prefs, isExempt = ::isBatteryExempt) }
 
+    /**
+     * What the previous process left behind: whether it died with sessions open (a cold launcher start
+     * then resumes the remembered terminal). Created before anything of this process writes to it.
+     */
+    val sessionMarker by lazy { SessionMarker(prefs) }
+
+    /** Timing markers for the critical paths (logcat tag `or2.timing`), recorded only in a debuggable build. */
+    val timing by lazy {
+        val debuggable = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+        Timing(if (debuggable) { line -> Log.d(TIMING_TAG, line) } else null)
+    }
+
     /** Device tests point this at a scripted host (`contract_probe_host`) and restore it; production never sets it. */
     @Volatile
     var connectorOverride: HostConnector? = null
@@ -43,7 +59,7 @@ class Or2Application : Application() {
     /** The process's one set of connections; [ConnectionService] keeps the process alive while any is open. */
     val connections by lazy {
         HostConnections({ request, listener -> (connectorOverride ?: HostConnector.Native).connect(request, listener) }, database.dao(),
-            moshFailures = database.dao(), moshServers = moshServers)
+            moshFailures = database.dao(), moshServers = moshServers, timing = timing)
             .also { it.userClose = reattach }
     }
 
@@ -63,8 +79,13 @@ class Or2Application : Application() {
         if (starter != null) return
         val created = ServiceStarter { ConnectionService.start(this) }
         starter = created
+        // Read what the previous process left before this one starts writing.
+        val marker = sessionMarker
         CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate).launch {
-            connections.serviceSnapshots().collect(created::onSnapshot)
+            connections.serviceSnapshots().collect { snapshot ->
+                created.onSnapshot(snapshot)
+                marker.onOpenSessions(snapshot.sessions > 0)
+            }
         }
     }
 

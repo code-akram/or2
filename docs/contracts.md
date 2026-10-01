@@ -386,14 +386,15 @@ pub trait RemoteHost: Send + Sync + 'static {
 
 ### Capability probe
 
-Non-interactive SSH does not load the user's `PATH`. One exec per connection, cached in memory
-for the connection's lifetime (Rust has no storage), finds `tmux`, `herdr` and `mosh-server`:
+Non-interactive SSH does not load the user's `PATH`. Two execs per connection **run at once**
+(one round trip pair, not two), cached in memory for the connection's lifetime (Rust has no
+storage); the first finds `tmux`, `herdr` and `mosh-server`:
 `command -v`, then `$HOME/.local/bin`, `$HOME/.cargo/bin`, `/opt/homebrew/bin`,
 `/usr/local/bin`, `/usr/bin`, `/bin`, `$HOME/.nix-profile/bin`, `/run/current-system/sw/bin`.
 It also reports a UTF-8 locale (`C.UTF-8`, else the first `*.UTF-8`/`*.utf8` in `locale -a`,
 else `en_US.UTF-8`). Every later tmux/herdr/mosh command uses the absolute path found: the
-host driver passes `HostCapabilities.herdr` to `herdr::run`, `herdr::watch` and
-`herdr::focus_pane` (as `mosh::bootstrap` takes `caps`), so no client repeats the PATH search.
+host driver passes `HostCapabilities.herdr` to `herdr::run_in` and `herdr::focus_pane_in` (as
+`mosh::bootstrap` takes `caps`), so no client repeats the PATH search.
 The probe is a fixed script run with `exec_script`.
 
 Lane A1: `or2_core::probe::PROBE_SCRIPT` and `probe::parse` (`probe::probe(&host)` runs them).
@@ -406,17 +407,23 @@ listed. The script contains no `'` or `\` (a test enforces it, because `render_s
 rejects them). A probe that fails to run is not cached, so the next query or watch retry runs
 it again.
 
-Lane A1 decisions, both from review: (1) herdr's session list is **not** part of the script.
-When herdr was found, `probe::herdr_sessions` lists the sessions with `herdr::list_sessions`
-(lane A2's one parser of `<herdr> session list --json`; the probe has no parser of its own) as
-a second exec bounded by `probe::HERDR_LIST_TIMEOUT` (5 s), so a wedged herdr costs only
+Lane A1 decisions, both from review: (1) herdr's session list is **not** part of that script.
+`probe::HERDR_SCRIPT` is a second fixed script, run in its own channel **at the same time** (the
+probe finished in two round trips instead of four): it finds herdr with the same search, prints
+`or2:herdr:<path>`, and when found `or2:list-begin`, `herdr session list --json`'s stdout and
+`or2:list-end:<exit status>`. The text between the markers is read by `herdr::parse_listing`
+(lane A2's one parser of `<herdr> session list --json`, shared with `herdr::list_sessions`; the
+probe has no parser of its own) and the whole exec is bounded by `probe::HERDR_LIST_TIMEOUT`
+(5 s), so a wedged herdr costs only
 `herdr_sessions` (empty), never tmux, mosh-server or the locale, and never makes the probe
 fail and be retried at full cost on every terminal open. Only a connection that closes
 mid-probe fails it. `name`, `running` and `default` are carried over; an unreadable listing
 (including one with an entry that has no `socket_path`) is a failed listing, not a partial
-one. (2) The cache holds programs and locale; **`capabilities()` reads herdr's
-session list afresh on every call** (`probe::SessionsCache`), so `running` and sessions
-started or stopped after connecting show on the host screen. A listing that fails (herdr
+one (the first script still reports herdr's path when the second hangs). (2) The cache holds
+programs and locale; **`capabilities()` reads herdr's session list afresh on every call**
+(`probe::SessionsCache`), so `running` and sessions started or stopped after connecting show on the
+host screen, **except the first call after the probe**: the probe's listing is as fresh as a read
+made now, so that call reports it without a third exec (`Directory::seed` / `take_unread`). A listing that fails (herdr
 gone, hung, garbage) reports the **last list that was read successfully**, not the one from
 connect time (until a read succeeds, the probe's own list): the app treats the list as
 authoritative and stops the watch of a session missing from it, so a transient failure must
@@ -425,7 +432,10 @@ overlap (several Refresh calls); each takes a ticket when it starts and a result
 only if no read that started later has already been applied, so a slow older read never
 overwrites a newer list (and then reports the newer one). The programs and locale stay in the
 immutable probe result. Live per-pane state is
-still `watch_herdr`'s job; terminal opens and watches use only the cached paths.
+still `watch_herdr`'s job; terminal opens and watches use only the cached paths. The listing the
+probe read (with each session's socket path, which never reaches Kotlin) also seeds the
+connection's `herdr::Directory` (next section), which is where the herdr watches and pane focuses
+find sockets.
 
 ## Host connection (`or2_core::host`)
 
@@ -442,9 +452,37 @@ Connecting ──▶ AwaitingHostKey ──▶ Authenticating ──▶ Connecte
 - `HostConnectRequest { addresses: Vec<Endpoint> (1..=8, preference order), username, key,
   trusted_host_keys }`. Trust belongs to the host, not to an address.
 - **Address racing.** Start address 0; start each next address 250 ms after the previous one
-  started or immediately when it fails. The first TCP connection wins; the others are dropped.
-  If all fail, close with `Unreachable` whose message lists each address's error (no secrets).
+  started or immediately when it fails (only the most recently started address's failure brings
+  the next forward). The first TCP connection wins; the others are dropped. **Each address has its
+  own allowance** of `transport::ADDRESS_TIMEOUT` (6 s, `HostOptions::address_timeout`), name
+  resolution included, inside the overall 20 s connect timeout: an address that silently drops
+  packets (an overlay IP with no route while its VPN is off, a sleeping machine) fails at its own
+  limit (`no answer within 6 s`) instead of holding the race until the overall timer, and the
+  attempts' limits run side by side, so with up to 8 addresses the race ends within about 8 s. If
+  all fail, close with `Unreachable` whose message lists **each address's outcome by position, in
+  words and with no host names or addresses**: `TCP connection failed: address 0: name not
+  resolved (mDNS) after 3 tries; address 1: no answer within 6 s` (`transport::describe_error`:
+  `connection refused`, `no route to the host` for ENETUNREACH/EHOSTUNREACH, which fail at once and
+  start the next address, `no answer`, or the text of an error `transport` raised). The app puts
+  the host names back for its own screen. If the **overall connect timer fires while the race is
+  still running** (an allowance longer than the timeout, a test), the close is also `Unreachable`,
+  `no address answered within 20 s: address 0: still trying after 20 s; ...`
+  (`transport::RaceReport`, which the race updates and the driver reads); `TimedOut` is only for a
+  TCP connection that then stalls in the SSH handshake or authentication.
   The SSH handshake runs only on the winner. `Connected.address_index` reports which one won.
+- **One endpoint** (`DirectTcp::connect`, `transport::dial`): the name is **resolved once** and the
+  resolved addresses are raced, they are not tried in turn. A `.local` name (mDNS; the first lookup
+  an app makes can fail after a second or two and succeed from the cache on the next) is resolved
+  up to 3 times within 4 s, 250 ms apart (`name not resolved (mDNS) after 3 tries`, or `within
+  4 s`); any other name once (`name not resolved`). **IPv6 link-local results without a scope id
+  are dropped** (an app socket cannot connect to them; the same name usually has an IPv4 address);
+  if nothing else remains, the endpoint fails with that explanation. The usable addresses race
+  Happy-Eyeballs style: families alternate starting with the resolver's first, 250 ms apart, a
+  refusal starts the next at once, and all of them stop at the endpoint's budget (5 s from the
+  start, inside the race's 6 s allowance, so the endpoint explains itself first). When every
+  resolved address fails the error is one line (`3 addresses: connection refused, no answer within
+  5 s`). `Resolver` and `Connector` are traits, so all of it is tested against a scripted resolver
+  on a paused clock (`transport_dial_tests.rs`, `transport_race_tests.rs`).
 - Host-key relay, connect timeout (20 s, paused while awaiting the user), keepalive (15 s, 3
   misses) and failure mapping are M1's. `CloseReason` is reused; `RemoteExited` never occurs
   for a host.
@@ -586,9 +624,13 @@ Lane A1 (`ssh/terminal_session.rs`, `ssh/pump.rs`): the session is a thread `or2
 owning the engine and the `SessionDriver`, plus a task owning the channel; `ssh/pump.rs` is the
 terminal pump M1's one-connection session shares (`TerminalPump`: engine, reply budget,
 commands, frames; `pump_channel`: concurrent channel read and write). Order: for tmux and herdr
-the probe (cached), then for a herdr pane the focus, then the channel (`pty-req` at the
-requested size, `shell` or `exec`, then a window change if the size changed meanwhile), then
-`Connected`. Anything that fails before the channel exists (missing program, failed focus,
+the probe (cached), then the channel (`pty-req` at the requested size, `shell` or `exec`, then a
+window change if the size changed meanwhile), then `Connected`; a herdr pane's focus runs **beside
+the channel open** (they do not depend on each other: the herdr client follows herdr's focus, so a
+focus that lands a moment after the client starts only changes what it shows next), and the session
+is `Connected` when both are done. A focus that fails closes the channel that was opened and the
+session from `Connecting` with `CommandFailed` (`terminal_session::plan` returns the command and the
+pending `PaneFocus` separately). Anything that fails before the channel exists (missing program,
 failed probe) closes the session from `Connecting` without opening one. Every other way a
 session ends (user disconnect, host close, protocol failure) closes its channel first, so the
 program does not outlive the session on the host: a tmux client detaches, the tmux session
@@ -652,12 +694,24 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
   number; final); another failure or unreadable output is `Failed`; a missing or stopped
   session is `NotRunning`.
   `HostCapabilities.herdr_sessions` reports name, `running` and `is_default`; `socket_path` is
-  not reported to Kotlin. `run` and `focus_pane` rediscover it themselves on every attempt,
-  using the herdr path they are given.
+  not reported to Kotlin. **The connection's `herdr::Directory`** (one per host connection, inside
+  `probe::SessionsCache`) holds the last listing that was read successfully, seeded by the
+  capability probe: a watch's first attempt and every pane focus take a **running** session's
+  socket from it and run no `session list`. A session the list does not know or calls stopped is
+  not answered from it (it may have started since): that lookup reads the listing. A socket from
+  the directory that does not open (`Unreachable`, the path went stale) sends that attempt back to
+  the listing **once** (`Directory::invalidate`, then a fresh read); a socket from a listing read
+  just now that does not open is the answer (`Failed`, with the forwarding-policy hint), not a
+  reason to list again. Every later watch attempt (a retry after `Unavailable`, a recovery after
+  `events_lost` or a dropped stream) reads the listing again: failure is the only trigger for
+  re-discovery. The free functions `herdr::run`, `herdr::watch` and `herdr::focus_pane` (no
+  connection) use a directory of their own and so still read the listing first.
 - **Watch:** `herdr::watch(host, herdr, session, observer) -> HerdrWatchHandle` is `channel`
-  plus a task running `run`. One *attempt*: discover; open one long-lived streamlocal event
-  stream and `events.subscribe` (bounded by the 10 s request timeout), wait for the ack;
-  then reconcile: `session.snapshot` on a separate short-lived stream, install it, and read
+  plus a task running `run`. One *attempt*: find the socket (the connection's directory, see
+  Discovery); open two streamlocal streams at once, a long-lived one for events and a request
+  stream for the first snapshot; `events.subscribe` on the first (bounded by the 10 s request
+  timeout), wait for the ack;
+  then reconcile: `session.snapshot` on the request stream, install it, and read
   again while an event arrived during the read (events are invalidations, never patches).
   Reads are at least 100 ms apart and events that arrive before a read starts are covered by
   it. Any line on the event stream other than the ack, including an unparseable or unknown
@@ -681,9 +735,15 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
     only through lifecycle-driven reads, and the request is tried again with every later read),
     so a persistent rejection cannot make the view flap between `Live` and `Unavailable`.
   - *Connect cost.* The first view is installed after one subscribe and one snapshot, as in
-    the contract sequence; the per-pane resubscribe and its confirming read follow it, and
-    every later new pane costs one more of each (a subscription cannot grow). Not yet
-    measured over an OpenSSH-backed host: measure on the phone.
+    the contract sequence, and **nothing else delays it**: the socket comes from the directory (no
+    listing), the subscription's stream and the snapshot's stream are **opened together** (the
+    snapshot request itself still waits for the subscription's acknowledgement, so no event can be
+    missed), and the 100 ms between reads and the per-pane resubscribe with its confirming read
+    all follow the first delivery (a test asserts the first `Live` is delivered at the same
+    instant the bootstrap starts, with only those two requests served). Every later new pane costs
+    one more of each (a subscription cannot grow). Measured over a 120 ms round trip against a
+    real sshd: a watch is live 3 round trips after the capability probe (see the latency
+    fixture under "M3 polish").
   - *Unreachable socket.* `session list --json` says `running: true` but opening its socket
     fails with `Io`: that is `Failed`, not `NotRunning`, because the listing already settled
     whether the session runs. The likeliest cause over OpenSSH is the host's forwarding policy
@@ -748,8 +808,16 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
   `u64`; the FFI records are `HerdrView`, `HerdrWorkspace`, `HerdrTab`, `HerdrPane`,
   `HerdrAgent`. `cwd` is the pane's `cwd` (not `foreground_cwd`) and `title` its `title`
   (not `terminal_title`).
-- **Focus:** `herdr::focus_pane(host, herdr, session, pane_id)` rediscovers the socket and sends
-  one `pane.focus` request on a short-lived stream (10 s bound). It changes what the user's
+- **Focus:** `herdr::focus_pane_in(host, herdr, directory, session, pane_id)` (and the
+  connection-less `herdr::focus_pane`, which uses a directory of its own) takes the socket from the
+  directory and sends one `pane.focus` request on a short-lived stream (10 s bound): two round
+  trips (open, request) and no listing. **`herdr::FocusGate`** (one per connection) keeps the app's
+  focus and the terminal's own from both reaching herdr: a focus for a pane whose focus is already
+  in flight **joins it** and shares its answer (a failure included, and a cancelled leader leaves
+  its followers to focus for themselves), and a terminal's focus (`from_terminal`) is satisfied by
+  an acknowledgement younger than `focus::RECENT` (2 s) for the same pane; the app's own request
+  (`HostHandle::focus_herdr_pane`) is never answered from memory, because the user's desktop may
+  have moved the focus meanwhile. It changes what the user's
   herdr clients show; tests use isolated named sessions only. An error response with the code
   `pane_not_found` is `HerdrError::PaneNotFound` (the pane is gone); any other error response
   is `HerdrError::Failed`. The host exposes it as `HostHandle::focus_herdr_pane` (FFI API 6).
@@ -1085,7 +1153,10 @@ impl HostConnection {                     // all non-blocking unless async
   await its success every time an agent-target terminal is activated or reused**: tapping an
   inbox row whose terminal is already open, choosing it in the switcher, or navigating back to
   it. Only then show the terminal and enable input for it. For a first open the target's
-  `pane_id` already focuses before `herdr` starts (`open_terminal` unchanged).
+  `pane_id` focuses the pane as part of `open_terminal` (beside the start of the program, see
+  "Terminal sessions on a host"); the app's own focus of the same pane and the terminal's are
+  **one request** (the connection's `FocusGate` joins a focus in flight, and a terminal's own focus
+  accepts one the app finished within 2 s), so the app may start the focus and the open together.
   `focus_herdr_pane` validates names like `TerminalTarget` (`InvalidName`; session
   `[A-Za-z0-9_-]{1,64}`, pane `[A-Za-z0-9:_-]{1,128}`), needs a connected host
   (`NotConnected`/`Closed`), uses the probed herdr path (`NotInstalled { "herdr" }` without
@@ -1097,7 +1168,8 @@ impl HostConnection {                     // all non-blocking unless async
   deterministically: the probe view's panes `w1:p1`, `w1:p2` and `w2:p1` succeed (and become the
   focused pane of watches started afterwards), any other id is `PaneNotFound`.
   The app side is `TerminalActivations` (`app/`, reached as `HostConnections.activations`): the
-  inbox row (a first open too, so a vanished pane never opens a terminal), the session switcher, a
+  inbox row (a first open too: the terminal is started beside the focus and dismissed when the pane
+  turns out to be gone, so a vanished pane leaves no terminal), the session switcher, a
   Home thumbnail and the host screen's recent list all go through it. It awaits the focus, then
   yields `Activation.Ready(terminal)` or `Activation.Failed(message)`; `PaneNotFound` says the
   agent's pane is gone, any other error is shown, and neither navigates. Terminals that are not for
@@ -1331,12 +1403,14 @@ session `Failed { Internal { "mosh terminals land with M3-A" } }` is gone.
    focus and no exec channel, whatever the target is (AUTO then falls back to SSH, which reports
    a missing tmux or herdr itself).
 3. The target's command as `RemoteCommand::argv()`, built by the code the SSH path uses
-   (`terminal_session::program`): `<tmux> -u new-session -A -s <name>`, `<herdr>` or `<herdr>
+   (`terminal_session::plan`, which also returns the pane focus a herdr pane owes): `<tmux> -u new-session -A -s <name>`, `<herdr>` or `<herdr>
    --session <name>`, nothing for `Shell` (the login shell). `argv()` returns `None` for a
    command that carries environment assignments (an argument vector cannot), and the session
    closes `Failed { Internal }` rather than run the command without them; none do today. A
-   herdr pane is focused first, over
-   SSH, exactly as for an SSH terminal (`CommandFailed` on failure, before any server exists).
+   herdr pane is focused over SSH, exactly as for an SSH terminal, **beside** step 4 (the two do
+   not depend on each other; the app's own focus of the same pane, if in flight, is joined, and
+   one it finished moments ago satisfies it): a focus that fails (`CommandFailed`, the pane is
+   gone) stops the server step 4 already started before the session reports its failure.
 4. `mosh::bootstrap(host, caps, size, argv)` with the probed path and UTF-8 locale; then
    `mosh::run_session` (the driver of `mosh::start_with`, see below) with `DirectUdp` and
    `Link` pinned to `peer_addr()` with the bootstrap's port (`set_port`, so an IPv6 scope id
@@ -1366,9 +1440,8 @@ session `Failed { Internal { "mosh terminals land with M3-A" } }` is gone.
    it started can be stopped; cutting the exec shorter loses the pid and the server stays (the
    limitation documented under `mosh::terminate`). **A disconnect starts nothing new:**
    `prepare` carries a cancellation flag the abandon sets, checked after the capability probe
-   (before the pane focus) and after the focus (before the exec), so a disconnect during the
-   probe or the focus focuses no pane and starts no server; only an exec already running is
-   waited for.
+   (before the pane focus and the exec, which start together), so a disconnect during the probe
+   focuses no pane and starts no server; only an exec already running is waited for.
    **The host waits for this.** On a user disconnect of the host the host driver waits
    `SESSIONS_CLOSE_GRACE` (3 s) for its SSH terminals and watches as before, and for mosh
    sessions until `CLOSE_BUDGET` (8 s) after the close began (a second drain tracker, held by
@@ -1518,7 +1591,8 @@ FFI unit tests: the registry (roams live mosh sessions only, forgets closed and 
   all". Request `POST_NOTIFICATIONS` (Android 13+) the first time a connection starts; the
   service still runs if it is denied.
 - **Battery optimisation:** a one-time explanation and `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`
-  the first time a session is open while the app goes to the background; never nag again.
+  **up front**, the first time the user starts a connection, in the foreground and before the
+  first unlock (see "M3 polish"); never nag again.
 - **Network callback:** `ConnectivityManager.registerDefaultNetworkCallback` → `network_changed()`
   on every default-network change; debounce 500 ms.
 - **Transport preference** per host in Room v3 (`transport`: `AUTO` default, `SSH`, `MOSH`), real
@@ -1582,12 +1656,10 @@ mosh session. Where the text above left a choice open, this is what the code doe
   answer arrives. `busy` is set from the tap until the connect starts: a second Connect tap does
   nothing meanwhile, and a Resume or reconnect that is waiting on the connect sees `busy` and not
   an idle host, so it is not abandoned (`resumeStep` gives up only when nothing is in flight).
-- **Battery optimisation:** `onStop` with a session open marks the explanation due (persisted;
-  never when the app is already exempt, and a configuration change is not "going to the
-  background"); the next time the app returns, a dialog explains and offers "Allow"
-  (`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) or "Not now". It is recorded as asked when shown,
-  whatever the answer, so it never nags again. A system dialog cannot be shown while the app is
-  leaving, which is why it waits for the return.
+- **Battery optimisation:** *superseded by "M3 polish" below.* The first M3-B text marked the
+  explanation due on `onStop` and showed it on the next return, which put a modal dialog over the
+  terminal; it is now asked up front, before the first unlock, and a declined exemption leaves a
+  small non-blocking card on Home.
 - **Network callback:** registered with the service on the main looper and removed with it.
   `NetworkChanges` tracks the default network's handle: a different network, or the same one
   after it was lost, is a change; the callback's first report of the network that was already the
@@ -1704,7 +1776,7 @@ mosh session. Where the text above left a choice open, this is what the code doe
       process died, a saved terminal destination that is not open any more is replaced by Home.
     - **Return state survives recreation.** The service keeps the process alive, so the system can
       destroy and recreate the activity while it is in the background. `returning` and
-      `stoppedOnTerminal` are saved state, and the return work (battery explanation, reconnect
+      `stoppedOnTerminal` are saved state, and the return work (reconnect
       offer, show/reopen) runs once the stored hosts have been read (a recreated activity starts
       with none), not at the `ON_START` itself.
   - Home shows a **Resume** card (`Alpha: herdr w1:p2`, `Mosh`) whenever the decision is reopen or
@@ -1763,8 +1835,10 @@ to fail v0 step 3. These changes landed after lanes M3-A and M3-B and are integr
   `connectGrouped`), then the host connects, the remembered target reopens (a herdr pane is focused
   first, the capability probe awaited briefly so AUTO can still choose mosh) and the terminal is
   shown. `shouldAutoResume` decides: a remembered terminal whose host still exists, has a key and
-  is not connected. A cold start from the launcher has no saved destination and shows Home's Resume
-  card as before (one tap and the fingerprint). Cancelling the prompt leaves the Resume card. SSH keys
+  is not connected. *A cold start from the launcher has no saved destination; OxygenOS removes a
+  killed app from recents, so that is the usual way back, and "M3 polish" resumes there too (a
+  "sessions open" marker tells a process that died with sessions from one that ended in order).*
+  Cancelling the prompt leaves the Resume card. SSH keys
   stay per-use; no mosh key is ever stored. After process death the old `mosh-server` is orphaned (its
   key died with the process; `mosh-server` has no idle timeout), and the reopened terminal starts a new
   one; the orphan is stopped by pid over the new SSH connection (see "Orphan cleanup"). The pane's tmux
@@ -1802,7 +1876,7 @@ to fail v0 step 3. These changes landed after lanes M3-A and M3-B and are integr
   row, the host screen) instead of a failure, and the reconnect offer never includes it. It still
   reads asleep only when the host went quiet (connection lost, unreachable, timed out): a rejected
   key or host key is a failure whatever the flag says. A tap on the host, or `Unlock` in the inbox,
-  still connects it. The one-time battery explanation is still a dialog (asked once, ever).
+  still connects it. The one-time battery explanation is asked up front, once (see "M3 polish").
 - **Multi-address mosh.** Mosh pins to the address SSH actually reached. The host form says so under
   the address list: `In order of preference. All are tried; the first to answer wins. Mosh stays on
   the address SSH reached, so list the one that works on every network first.`
@@ -1947,11 +2021,156 @@ standby setting, mobile data only, screen off while waiting, target the always-o
    (verified through herdr).
 5. Variants: Wi-Fi→mobile mid-wait; airplane mode 2 min; process killed (`am kill`/force) → the
    implemented recovery: a fresh SSH reconnect (one grouped unlock) and the Resume path (auto-resume
-   through the recents list, or Home's Resume card after a cold start), which reopens the remembered
+   through the recents list or, with sessions open when it died, from a cold launcher start; Home's
+   Resume card when the fingerprint is cancelled), which reopens the remembered
    target over a new mosh session, with the old `mosh-server` stopped by its recorded pid over the new
    connection (`resume_mosh`, resuming the dead client's session from a stored ticket, was rejected and is
    not implemented). Record the time to the first frame, the prompts, and that the orphan is gone. Three
    runs each, report p50 and max.
+
+## M3 polish: latency, battery, cold-launch resume (integrated on `m3/polish`)
+
+Phone acceptance (Wi-Fi, OnePlus/OxygenOS 16, about 117 ms RTT to the host) found the critical paths
+far from 2 s and two Android behaviours that defeat "stays connected". This section records what
+changed; the rules it touches are also updated where they live (probe, herdr, mosh, Android).
+
+The FFI is unchanged (API stays **10**): the latency work is inside `or2-core`, the timing markers use the
+existing callbacks, and the Android changes are app-side.
+
+### Latency fixture and measured numbers
+
+`core/or2-core/tests/latency.rs` (feature set of the other sshd tests; needs `sshd` and
+`mosh-server`) puts a real disposable OpenSSH behind the shared relay (`common::Proxy`) holding
+every chunk 60 ms each way (120 ms RTT), a fake `herdr` script that lists one running session, a
+real Unix-socket server speaking herdr's wire format (subscribe acknowledged, the checked-in
+snapshot, `pane.focus`, `pane_not_found` for `w9:p9`) and a real `mosh-server` (UDP is local: add
+one round trip on a real link). It prints the table below (`-- --nocapture`) and asserts the
+protocol work exactly (how many `herdr session list` runs, herdr connections and `pane.focus`
+requests) and the times with room for a loaded machine. Measured on the runner, before this
+change (main `9039f61`) and after, same fixture, same run:
+
+| Path (120 ms RTT) | before | after |
+|---|---|---|
+| `capabilities()` right after `Connected` | 928 ms (7.7 RTT, 3 sequential execs) | 283 ms (2.4 RTT, 2 execs at once) |
+| inbox: `Connected` to first `Live` view | 1815 ms (15.1 RTT, 3 `session list` runs) | 726 ms (6.1 RTT, 1 run) |
+| reuse: pane focus only | 564 ms (4.7 RTT) | 241-282 ms (2.0-2.4 RTT) |
+| tap: focus, then a mosh terminal on the pane, `Connected` | 1454 ms (12.1 RTT) | 608 ms (5.1 RTT) |
+| tap: focus and open started together | n/a | 322 ms (2.7 RTT) |
+| SSH terminal on a pane (focus beside the channel) | n/a | 523 ms (4.4 RTT) |
+
+What was cut: the probe's herdr listing runs beside the probe script (not after it) and seeds the
+connection's directory; `capabilities()` right after it does not list a third time; a watch and a
+focus take their socket from the directory (no `session list`, no discovery per call); a watch's
+two streams open together; the app's focus and the terminal's own focus are one request (the
+`FocusGate`); the pane focus runs beside the mosh bootstrap or the SSH channel open instead of
+before it. The unreachable-host test connects a second, healthy host while a first one accepts TCP
+and never answers the handshake (20 s timeout) and checks the healthy host's connect and inbox are
+unaffected: each host is its own driver thread, and the Android flows are per host.
+
+### Battery exemption up front
+
+OxygenOS lets the SSH connections die within about ten minutes in the background unless the app is
+exempt from battery optimisation (mosh survives; with the exemption SSH does too). The explanation
+used to appear as a modal dialog over the terminal on the first return from the background. Now:
+
+- **When.** The first time the user starts a connection (any Connect, Resume, reconnect chip or
+  automatic resume), after the `POST_NOTIFICATIONS` request and **before the first unlock**, in the
+  foreground: `MainActivity.connectAfterNotifications`, while `busy` is set. If `BatteryPrompt.shouldExplain()`
+  (never explained, and not already exempt) it shows the explanation ("Keep sessions connected",
+  Allow / Not now) and holds the connect (the host ids are saved state, like the notification
+  request's, so a recreated activity still connects them). "Allow" opens
+  `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` through an activity-result launcher and the connect
+  (and its fingerprint prompt) goes on when the system dialog closes; "Not now" (or back, or a device
+  with no such screen) goes straight on. The explanation is recorded as asked when it is answered, **once,
+  ever**, whatever the answer; an already exempt app is never asked.
+- **Never on return.** `onStop`/`onStart` no longer touch the battery prompt: nothing modal appears
+  over a terminal.
+- **If it was not granted.** `BatteryPrompt.card` is true when the exemption was declined (or the
+  system dialog was refused) and is not in place: Home shows a small card above SESSIONS, "Background
+  connections may drop", with **Allow** (the system request again, as a plain `startActivity`) and a
+  close glyph that dismisses it for good. It blocks nothing, and goes away by itself once the
+  exemption is in place (re-read on every `onStart`). Tests: `ReattachTest` (the prompt's states and
+  persistence), `HomeUiDeviceTest` (the card, compile-checked here).
+
+### Cold-launch auto-resume
+
+After the process is killed OxygenOS removes or2 from recents, so the user comes back from the launcher,
+which has no saved destination, and used to get Home's Resume card (a tap, then the fingerprint). Now
+a cold launcher start resumes at once, exactly as the recents path does:
+
+- **The marker.** `SessionMarker` (app-private preference `sessions_open`) is written by `Or2Application`
+  from the service's snapshots: set while any terminal is open (`ServiceSnapshot.sessions > 0`) and
+  cleared the moment none is (Disconnect all, the last close, a remote exit, loss of every session).
+  A killed process leaves it set. The next process reads it **once, when it is created**
+  (`diedWithSessions`, before it writes anything) and hands it to the first activity that asks
+  (`takeColdResume`, one-shot per process, so rotation or a recreated activity never resumes twice).
+- **The decision.** `shouldAutoResumeOnLaunch(diedWithSessions, last, hosts, connectedHosts)` is
+  `diedWithSessions && shouldAutoResume(...)`: a remembered terminal whose host exists, has a key and is
+  not connected. A target the user closed on purpose is not remembered (`ReattachMemory` forgets it),
+  so it never resumes, and an orderly end cleared the marker. `Or2App` evaluates it once the stored
+  hosts are read (the same effect as the recents path, which still handles a saved terminal
+  destination), starts `resumeLast()` (one grouped biometric, connect, reopen the remembered target)
+  and leaves Home's Resume card as the fallback when the fingerprint is cancelled.
+- Tests: `ReattachTest` (marker lifecycle across "processes", the one-shot, the decision, a closed
+  target never resumed).
+
+### Timing markers (`or2.timing`)
+
+One logcat tag, **`or2.timing`**, debug builds only (`Or2Application` passes a sink to `Timing` only when
+the app is debuggable; a release build records nothing). Read it with:
+
+```sh
+adb logcat -v time -s or2.timing:D
+```
+
+One line per marker, `<path> <event> ms=<since the path began>`, naming hosts by id and herdr panes by
+pane id only (no label, address, user name, key or output):
+
+| Path | Events |
+|---|---|
+| `connect host=N` | `unlocked` (the biometric is done; ms=0), `authenticating`, `connected`, `capabilities` (the probe answered), `live` (the first herdr view of the host), or `failed` (closed before it connected, e.g. 20 s for an unreachable host) |
+| `tap host=N pane=P` (inbox tap) | `begin`, `focused` (herdr acknowledged the pane focus), `terminal-connected`, `frame` (the first frame was drawn) |
+| `reuse host=N pane=P` (an open terminal) | `begin`, `focused`, `frame` |
+| `reopen host=N` (return to the foreground) | as `tap` |
+| `resume host=N` (Resume card or automatic resume) | `begin`, `host-connected`, then the reopen's `focused`, `terminal-connected`, `frame` |
+
+For a new agent terminal the focus and the terminal start together, so `focused` and
+`terminal-connected` may come in either order. `connect` shows how long each host took from the
+fingerprint (an unreachable host's 20 s never delays the others: they are separate paths). No FFI change:
+the markers use the existing callbacks. Tests: `TimingTest`, `TerminalActivationsTest`.
+
+### Agent taps start the terminal beside the focus
+
+`TerminalActivations.openAgent` and `reopen` (`openOrReuse`): a terminal that is already open is reused
+after its pane is focused again; a new one is **opened while the pane is being focused** (Rust joins the
+two, see the herdr focus gate), and the wait ends when both are done. A pane that cannot be focused (it
+vanished) leaves no terminal: the one that was opened is dismissed, as is one whose wait was cancelled.
+
+### Unreachable hosts explain themselves
+
+The host card (Home) and the host page show, under the failure and in muted mono, what **each address**
+did: `blackstark.local:22 \u00b7 name not resolved (mDNS) after 3 tries` and `10.255.255.1:22 \u00b7 no answer
+within 6 s`. The core names addresses by position only; `unreachableDetail` puts the host's own names
+back (an `Unreachable` message of the form `address N: <outcome>; address M: ...`, see "Address
+racing"). A host with the **sleeps** flag whose connection ended `Unreachable`, `TimedOut` or lost reads
+as muted `Asleep` rather than an error (the detail still shows underneath); a rejected key or host key
+is a failure whatever the flag says. Tests: `SessionMessagesTest`, `HomeModelTest`.
+
+### Not done / for the phone
+
+- The measured numbers are over a modelled 120 ms link on the runner; the phone's own times (its CPU,
+  the ZeroTier path, the UDP round trip of a mosh start) are what `or2.timing` is for: read
+  `connect host=N connected / capabilities / live`, `tap ... focused / terminal-connected / frame`
+  and `resume ...` on a debug build, and compare each leg with the round trips counted above.
+- The cold-launch resume, the up-front battery request (and OxygenOS's own dialog), and the Home card
+  have run only on fakes and compile-checked device tests (`HomeUiDeviceTest`); the biometric prompt
+  at a cold start is the thing to watch.
+- The per-address timeout and the `.local` retry are tested against scripted resolvers and a
+  blackholing transport; the real Android resolver (and a first mDNS lookup that fails after 1.5 s) is
+  the phone's to confirm.
+- `tests/mosh_live.rs::terminate_stops_a_server_nobody_connected_to` failed once in one full workspace
+  run (a UDP-port-to-pid lookup of the test's own helper) and passed on every rerun, alone and in the
+  suite; it does not touch this change and is recorded here rather than hidden.
 
 # Easy pair (QR onboarding)
 

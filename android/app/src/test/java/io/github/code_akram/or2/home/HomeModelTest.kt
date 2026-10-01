@@ -10,6 +10,7 @@ import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.session.hostStateMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -77,5 +78,43 @@ class HomeModelTest {
         // Unlocking still shows its progress, and a connected host is just connected.
         assertEquals("Unlocking key\u2026", hostCardStatus(lost, unlocking = true, blockedAgents = 0, sleeps = true).progress)
         assertEquals(HostDot.CONNECTED, hostCardStatus(HostState.Connected(0u), unlocking = false, blockedAgents = 0, sleeps = true).dot)
+    }
+
+    private val twoAddresses = listOf(HostEndpoint("blackstark.local", 22), HostEndpoint("10.255.255.1", 22))
+    private val unreachable = HostState.Closed(
+        CloseReason.Failed(
+            SessionFailure.Unreachable("TCP connection failed: address 0: name not resolved (mDNS) after 3 tries; address 1: no answer within 6 s"),
+        ),
+    )
+
+    @Test
+    fun anUnreachableHostExplainsWhatEachAddressDidInMutedLines() {
+        val status = hostCardStatus(unreachable, unlocking = false, blockedAgents = 0, addresses = twoAddresses)
+        assertEquals(HostDot.FAILED, status.dot)
+        assertEquals(
+            "blackstark.local:22 \u00b7 name not resolved (mDNS) after 3 tries\n10.255.255.1:22 \u00b7 no answer within 6 s",
+            status.detail,
+        )
+        // Without the host's addresses (or for another failure) there is nothing to add.
+        assertNull(hostCardStatus(unreachable, false, 0).detail)
+        assertNull(hostCardStatus(HostState.Closed(CloseReason.Failed(SessionFailure.TimedOut)), false, 0, addresses = twoAddresses).detail)
+    }
+
+    @Test
+    fun aSleepingHostThatTimedOutReadsAsleepNotAsAnErrorAndKeepsTheExplanation() {
+        val timedOut = HostState.Closed(CloseReason.Failed(SessionFailure.TimedOut))
+        val asleep = hostCardStatus(timedOut, unlocking = false, blockedAgents = 0, sleeps = true, addresses = twoAddresses)
+        assertTrue(asleep.asleep)
+        assertNull(asleep.failure)
+        assertEquals(HostDot.NONE, asleep.dot)
+        // The same for an unreachable one: muted, with what each address did underneath.
+        val quiet = hostCardStatus(unreachable, unlocking = false, blockedAgents = 0, sleeps = true, addresses = twoAddresses)
+        assertTrue(quiet.asleep)
+        assertNull(quiet.failure)
+        assertTrue(quiet.detail!!.contains("blackstark.local:22"))
+        // A rejected key is no sleep, whatever the flag says.
+        val rejected = hostCardStatus(HostState.Closed(CloseReason.Failed(SessionFailure.AuthenticationRejected)), false, 0, sleeps = true)
+        assertFalse(rejected.asleep)
+        assertNotNull(rejected.failure)
     }
 }

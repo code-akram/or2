@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use tokio::time::{Instant, sleep, sleep_until};
 
-use super::discovery::{self, DiscoveryError};
+use super::discovery::{Directory, DiscoveryError};
 use super::generated::request::{EmptyParams, EventsSubscribeParams, RequestBody, Subscription};
 use super::project::{self, SnapshotError};
 use super::view::HerdrView;
@@ -255,16 +255,15 @@ async fn sleep_until_due(due: Option<Instant>) {
     }
 }
 
-/// Opens an event stream, subscribes to the lifecycle events and to `pane.agent_status_changed`
-/// of every pane in `panes`, and waits for the acknowledgement. Events that follow it stay
-/// buffered in the returned reader.
-async fn subscribe<H: RemoteHost>(
-    host: &H,
-    socket: &str,
+/// Subscribes on `reader` (an open stream) to the lifecycle events and to
+/// `pane.agent_status_changed` of every pane in `panes`, and waits for the acknowledgement.
+/// Events that follow it stay buffered in the returned reader.
+async fn subscribe_on<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    mut reader: LineReader<S>,
     id: &str,
     panes: &PaneKeys,
     timeout: Duration,
-) -> Result<LineReader<H::Stream>, WireError> {
+) -> Result<LineReader<S>, WireError> {
     let mut subscriptions = lifecycle();
     subscriptions.extend(
         panes
@@ -279,7 +278,6 @@ async fn subscribe<H: RemoteHost>(
         &RequestBody::EventsSubscribe(EventsSubscribeParams { subscriptions }),
     )?;
     tokio::time::timeout(timeout, async {
-        let mut reader = wire::open(host, socket).await?;
         reader.send(&line).await?;
         loop {
             match reader.next_message().await? {
@@ -306,8 +304,28 @@ async fn subscribe<H: RemoteHost>(
     .map_err(|_| WireError::TimedOut)?
 }
 
+/// Opens an event stream and subscribes on it (see [`subscribe_on`]); the open is bounded by
+/// `timeout` as well.
+async fn subscribe<H: RemoteHost>(
+    host: &H,
+    socket: &str,
+    id: &str,
+    panes: &PaneKeys,
+    timeout: Duration,
+) -> Result<LineReader<H::Stream>, WireError> {
+    let reader = tokio::time::timeout(timeout, wire::open(host, socket))
+        .await
+        .map_err(|_| WireError::TimedOut)??;
+    subscribe_on(reader, id, panes, timeout).await
+}
+
 struct Watch<H: RemoteHost> {
     host: Arc<H>,
+    /// Where sockets come from: the connection's listing, read again only after a failure.
+    directory: Arc<Directory>,
+    /// Attempts started so far: the first takes its socket from the directory's list, every
+    /// later one (a retry or a recovery) reads the listing again.
+    attempts: u32,
     target: Arc<Target>,
     driver: HerdrWatchDriver,
     timing: Timing,
@@ -414,16 +432,19 @@ impl<H: RemoteHost> Watch<H> {
         exit
     }
 
-    /// The lifecycle-only subscription was rejected: read the snapshot once to see whether
-    /// herdr is too old (final) before reporting the rejection (`Failed`, retried).
-    async fn rejected_subscribe(&mut self, socket: &str, error: WireError) -> Exit {
+    /// The lifecycle-only subscription was rejected: read the snapshot once, on the stream that
+    /// was opened for it, to see whether herdr is too old (final) before reporting the
+    /// rejection (`Failed`, retried).
+    async fn rejected_subscribe<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+        &mut self,
+        mut requests: LineReader<S>,
+        error: WireError,
+    ) -> Exit {
         let id = self.request_id();
-        let host = Arc::clone(&self.host);
         let timeout = self.timing.request;
         let snapshot = self
-            .pump(wire::call(
-                &*host,
-                socket,
+            .pump(wire::call_on(
+                &mut requests,
                 &id,
                 &RequestBody::SessionSnapshot(EmptyParams(serde_json::Map::new())),
                 timeout,
@@ -446,31 +467,67 @@ impl<H: RemoteHost> Watch<H> {
         let target = Arc::clone(&self.target);
         let timeout = self.timing.request;
 
-        let socket = self
-            .pump(discovery::locate(
-                &*host,
-                &target.herdr,
-                target.session.as_deref(),
-            ))
-            .await?
-            .map_err(exit_for_discovery)?;
+        // The first attempt of a watch takes its socket from the connection's listing; every
+        // later one (a retry after a failure, a recovery) reads the listing again.
+        let mut fresh = self.attempts > 0;
+        self.attempts += 1;
+        // Two streams open together, one for the subscription and one for the first snapshot
+        // (which must follow the subscription's acknowledgement, not its open): a socket that
+        // the cached listing named but that does not open sends the attempt back to the
+        // listing once, instead of failing the watch for a retry interval.
+        let (socket, events, requests) = loop {
+            let directory = Arc::clone(&self.directory);
+            let cached = if fresh {
+                None
+            } else {
+                directory.cached_socket(target.session.as_deref())
+            };
+            let from_cache = cached.is_some();
+            let socket = match cached {
+                Some(socket) => socket,
+                None => self
+                    .pump(directory.locate_fresh(&*host, &target.herdr, target.session.as_deref()))
+                    .await?
+                    .map_err(exit_for_discovery)?,
+            };
+            let opened = self
+                .pump(tokio::time::timeout(timeout, async {
+                    tokio::join!(wire::open(&*host, &socket), wire::open(&*host, &socket))
+                }))
+                .await?
+                .map_err(|_| exit_for_wire(WireError::TimedOut))?;
+            match opened {
+                (Ok(events), Ok(requests)) => break (socket, events, requests),
+                (events, requests) => {
+                    let error = events
+                        .err()
+                        .or(requests.err())
+                        .expect("one of the two opens failed");
+                    if from_cache && matches!(error, WireError::Unreachable(_)) {
+                        self.directory.invalidate();
+                        fresh = true;
+                        continue;
+                    }
+                    return Err(exit_for_wire(error));
+                }
+            }
+        };
 
         // Subscribe first, then read: nothing that happens from here on can be missed.
         let id = self.request_id();
         let none = PaneKeys::new();
-        let stream = match self
-            .pump(subscribe(&*host, &socket, &id, &none, timeout))
-            .await?
-        {
+        let stream = match self.pump(subscribe_on(events, &id, &none, timeout)).await? {
             Ok(stream) => stream,
             // An older herdr may not know every lifecycle event and reject the request; its
             // protocol decides between "retry" and "final" as it would for a snapshot.
             Err(error @ WireError::Herdr { .. }) => {
-                return Err(self.rejected_subscribe(&socket, error).await);
+                return Err(self.rejected_subscribe(requests, error).await);
             }
             Err(error) => return Err(exit_for_wire(error)),
         };
         self.events = Some(stream);
+        // The first snapshot goes over the stream that is already open.
+        let mut first_read = Some(requests);
 
         let mut subscribed = PaneKeys::new();
         let mut rejected = 0;
@@ -488,16 +545,14 @@ impl<H: RemoteHost> Watch<H> {
                 self.dirty = false;
                 last_read = Some(Instant::now());
                 let id = self.request_id();
-                let result = self
-                    .pump(wire::call(
-                        &*host,
-                        &socket,
-                        &id,
-                        &RequestBody::SessionSnapshot(EmptyParams(serde_json::Map::new())),
-                        timeout,
-                    ))
-                    .await?
-                    .map_err(exit_for_wire)?;
+                let body = RequestBody::SessionSnapshot(EmptyParams(serde_json::Map::new()));
+                let read = async {
+                    match first_read.take() {
+                        Some(mut stream) => wire::call_on(&mut stream, &id, &body, timeout).await,
+                        None => wire::call(&*host, &socket, &id, &body, timeout).await,
+                    }
+                };
+                let result = self.pump(read).await?.map_err(exit_for_wire)?;
                 let snapshot = project::parse_snapshot(&result).map_err(exit_for_snapshot)?;
                 self.install(project::project(&snapshot));
 
@@ -564,7 +619,8 @@ impl<H: RemoteHost> Watch<H> {
     }
 }
 
-/// Runs the watch until `driver` is stopped or the host closes, then closes it.
+/// Runs the watch until `driver` is stopped or the host closes, then closes it. Discovers
+/// sockets with a directory of its own (the first attempt reads the listing).
 pub(super) async fn run<H: RemoteHost>(
     host: Arc<H>,
     herdr: String,
@@ -572,8 +628,30 @@ pub(super) async fn run<H: RemoteHost>(
     driver: HerdrWatchDriver,
     timing: Timing,
 ) {
+    run_in(
+        host,
+        herdr,
+        Arc::new(Directory::new()),
+        session,
+        driver,
+        timing,
+    )
+    .await;
+}
+
+/// [`run`] with the connection's `directory`, so the first attempt costs no `session list`.
+pub(super) async fn run_in<H: RemoteHost>(
+    host: Arc<H>,
+    herdr: String,
+    directory: Arc<Directory>,
+    session: Option<String>,
+    driver: HerdrWatchDriver,
+    timing: Timing,
+) {
     Watch {
         host,
+        directory,
+        attempts: 0,
         target: Arc::new(Target { herdr, session }),
         driver,
         timing,
