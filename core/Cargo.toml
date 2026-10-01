@@ -12,6 +12,7 @@ libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "8953a7
 or2-core = { path = "or2-core" }
 rand = { version = "=0.10.3", features = ["thread_rng"] }
 russh = "=0.63.3"
+serde_json = "=1.0.151"
 thiserror = "=2.0.21"
 tokio = "=1.47.1"
 uniffi = "=0.32.2"
