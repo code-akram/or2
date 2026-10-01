@@ -26,19 +26,12 @@ class TransportChoiceTest {
     }
 
     @Test
-    fun aRememberedTransportGuidesAutoButNeverOverridesMissingOrRejectedMosh() {
-        assertEquals(TerminalTransport.SSH, chooseTransport(TransportPref.AUTO, server, false, TerminalTransport.SSH))
-        assertEquals(TerminalTransport.MOSH, chooseTransport(TransportPref.AUTO, server, false, TerminalTransport.MOSH))
-        assertEquals(TerminalTransport.SSH, chooseTransport(TransportPref.AUTO, null, false, TerminalTransport.MOSH))
-        assertEquals(TerminalTransport.SSH, chooseTransport(TransportPref.AUTO, server, true, TerminalTransport.MOSH))
-        // An explicit preference beats what the target had before.
-        assertEquals(TerminalTransport.SSH, chooseTransport(TransportPref.SSH, server, false, TerminalTransport.MOSH))
-    }
-
-    @Test
     fun onlyTimedOutAndNotInstalledFallBack() {
         assertTrue(isMoshFallback(SessionFailure.TimedOut))
         assertTrue(isMoshFallback(SessionFailure.NotInstalled("mosh-server")))
+        // A missing tmux or herdr is not mosh's problem: the SSH retry would fail the same way.
+        assertFalse(isMoshFallback(SessionFailure.NotInstalled("tmux")))
+        assertFalse(isMoshFallback(SessionFailure.NotInstalled("herdr")))
         assertFalse(isMoshFallback(SessionFailure.Unreachable("x")))
         assertFalse(isMoshFallback(SessionFailure.AuthenticationRejected))
         assertFalse(isMoshFallback(SessionFailure.ConnectionLost("x")))

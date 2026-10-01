@@ -1,6 +1,11 @@
 package io.github.code_akram.or2.app
 
 import io.github.code_akram.or2.connection.FakePort
+import io.github.code_akram.or2.data.Host
+import io.github.code_akram.or2.data.TransportPref
+import io.github.code_akram.or2.ffi.HostListener
+import io.github.code_akram.or2.ffi.SessionFailure
+import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.connection.FakeTrust
 import io.github.code_akram.or2.connection.HostConnections
 import io.github.code_akram.or2.connection.testHost
@@ -32,18 +37,25 @@ class TerminalActivationsTest {
     private val a = TerminalTarget.Herdr(null, "w1:p1")
     private val b = TerminalTarget.Herdr(null, "w1:p2")
 
-    private class Setup(val holder: HostConnections, val port: FakePort, val events: MutableList<String>) {
+    private class Setup(val holder: HostConnections, val port: FakePort, val events: MutableList<String>, val hostListener: HostListener) {
         val activations get() = holder.activations
         fun open(target: TerminalTarget) = holder.openTerminal(holder.host(7)!!, target)
     }
 
-    private suspend fun TestScope.setup(): Setup {
+    /** A connected host. [pending] leaves the capability probe unanswered until `port.capsGate` completes. */
+    private suspend fun TestScope.setup(target: Host = host, pending: Boolean = false): Setup {
         val events = mutableListOf<String>()
         val port = FakePort(events)
-        val holder = HostConnections({ _, _ -> port }, FakeTrust(), StandardTestDispatcher(testScheduler), UnconfinedTestDispatcher(testScheduler))
-        holder.connect(host, byteArrayOf(1))
+        port.caps = port.caps.copy(moshServer = "/usr/bin/mosh-server")
+        if (pending) port.capsGate = CompletableDeferred()
+        var listener: HostListener? = null
+        val holder = HostConnections({ _, l -> listener = l; port }, FakeTrust(), StandardTestDispatcher(testScheduler), UnconfinedTestDispatcher(testScheduler))
+        holder.connect(target, byteArrayOf(1))
         port.nativeState = HostState.Connected(0u)
-        return Setup(holder, port, events)
+        listener!!.onHostStateChanged(HostState.Connected(0u))
+        advanceUntilIdle()
+        events.clear() // The probe's own calls are not what these tests are about.
+        return Setup(holder, port, events, listener!!)
     }
 
     /** Runs a launch* call to completion and returns what `done` received (recording "navigate" in [Setup.events]). */
@@ -136,12 +148,90 @@ class TerminalActivationsTest {
     @Test
     fun aHostThatIsNoLongerConnectedIsReportedBeforeAnyFocus() = runTest {
         val s = setup()
-        val open = s.open(a)
         s.holder.dismissHost(7)
         s.events.clear()
         assertEquals(Activation.Failed("Fixture is no longer connected."), openAgent(s, "w1:p1"))
-        assertEquals(Activation.Failed("Fixture is no longer connected."), activation(s) { s.activations.launchReuse(open, it) })
         assertTrue(s.events.none { it.startsWith("focus") })
+    }
+
+    @Test
+    fun aSurvivingMoshPaneTerminalIsShownAsItIsWhenItsSshConnectionIsLost() = runTest {
+        // The headline M3 case: the network drops, the SSH host closes, the mosh session keeps running.
+        val s = setup(testHost(transport = TransportPref.MOSH))
+        val terminal = s.open(a)
+        assertEquals(TerminalTransport.MOSH, terminal.transport.value)
+        s.hostListener.onHostStateChanged(HostState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("network changed"))))
+        advanceUntilIdle()
+        s.events.clear()
+
+        // Nothing can be focused, and nothing is refused: the terminal opens (Home thumbnail, switcher, reattach Show).
+        assertEquals(Activation.Ready(terminal), activation(s) { s.activations.launchReuse(terminal, it) })
+        assertEquals(Activation.Ready(terminal), s.activations.reuse(terminal))
+        assertEquals(listOf("navigate"), s.events)
+
+        // The connection forgotten altogether (dismissed) while the session lives on: still shown.
+        s.holder.dismissHost(7)
+        assertEquals(Activation.Ready(terminal), s.activations.reuse(terminal))
+        assertTrue(s.events.none { it.startsWith("focus") })
+    }
+
+    @Test
+    fun anAliveTerminalOnAHostThatIsConnectingAgainIsNotFocusedEither() = runTest {
+        val s = setup(testHost(transport = TransportPref.MOSH))
+        val terminal = s.open(a)
+        s.hostListener.onHostStateChanged(HostState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("x"))))
+        advanceUntilIdle()
+        s.events.clear()
+        assertEquals(Activation.Ready(terminal), s.activations.reuse(terminal))
+        assertTrue(s.events.isEmpty())
+        s.holder.dismissHost(7)
+    }
+
+    @Test
+    fun aTerminalOpenedFromTheHostScreenWaitsForTheProbeSoAutoCanChooseMosh() = runTest {
+        val s = setup(pending = true)
+        var result: Activation? = null
+        s.activations.launchOpen(s.holder.host(7)!!, TerminalTarget.Tmux("work")) { result = it }
+        runCurrent()
+        assertEquals("Opening Fixture: tmux work", s.activations.pending.value)
+        assertNull(result)
+        assertTrue(s.port.terminals.isEmpty())
+
+        s.port.capsGate!!.complete(Unit)
+        advanceUntilIdle()
+        val terminal = (result as Activation.Ready).terminal
+        assertEquals(TerminalTransport.MOSH, terminal.transport.value)
+        assertNull(s.activations.pending.value)
+
+        // A failure to open is a message, never a navigation.
+        s.port.openFailure = HostException.Closed()
+        assertEquals(Activation.Failed("The connection has closed. Reconnect to continue."), s.activations.open(s.holder.host(7)!!, TerminalTarget.Shell))
+        s.holder.dismissHost(7)
+    }
+
+    @Test
+    fun anInboxTapAndAReattachAlsoWaitForTheProbe() = runTest {
+        val s = setup(pending = true)
+        var result: Activation? = null
+        s.activations.launchOpenAgent(7, host.label, null, "w1:p1") { result = it }
+        runCurrent()
+        assertNull(result) // Focused, but not opened over SSH before the probe answered.
+        assertTrue(s.port.terminals.isEmpty())
+        s.port.capsGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(TerminalTransport.MOSH, (result as Activation.Ready).terminal.transport.value)
+
+        val r = setup(pending = true)
+        var reopened: Activation? = null
+        r.activations.launchReopen(LastTerminal(7, TerminalTarget.Tmux("w"), TerminalTransport.SSH), host.label) { reopened = it }
+        runCurrent()
+        assertNull(reopened)
+        r.port.capsGate!!.complete(Unit)
+        advanceUntilIdle()
+        // What the target ran over before does not decide: SSH was remembered, AUTO with mosh-server picks mosh.
+        assertEquals(TerminalTransport.MOSH, (reopened as Activation.Ready).terminal.transport.value)
+        s.holder.dismissHost(7)
+        r.holder.dismissHost(7)
     }
 
     @Test

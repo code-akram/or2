@@ -88,6 +88,8 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     var destroyed = false
     var caps = HostCapabilities("/usr/bin/tmux", "/usr/bin/herdr", null, "C.UTF-8", listOf(HerdrSessionInfo("default", true, true)))
     var capsFailure: Exception? = null
+    /** While set, the capability probe is unanswered: `capabilities()` waits for it to complete. */
+    var capsGate: CompletableDeferred<Unit>? = null
     var tmux = listOf<TmuxSession>()
     var openFailure: Exception? = null
     var watchFailure: Exception? = null
@@ -119,6 +121,7 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     }
     override suspend fun capabilities(): HostCapabilities {
         capabilityCalls++
+        capsGate?.await()
         capsFailure?.let { throw it }
         return caps
     }

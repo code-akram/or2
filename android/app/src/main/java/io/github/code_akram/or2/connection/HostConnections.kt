@@ -120,6 +120,12 @@ class ActiveHost internal constructor(val host: Host) {
 
     /** Whether herdr watches should run: the host's inbox flag, which can change on a live connection. */
     internal var watching = host.showInInbox
+
+    /**
+     * The host's transport preference, which can change on a live connection ([host] is the
+     * snapshot taken when it connected): terminals opened afterwards follow it.
+     */
+    internal var transportPref = host.transport
     val state = mutableState.asStateFlow()
     val hasConnected = mutableHasConnected.asStateFlow()
 
@@ -178,12 +184,14 @@ class ActiveTerminal internal constructor(val id: Long, val host: Host, val targ
     val note = mutableNote.asStateFlow()
 
     /** Short label for the session switcher. */
-    val title: String
-        get() = when (target) {
-            TerminalTarget.Shell -> "shell"
-            is TerminalTarget.Tmux -> "tmux ${target.sessionName}"
-            is TerminalTarget.Herdr -> "herdr" + (target.session?.let { " $it" } ?: "") + (target.paneId?.let { " $it" } ?: "")
-        }
+    val title: String get() = targetTitle(target)
+}
+
+/** Short label for a terminal target: `shell`, `tmux main`, `herdr work w1:p2`. */
+fun targetTitle(target: TerminalTarget): String = when (target) {
+    TerminalTarget.Shell -> "shell"
+    is TerminalTarget.Tmux -> "tmux ${target.sessionName}"
+    is TerminalTarget.Herdr -> "herdr" + (target.session?.let { " $it" } ?: "") + (target.paneId?.let { " $it" } ?: "")
 }
 
 /** The user's own closing of a host or terminal (disconnect, close, delete, remote shell exit). */
@@ -434,6 +442,19 @@ class HostConnections(
     }
 
     /**
+     * Follows the host's transport preference on a live connection: terminals opened afterwards
+     * use it, terminals already open keep what they run over. A changed preference is a fresh
+     * decision, so the memory of an earlier mosh failure on this connection ([ActiveHost.moshFallbackNote])
+     * is dropped with it.
+     */
+    fun setTransport(hostId: Long, pref: TransportPref) {
+        val current = mutableHosts.value[hostId] ?: return
+        if (current.transportPref == pref) return
+        current.transportPref = pref
+        current.moshFallbackNote = null
+    }
+
+    /**
      * With herdr installed, the default session (watched unnamed) and every listed session get a
      * watch whether or not it is running: the watch reports `NotRunning` and retries by itself, so
      * a session started later is picked up without another probe (the connection caches the
@@ -491,16 +512,18 @@ class HostConnections(
 
     /**
      * Call on main. Opens a terminal on a connected host; throws [HostException] if it cannot.
-     * The transport follows the host's preference ([chooseTransport]); [remembered] is the transport
-     * the same target had before (reattach). Under AUTO a mosh terminal that fails with `TimedOut`
-     * or `NotInstalled` before it connected is retried over SSH on the same [ActiveTerminal].
+     * The transport follows the host's current preference ([chooseTransport]); under AUTO that
+     * needs the capability probe, so callers that can suspend call [awaitTransportChoice] first
+     * (a probe that has not answered counts as no `mosh-server`). Under AUTO a mosh terminal that
+     * fails with `TimedOut` or a missing `mosh-server` before it connected is retried over SSH on
+     * the same [ActiveTerminal].
      */
-    fun openTerminal(current: ActiveHost, target: TerminalTarget, remembered: TerminalTransport? = null): ActiveTerminal {
+    fun openTerminal(current: ActiveHost, target: TerminalTarget): ActiveTerminal {
         if (!owns(current) || current.retired) throw HostException.Closed()
         val port = current.mutablePort.value ?: throw HostException.NotConnected()
-        val pref = current.host.transport
+        val pref = current.transportPref
         val moshServer = current.capabilities.value?.moshServer
-        val choice = chooseTransport(pref, moshServer, current.moshFallbackNote != null, remembered)
+        val choice = chooseTransport(pref, moshServer, current.moshFallbackNote != null)
         val terminal = ActiveTerminal(nextTerminalId, current.host, target)
         terminal.fallbackEligible = pref == TransportPref.AUTO && choice == TerminalTransport.MOSH
         if (pref == TransportPref.AUTO && moshServer != null && choice == TerminalTransport.SSH) {
@@ -535,6 +558,8 @@ class HostConnections(
         // Preserve a transient Connected even if the UI observes only Closed.
         if (state == SessionState.Connected) terminal.mutableHasConnected.value = true
         terminal.mutableState.value = state
+        // Nothing is heard on a closed session: its last health must not keep saying "Last heard N s ago".
+        if (state is SessionState.Closed) terminal.mutableLinkHealth.value = null
         // A shell the user exited is over: reattach must not offer it again.
         if (state is SessionState.Closed && state.reason is CloseReason.RemoteExited) {
             userClose?.terminalClosed(terminal.host.id, terminal.target)
@@ -581,6 +606,15 @@ class HostConnections(
         withTimeoutOrNull(timeoutMs) {
             merge(current.capabilities, current.capabilitiesError).filterNotNull().first()
         }
+    }
+
+    /**
+     * Call before [openTerminal]: under AUTO the transport depends on the capability probe, so a
+     * tap right after connecting waits for it (briefly) instead of silently choosing SSH. An
+     * explicit SSH or Mosh preference never waits.
+     */
+    suspend fun awaitTransportChoice(current: ActiveHost) {
+        if (current.transportPref == TransportPref.AUTO) awaitCapabilities(current)
     }
 
     /** The user ends this terminal. */
