@@ -1504,6 +1504,7 @@ dependencies = [
  "gethostname",
  "hmac",
  "if-addrs",
+ "libc",
  "or2-core",
  "qrcode",
  "rand",

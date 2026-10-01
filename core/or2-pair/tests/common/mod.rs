@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use or2_core::keys::ClientKey;
 use or2_core::pair::{PairError, PairOffer, PairTiming, submit_key};
 use or2_core::transport::DirectTcp;
+use or2_pair::account::Account;
 use or2_pair::addresses::Iface;
 use or2_pair::args::Options;
 use or2_pair::checks::Platform;
@@ -150,8 +151,7 @@ pub fn pair_with<R>(
             let now = || DateTime::from_unix(1_782_867_661);
             let env = Env {
                 version: "test",
-                home: world.home.path().to_path_buf(),
-                user: Some("fallback-user".into()),
+                account: Account::new("alice", world.home.path()),
                 hostname: Some("testhost.example.net".into()),
                 etc_ssh: world.etc.path().to_path_buf(),
                 program_dirs: Vec::<PathBuf>::new(),

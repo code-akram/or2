@@ -20,7 +20,6 @@
 //! connection, and one guess is all anyone gets.
 
 use std::io;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -29,6 +28,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
 
+use crate::account::Account;
 use crate::authorized_keys::{self, Added};
 use crate::confirm::{Answer, Confirm, ConfirmRequest};
 use crate::date::DateTime;
@@ -53,11 +53,10 @@ fn mac_of(otp: &[u8; 16], nonce: &[u8], key: &str) -> Hmac<Sha256> {
 
 /// What the exchange needs from its surroundings.
 pub struct Session<'a> {
-    /// The login the key will be authorized for.
-    pub user: &'a str,
+    /// The account the key is authorized for: its name is what is shown, its home is where the
+    /// key goes.
+    pub account: &'a Account,
     pub otp: [u8; 16],
-    /// The home directory whose `.ssh/authorized_keys` gets the key.
-    pub home: &'a Path,
     pub confirm: &'a dyn Confirm,
     /// Fills a buffer with random bytes (the nonce).
     pub random: &'a dyn Fn(&mut [u8]),
@@ -223,7 +222,8 @@ pub fn attempt(
     let fingerprint = key.fingerprint();
 
     let question = ConfirmRequest {
-        user: session.user.to_owned(),
+        user: session.account.name.clone(),
+        target: authorized_keys::path(&session.account.home),
         device: device.clone(),
         fingerprint: fingerprint.clone(),
         algorithm: key.algorithm().to_owned(),
@@ -244,7 +244,7 @@ pub fn attempt(
         }
     }
 
-    match authorized_keys::add(session.home, &key, &device, (session.now)()) {
+    match authorized_keys::add(&session.account.home, &key, &device, (session.now)()) {
         Ok(added) => {
             reply(connection, true, "");
             Some(Outcome::Authorized {
@@ -381,9 +381,8 @@ mod tests {
             let random = |buf: &mut [u8]| buf.fill(self.nonce.get());
             let now = || DateTime::from_unix(1_782_867_661);
             let session = Session {
-                user: "alice",
+                account: &Account::new("alice", self.home.path()),
                 otp: OTP,
-                home: self.home.path(),
                 confirm: &self.confirm,
                 random: &random,
                 now: &now,
@@ -673,9 +672,8 @@ mod tests {
         let random = |buf: &mut [u8]| buf.fill(7);
         let now = || DateTime::from_unix(1_782_867_661);
         let session = Session {
-            user: "alice",
+            account: &Account::new("alice", fixture.home.path()),
             otp: OTP,
-            home: fixture.home.path(),
             confirm: &fixture.confirm,
             random: &random,
             now: &now,
@@ -697,9 +695,8 @@ mod tests {
         let random = |buf: &mut [u8]| buf.fill(7);
         let now = || DateTime::from_unix(0);
         let session = Session {
-            user: "alice",
+            account: &Account::new("alice", fixture.home.path()),
             otp: OTP,
-            home: fixture.home.path(),
             confirm: &fixture.confirm,
             random: &random,
             now: &now,

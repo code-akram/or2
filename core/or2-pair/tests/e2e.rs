@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use or2_core::pair::{PairError, PairOffer, PairParseError, Refusal};
+use or2_pair::account::Account;
 use or2_pair::confirm::Answer;
 use or2_pair::net::{Net, PairListener, StdNet};
 use or2_pair::run::{Exit, RunError};
@@ -360,6 +361,66 @@ fn by_default_only_overlay_and_lan_addresses_are_bound() {
 }
 
 #[test]
+fn a_user_that_is_not_this_account_is_refused_before_anything_happens() {
+    // Finding 1: `--user bob` while running as alice used to print and confirm "bob" and then
+    // authorize the key in alice's home.
+    let world = World::new();
+    let net = Recording(Mutex::default());
+    let mut options = options();
+    options.bind.clear();
+    options.user = Some("bob".into());
+    let result = pair_with(
+        &world,
+        &options,
+        &Auto::new(Answer::Yes),
+        WINDOW,
+        &net,
+        true,
+        |_| (),
+    );
+    match &result.exit {
+        Err(RunError::UserMismatch {
+            requested,
+            effective,
+        }) => {
+            assert_eq!((requested.as_str(), effective.as_str()), ("bob", "alice"));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(net.0.lock().unwrap().is_empty(), "nothing was bound");
+    assert!(!result.output.contains("or2-pair:1?"), "{}", result.output);
+    assert!(!world.home.path().join(".ssh").exists());
+    let message = result.exit.unwrap_err().to_string();
+    assert!(
+        message.contains("bob") && message.contains("alice"),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_code_and_the_confirmation_name_the_account_whose_file_is_written() {
+    let world = World::new();
+    let confirm = Auto::new(Answer::Yes);
+    let key = phone_key();
+    let mut options = options();
+    options.user = None;
+    let result = pair(&world, &options, &confirm, WINDOW, |ready| {
+        let offer = PairOffer::parse(&ready.payload).unwrap();
+        assert_eq!(offer.username, "alice", "the account's own name");
+        phone_submits(&offer, &key, "phone")
+    });
+    assert_eq!(result.phone, Some(Ok(())));
+    let asked = confirm.asked.lock().unwrap();
+    assert_eq!(asked[0].user, "alice");
+    assert_eq!(
+        asked[0].target,
+        world.home.path().join(".ssh/authorized_keys"),
+        "the prompt shows the file that will change"
+    );
+    assert!(world.authorized_keys().unwrap().contains(&key));
+}
+
+#[test]
 fn a_host_with_only_a_public_address_refuses_to_listen_by_default() {
     // The same fake world but the only interface is public: nothing is bindable.
     struct PublicOnly;
@@ -403,8 +464,7 @@ fn run_with_interfaces(
     let now = || DateTime::from_unix(0);
     let env = Env {
         version: "test",
-        home: world.home.path().to_path_buf(),
-        user: Some("alice".into()),
+        account: Account::new("alice", world.home.path()),
         hostname: Some("box".into()),
         etc_ssh: world.etc.path().to_path_buf(),
         program_dirs: vec![],

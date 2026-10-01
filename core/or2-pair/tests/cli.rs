@@ -10,6 +10,10 @@ fn run(home: &Path, args: &[&str]) -> Output {
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("USER", "tester")
+        // Only a `test-support` build reads these: it is pointed at a throwaway account, never
+        // at the real home.
+        .env("OR2_PAIR_TEST_HOME", home)
+        .env("OR2_PAIR_TEST_USER", "tester")
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .output()
@@ -72,6 +76,9 @@ fn a_usage_error_exits_two_and_says_how_to_get_help() {
     }
 }
 
+// `--check` looks at the account's home: only a `test-support` build can be pointed at a
+// throwaway one, so only that build runs it.
+#[cfg(feature = "test-support")]
 #[test]
 fn check_reports_and_changes_nothing_even_without_a_terminal() {
     let home = tempfile::tempdir().unwrap();
@@ -107,6 +114,27 @@ fn without_a_terminal_it_refuses_to_listen_so_a_pipe_cannot_answer_for_the_user(
     let shown = text(&out.stdout);
     assert!(
         !shown.contains("or2-pair:1?") && !shown.contains("Listening"),
+        "{shown}"
+    );
+    assert!(!home.path().join(".ssh").exists());
+}
+
+#[test]
+fn a_user_flag_that_names_someone_else_is_refused_before_anything_is_touched() {
+    let home = tempfile::tempdir().unwrap();
+    let out = run(
+        home.path(),
+        &["--user", "or2-not-the-current-user", "--no-listen"],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let error = text(&out.stderr);
+    assert!(
+        error.contains("or2-not-the-current-user") && error.contains("not the account"),
+        "{error}"
+    );
+    let shown = text(&out.stdout);
+    assert!(
+        !shown.contains("or2-pair:1?") && !shown.contains("Checks"),
         "{shown}"
     );
     assert!(!home.path().join(".ssh").exists());

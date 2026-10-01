@@ -32,6 +32,10 @@ gethostname = "=1.1.0"
 if-addrs = "=0.15.0"
 qrcode = { version = "=0.14.1", default-features = false }
 
+# The account database and no-follow file operations (Unix only).
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
+
 [dev-dependencies]
 or2-core = { workspace = true }
 rqrr = { version = "=0.11.0", default-features = false }

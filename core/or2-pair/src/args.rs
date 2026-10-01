@@ -15,7 +15,8 @@ this machine; you confirm the key's fingerprint here, and it is appended to
 
 OPTIONS:
     --name <label>        Name shown on the phone (default: this machine's host name)
-    --user <user>         Login user to pair for (default: $USER)
+    --user <user>         Must be the account you are running as (the default): keys are only
+                          authorized for the current user, in that user's own ~/.ssh
     --ssh-port <port>     Port sshd listens on (default: Port in /etc/ssh/sshd_config, else 22)
     --address <host>      Add an address to the code, ahead of the detected ones (repeatable),
                           e.g. a DNS name that works from anywhere

@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use or2_pair::account::Account;
 use or2_pair::addresses::Iface;
 use or2_pair::args::Options;
 use or2_pair::checks::Platform;
@@ -96,8 +97,7 @@ fn main() -> ExitCode {
     let confirm = Auto(answer);
     let env = Env {
         version: "testhost",
-        home,
-        user: Some("test".into()),
+        account: Account::new("test", home),
         hostname: Some("testhost".into()),
         etc_ssh: etc,
         program_dirs: Vec::new(),

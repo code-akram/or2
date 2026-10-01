@@ -69,7 +69,9 @@ presented on a later connection is the usual warning, never accepted automatical
 
 ### What it writes
 
-`or2-pair` appends one line to `~/.ssh/authorized_keys`:
+`or2-pair` appends one line to the `~/.ssh/authorized_keys` of the account that runs it (the home
+comes from the system's account database, not `$HOME`, so `sudo or2-pair` pairs root, never the
+user who typed `sudo`; the prompt names the account and the file):
 
 ```text
 no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA… or2-Pixel-8-2026-10-01
@@ -85,7 +87,7 @@ letters, digits, `.`, `_` and `-`.
 | Option | What it does |
 |---|---|
 | `--name <label>` | The host's name on the phone (default: the machine's host name) |
-| `--user <user>` | The login to pair for (default: `$USER`) |
+| `--user <user>` | Must be the account you are running as (the default). Keys are only authorized for the current user, in that user's own `~/.ssh`; to pair for another user, run `or2-pair` as that user |
 | `--ssh-port <port>` | sshd's port (default: `Port` in `/etc/ssh/sshd_config`, else 22) |
 | `--address <host>` | An extra address for the phone to try first, e.g. a DNS name that works from anywhere (repeatable) |
 | `--bind <ip>` | Listen only here (repeatable). Public addresses and `0.0.0.0` are allowed, with a warning |

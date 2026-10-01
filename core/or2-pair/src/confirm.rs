@@ -5,13 +5,17 @@
 //! environment variable and no default that says yes.
 
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Instant;
 
 /// What the person is asked to authorize.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmRequest {
+    /// The account whose `authorized_keys` receives the key.
     pub user: String,
+    /// That file, shown so the person sees exactly what will change.
+    pub target: PathBuf,
     /// The phone's label, already reduced to safe ASCII.
     pub device: String,
     /// `SHA256:…` of the phone's key.
@@ -64,6 +68,7 @@ impl Confirm for StdinConfirm {
             "Its key: {} ({})",
             request.fingerprint, request.algorithm
         );
+        let _ = writeln!(out, "It will be added to {}.", request.target.display());
         let _ = write!(out, "Authorize this key for {}? [y/N] ", request.user);
         let _ = out.flush();
         let (sender, receiver) = mpsc::channel();

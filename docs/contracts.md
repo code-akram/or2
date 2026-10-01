@@ -2281,6 +2281,16 @@ something after the hello; whatever happens from then on (bad MAC, bad key, `n`,
 error) ends the listener. A connection that sends nothing before it closes or times out (10 s) is not an
 attempt, so a port scan, or a connection the phone raced and dropped, cannot end the pairing.
 
+**The account.** The login in the code, the name in the prompt and the home whose `~/.ssh/authorized_keys`
+is written are one value (`or2_pair::account::Account`), resolved from the operating system's account
+database for the **effective user** of the process (`getpwuid_r(geteuid())`; Windows: `USERNAME` and
+`USERPROFILE`). `$HOME` and `$USER` are ignored, so `sudo` with a retained `HOME` cannot split them.
+`--user` may only repeat that name: any other value is refused before anything is checked, printed or
+bound (`--user X is not the account this runs as (Y)`). There is no privileged "pair for another user"
+mode; run `or2-pair` as that user. The prompt also shows the file that will change. On the phone, the
+`user` of a code that has a listener is read-only in the review (the host authorizes that account only);
+a `--no-listen` code still lets the user choose the login to install the key for.
+
 **Confirmation.** `Authorize this key for <user>? [y/N]`, answered only by `y` or `yes`. It is asked on the
 terminal and only if standard input is a terminal (otherwise the CLI refuses to listen): `yes | or2-pair`
 cannot answer. The `Confirm` trait is public so tests can answer; there is no flag or variable that says

@@ -147,6 +147,9 @@ class PairFlow(
     fun edit(name: String? = null, username: String? = null, choice: KeyChoice? = null) {
         val current = (mutableState.value as? PairState.Review)?.review ?: return
         if (current.working) return
+        // With a listener the host authorizes the key for the one account that ran or2-pair, and the
+        // code names it: a different login here would pair one account and connect as another.
+        val username = if (current.listens) null else username
         mutableState.value = PairState.Review(
             current.copy(
                 name = name ?: current.name, username = username ?: current.username,

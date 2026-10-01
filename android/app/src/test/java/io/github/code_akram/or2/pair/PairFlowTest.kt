@@ -142,8 +142,8 @@ class PairFlowTest {
     @Test
     fun editingChangesFieldsAndClearsTheLastError() {
         flow.onCode(code(), keys)
-        flow.edit(name = "Home", username = "bob", choice = KeyChoice.New)
-        assertEquals(Triple("Home", "bob", KeyChoice.New), review().let { Triple(it.name, it.username, it.choice) })
+        flow.edit(name = "Home", choice = KeyChoice.New)
+        assertEquals(Triple("Home", "alice", KeyChoice.New), review().let { Triple(it.name, it.username, it.choice) })
         flow.edit(name = "   ")
         assertFalse(review().valid)
         flow.submit(keys, "Pixel", generate)
@@ -151,6 +151,21 @@ class PairFlowTest {
         assertTrue(backend.events.isEmpty())
         flow.edit(name = "Home")
         assertNull(review().error)
+    }
+
+    @Test
+    fun theUserOfACodeWithAListenerIsTheHostsAccountAndCannotBeEdited() {
+        // The host authorizes the key for the account that ran or2-pair; a different login here would
+        // pair one account and then connect as another.
+        flow.onCode(code(listens = true), keys)
+        assertTrue(review().listens)
+        flow.edit(username = "bob")
+        assertEquals("alice", review().username)
+        // A code without a listener only describes the host: the user may name the login to install the key for.
+        flow.start()
+        flow.onCode(code(listens = false), keys)
+        flow.edit(username = "bob")
+        assertEquals("bob", review().username)
     }
 
     @Test

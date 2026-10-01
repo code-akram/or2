@@ -219,8 +219,13 @@ fun PairReviewScreen(
             Or2Field(review.name, { edit(it, null, null) }, label = "Name", placeholder = "My server", mono = false,
                 enabled = !review.working, tag = "pair-name")
             Or2Field(review.username, { edit(null, it, null) }, label = "Username", placeholder = "your-username",
-                enabled = !review.working, tag = "pair-username",
+                // With a listener the key is authorized for the account the code names, so it is not editable.
+                enabled = !review.working && !review.listens, tag = "pair-username",
                 errorText = if (review.username.isNotEmpty()) hostFieldError(review.username) else null)
+            if (review.listens) {
+                Text("The host authorizes this key for ${review.username} only.", style = Or2Type.Secondary,
+                    color = Or2Colors.TextMuted, modifier = Modifier.padding(top = (-10).dp))
+            }
             Column {
                 Text("Addresses", style = Or2Type.Body, color = Or2Colors.Text)
                 Text("Tried in this order, port ${offer.port}.", style = Or2Type.Secondary, color = Or2Colors.TextMuted,

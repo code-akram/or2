@@ -10,6 +10,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::account::{Account, AccountError};
 use crate::addresses::{self, Address, BindWarning, Iface, Kind};
 use crate::args::Options;
 use crate::authorized_keys::{self, Added};
@@ -24,8 +25,9 @@ use crate::qr::{self, QrStyle};
 
 pub struct Env<'a> {
     pub version: &'static str,
-    pub home: PathBuf,
-    pub user: Option<String>,
+    /// Who this run pairs for: the login shown and shipped in the code, and the home whose
+    /// `authorized_keys` is written. One value, so they cannot differ.
+    pub account: Account,
     pub hostname: Option<String>,
     pub etc_ssh: PathBuf,
     pub program_dirs: Vec<PathBuf>,
@@ -56,8 +58,15 @@ pub struct Ready {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
-    #[error("cannot tell which user to pair for; pass --user")]
-    NoUser,
+    #[error("{0}")]
+    Account(#[from] AccountError),
+    #[error(
+        "--user {requested} is not the account this runs as ({effective}): or2-pair authorizes keys only for the user who runs it, in that user's own ~/.ssh. Run it as {requested} (log in or use su), or leave --user out"
+    )]
+    UserMismatch {
+        requested: String,
+        effective: String,
+    },
     #[error("{0}")]
     HostKey(#[from] hostkey::NoHostKey),
     #[error(
@@ -152,6 +161,17 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
         env.version
     )?;
 
+    // The login in the code, the name in the prompt and the home that is written are all this
+    // account's. A flag cannot pick another one (see `account`).
+    if let Some(requested) = &options.user
+        && !env.account.is_named(requested)
+    {
+        return Err(RunError::UserMismatch {
+            requested: requested.clone(),
+            effective: env.account.name.clone(),
+        });
+    }
+
     // Fail before doing anything: with nobody to confirm there is no point in showing a code.
     if !options.no_listen && !options.check_only && !env.can_ask {
         return Err(RunError::NotInteractive);
@@ -166,7 +186,7 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
 
     heading(out, "Checks")?;
     let found = checks::run(&CheckInput {
-        home: &env.home,
+        home: &env.account.home,
         ssh_port,
         net: env.net,
         program_dirs: &env.program_dirs,
@@ -184,12 +204,7 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
         return Ok(Exit::Checked);
     }
 
-    let user = options
-        .user
-        .clone()
-        .or_else(|| env.user.clone())
-        .filter(|user| !user.trim().is_empty())
-        .ok_or(RunError::NoUser)?;
+    let user = env.account.name.clone();
     let name = options
         .name
         .clone()
@@ -319,7 +334,7 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
         writeln!(
             out,
             "\nNo listener (--no-listen). After scanning, the phone shows its public key: add it to {} on this host.",
-            authorized_keys::path(&env.home).display()
+            authorized_keys::path(&env.account.home).display()
         )?;
         return Ok(Exit::CodeOnly);
     };
@@ -341,15 +356,14 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
     }
 
     let session = Session {
-        user: &user,
+        account: &env.account,
         otp: otp.unwrap_or_default(),
-        home: &env.home,
         confirm: env.confirm,
         random: env.random,
         now: env.now,
     };
     let outcome = exchange::serve(listener.as_mut(), &session, Instant::now() + env.window);
-    report(&outcome, &user, &env.home, out)
+    report(&outcome, &user, &env.account.home, out)
 }
 
 fn report(
