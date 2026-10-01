@@ -117,11 +117,19 @@ pub fn serve(listener: &mut dyn PairListener, session: &Session<'_>, deadline: I
     let mut failures: HashMap<IpAddr, u32> = HashMap::new();
     let finish = |outcome, stats| Served { outcome, stats };
     loop {
+        // The window is checked before every accept and again after it: a socket that was
+        // queued before the end but is returned after it is closed, not greeted.
+        if Instant::now() >= deadline {
+            return finish(Outcome::TimedOut, stats);
+        }
         let mut connection = match listener.accept(deadline) {
             Ok(Some(connection)) => connection,
             Ok(None) => return finish(Outcome::TimedOut, stats),
             Err(error) => return finish(Outcome::ListenFailed(error), stats),
         };
+        if Instant::now() >= deadline {
+            return finish(Outcome::TimedOut, stats);
+        }
         let peer = connection.peer_ip();
         if peer.is_some_and(|ip| failures.get(&ip).copied().unwrap_or(0) >= MAX_FAILURES_PER_PEER) {
             stats.dropped += 1;
@@ -228,7 +236,11 @@ pub fn attempt(
     let mut nonce = [0u8; 32];
     (session.random)(&mut nonce);
     let hello = format!("{{\"v\":1,\"nonce\":\"{}\"}}\n", STANDARD.encode(nonce));
-    let greeted = connection.set_timeout(IO_TIMEOUT).is_ok()
+    let wait = deadline
+        .saturating_duration_since(Instant::now())
+        .min(IO_TIMEOUT);
+    let greeted = !wait.is_zero()
+        && connection.set_timeout(wait).is_ok()
         && connection.write_all(hello.as_bytes()).is_ok()
         && connection.flush().is_ok();
     if !greeted {
@@ -764,6 +776,101 @@ mod tests {
         };
         let outcome = serve(&mut queue, &session, Instant::now()).outcome;
         assert!(matches!(outcome, Outcome::TimedOut));
+    }
+
+    // --- Finding 7: nothing is served after the window ---------------------------------------
+
+    /// A script the test can still look at after `serve` took it.
+    struct Shared(std::sync::Arc<std::sync::Mutex<Script>>);
+
+    impl Read for Shared {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().read(buf)
+        }
+    }
+    impl Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().write(buf)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Connection for Shared {
+        fn peer(&self) -> String {
+            "192.168.1.50:5555".into()
+        }
+        fn set_timeout(&mut self, _: Duration) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Hands out its connection after `delay`, like a socket that was already queued.
+    struct LateQueue {
+        connection: Option<Shared>,
+        delay: Duration,
+    }
+
+    impl PairListener for LateQueue {
+        fn endpoints(&self) -> Vec<SocketAddr> {
+            Vec::new()
+        }
+        fn accept(&mut self, _: Instant) -> io::Result<Option<Box<dyn Connection>>> {
+            std::thread::sleep(self.delay);
+            Ok(self
+                .connection
+                .take()
+                .map(|c| Box::new(c) as Box<dyn Connection>))
+        }
+    }
+
+    #[test]
+    fn a_connection_queued_when_the_window_is_over_is_not_greeted() {
+        let fixture = Fixture::new(Answer::Yes);
+        let good = request_for(&OTP, &nonce_of(7), PHONE, "phone");
+        let script = std::sync::Arc::new(std::sync::Mutex::new(Script::new(&[&good])));
+        let mut listener = LateQueue {
+            connection: Some(Shared(script.clone())),
+            delay: Duration::from_millis(80),
+        };
+        let random = |buf: &mut [u8]| buf.fill(7);
+        let now = || DateTime::from_unix(1_782_867_661);
+        let session = Session {
+            account: &Account::new("alice", fixture.home.path()),
+            otp: OTP,
+            confirm: &fixture.confirm,
+            random: &random,
+            now: &now,
+        };
+        // The window ends while `accept` is still waiting; the socket it then returns was queued
+        // before the end, but the window is over: no greeting, no request read, nothing written.
+        let deadline = Instant::now() + Duration::from_millis(20);
+        let served = serve(&mut listener, &session, deadline);
+        assert!(matches!(served.outcome, Outcome::TimedOut));
+        assert!(script.lock().unwrap().output.is_empty(), "no hello");
+        assert!(fixture.authorized_keys().is_none());
+    }
+
+    #[test]
+    fn serve_does_not_accept_at_all_once_the_deadline_has_passed() {
+        let fixture = Fixture::new(Answer::Yes);
+        let mut queue = Queue(VecDeque::from([Script::new(&[]), Script::new(&[])]));
+        let random = |buf: &mut [u8]| buf.fill(7);
+        let now = || DateTime::from_unix(1_782_867_661);
+        let session = Session {
+            account: &Account::new("alice", fixture.home.path()),
+            otp: OTP,
+            confirm: &fixture.confirm,
+            random: &random,
+            now: &now,
+        };
+        let past = Instant::now();
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(matches!(
+            serve(&mut queue, &session, past).outcome,
+            Outcome::TimedOut
+        ));
+        assert_eq!(queue.0.len(), 2, "nothing was taken from the queue");
     }
 
     /// Serves `scripts` in order and returns what `serve` decided and what was left unserved.

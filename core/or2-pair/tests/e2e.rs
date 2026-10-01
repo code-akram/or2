@@ -500,6 +500,24 @@ fn run_with_interfaces(
     net: &dyn Net,
     interfaces: Vec<or2_pair::addresses::Iface>,
 ) -> Result<Exit, RunError> {
+    run_with_output(
+        world,
+        options,
+        net,
+        interfaces,
+        Duration::from_millis(100),
+        &mut Vec::new(),
+    )
+}
+
+fn run_with_output(
+    world: &World,
+    options: &or2_pair::args::Options,
+    net: &dyn Net,
+    interfaces: Vec<or2_pair::addresses::Iface>,
+    window: Duration,
+    out: &mut dyn std::io::Write,
+) -> Result<Exit, RunError> {
     use or2_pair::checks::Platform;
     use or2_pair::date::DateTime;
     use or2_pair::run::{Env, run};
@@ -521,10 +539,75 @@ fn run_with_interfaces(
         color: false,
         random: &random,
         now: &now,
-        window: Duration::from_millis(100),
+        window,
         on_ready: None,
     };
-    run(options, &env, &mut Vec::new())
+    run(options, &env, out)
+}
+
+/// Binds like the real network and queues a client on the listener at once.
+struct QueueingNet(Mutex<Option<std::net::TcpStream>>);
+
+impl Net for QueueingNet {
+    fn probe_ssh(&self, _: u16) -> io::Result<String> {
+        Ok("SSH-2.0-Fake".into())
+    }
+    fn listen(&self, ips: &[IpAddr], port: u16) -> io::Result<Box<dyn PairListener>> {
+        let listener = StdNet.listen(ips, port)?;
+        let endpoint = listener.endpoints()[0];
+        *self.0.lock().unwrap() = Some(std::net::TcpStream::connect(endpoint)?);
+        Ok(listener)
+    }
+}
+
+/// An output that takes its time, like a slow terminal or a pipe nobody reads.
+struct SlowWriter(Duration);
+
+impl std::io::Write for SlowWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        std::thread::sleep(self.0);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn slow_output_does_not_extend_the_window_and_a_queued_connection_is_not_served_after_it() {
+    // Finding 7: the window used to start after the QR was printed, and `accept` handed out a
+    // connection that was queued before the window ended even when it was over.
+    use std::io::Read;
+    let world = World::new();
+    let net = QueueingNet(Mutex::default());
+    let window = Duration::from_millis(300);
+    let started = Instant::now();
+    let exit = run_with_output(
+        &world,
+        &options(),
+        &net,
+        interfaces(),
+        window,
+        // Dozens of writes at 30 ms each: printing alone outlasts the window.
+        &mut SlowWriter(Duration::from_millis(30)),
+    );
+    assert_eq!(exit.unwrap(), Exit::TimedOut);
+    let mut client = net.0.lock().unwrap().take().expect("a client was queued");
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut heard = [0u8; 64];
+    let count = client.read(&mut heard).unwrap_or(0);
+    assert_eq!(
+        count, 0,
+        "a connection queued during the window got a hello"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(world.authorized_keys().is_none());
 }
 
 #[test]

@@ -116,6 +116,11 @@ impl PairListener for TcpPairListener {
 
     fn accept(&mut self, deadline: Instant) -> io::Result<Option<Box<dyn Connection>>> {
         loop {
+            // Past the deadline nothing is handed out, not even a connection that was already
+            // queued: the window is the window.
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
             for listener in &self.listeners {
                 match listener.accept() {
                     Ok((stream, peer)) => {
@@ -128,11 +133,8 @@ impl PairListener for TcpPairListener {
                     Err(error) => return Err(error),
                 }
             }
-            let now = Instant::now();
-            if now >= deadline {
-                return Ok(None);
-            }
-            std::thread::sleep((deadline - now).min(Duration::from_millis(20)));
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            std::thread::sleep(remaining.min(Duration::from_millis(20)));
         }
     }
 }
@@ -197,6 +199,15 @@ mod tests {
         assert_eq!(&buf, b"hi");
         assert!(connection.peer().starts_with("127.0.0.1:"));
         client.join().unwrap();
+    }
+
+    #[test]
+    fn a_queued_connection_is_not_handed_out_once_the_deadline_has_passed() {
+        let mut listener = StdNet.listen(&[loopback()], 0).unwrap();
+        let _client = TcpStream::connect(listener.endpoints()[0]).unwrap();
+        let past = Instant::now();
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(listener.accept(past).unwrap().is_none());
     }
 
     #[test]

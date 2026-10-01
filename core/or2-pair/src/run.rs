@@ -226,6 +226,8 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
 
     // Bind first, so the code names the port that is really open.
     let mut listener = None;
+    // When the window ends: fixed the moment the port is open, not when the output is done.
+    let mut expires = None;
     let mut otp = None;
     let mut pair = Vec::new();
     if !options.no_listen {
@@ -257,6 +259,7 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
         let mut secret = [0u8; 16];
         (env.random)(&mut secret);
         otp = Some(secret);
+        expires = Some(Instant::now() + env.window);
         listener = Some(bound);
     }
 
@@ -339,13 +342,14 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
         return Ok(Exit::CodeOnly);
     };
 
+    let expires = expires.unwrap_or_else(Instant::now);
     let listening = listener.endpoints();
     let ends: Vec<String> = listening.iter().map(ToString::to_string).collect();
     writeln!(
         out,
         "\nListening on {} for {} s. Press Ctrl-C to cancel.",
         ends.join(", "),
-        env.window.as_secs()
+        (expires.saturating_duration_since(Instant::now()) + Duration::from_millis(500)).as_secs()
     )?;
     out.flush()?;
     if let Some(ready) = env.on_ready {
@@ -362,7 +366,7 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
         random: env.random,
         now: env.now,
     };
-    let served = exchange::serve(listener.as_mut(), &session, Instant::now() + env.window);
+    let served = exchange::serve(listener.as_mut(), &session, expires);
     report(&served.outcome, served.stats, &user, &env.account.home, out)
 }
 

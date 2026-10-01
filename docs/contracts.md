@@ -2274,7 +2274,11 @@ looks at or shows anything about the key.
 **Timing.** The phone gives every connect, the hello and the write 10 s (`PairTiming::step`). The wait for
 the verdict is the host's own 120 s window plus a margin (125 s), because that wait is a person typing `y`;
 a flat 10 s there would make the confirmation impossible. The host's whole window is 120 s from the moment
-it starts listening, and it is also the deadline of the confirmation question.
+the port is bound (before the QR is drawn or printed, so slow output shortens the window rather than
+extending it; the "Listening ... for N s" line shows what is left), and it is also the deadline of the
+confirmation question. The deadline is checked before every `accept` and again after it: a socket that was
+already queued when the window ended is closed unanswered, never greeted, and the greeting and the request
+read are clamped to the time that is left.
 
 **One attempt.** The listener serves one *attempt*. An attempt is a request that is well formed, within the
 size limit **and whose HMAC verifies** (only the holder of the one-time password can make one); whatever
