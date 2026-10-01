@@ -32,6 +32,7 @@ use std::time::Duration;
 use russh::client::{self as russh_client, Handle};
 use tokio::io::DuplexStream;
 use tokio::sync::{OnceCell, mpsc, oneshot, watch};
+use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 
 use super::client::{
@@ -52,7 +53,10 @@ use crate::remote::{ExecOutput, OUTPUT_CAP, RemoteError, RemoteHost, SecretBytes
 use crate::session::{CloseReason, HostKeyPrompt, SessionDriver, SessionFailure};
 use crate::term::TerminalSize;
 use crate::tmux::{self, TmuxError};
-use crate::transport::{DatagramTransport, RACE_STAGGER, Transport, race};
+use crate::transport::{
+    ADDRESS_TIMEOUT, DatagramTransport, RACE_STAGGER, RaceReport, RaceTiming, Transport, race_with,
+    seconds,
+};
 
 /// Timings, adjustable so tests need not wait for the production values.
 #[derive(Debug, Clone, Copy)]
@@ -64,6 +68,9 @@ pub struct HostOptions {
     pub exec_timeout: Duration,
     /// Delay between address attempts. Production: `transport::RACE_STAGGER`.
     pub stagger: Duration,
+    /// How long one address may take (name resolution and TCP connect) before the race counts
+    /// it as unanswered. Production: `transport::ADDRESS_TIMEOUT`.
+    pub address_timeout: Duration,
     /// How long a mosh terminal waits for the server's first datagram before it closes
     /// `TimedOut` (UDP blocked) and stops the server. Production: `mosh::CONNECT_TIMEOUT`.
     pub mosh_connect_timeout: Duration,
@@ -75,6 +82,7 @@ impl Default for HostOptions {
             connect_timeout: Duration::from_secs(20),
             exec_timeout: crate::remote::EXEC_TIMEOUT,
             stagger: RACE_STAGGER,
+            address_timeout: ADDRESS_TIMEOUT,
             mosh_connect_timeout: crate::mosh::CONNECT_TIMEOUT,
         }
     }
@@ -121,10 +129,19 @@ pub(super) struct SshHost {
     handle: Handle<Client<HostEvent>>,
     exec_timeout: Duration,
     capabilities: OnceCell<HostCapabilities>,
-    /// The last herdr session list read successfully (the probe's own list until then).
+    /// The last herdr session list read successfully (the probe's own list until then), which
+    /// the herdr watches and pane focuses find their sockets in.
     sessions: probe::SessionsCache,
+    /// Keeps the app's pane focus and the terminal's own from both reaching herdr.
+    pub(super) focus: herdr::FocusGate,
     /// The mosh servers this connection still has to stop (see [`mosh_session::ServerDebt`]).
     pub(super) servers: mosh_session::ServerDebt,
+    /// The session-channel opens still waiting for the server's answer (see
+    /// [`SshHost::start_open`]). `None` once the connection is over.
+    opens: Mutex<Option<JoinSet<()>>>,
+    /// This connection's own `Arc`, for the `&self` callers (the [`RemoteHost`] methods) that
+    /// start an open.
+    me: Weak<SshHost>,
 }
 
 /// Every established SSH connection of the process, for [`network_changed`]. Weak: a closed
@@ -159,7 +176,36 @@ impl SshHost {
     /// The probe's answer, run once per connection. A failed probe is not cached.
     pub(super) async fn capabilities(&self) -> Result<&HostCapabilities, RemoteError> {
         self.capabilities
-            .get_or_try_init(|| probe::probe(self))
+            .get_or_try_init(|| async {
+                let (capabilities, entries) = probe::probe_entries(self).await?;
+                // The listing the probe read is what the watches and focuses discover from.
+                if let Some(entries) = entries {
+                    self.sessions.directory().seed(entries);
+                }
+                Ok(capabilities)
+            })
+            .await
+    }
+
+    /// `herdr` focus of `pane_id`, the socket from this connection's directory. `from_terminal`
+    /// is a terminal's own focus before it starts, which a focus the app acknowledged a moment
+    /// ago satisfies; the app's request is never answered from memory (see [`herdr::FocusGate`]).
+    pub(super) async fn focus_pane(
+        self: &Arc<Self>,
+        herdr: &str,
+        session: Option<&str>,
+        pane_id: &str,
+        from_terminal: bool,
+    ) -> Result<(), herdr::HerdrError> {
+        self.focus
+            .focus(
+                self,
+                herdr,
+                self.sessions.directory(),
+                session,
+                pane_id,
+                from_terminal,
+            )
             .await
     }
 
@@ -174,11 +220,83 @@ impl SshHost {
         self.handle.is_closed()
     }
 
-    /// A new session channel, for a terminal.
-    pub(super) async fn open_channel(
-        &self,
-    ) -> Result<russh::Channel<russh_client::Msg>, russh::Error> {
-        self.handle.channel_open_session().await
+    /// Starts opening a session channel. The open belongs to the connection, not to the caller:
+    /// it runs as a task of [`SshHost::opens`] until the server answers, however long that takes
+    /// and whatever the caller does meanwhile. A caller that gave up (its timeout, a stop, a
+    /// cancelled future) and dropped the [`PendingOpen`] leaves the task to close the channel the
+    /// server confirms later; a raw russh channel does not close itself when dropped, and a
+    /// leaked one counts against the server's `MaxSessions` for the connection's lifetime. The
+    /// task ends with its answer, or with the connection ([`SshHost::end_opens`]).
+    pub(super) fn start_open(self: &Arc<Self>) -> PendingOpen {
+        self.start_open_of(OpenKind::Session)
+    }
+
+    /// [`SshHost::start_open`] for any kind of channel open.
+    fn start_open_of(self: &Arc<Self>, kind: OpenKind) -> PendingOpen {
+        let (answer, reply) = oneshot::channel();
+        let host = Arc::clone(self);
+        let mut opens = self.opens.lock().unwrap_or_else(PoisonError::into_inner);
+        // After the connection ended nothing is spawned: the dropped sender reads as `Disconnect`.
+        if let Some(set) = opens.as_mut() {
+            // Finished tasks are reaped as new ones come.
+            while set.try_join_next().is_some() {}
+            set.spawn_on(
+                async move {
+                    let opened = match kind {
+                        OpenKind::Session => host.handle.channel_open_session().await,
+                        OpenKind::Streamlocal(path) => {
+                            host.handle.channel_open_direct_streamlocal(path).await
+                        }
+                    };
+                    // The channel travels in a guard that closes it unless the caller takes it
+                    // out: a failed send (nobody waits any more) drops the guard here, and one
+                    // queued but never received is dropped with the receiver.
+                    let weak = Arc::downgrade(&host);
+                    drop(host);
+                    let _ = answer.send(opened.map(|channel| OpenedChannel::new(channel, weak)));
+                },
+                runtime().handle(),
+            );
+        }
+        PendingOpen(reply)
+    }
+
+    /// Closes a channel nobody owns any more, in the background and bounded, as a task of the
+    /// connection (so it ends with it). Nothing to do once the connection is over.
+    fn close_in_background(&self, channel: russh::Channel<russh_client::Msg>) {
+        let mut opens = self.opens.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(set) = opens.as_mut() {
+            set.spawn_on(
+                async move {
+                    let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
+                },
+                runtime().handle(),
+            );
+        }
+    }
+
+    /// The connection is over: stop every open still waiting (their callers see `Disconnect`),
+    /// and refuse new ones. Also breaks the reference each task holds to this host.
+    pub(super) fn end_opens(&self) {
+        let set = self
+            .opens
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        drop(set); // Dropping a `JoinSet` aborts its tasks.
+    }
+
+    /// How many opens are still waiting for the server.
+    #[cfg(test)]
+    pub(super) fn outstanding_opens(&self) -> usize {
+        self.opens
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+            .map_or(0, |set| {
+                while set.try_join_next().is_some() {}
+                set.len()
+            })
     }
 
     /// Runs `line` on `channel` without a PTY and collects it until the channel closes. No
@@ -231,6 +349,96 @@ impl SshHost {
                 Some(_) => {}
             }
         }
+    }
+}
+
+/// Which channel [`SshHost::start_open_of`] opens.
+enum OpenKind {
+    Session,
+    /// `direct-streamlocal@openssh.com` to this socket path.
+    Streamlocal(String),
+}
+
+/// A confirmed channel that nobody has taken yet. Dropped, it closes the channel through the
+/// connection (a raw russh channel does not close itself, and a leaked one holds a `MaxSessions`
+/// slot); [`OpenedChannel::into_inner`] hands it over, and with it the duty to close it.
+pub(super) struct OpenedChannel {
+    channel: Option<russh::Channel<russh_client::Msg>>,
+    host: Weak<SshHost>,
+}
+
+impl OpenedChannel {
+    fn new(channel: russh::Channel<russh_client::Msg>, host: Weak<SshHost>) -> Self {
+        Self {
+            channel: Some(channel),
+            host,
+        }
+    }
+
+    /// Hands the channel over, and with it the duty to close it (or to know that the server
+    /// has). Call it only where the next owner takes over without an `await` in between.
+    pub(super) fn into_inner(mut self) -> russh::Channel<russh_client::Msg> {
+        self.channel.take().expect("an armed opened channel")
+    }
+
+    /// Closes the channel deliberately (the guard is then disarmed, also if the close is
+    /// cancelled or fails). The caller bounds it.
+    pub(super) async fn close(mut self) -> Result<(), russh::Error> {
+        self.channel
+            .take()
+            .expect("an armed opened channel")
+            .close()
+            .await
+    }
+}
+
+impl std::ops::Deref for OpenedChannel {
+    type Target = russh::Channel<russh_client::Msg>;
+
+    fn deref(&self) -> &Self::Target {
+        self.channel.as_ref().expect("an armed opened channel")
+    }
+}
+
+impl std::ops::DerefMut for OpenedChannel {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.channel.as_mut().expect("an armed opened channel")
+    }
+}
+
+impl Drop for OpenedChannel {
+    fn drop(&mut self) {
+        // A host that is gone took its channels with it.
+        if let (Some(channel), Some(host)) = (self.channel.take(), self.host.upgrade()) {
+            host.close_in_background(channel);
+        }
+    }
+}
+
+/// A channel being opened by the connection ([`SshHost::start_open`]). Dropping it is
+/// safe at any moment: the connection closes the channel if the server confirms it later, and
+/// one that was confirmed but not yet taken is closed here.
+pub(super) struct PendingOpen(oneshot::Receiver<Result<OpenedChannel, russh::Error>>);
+
+impl PendingOpen {
+    /// Resolves with the server's answer. Cancel-safe: the answer is kept for the next call. The
+    /// channel stays in its close-on-drop guard until the caller disarms it, so no path (a
+    /// cancelled future, an aborted task) can leave it unclosed.
+    pub(super) async fn wait(&mut self) -> Result<OpenedChannel, russh::Error> {
+        match (&mut self.0).await {
+            Ok(opened) => opened,
+            // The connection ended and took the open with it.
+            Err(_) => Err(russh::Error::Disconnect),
+        }
+    }
+}
+
+impl Drop for PendingOpen {
+    fn drop(&mut self) {
+        // Refuse further answers and dispose of one that is already queued: dropping its guard
+        // closes the channel.
+        self.0.close();
+        drop(self.0.try_recv());
     }
 }
 
@@ -329,25 +537,33 @@ impl RemoteHost for SshHost {
     /// server's `MaxSessions`.
     async fn exec_rendered(&self, line: &str) -> Result<ExecOutput, RemoteError> {
         let deadline = Instant::now() + self.exec_timeout;
-        let channel = timeout_at(deadline, self.handle.channel_open_session())
+        // The open is the connection's (see `start_open`): past the deadline, a confirmation that
+        // arrives late is closed by the connection instead of orphaned on it.
+        let mut opening = self.me.upgrade().ok_or(RemoteError::Closed)?.start_open();
+        let channel = timeout_at(deadline, opening.wait())
             .await
             .map_err(|_| RemoteError::TimedOut)?
             .map_err(remote_error)?;
-        self.run_exec(channel, line, deadline).await
+        // `ExecChannel` takes over the duty to close it, with no `await` in between.
+        self.run_exec(channel.into_inner(), line, deadline).await
     }
 
     /// OpenSSH `direct-streamlocal@openssh.com`. A socket that is missing or refuses the
     /// connection fails the open with `CONNECT_FAILED`: `Io`. A server with streamlocal
     /// forwarding disabled (or any other refusal) is `Rejected` ([`streamlocal_error`]).
     async fn open_unix(&self, path: &str) -> Result<Self::Stream, RemoteError> {
-        let channel = timeout(
-            self.exec_timeout,
-            self.handle.channel_open_direct_streamlocal(path),
-        )
-        .await
-        .map_err(|_| RemoteError::TimedOut)?
-        .map_err(streamlocal_error)?;
-        Ok(channel.into_stream())
+        // The open is the connection's (see `start_open`): past the deadline, a confirmation that
+        // arrives late is closed by the connection instead of orphaned on it.
+        let mut opening = self
+            .me
+            .upgrade()
+            .ok_or(RemoteError::Closed)?
+            .start_open_of(OpenKind::Streamlocal(path.to_owned()));
+        let channel = timeout(self.exec_timeout, opening.wait())
+            .await
+            .map_err(|_| RemoteError::TimedOut)?
+            .map_err(streamlocal_error)?;
+        Ok(channel.into_inner().into_stream())
     }
 }
 
@@ -494,8 +710,19 @@ async fn drive<T: Transport, D: DatagramTransport>(
     let (events, mut incoming) = mpsc::channel(32);
     let (shutdown, stop) = watch::channel(false);
     let mut network_ended = false;
+    // What each address has done, for a connect timeout that fires while the race still runs.
+    let report = RaceReport::new();
+    let race_report = report.clone();
     let mut network = tokio::spawn(async move {
-        let reason = network(transport, request, events.clone(), options, stop).await;
+        let reason = network(
+            transport,
+            request,
+            events.clone(),
+            options,
+            stop,
+            &race_report,
+        )
+        .await;
         let _ = events.send(HostEvent::Closed(reason)).await;
     });
     let (closing_sender, closing) = watch::channel(None);
@@ -573,7 +800,17 @@ async fn drive<T: Transport, D: DatagramTransport>(
                     }
                 },
                 () = sleep_until(deadline), if timing => {
-                    break Ok(CloseReason::Failed(SessionFailure::TimedOut));
+                    // No TCP connection yet: the host is unreachable, and each address says what
+                    // it did. Once one connected, the handshake or authentication is what hung.
+                    break Ok(CloseReason::Failed(if report.is_pending() {
+                        SessionFailure::Unreachable(format!(
+                            "no address answered within {}: {}",
+                            seconds(options.connect_timeout),
+                            report.describe()
+                        ))
+                    } else {
+                        SessionFailure::TimedOut
+                    }));
                 }
                 result = &mut network, if !network_ended => {
                     network_ended = true;
@@ -809,7 +1046,7 @@ async fn list_tmux(host: &SshHost) -> Result<Vec<TmuxSession>, HostError> {
 
 /// `HostHandle::focus_herdr_pane`: one `pane.focus` through the probed herdr path.
 async fn focus_herdr_pane(
-    host: &SshHost,
+    host: &Arc<SshHost>,
     session: Option<String>,
     pane_id: String,
 ) -> Result<(), HostError> {
@@ -819,7 +1056,7 @@ async fn focus_herdr_pane(
             program: "herdr".into(),
         });
     };
-    herdr::focus_pane(host, path, session.as_deref(), &pane_id)
+    host.focus_pane(path, session.as_deref(), &pane_id, false)
         .await
         .map_err(|error| match error {
             herdr::HerdrError::PaneNotFound => HostError::PaneNotFound,
@@ -857,7 +1094,8 @@ async fn watch_herdr(host: Arc<SshHost>, session: Option<String>, mut driver: He
                     driver.close();
                     return;
                 };
-                return herdr::run(host, herdr, session, driver).await;
+                let directory = Arc::clone(host.sessions.directory());
+                return herdr::run_in(host, herdr, directory, session, driver).await;
             }
             Err(error) => {
                 let _ = driver.transition(HerdrState::Unavailable {
@@ -883,8 +1121,13 @@ async fn network<T: Transport>(
     events: mpsc::Sender<HostEvent>,
     options: HostOptions,
     stop: watch::Receiver<bool>,
+    report: &RaceReport,
 ) -> CloseReason {
-    let raced = match race(&transport, &request.addresses, options.stagger).await {
+    let timing = RaceTiming {
+        stagger: options.stagger,
+        address_timeout: options.address_timeout,
+    };
+    let raced = match race_with(&transport, &request.addresses, timing, Some(report)).await {
         Ok(raced) => raced,
         Err(failure) => {
             return CloseReason::Failed(SessionFailure::Unreachable(format!(
@@ -916,6 +1159,15 @@ async fn network<T: Transport>(
     }
 }
 
+/// Ends the connection's outstanding channel opens when dropped.
+struct EndOpens(Arc<SshHost>);
+
+impl Drop for EndOpens {
+    fn drop(&mut self) {
+        self.0.end_opens();
+    }
+}
+
 /// Handshake, authentication, then waits for the SSH session to end or for `stop`.
 async fn hold(
     request: HostConnectRequest,
@@ -942,14 +1194,20 @@ async fn hold(
     authenticate(&mut handle, username, &key).await?;
     // The key is needed for authentication only; do not keep it for the connection's lifetime.
     drop(key);
-    let host = Arc::new(SshHost {
+    let host = Arc::new_cyclic(|me| SshHost {
         handle,
         exec_timeout: options.exec_timeout,
         capabilities: OnceCell::new(),
         sessions: probe::SessionsCache::new(),
+        focus: herdr::FocusGate::new(),
         servers: mosh_session::ServerDebt::default(),
+        opens: Mutex::new(Some(JoinSet::new())),
+        me: me.clone(),
     });
     register(&host);
+    // However this function ends, also when the host driver aborts it, the opens that are still
+    // waiting end with the connection.
+    let _opens = EndOpens(Arc::clone(&host));
     if events
         .send(HostEvent::Connected {
             address_index,

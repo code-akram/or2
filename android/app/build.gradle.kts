@@ -129,4 +129,6 @@ dependencies {
     androidTestImplementation("androidx.room:room-testing:2.8.3")
     androidTestImplementation(platform("androidx.compose:compose-bom:2025.10.00"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    // Declares the empty ComponentActivity that createComposeRule() hosts tests in (debug only).
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

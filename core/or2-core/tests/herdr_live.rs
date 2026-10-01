@@ -19,10 +19,10 @@ use or2_core::herdr::generated::request::{
 };
 use or2_core::herdr::view::AgentStatus;
 use or2_core::herdr::{
-    HerdrObserver, HerdrState, HerdrUnavailable, HerdrView, HerdrWatchHandle, Timing, focus_pane,
-    watch, watch_with_timing, wire,
+    Directory, FocusGate, HerdrError, HerdrObserver, HerdrState, HerdrUnavailable, HerdrView,
+    HerdrWatchHandle, Timing, focus_pane, list_sessions, run_in, watch, watch_with_timing, wire,
 };
-use or2_core::remote::LocalHost;
+use or2_core::remote::{ExecOutput, LocalHost, RemoteError, RemoteHost};
 use serde_json::Value;
 
 static SESSIONS: AtomicUsize = AtomicUsize::new(0);
@@ -593,4 +593,127 @@ async fn the_watch_recovers_when_the_server_starts_stops_and_restarts() {
             .all(|s| !matches!(s, HerdrState::Unavailable { reason, .. } if reason.is_final())),
         "{states:#?}"
     );
+}
+
+/// A host whose `session list --json` names a socket nothing listens on: what a directory
+/// holds after the session moved. Everything else is the real thing.
+struct StaleListing(LocalHost);
+
+impl RemoteHost for StaleListing {
+    type Stream = <LocalHost as RemoteHost>::Stream;
+
+    async fn exec_rendered(&self, line: &str) -> Result<ExecOutput, RemoteError> {
+        let mut output = self.0.exec_rendered(line).await?;
+        if line.contains("'session' 'list'") {
+            let mut listing: Value = serde_json::from_slice(&output.stdout).unwrap();
+            for session in listing["sessions"].as_array_mut().unwrap() {
+                session["socket_path"] = "/nonexistent/or2-test/herdr.sock".into();
+            }
+            output.stdout = serde_json::to_vec(&listing).unwrap().into();
+        }
+        Ok(output)
+    }
+
+    async fn open_unix(&self, path: &str) -> Result<Self::Stream, RemoteError> {
+        self.0.open_unix(path).await
+    }
+}
+
+/// A watch and a focus that take their socket from the connection's directory (seeded with the
+/// listing, as the capability probe does) work against a real herdr; a directory that names a
+/// socket that is gone is rediscovered once, by the focus and by the watch.
+#[tokio::test]
+async fn a_directory_seeds_the_watch_and_the_focus_and_a_stale_path_is_rediscovered() {
+    let Some(mut herdr) = Isolated::new() else {
+        return;
+    };
+    herdr.start();
+    let host = Arc::new(LocalHost::new());
+    let created = herdr
+        .call(RequestBody::WorkspaceCreate(WorkspaceCreateParams {
+            cwd: Some("/tmp".into()),
+            label: Some("or2-directory".into()),
+            focus: true,
+            ..WorkspaceCreateParams::default()
+        }))
+        .await;
+    let root = str_at(&created, "/root_pane/pane_id").to_owned();
+
+    // The directory as the probe seeds it: the real listing, with this session's real socket.
+    let directory = Arc::new(Directory::new());
+    directory.seed(list_sessions(&*host, herdr.herdr()).await.unwrap());
+    let recorder = Arc::new(Recorder::default());
+    let (handle, driver) = or2_core::herdr::channel(recorder.clone());
+    let task = tokio::spawn(run_in(
+        Arc::clone(&host),
+        herdr.herdr().to_owned(),
+        Arc::clone(&directory),
+        Some(herdr.name.clone()),
+        driver,
+    ));
+    let view = view_where(&handle, "the view from the seeded directory", |v| {
+        v.panes.len() == 1
+    })
+    .await;
+    assert_eq!(view.panes[0].pane_id, root);
+
+    // A focus through the gate: the app's, then a terminal's own, which the first satisfies.
+    let gate = FocusGate::new();
+    let focus = |pane: String, from_terminal: bool| {
+        let (gate, host, herdr, directory) = (&gate, &host, &herdr, &directory);
+        async move {
+            gate.focus(
+                host,
+                herdr.herdr(),
+                directory,
+                Some(&herdr.name),
+                &pane,
+                from_terminal,
+            )
+            .await
+        }
+    };
+    focus(root.clone(), false).await.unwrap();
+    focus(root.clone(), true).await.unwrap();
+    // A pane that is not there is the explicit error.
+    assert_eq!(
+        focus("w99:p99".into(), false).await,
+        Err(HerdrError::PaneNotFound)
+    );
+    handle.stop();
+    task.await.unwrap();
+
+    // The same with a directory that holds a socket that is gone: the focus lists once and
+    // finds the real one; so does a watch (its first attempt, then the same attempt again).
+    let stale_host = StaleListing(LocalHost::new());
+    let stale = Arc::new(Directory::new());
+    stale.seed(list_sessions(&stale_host, herdr.herdr()).await.unwrap());
+    let gate = FocusGate::new();
+    gate.focus(
+        &host,
+        herdr.herdr(),
+        &stale,
+        Some(&herdr.name),
+        &root,
+        false,
+    )
+    .await
+    .expect("a stale socket is rediscovered");
+
+    let stale = Arc::new(Directory::new());
+    stale.seed(list_sessions(&stale_host, herdr.herdr()).await.unwrap());
+    let (handle, driver) = or2_core::herdr::channel(Arc::new(Recorder::default()));
+    let task = tokio::spawn(run_in(
+        Arc::clone(&host),
+        herdr.herdr().to_owned(),
+        stale,
+        Some(herdr.name.clone()),
+        driver,
+    ));
+    view_where(&handle, "the view after rediscovering", |v| {
+        v.panes.len() == 1
+    })
+    .await;
+    handle.stop();
+    task.await.unwrap();
 }

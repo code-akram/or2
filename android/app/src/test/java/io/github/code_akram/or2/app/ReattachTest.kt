@@ -27,6 +27,20 @@ class ReattachTest {
     }
 
     @Test
+    fun aPendingResumeTargetSurvivesTheSavedStateRoundTripAndNothingStaysNothing() {
+        // Rotation (or process death) during a cold resume: the continuation is saved state, not
+        // `remember`, so the recreated composition still knows which terminal to reopen.
+        val scope = androidx.compose.runtime.saveable.SaverScope { true }
+        for (target in listOf(last, LastTerminal(3, TerminalTarget.Shell, TerminalTransport.SSH), LastTerminal(4, TerminalTarget.Tmux("a b"), TerminalTransport.MOSH))) {
+            val saved = with(PendingResumeSaver) { scope.save(target) }
+            assertNotNull(saved)
+            assertEquals(target, PendingResumeSaver.restore(saved!!))
+        }
+        assertNull(with(PendingResumeSaver) { scope.save(null) }) // Nothing pending: nothing saved.
+        assertNull(PendingResumeSaver.restore("garbage")) // Not ours: nothing pending.
+    }
+
+    @Test
     fun anythingThatIsNotOurEncodingDecodesToNothing() {
         for (text in listOf(null, "", "garbage", "x|SSH|shell", "7|TELNET|shell", "7|SSH|tmux", "7|SSH|tmux|-", "7|SSH|herdr|-", "7|SSH|shell|extra", "7|SSH|zsh")) {
             assertNull(text, LastTerminal.decode(text))
@@ -109,45 +123,158 @@ class ReattachTest {
         assertFalse(NotificationPermissionPolicy(store).shouldAsk(sdk = 36, granted = false)) // Persisted.
     }
 
-    @Test
-    fun theBatteryExplanationIsDueOnlyAfterABackgroundedSessionAndShownOnce() {
-        val store = MemoryPrefStore()
-        var exempt = false
-        val prompt = BatteryPrompt(store) { exempt }
-        assertFalse(prompt.takeIfDue()) // Nothing happened yet.
-        prompt.onBackgrounded(sessionOpen = false)
-        assertFalse(prompt.takeIfDue()) // No session open: nothing to protect.
+    // --- the battery exemption, asked up front ----------------------------------------------------
 
-        prompt.onBackgrounded(sessionOpen = true)
-        assertTrue(BatteryPrompt(store) { exempt }.takeIfDue().also { /* a new instance sees the persisted flag */ })
-        assertFalse(prompt.takeIfDue()) // Shown: never again.
-        prompt.onBackgrounded(sessionOpen = true)
-        assertFalse(prompt.takeIfDue())
+    @Test
+    fun theBatteryExplanationIsAskedBeforeTheFirstConnectionAndOnlyOnce() {
+        val store = MemoryPrefStore()
+        val prompt = BatteryPrompt(store) { false }
+        assertTrue(prompt.shouldExplain()) // The first time a connection starts.
+        assertFalse(prompt.explaining.value)
+        prompt.explain()
+        assertTrue(prompt.explaining.value) // Up on screen, waiting for the answer.
+        prompt.explained()
+        assertFalse(prompt.explaining.value)
+        assertFalse(prompt.shouldExplain()) // Never again...
+        assertFalse(BatteryPrompt(store) { false }.shouldExplain()) // ...also after a restart.
     }
 
     @Test
-    fun anAlreadyExemptAppIsNeverAsked() {
+    fun aRecreatedActivityWaitingOnTheExplanationShowsItAgainInsteadOfStayingBusy() {
+        // The process died while the explanation was up: nothing was answered, nothing recorded,
+        // and the new process's prompt starts with no explanation on screen.
         val store = MemoryPrefStore()
-        val prompt = BatteryPrompt(store) { true }
-        prompt.onBackgrounded(sessionOpen = true)
-        assertFalse(prompt.takeIfDue())
-        var exempt = true
-        val later = BatteryPrompt(store) { exempt }
-        exempt = false // Exemption withdrawn later: still counts as asked, no nagging.
-        later.onBackgrounded(sessionOpen = true)
-        assertFalse(later.takeIfDue())
+        val restored = BatteryPrompt(store) { false }
+        assertFalse(restored.explaining.value)
+        assertEquals(BatteryStage.EXPLANATION, restored.restoreStage())
+        assertTrue(restored.explaining.value) // On screen again, awaiting the answer.
+        restored.explained()
+        assertFalse(restored.explaining.value)
+        // Same process (rotation): the explanation is still up and restoring it changes nothing.
+        val live = BatteryPrompt(MemoryPrefStore()) { false }
+        live.explain()
+        assertEquals(BatteryStage.EXPLANATION, live.restoreStage())
+        assertTrue(live.explaining.value)
     }
 
     @Test
-    fun exemptionGrantedWhileTheExplanationWasDueStopsTheDialog() {
+    fun aRestoredConnectAfterTheExplanationWaitsForTheSystemRequestAndNeverRelaunchesIt() {
+        val store = MemoryPrefStore()
+        val prompt = BatteryPrompt(store) { false }
+        prompt.explain()
+        prompt.explained() // "Allow" was tapped: the system dialog is (or was) up.
+        val restored = BatteryPrompt(store) { false }
+        assertEquals(BatteryStage.SYSTEM_REQUEST, restored.restoreStage())
+        assertFalse(restored.explaining.value) // Nothing of ours to show; the result callback carries on.
+    }
+
+    @Test
+    fun aRestoredConnectWhoseAppBecameExemptJustConnects() {
+        val restored = BatteryPrompt(MemoryPrefStore()) { true }
+        assertEquals(BatteryStage.PROCEED, restored.restoreStage())
+        assertFalse(restored.explaining.value)
+    }
+
+    @Test
+    fun anAlreadyExemptAppIsNeverAskedAndNeverShowsTheCard() {
+        val prompt = BatteryPrompt(MemoryPrefStore()) { true }
+        assertFalse(prompt.shouldExplain())
+        prompt.declined()
+        assertFalse(prompt.card.value)
+    }
+
+    @Test
+    fun aDeclinedExemptionLeavesADismissibleCardUntilItIsGranted() {
         val store = MemoryPrefStore()
         var exempt = false
         val prompt = BatteryPrompt(store) { exempt }
-        prompt.onBackgrounded(sessionOpen = true)
-        exempt = true // The user granted it in system settings meanwhile.
-        assertFalse(prompt.takeIfDue())
-        exempt = false
-        assertFalse(prompt.takeIfDue()) // And it was consumed.
+        assertFalse(prompt.card.value) // Nothing declined yet.
+        prompt.explained()
+        assertFalse(prompt.card.value) // Allow was tapped: the system dialog decides.
+        prompt.declined() // "Not now", or the system dialog was refused.
+        assertTrue(prompt.card.value)
+        assertTrue(BatteryPrompt(store) { exempt }.card.value) // Persisted.
+        assertFalse(prompt.shouldExplain()) // The explanation is still not repeated.
+
+        exempt = true // Granted from the card, in the system dialog or in Settings.
+        prompt.refresh()
+        assertFalse(prompt.card.value)
+        exempt = false // Withdrawn later: the card comes back (declined, not dismissed).
+        prompt.refresh()
+        assertTrue(prompt.card.value)
+
+        prompt.dismissCard()
+        assertFalse(prompt.card.value)
+        assertFalse(BatteryPrompt(store) { exempt }.card.value) // Dismissed for good.
+    }
+
+    // --- cold launch: the marker and the decision -------------------------------------------------
+
+    @Test
+    fun theSessionMarkerIsSetWhileSessionsAreOpenAndClearedOnAnOrderlyEnd() {
+        val store = MemoryPrefStore()
+        val first = SessionMarker(store)
+        assertFalse(first.diedWithSessions) // A first run, or an orderly end before.
+        first.onOpenSessions(true)
+        assertTrue(store.getBoolean("sessions_open"))
+        first.onOpenSessions(false) // Disconnect all, the last close, a remote exit.
+        assertFalse(store.getBoolean("sessions_open"))
+        assertFalse(SessionMarker(store).diedWithSessions)
+    }
+
+    @Test
+    fun aKilledProcessLeavesTheMarkerAndTheNextColdStartTakesItOnce() {
+        val store = MemoryPrefStore()
+        SessionMarker(store).onOpenSessions(true) // ... and the process is killed here.
+        val next = SessionMarker(store)
+        assertTrue(next.diedWithSessions)
+        // The new process starts idle and clears the marker; what it found is unaffected.
+        next.onOpenSessions(false)
+        assertFalse(store.getBoolean("sessions_open"))
+        assertTrue(next.diedWithSessions)
+        assertTrue(next.takeColdResume()) // The first activity resumes...
+        assertFalse(next.takeColdResume()) // ...a recreated one (rotation) does not.
+        assertFalse(SessionMarker(store).diedWithSessions) // And the next process finds nothing to resume.
+    }
+
+    @Test
+    fun anUnchangedOpenStateIsNotWrittenAgain() {
+        val writes = mutableListOf<Boolean>()
+        val store = object : PrefStore by MemoryPrefStore() {
+            override fun putBoolean(key: String, value: Boolean) { writes += value }
+        }
+        val marker = SessionMarker(store)
+        marker.onOpenSessions(false)
+        marker.onOpenSessions(true)
+        marker.onOpenSessions(true)
+        marker.onOpenSessions(false)
+        assertEquals(listOf(true, false), writes)
+    }
+
+    @Test
+    fun aColdLauncherStartResumesOnlyAfterADeathWithSessionsOpenAndARememberedTargetItCanUnlock() {
+        val hosts = listOf(host(7))
+        assertTrue(shouldAutoResumeOnLaunch(true, last, hosts, emptySet()))
+        // An orderly end, or a first run: the Resume card at most.
+        assertFalse(shouldAutoResumeOnLaunch(false, last, hosts, emptySet()))
+        // The user closed what was open (nothing is remembered), or deleted the host, or it has no key.
+        assertFalse(shouldAutoResumeOnLaunch(true, null, hosts, emptySet()))
+        assertFalse(shouldAutoResumeOnLaunch(true, last, listOf(host(8)), emptySet()))
+        assertFalse(shouldAutoResumeOnLaunch(true, last, listOf(host(7, keyId = null)), emptySet()))
+        assertFalse(shouldAutoResumeOnLaunch(true, last, hosts, setOf(7)))
+    }
+
+    @Test
+    fun aTargetTheUserClosedIsNeverAutoResumedEvenIfTheProcessDiedWithOtherSessionsOpen() {
+        val store = MemoryPrefStore()
+        val memory = ReattachMemory(store)
+        memory.remember(last)
+        SessionMarker(store).onOpenSessions(true)
+        memory.terminalClosed(7, pane) // The user closed it; another session keeps the marker set...
+        val marker = SessionMarker(store)
+        assertTrue(marker.diedWithSessions)
+        // ...but there is nothing remembered to resume.
+        assertFalse(shouldAutoResumeOnLaunch(marker.takeColdResume(), ReattachMemory(store).last.value, listOf(host(7)), emptySet()))
     }
 
     // --- process death: resume at once, with no tap beyond the fingerprint ----------------------

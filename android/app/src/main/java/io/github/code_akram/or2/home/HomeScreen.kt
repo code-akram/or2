@@ -103,6 +103,10 @@ fun HomeScreen(
     modifier: Modifier = Modifier,
     resume: HomeResume? = null,
     onResume: () -> Unit = {},
+    /** The battery exemption was declined: a small, dismissible card offers it again, blocking nothing. */
+    batteryCard: Boolean = false,
+    allowBattery: () -> Unit = {},
+    dismissBattery: () -> Unit = {},
 ) {
     var options by remember { mutableStateOf<HostCard?>(null) }
     var deleting by remember { mutableStateOf<Host?>(null) }
@@ -125,6 +129,9 @@ fun HomeScreen(
                 if (resume != null) {
                     ActionCard("Resume", resume.title, "Unlocks if needed, then returns to this terminal.", meta = resume.detail,
                         icon = Or2Icons.Terminal, onClick = onResume, modifier = Modifier.padding(top = Or2Dimens.Gutter).testTag("home-resume"))
+                }
+                if (batteryCard) {
+                    BatteryCard(allowBattery, dismissBattery, Modifier.padding(top = Or2Dimens.Gutter))
                 }
                 if (sessions.isNotEmpty()) {
                     SectionHeader("Sessions", topGap = 8.dp)
@@ -197,6 +204,19 @@ fun HomeScreen(
     }
 }
 
+/** "Background connections may drop": the exemption was declined; Allow opens the system's request. */
+@Composable
+private fun BatteryCard(allow: () -> Unit, dismiss: () -> Unit, modifier: Modifier = Modifier) {
+    Or2Card(modifier.fillMaxWidth().testTag("home-battery-card"), color = Or2Colors.SurfaceRaised) {
+        Row(Modifier.padding(start = Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
+            Text("Background connections may drop", style = Or2Type.Secondary, color = Or2Colors.TextMuted,
+                modifier = Modifier.weight(1f).padding(vertical = 8.dp))
+            TextAction("Allow", allow, modifier = Modifier.testTag("battery-card-allow"))
+            IconAction(Or2Icons.Close, "Dismiss", dismiss, Modifier.testTag("battery-card-dismiss"), tint = Or2Colors.TextMuted)
+        }
+    }
+}
+
 @Composable
 private fun EmptyConnections(keyCount: Int, addHost: () -> Unit, openKeys: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(top = 24.dp).testTag("home-empty"), verticalArrangement = Arrangement.spacedBy(24.dp)) {
@@ -250,6 +270,9 @@ fun HostCardView(card: HostCard, onClick: () -> Unit, onLongClick: () -> Unit, m
                         Text("Asleep", style = Or2Type.Secondary, color = Or2Colors.TextMuted, maxLines = 1, modifier = Modifier.testTag("host-asleep:${host.id}"))
                     else ->
                         Text(hostAddressLine(host), style = Or2Type.Mono, color = Or2Colors.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                status.detail?.let {
+                    Text(it, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, maxLines = 4, modifier = Modifier.testTag("host-detail-lines:${host.id}"))
                 }
             }
             Spacer(Modifier.width(6.dp))

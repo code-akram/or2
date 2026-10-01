@@ -991,3 +991,1059 @@ fn generated_types_decode_captured_messages_and_tolerate_the_future() {
         success_response::ResponseResult::SubscriptionStarted
     ));
 }
+
+// ---------------------------------------------------------------------------------------
+// Discovery through the connection's directory, and the first view's cost.
+
+use super::discovery::{Directory, list_sessions};
+use super::focus::FocusGate;
+
+/// A directory holding what the capability probe would have read from the fixture listing.
+async fn seeded(host: &FakeHost) -> Arc<Directory> {
+    let directory = Arc::new(Directory::new());
+    directory.seed(list_sessions(host, HERDR).await.unwrap());
+    host.clear_exec_log();
+    directory
+}
+
+fn start_in(host: &FakeHost, directory: &Arc<Directory>, session: Option<&str>) -> Harness {
+    let recorder = Arc::new(Recorder::default());
+    let (handle, driver) = channel(recorder.clone());
+    let task = tokio::spawn(watch::run_in(
+        Arc::new(host.clone()),
+        HERDR.into(),
+        Arc::clone(directory),
+        session.map(str::to_owned),
+        driver,
+        Timing::default(),
+    ));
+    Harness {
+        handle,
+        recorder,
+        task,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_watch_on_a_seeded_directory_runs_no_listing_and_is_live_after_one_subscribe_and_one_snapshot()
+ {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let started = Instant::now();
+    let harness = start_in(&host, &directory, None);
+    harness.live().await;
+
+    assert!(host.exec_log().is_empty(), "no `session list` for a watch");
+    let (at, _) = harness.recorder.lock()[0].clone();
+    assert_eq!(
+        at, started,
+        "the first view is not held back by the 100 ms between reads"
+    );
+    // Whatever else the bootstrap does afterwards (the per-pane subscription and its confirming
+    // read), the view was installed from the first two requests.
+    let served = host.served();
+    assert_eq!(
+        served[..2],
+        [
+            Served::Subscribe {
+                lifecycle: lifecycle().len(),
+                panes: Vec::new()
+            },
+            Served::Snapshot
+        ]
+    );
+    // The two streams of the first read opened together, before either was used.
+    assert_eq!(host.opened()[..2], [DEFAULT_SOCKET; 2]);
+    harness.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_per_pane_subscription_and_its_confirming_read_follow_the_first_view_never_precede_it()
+{
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let harness = start_in(&host, &directory, None);
+    harness.live().await;
+    harness
+        .until("the confirming read", |_| host.snapshots_served() >= 2)
+        .await;
+    let served = host.served();
+    let first_pane_subscription = served
+        .iter()
+        .position(|entry| matches!(entry, Served::Subscribe { panes, .. } if !panes.is_empty()))
+        .expect("the per-pane subscription");
+    let first_snapshot = served
+        .iter()
+        .position(|entry| *entry == Served::Snapshot)
+        .unwrap();
+    assert!(first_snapshot < first_pane_subscription);
+    assert_eq!(
+        harness.views().len(),
+        1,
+        "an unchanged view is not redelivered"
+    );
+    harness.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cached_socket_that_does_not_open_sends_the_attempt_back_to_the_listing_once() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    // The session moved: the directory still names the old path.
+    host.kill_socket(DEFAULT_SOCKET);
+    host.set_listing(&fixture("session_list.json").replace(DEFAULT_SOCKET, "/moved/herdr.sock"));
+    let harness = start_in(&host, &directory, None);
+    harness.live().await;
+    assert_eq!(host.exec_log().len(), 1, "one listing, in the same attempt");
+    assert!(host.opened().contains(&"/moved/herdr.sock".to_owned()));
+    assert_eq!(
+        directory.cached_socket(None).as_deref(),
+        Some("/moved/herdr.sock"),
+        "the directory learned the new path"
+    );
+    let states = harness.stop().await;
+    assert!(
+        !states
+            .iter()
+            .any(|state| matches!(state, HerdrState::Unavailable { .. })),
+        "never reported as unavailable: {states:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_socket_from_a_fresh_listing_that_does_not_open_fails_without_a_second_listing() {
+    let host = host_with(&two_panes());
+    host.kill_socket(DEFAULT_SOCKET);
+    let harness = start_in(&host, &Arc::new(Directory::new()), None);
+    harness
+        .until("unavailable", |h| !h.states().is_empty())
+        .await;
+    assert_eq!(host.exec_log().len(), 1);
+    assert!(matches!(
+        harness.states()[0],
+        HerdrState::Unavailable {
+            reason: HerdrUnavailable::Failed,
+            ..
+        }
+    ));
+    harness.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_the_first_attempt_trusts_the_directory_a_retry_reads_the_listing_again() {
+    let host = host_with("not json");
+    let directory = seeded(&host).await;
+    let harness = start_in(&host, &directory, None);
+    harness
+        .until("the first failure", |h| !h.states().is_empty())
+        .await;
+    assert!(
+        host.exec_log().is_empty(),
+        "the first attempt used the seed"
+    );
+    // Ten seconds later the retry discovers again, and recovers when the snapshot reads.
+    host.script_snapshots(vec![Step::reply(&two_panes())]);
+    harness.live().await;
+    assert_eq!(host.exec_log().len(), 1);
+    harness.stop().await;
+}
+
+// ---------------------------------------------------------------------------------------
+// The focus gate: a focus from the app and the terminal's own meet.
+
+async fn focus_once(
+    gate: &FocusGate,
+    host: &FakeHost,
+    directory: &Arc<Directory>,
+    pane: &str,
+    from_terminal: bool,
+) -> Result<(), HerdrError> {
+    gate.focus(
+        &Arc::new(host.clone()),
+        HERDR,
+        directory,
+        None,
+        pane,
+        from_terminal,
+    )
+    .await
+}
+
+fn focuses(host: &FakeHost) -> usize {
+    host.served()
+        .iter()
+        .filter(|entry| matches!(entry, Served::Focus(_)))
+        .count()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_focus_uses_the_cached_socket_and_runs_no_listing() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    focus_once(&gate, &host, &directory, "w2:p1", false)
+        .await
+        .unwrap();
+    assert!(host.exec_log().is_empty());
+    assert_eq!(host.served(), [Served::Focus("w2:p1".into())]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_focus_with_nothing_cached_reads_the_listing_once() {
+    let host = host_with(&two_panes());
+    let (gate, directory) = (FocusGate::new(), Arc::new(Directory::new()));
+    focus_once(&gate, &host, &directory, "w2:p1", false)
+        .await
+        .unwrap();
+    focus_once(&gate, &host, &directory, "w2:p2", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        host.exec_log().len(),
+        1,
+        "the second focus knows the socket"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stale_cached_socket_is_rediscovered_once_and_a_missing_session_is_not_retried() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    host.kill_socket(DEFAULT_SOCKET);
+    host.set_listing(&fixture("session_list.json").replace(DEFAULT_SOCKET, "/moved/herdr.sock"));
+    focus_once(&gate, &host, &directory, "w2:p1", false)
+        .await
+        .unwrap();
+    assert_eq!(host.exec_log().len(), 1);
+    assert_eq!(host.opened(), [DEFAULT_SOCKET, "/moved/herdr.sock"]);
+    // A path from a listing read just now that does not open is the answer, not a reason to
+    // read the listing again.
+    host.kill_socket("/moved/herdr.sock");
+    let error = focus_once(&gate, &host, &directory, "w2:p2", false)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, HerdrError::Failed(_)), "{error:?}");
+    assert_eq!(host.exec_log().len(), 2, "one more listing, not two");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_focus_joins_the_same_focus_in_flight_instead_of_sending_another() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    let (app, terminal) = tokio::join!(
+        focus_once(&gate, &host, &directory, "w2:p1", false),
+        focus_once(&gate, &host, &directory, "w2:p1", true),
+    );
+    app.unwrap();
+    terminal.unwrap();
+    assert_eq!(focuses(&host), 1);
+    // A different pane is its own focus.
+    focus_once(&gate, &host, &directory, "w2:p2", false)
+        .await
+        .unwrap();
+    assert_eq!(focuses(&host), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_terminals_focus_accepts_a_recent_acknowledgement_but_the_apps_never_does() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    focus_once(&gate, &host, &directory, "w2:p1", false)
+        .await
+        .unwrap();
+    focus_once(&gate, &host, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(focuses(&host), 1, "the terminal's focus is already done");
+    // The user taps the same agent again: a real focus, since the desktop may have moved on.
+    focus_once(&gate, &host, &directory, "w2:p1", false)
+        .await
+        .unwrap();
+    assert_eq!(focuses(&host), 2);
+    // Past the window the terminal's own focus is sent too.
+    sleep(super::focus::RECENT + Duration::from_millis(1)).await;
+    focus_once(&gate, &host, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(focuses(&host), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_focus_is_shared_with_those_waiting_and_remembered_by_nobody() {
+    let host = host_with(&two_panes());
+    host.fail_focus("pane_not_found", "no such pane");
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    let (app, terminal) = tokio::join!(
+        focus_once(&gate, &host, &directory, "w9:p9", false),
+        focus_once(&gate, &host, &directory, "w9:p9", true),
+    );
+    assert_eq!(app, Err(HerdrError::PaneNotFound));
+    assert_eq!(terminal, Err(HerdrError::PaneNotFound));
+    assert_eq!(focuses(&host), 1);
+    // The pane is back: nothing remembers the failure.
+    host.clear_focus_error();
+    focus_once(&gate, &host, &directory, "w9:p9", true)
+        .await
+        .unwrap();
+    assert_eq!(focuses(&host), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_focus_leaves_its_followers_to_focus_for_themselves() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    // The leader is dropped while it waits for herdr's answer (a cancelled query).
+    let follower = async {
+        let mut leader = Box::pin(focus_once(&gate, &host, &directory, "w2:p1", false));
+        // Poll the leader once so it holds the slot, then drop it.
+        tokio::select! {
+            biased;
+            _ = &mut leader => unreachable!("the focus needs a round trip"),
+            () = std::future::ready(()) => {}
+        }
+        drop(leader);
+        focus_once(&gate, &host, &directory, "w2:p1", true).await
+    };
+    follower.await.unwrap();
+    assert!(focuses(&host) >= 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recent_focus_of_a_pane_does_not_satisfy_a_terminal_after_another_pane_was_focused() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    focus_once(&gate, &host, &directory, "w2:p1", false)
+        .await
+        .unwrap();
+    focus_once(&gate, &host, &directory, "w2:p2", false)
+        .await
+        .unwrap();
+    // Pane 2 is the focused one: a terminal on pane 1 must focus it again, inside RECENT.
+    focus_once(&gate, &host, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        host.served().last(),
+        Some(&Served::Focus("w2:p1".into())),
+        "opening A after B must restore A"
+    );
+    // That focus is now the latest: the next terminal on the same pane accepts it.
+    let before = focuses(&host);
+    focus_once(&gate, &host, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(focuses(&host), before);
+}
+
+#[tokio::test(start_paused = true)]
+async fn overlapping_focuses_of_two_panes_leave_only_the_later_one_recent() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    // A is asked first and B while A is in flight: B is the pane herdr ends on.
+    let (a, b) = tokio::join!(
+        focus_once(&gate, &host, &directory, "w2:p1", false),
+        focus_once(&gate, &host, &directory, "w2:p2", false),
+    );
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(focuses(&host), 2);
+    focus_once(&gate, &host, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        host.served().last(),
+        Some(&Served::Focus("w2:p1".into())),
+        "A's acknowledgement is not authoritative once B was asked"
+    );
+    // B is not recent any more either, after A was focused again.
+    focus_once(&gate, &host, &directory, "w2:p2", true)
+        .await
+        .unwrap();
+    assert_eq!(host.served().last(), Some(&Served::Focus("w2:p2".into())));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_focus_in_another_herdr_session_does_not_invalidate_a_recent_one() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    focus_once(&gate, &host, &directory, "w2:p1", false)
+        .await
+        .unwrap();
+    // The other session's focus fails (nothing is listed for it): it must not touch session None.
+    let _ = gate
+        .focus(
+            &Arc::new(host.clone()),
+            HERDR,
+            &directory,
+            Some("other"),
+            "w2:p2",
+            false,
+        )
+        .await;
+    let before = focuses(&host);
+    focus_once(&gate, &host, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(focuses(&host), before);
+}
+
+// ---------------------------------------------------------------------------------------
+// The focus gate serializes a session's focuses: the order they reach herdr is the order they
+// were asked in, and an acknowledgement is only trusted as the session's last.
+
+/// Holds the first socket open until released: the request of the focus that opened it reaches
+/// herdr only then, however early it started.
+struct HoldFirstOpen {
+    host: FakeHost,
+    first: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl HoldFirstOpen {
+    fn new(host: &FakeHost) -> Self {
+        Self {
+            host: host.clone(),
+            first: std::sync::atomic::AtomicBool::new(true),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+impl crate::remote::RemoteHost for HoldFirstOpen {
+    type Stream = tokio::io::DuplexStream;
+
+    async fn exec_rendered(&self, line: &str) -> Result<crate::remote::ExecOutput, RemoteError> {
+        crate::remote::RemoteHost::exec_rendered(&self.host, line).await
+    }
+
+    async fn open_unix(&self, path: &str) -> Result<Self::Stream, RemoteError> {
+        if self.first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        crate::remote::RemoteHost::open_unix(&self.host, path).await
+    }
+}
+
+/// Lets every other task and future that can run, run.
+async fn settle() {
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Polls `future` once so that it takes its place, and hands it back.
+async fn poll_once<F: std::future::Future + Unpin>(future: &mut F) {
+    tokio::select! {
+        biased;
+        _ = future => unreachable!("the focus needs round trips"),
+        () = std::future::ready(()) => {}
+    }
+}
+
+fn focused_panes(host: &FakeHost) -> Vec<String> {
+    host.served()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Served::Focus(pane) => Some(pane),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn out_of_order_focus_does_not_leave_the_wrong_pane_recent() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let host = Arc::new(HoldFirstOpen::new(&fake));
+    let gate = FocusGate::new();
+    // A starts first and its socket is held; B starts meanwhile and must not reach herdr first.
+    let (a, b) = tokio::join!(
+        gate.focus(&host, HERDR, &directory, None, "w2:p1", false),
+        async {
+            host.entered.notified().await;
+            let b = gate.focus(&host, HERDR, &directory, None, "w2:p2", false);
+            tokio::pin!(b);
+            tokio::select! {
+                biased;
+                result = &mut b => panic!("B was sent ahead of A: {result:?}"),
+                () = settle() => {}
+            }
+            assert!(focused_panes(&fake).is_empty(), "B overtook A");
+            host.release.notify_one();
+            b.await
+        },
+    );
+    a.unwrap();
+    b.unwrap();
+    // Remote order is local order: A, then B. B is the pane herdr is on, and says so.
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2"]);
+    gate.focus(&host, HERDR, &directory, None, "w2:p2", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        focused_panes(&fake),
+        ["w2:p1", "w2:p2"],
+        "B is the last focus"
+    );
+    // A is not: a terminal on A sends its focus.
+    gate.focus(&host, HERDR, &directory, None, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2", "w2:p1"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn overlapping_a_b_a_reach_herdr_in_that_order_and_leave_a_recent() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    // The second A (a terminal's) does not join the first or take its answer: B was asked in
+    // between, so it is sent after B.
+    let (a1, b, a2) = tokio::join!(
+        focus_once(&gate, &host, &directory, "w2:p1", false),
+        focus_once(&gate, &host, &directory, "w2:p2", false),
+        focus_once(&gate, &host, &directory, "w2:p1", true),
+    );
+    a1.unwrap();
+    b.unwrap();
+    a2.unwrap();
+    assert_eq!(focused_panes(&host), ["w2:p1", "w2:p2", "w2:p1"]);
+    focus_once(&gate, &host, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        focused_panes(&host).len(),
+        3,
+        "A is the session's last focus"
+    );
+    focus_once(&gate, &host, &directory, "w2:p2", true)
+        .await
+        .unwrap();
+    assert_eq!(focused_panes(&host), ["w2:p1", "w2:p2", "w2:p1", "w2:p2"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_focus_cancelled_while_queued_does_not_wedge_the_queue_or_its_followers() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let host = Arc::new(HoldFirstOpen::new(&fake));
+    let gate = FocusGate::new();
+    let (a, c) = tokio::join!(
+        gate.focus(&host, HERDR, &directory, None, "w2:p1", false),
+        async {
+            host.entered.notified().await;
+            // B queues behind A, and C joins B.
+            let mut b = Box::pin(gate.focus(&host, HERDR, &directory, None, "w2:p2", false));
+            poll_once(&mut b).await;
+            let mut c = Box::pin(gate.focus(&host, HERDR, &directory, None, "w2:p2", true));
+            poll_once(&mut c).await;
+            // B is given up while it waits for its turn.
+            drop(b);
+            host.release.notify_one();
+            c.await
+        },
+    );
+    a.unwrap();
+    c.unwrap();
+    // C asked for itself and was sent after A.
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2"]);
+    // The queue is free: a later focus is served.
+    focus_once(&gate, &fake, &directory, "w2:p1", false)
+        .await
+        .unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2", "w2:p1"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_focus_makes_the_session_forget_its_acknowledgement() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let gate = FocusGate::new();
+    focus_once(&gate, &fake, &directory, "w2:p1", false)
+        .await
+        .unwrap();
+    {
+        // B is given up after it started: it may or may not have reached herdr.
+        let mut b = Box::pin(focus_once(&gate, &fake, &directory, "w2:p2", false));
+        poll_once(&mut b).await;
+    }
+    settle().await;
+    let before = focused_panes(&fake).len();
+    focus_once(&gate, &fake, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        focused_panes(&fake).last().map(String::as_str),
+        Some("w2:p1")
+    );
+    assert_eq!(focused_panes(&fake).len(), before + 1, "A was sent again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn another_herdr_session_does_not_wait_for_a_held_focus() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let host = Arc::new(HoldFirstOpen::new(&fake));
+    let gate = FocusGate::new();
+    let (a, other) = tokio::join!(
+        gate.focus(&host, HERDR, &directory, None, "w2:p1", false),
+        async {
+            host.entered.notified().await;
+            // Session "work" is independent: its focus completes while the default session's
+            // is still held.
+            let other = gate
+                .focus(&host, HERDR, &directory, Some("work"), "w2:p2", false)
+                .await;
+            assert_eq!(
+                focused_panes(&fake),
+                ["w2:p2"],
+                "the held focus has not reached herdr"
+            );
+            host.release.notify_one();
+            other
+        },
+    );
+    a.unwrap();
+    other.unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p2", "w2:p1"]);
+    // Each session's last acknowledgement stands on its own.
+    gate.focus(&host, HERDR, &directory, None, "w2:p1", true)
+        .await
+        .unwrap();
+    gate.focus(&host, HERDR, &directory, Some("work"), "w2:p2", true)
+        .await
+        .unwrap();
+    assert_eq!(focused_panes(&fake).len(), 2);
+}
+
+// ---------------------------------------------------------------------------------------
+// The focus actor: cancellation leaves the session's queue and its memory consistent.
+
+fn terminal_focus<'a, H: crate::remote::RemoteHost>(
+    gate: &'a FocusGate,
+    host: &'a Arc<H>,
+    directory: &'a Arc<Directory>,
+    session: Option<&'a str>,
+    pane: &'a str,
+    from_terminal: bool,
+) -> impl std::future::Future<Output = Result<(), HerdrError>> + 'a {
+    gate.focus(host, HERDR, directory, session, pane, from_terminal)
+}
+
+#[tokio::test(start_paused = true)]
+async fn out_of_order_release_still_reaches_herdr_in_asked_order() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let host = Arc::new(HoldFirstOpen::new(&fake));
+    let gate = FocusGate::new();
+    let mut a = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w2:p1", false,
+    ));
+    poll_once(&mut a).await;
+    host.entered.notified().await;
+    let mut b = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w2:p2", false,
+    ));
+    poll_once(&mut b).await;
+    assert!(focused_panes(&fake).is_empty(), "B overtook held A");
+    host.release.notify_one();
+    a.await.unwrap();
+    b.await.unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2"]);
+    terminal_focus(&gate, &host, &directory, None, "w2:p2", true)
+        .await
+        .unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2"]);
+    terminal_focus(&gate, &host, &directory, None, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2", "w2:p1"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_tail_does_not_restore_a_stale_recent_while_an_older_pending_runs() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let host = Arc::new(HoldFirstOpen::new(&fake));
+    let gate = FocusGate::new();
+    let mut a = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w2:p1", false,
+    ));
+    poll_once(&mut a).await;
+    host.entered.notified().await;
+    let mut b = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w2:p2", false,
+    ));
+    poll_once(&mut b).await;
+    let mut c = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w1:p1", false,
+    ));
+    poll_once(&mut c).await;
+    drop(c);
+    // Hold B's reply after herdr acted on it (A is the first focus herdr gets): the remote pane
+    // is B, and a cached success for A would be wrong.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    fake.hold_focus_after(1, entered.clone(), release.clone());
+    host.release.notify_one();
+    a.await.unwrap();
+    entered.notified().await;
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2"]);
+    let mut terminal_a = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w2:p1", true,
+    ));
+    tokio::select! {
+        biased;
+        result = &mut terminal_a => panic!("terminal A accepted a stale A while herdr is on B: {result:?}"),
+        () = settle() => {}
+    }
+    release.notify_one();
+    let (b, terminal_a) = tokio::join!(b, terminal_a);
+    b.unwrap();
+    terminal_a.unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2", "w2:p1"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_focus_after_a_cancelled_tail_joins_the_pending_one() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let host = Arc::new(HoldFirstOpen::new(&fake));
+    let gate = FocusGate::new();
+    let mut a = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w2:p1", false,
+    ));
+    poll_once(&mut a).await;
+    host.entered.notified().await;
+    let mut b = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w2:p2", false,
+    ));
+    poll_once(&mut b).await;
+    let mut c = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w1:p1", false,
+    ));
+    poll_once(&mut c).await;
+    drop(c);
+    let mut follower_b = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w2:p2", true,
+    ));
+    poll_once(&mut follower_b).await;
+    host.release.notify_one();
+    a.await.unwrap();
+    let (b, follower_b) = tokio::join!(b, follower_b);
+    b.unwrap();
+    follower_b.unwrap();
+    assert_eq!(
+        focused_panes(&fake),
+        ["w2:p1", "w2:p2"],
+        "the same-pane request shares the pending B once the cancelled C has left"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_last_queued_focus_is_remembered_only_once_the_queue_has_drained() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let gate = FocusGate::new();
+    let (a, b, c) = tokio::join!(
+        focus_once(&gate, &fake, &directory, "w2:p1", false),
+        focus_once(&gate, &fake, &directory, "w2:p2", false),
+        focus_once(&gate, &fake, &directory, "w1:p1", false),
+    );
+    a.unwrap();
+    b.unwrap();
+    c.unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2", "w1:p1"]);
+    focus_once(&gate, &fake, &directory, "w1:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(focused_panes(&fake).len(), 3, "C is the one herdr is on");
+    focus_once(&gate, &fake, &directory, "w2:p2", true)
+        .await
+        .unwrap();
+    assert_eq!(focused_panes(&fake).len(), 4, "B is not");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_queued_focus_that_all_its_waiters_gave_up_is_never_sent() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let host = Arc::new(HoldFirstOpen::new(&fake));
+    let gate = FocusGate::new();
+    let mut a = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w2:p1", false,
+    ));
+    poll_once(&mut a).await;
+    host.entered.notified().await;
+    // B has two waiters, both of which leave; C has one, which stays.
+    let mut b1 = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w2:p2", false,
+    ));
+    poll_once(&mut b1).await;
+    let mut b2 = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w2:p2", true,
+    ));
+    poll_once(&mut b2).await;
+    let mut c = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w1:p1", false,
+    ));
+    poll_once(&mut c).await;
+    drop(b1);
+    drop(b2);
+    host.release.notify_one();
+    a.await.unwrap();
+    c.await.unwrap();
+    assert_eq!(
+        focused_panes(&fake),
+        ["w2:p1", "w1:p1"],
+        "B had nobody waiting: it has no side effect"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn one_live_waiter_is_enough_to_send_a_queued_focus() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let host = Arc::new(HoldFirstOpen::new(&fake));
+    let gate = FocusGate::new();
+    let mut a = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w2:p1", false,
+    ));
+    poll_once(&mut a).await;
+    host.entered.notified().await;
+    let mut b1 = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w2:p2", false,
+    ));
+    poll_once(&mut b1).await;
+    let mut b2 = Box::pin(terminal_focus(
+        &gate, &host, &directory, None, "w2:p2", true,
+    ));
+    poll_once(&mut b2).await;
+    drop(b1);
+    host.release.notify_one();
+    a.await.unwrap();
+    b2.await.unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_focus_in_flight_completes_after_its_caller_left_and_is_remembered() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let gate = FocusGate::new();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    fake.hold_next_focus(entered.clone(), release.clone());
+    let mut a = Box::pin(focus_once(&gate, &fake, &directory, "w2:p1", false));
+    poll_once(&mut a).await;
+    entered.notified().await;
+    assert_eq!(focused_panes(&fake), ["w2:p1"], "herdr has the request");
+    drop(a);
+    // Herdr answers after the caller left: the focus counts, as the session's last.
+    release.notify_one();
+    settle().await;
+    focus_once(&gate, &fake, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p1"], "nothing was sent again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_request_that_joins_a_focus_in_flight_after_its_caller_left_gets_its_answer() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let gate = FocusGate::new();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    fake.hold_next_focus(entered.clone(), release.clone());
+    let mut a = Box::pin(focus_once(&gate, &fake, &directory, "w2:p1", false));
+    poll_once(&mut a).await;
+    entered.notified().await;
+    drop(a);
+    let mut joiner = Box::pin(focus_once(&gate, &fake, &directory, "w2:p1", true));
+    poll_once(&mut joiner).await;
+    release.notify_one();
+    joiner.await.unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p1"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pending_focus_in_one_session_does_not_touch_another_sessions_memory() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let gate = FocusGate::new();
+    let host = Arc::new(fake.clone());
+    terminal_focus(&gate, &host, &directory, None, "w2:p1", false)
+        .await
+        .unwrap();
+    // Session "work" has a focus in flight, with a request queued and then cancelled behind it.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    fake.hold_next_focus(entered.clone(), release.clone());
+    let mut w1 = Box::pin(terminal_focus(
+        &gate,
+        &host,
+        &directory,
+        Some("work"),
+        "w2:p2",
+        false,
+    ));
+    poll_once(&mut w1).await;
+    entered.notified().await;
+    let mut w2 = Box::pin(terminal_focus(
+        &gate,
+        &host,
+        &directory,
+        Some("work"),
+        "w1:p1",
+        false,
+    ));
+    poll_once(&mut w2).await;
+    drop(w2);
+    // The default session still answers from memory, at once.
+    terminal_focus(&gate, &host, &directory, None, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2"]);
+    release.notify_one();
+    w1.await.unwrap();
+    terminal_focus(&gate, &host, &directory, Some("work"), "w2:p2", true)
+        .await
+        .unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_idle_actor_stays_for_the_window_of_its_acknowledgement_and_then_ends() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let gate = FocusGate::new();
+    focus_once(&gate, &fake, &directory, "w2:p1", false)
+        .await
+        .unwrap();
+    // Idle for most of the window: the acknowledgement still stands.
+    sleep(super::focus::RECENT - Duration::from_millis(100)).await;
+    focus_once(&gate, &fake, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(focuses(&fake), 1);
+    // Past it, the actor has gone: a new one starts, and sends.
+    sleep(super::focus::RECENT + Duration::from_millis(100)).await;
+    assert_eq!(
+        gate.actors_running(),
+        0,
+        "no actor lingers without an acknowledgement to keep"
+    );
+    focus_once(&gate, &fake, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(focuses(&fake), 2);
+}
+
+/// Opens each socket after a pause that varies from one open to the next.
+struct Jitter {
+    host: FakeHost,
+    opens: std::sync::atomic::AtomicU64,
+}
+
+impl crate::remote::RemoteHost for Jitter {
+    type Stream = tokio::io::DuplexStream;
+
+    async fn exec_rendered(&self, line: &str) -> Result<crate::remote::ExecOutput, RemoteError> {
+        crate::remote::RemoteHost::exec_rendered(&self.host, line).await
+    }
+
+    async fn open_unix(&self, path: &str) -> Result<Self::Stream, RemoteError> {
+        let n = self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        sleep(Duration::from_millis(n * 7 % 13)).await;
+        crate::remote::RemoteHost::open_unix(&self.host, path).await
+    }
+}
+
+/// A small deterministic generator: the stress test must be the same run every time.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self, below: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 33) % below
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recent_answer_is_only_ever_given_for_the_last_request_herdr_received_with_nothing_pending()
+ {
+    const PANES: [&str; 3] = ["w2:p1", "w2:p2", "w1:p1"];
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let host = Arc::new(Jitter {
+        host: fake.clone(),
+        opens: std::sync::atomic::AtomicU64::new(0),
+    });
+    let gate = Arc::new(FocusGate::new());
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let (fake, hits) = (fake.clone(), Arc::clone(&hits));
+        *gate.hit_hook.lock().unwrap() = Some(Arc::new(move |pane: &str, pending: usize| {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(pending, 0, "a recent answer with a focus pending");
+            assert_eq!(
+                focused_panes(&fake).last().map(String::as_str),
+                Some(pane),
+                "a recent answer for a pane herdr was not last given"
+            );
+        }));
+    }
+    let mut random = Lcg(7);
+    let mut tasks = Vec::new();
+    for _ in 0..400 {
+        // Half arrive on their own, half in bursts that overlap.
+        let start = Duration::from_millis(if random.next(2) == 0 {
+            random.next(6000)
+        } else {
+            100 * random.next(60)
+        });
+        let pane = PANES[random.next(3) as usize];
+        let from_terminal = random.next(3) != 0;
+        // About a third give up at some point.
+        let give_up = (random.next(3) == 0).then(|| Duration::from_millis(1 + random.next(40)));
+        let (gate, host, directory) =
+            (Arc::clone(&gate), Arc::clone(&host), Arc::clone(&directory));
+        tasks.push(tokio::spawn(async move {
+            sleep(start).await;
+            let focus = gate.focus(&host, HERDR, &directory, None, pane, from_terminal);
+            match give_up {
+                Some(limit) => tokio::time::timeout(limit, focus).await.ok(),
+                None => Some(focus.await),
+            }
+        }));
+    }
+    let mut answered = 0;
+    for task in tasks {
+        if let Some(result) = task.await.unwrap() {
+            result.unwrap();
+            answered += 1;
+        }
+    }
+    assert!(answered > 100, "answered {answered}");
+    let hits = hits.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(hits > 5, "the stress must exercise recent answers: {hits}");
+    // Whatever was left behind, the gate still works.
+    gate.focus(&host, HERDR, &directory, None, "w2:p1", false)
+        .await
+        .unwrap();
+}

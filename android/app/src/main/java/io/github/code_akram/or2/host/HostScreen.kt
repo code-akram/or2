@@ -40,6 +40,7 @@ import io.github.code_akram.or2.ffi.TmuxSession
 import io.github.code_akram.or2.inbox.LinkStatus
 import io.github.code_akram.or2.inbox.linkStatus
 import io.github.code_akram.or2.session.HostTrustDialog
+import io.github.code_akram.or2.session.hostFailureDetail
 import io.github.code_akram.or2.session.hostStateMessage
 import io.github.code_akram.or2.ui.AttentionCard
 import io.github.code_akram.or2.ui.BottomInsetSpacer
@@ -210,6 +211,10 @@ private fun StatusCard(host: Host, hostState: HostState?, link: LinkStatus) {
                     }
                     Text(message, style = Or2Type.Body, color = if (link == LinkStatus.FAILED) Or2Colors.Danger else Or2Colors.Text,
                         modifier = Modifier.testTag("host-state"))
+                }
+                hostFailureDetail(hostState, host.addresses)?.let { detail ->
+                    // What each address did, in muted mono: which one was refused, which never answered.
+                    Text(detail, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.testTag("host-failure-detail"))
                 }
                 (hostState as? HostState.Connected)?.let { connected ->
                     if (host.addresses.size > 1) {

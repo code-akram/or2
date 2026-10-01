@@ -178,6 +178,13 @@ class TerminalView(context: Context) : View(context) {
     private var lastSize: GridSize? = null
     private var framePending = false
     private var requestedFull = false
+
+    /**
+     * Called after a frame this view applied has been drawn and committed, for every such frame (the
+     * timing markers decide whether anyone is waiting: a retained view is shown again later).
+     */
+    var onFrameDrawn: () -> Unit = {}
+    private val appliedFrames = AppliedFrames()
     private var cursorVisible = true
     private val blink = object : Runnable {
         override fun run() {
@@ -197,6 +204,7 @@ class TerminalView(context: Context) : View(context) {
                     reportedBackground = grid.background
                     onBackgroundChanged(grid.background)
                 }
+                appliedFrames.applied()
                 invalidate()
             } else {
                 requestSnapshot()
@@ -416,6 +424,17 @@ class TerminalView(context: Context) : View(context) {
         frameReady() // Also drain an event that arrived before attachment.
     }
 
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        // A retained view shown again (the app returned from the background): its next draw counts
+        // even when the terminal's content did not change meanwhile. A view that has not had its
+        // first frame yet waits for it instead (a blank draw is not the terminal on screen).
+        if (visibility == VISIBLE && grid.hasGrid) {
+            appliedFrames.shown()
+            invalidate()
+        }
+    }
+
     override fun onDetachedFromWindow() {
         removeCallbacks(blink)
         scroller.forceFinished(true)
@@ -527,6 +546,8 @@ class TerminalView(context: Context) : View(context) {
                 0f, height - cellHeight + baseline, textPaint)
         }
         canvas.restoreToCount(checkpoint)
+        // Reported once this frame has really been committed, not when it was only asked for.
+        if (appliedFrames.drawn()) viewTreeObserver.registerFrameCommitCallback { onFrameDrawn() }
     }
 
     /** A thin accent bar on the right edge showing where the viewport sits in the scrollback. */

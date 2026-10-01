@@ -12,6 +12,8 @@ import io.github.code_akram.or2.session.hostErrorMessage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -47,22 +49,60 @@ class TerminalActivations(private val connections: HostConnections, private val 
     private var generation = 0
 
     /**
-     * An agent tapped in the inbox: focuses its pane, then reuses the terminal already open for it
-     * or opens a new one. A first open is focused too, so a vanished pane never opens a terminal
-     * that would close with a command failure.
+     * An agent tapped in the inbox: reuses the terminal already open for it (after focusing its pane
+     * again) or opens a new one. A new terminal and the pane focus **start together**: the terminal's own
+     * focus joins the one in flight (Rust shares it), and the wait ends when both are done. A pane that
+     * cannot be focused (it vanished) leaves no terminal: the one that was opened is dismissed, and so is
+     * one whose wait was cancelled.
      */
     suspend fun openAgent(hostId: Long, hostLabel: String, session: String?, paneId: String): Activation {
         val target = TerminalTarget.Herdr(session, paneId)
         val active = connections.host(hostId) ?: return Activation.Failed("$hostLabel is no longer connected.")
+        val span = "tap host=$hostId pane=$paneId"
+        connections.timing.begin(span)
         try {
-            connections.focusHerdrPane(active, session, paneId)
-            connections.findOpenTerminal(hostId, target)?.let { return Activation.Ready(it) }
-            connections.awaitTransportChoice(active)
-            return Activation.Ready(connections.openTerminal(active, target))
+            return Activation.Ready(openOrReuse(active, hostId, target, span))
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
             return Activation.Failed(focusMessage(error))
+        }
+    }
+
+    /**
+     * The terminal for [target] on [active]: an open one is reused (a herdr pane is focused again
+     * first); otherwise a new one is opened while its pane (if any) is being focused. Timing marks go to
+     * [span]. Throws what the focus or the open threw, after dismissing a terminal it had opened.
+     */
+    private suspend fun openOrReuse(active: ActiveHost, hostId: Long, target: TerminalTarget, span: String): ActiveTerminal {
+        val timing = connections.timing
+        val herdr = target as? TerminalTarget.Herdr
+        val paneId = herdr?.paneId
+        connections.findOpenTerminal(hostId, target)?.let { existing ->
+            if (herdr != null && paneId != null) {
+                connections.focusHerdrPane(active, herdr.session, paneId)
+                timing.mark(span, "focused")
+            }
+            timing.watchTerminal(existing.id, span)
+            return existing
+        }
+        var opened: ActiveTerminal? = null
+        try {
+            return coroutineScope {
+                val focus = if (herdr != null && paneId != null) async {
+                    connections.focusHerdrPane(active, herdr.session, paneId)
+                    timing.mark(span, "focused")
+                } else null
+                connections.awaitTransportChoice(active)
+                val terminal = connections.openTerminal(active, target)
+                opened = terminal
+                timing.watchTerminal(terminal.id, span)
+                focus?.await()
+                terminal
+            }
+        } catch (error: Throwable) {
+            opened?.let(connections::dismissTerminal)
+            throw error
         }
     }
 
@@ -93,8 +133,12 @@ class TerminalActivations(private val connections: HostConnections, private val 
         val paneId = (target as? TerminalTarget.Herdr)?.paneId
         if (paneId == null || !needsFocus(terminal)) return Activation.Ready(terminal)
         val active = connections.host(terminal.host.id) ?: return Activation.Ready(terminal)
+        val span = "reuse host=${terminal.host.id} pane=$paneId"
+        connections.timing.begin(span)
         try {
             connections.focusHerdrPane(active, target.session, paneId)
+            connections.timing.mark(span, "focused")
+            connections.timing.watchTerminal(terminal.id, span)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
@@ -106,19 +150,17 @@ class TerminalActivations(private val connections: HostConnections, private val 
 
     /**
      * Reattach: reopens the terminal the user last had on a connected host. A herdr pane is focused
-     * first, exactly as for an inbox tap; an open terminal for the same target is reused. The
-     * transport is chosen afresh by the host's preference (the capability probe is awaited briefly
-     * so AUTO can still choose mosh right after connecting); what the target ran over before is not
-     * carried along.
+     * as for an inbox tap (together with a new terminal's start); an open terminal for the same target
+     * is reused. The transport is chosen afresh by the host's preference (the capability probe is
+     * awaited briefly so AUTO can still choose mosh right after connecting); what the target ran over
+     * before is not carried along. [span] is the timing path this belongs to (a Resume's own, else a
+     * `reopen` span of its own).
      */
-    suspend fun reopen(last: LastTerminal, hostLabel: String): Activation {
+    suspend fun reopen(last: LastTerminal, hostLabel: String, span: String? = null): Activation {
         val active = connections.host(last.hostId) ?: return Activation.Failed("$hostLabel is no longer connected.")
+        val path = span ?: "reopen host=${last.hostId}".also { connections.timing.begin(it) }
         try {
-            val target = last.target
-            (target as? TerminalTarget.Herdr)?.paneId?.let { connections.focusHerdrPane(active, target.session, it) }
-            connections.findOpenTerminal(last.hostId, target)?.let { return Activation.Ready(it) }
-            connections.awaitTransportChoice(active)
-            return Activation.Ready(connections.openTerminal(active, target))
+            return Activation.Ready(openOrReuse(active, last.hostId, last.target, path))
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
@@ -126,13 +168,13 @@ class TerminalActivations(private val connections: HostConnections, private val 
         }
     }
 
-    fun launchReopen(last: LastTerminal, hostLabel: String, done: (Activation) -> Unit) {
+    fun launchReopen(last: LastTerminal, hostLabel: String, span: String? = null, done: (Activation) -> Unit) {
         val title = when (val target = last.target) {
             TerminalTarget.Shell -> "shell"
             is TerminalTarget.Tmux -> "tmux ${target.sessionName}"
             is TerminalTarget.Herdr -> "herdr" + (target.paneId?.let { " $it" } ?: "")
         }
-        launch("Resuming $hostLabel: $title", done) { reopen(last, hostLabel) }
+        launch("Resuming $hostLabel: $title", done) { reopen(last, hostLabel, span) }
     }
 
     fun launchOpen(active: ActiveHost, target: TerminalTarget, done: (Activation) -> Unit) {

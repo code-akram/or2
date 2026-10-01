@@ -49,11 +49,11 @@ class HomeUiDeviceTest {
     private val calls = mutableListOf<String>()
 
     private fun card(host: Host, state: HostState?, blocked: Int = 0, unlocking: Boolean = false) =
-        HostCard(host, hostCardStatus(state, unlocking, blocked, host.sleeps), linkStatus(state, host.sleeps))
+        HostCard(host, hostCardStatus(state, unlocking, blocked, host.sleeps, host.addresses), linkStatus(state, host.sleeps))
 
     private fun show(
         hosts: List<HostCard>, sessions: List<HomeSession> = emptyList(), keyCount: Int = 1, blocked: Int = 0, working: Int = 0,
-        canConnectAll: Boolean = false, busy: Boolean = false, resume: HomeResume? = null,
+        canConnectAll: Boolean = false, busy: Boolean = false, resume: HomeResume? = null, batteryCard: Boolean = false,
     ) = compose.runOnUiThread {
         compose.activity.setContent {
             Or2Theme {
@@ -64,6 +64,7 @@ class HomeUiDeviceTest {
                     disconnectHost = { calls += "disconnect:${it.id}" }, deleteHost = { calls += "delete:${it.id}" },
                     openInbox = { calls += "inbox" }, openKeys = { calls += "keys" }, connectAll = { calls += "all" },
                     resume = resume, onResume = { calls += "resume" },
+                    batteryCard = batteryCard, allowBattery = { calls += "allow-battery" }, dismissBattery = { calls += "dismiss-battery" },
                 )
             }
         }
@@ -95,6 +96,39 @@ class HomeUiDeviceTest {
         compose.onNodeWithTag("host-progress:4", useUnmergedTree = true).assertTextEquals("Unlocking key…")
         compose.onNodeWithTag("host:5").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("fixture-user@fixture.invalid:22").assertIsDisplayed() // The default uiHost address.
+    }
+
+    @Test
+    fun theBatteryCardIsSmallDismissibleAndLeavesTheHostListUsable() {
+        show(listOf(card(one, null)), batteryCard = true)
+        compose.onNodeWithTag("home-battery-card").assertIsDisplayed()
+        compose.onNodeWithText("Background connections may drop").assertIsDisplayed()
+        // Nothing is blocked: the list is there and a host can still be opened.
+        compose.onNodeWithTag("host:1").assertIsDisplayed().performClick()
+        compose.onNodeWithTag("battery-card-allow").performClick()
+        compose.onNodeWithTag("battery-card-dismiss").performClick()
+        compose.runOnIdle { assertEquals(listOf("open:1", "allow-battery", "dismiss-battery"), calls) }
+    }
+
+    @Test
+    fun noBatteryCardWhenTheExemptionIsInPlaceOrNeverDeclined() {
+        show(listOf(card(one, null)), batteryCard = false)
+        compose.onNodeWithTag("home-battery-card").assertDoesNotExist()
+    }
+
+    @Test
+    fun anUnreachableHostSaysWhatEachAddressDidInMutedMonoLines() {
+        val mac = uiHost(6, "Mac", addresses = listOf(HostEndpoint("mac.local", 22), HostEndpoint("10.255.255.1", 22)))
+        val unreachable = HostState.Closed(
+            CloseReason.Failed(
+                SessionFailure.Unreachable("TCP connection failed: address 0: name not resolved (mDNS) after 3 tries; address 1: no answer within 6 s"),
+            ),
+        )
+        show(listOf(card(mac, unreachable)))
+        compose.onNodeWithTag("host-failure:6", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag("host-detail-lines:6", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("mac.local:22 \u00b7 name not resolved (mDNS) after 3 tries", substring = true, useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("10.255.255.1:22 \u00b7 no answer within 6 s", substring = true, useUnmergedTree = true).assertIsDisplayed()
     }
 
     @Test

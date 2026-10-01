@@ -1,5 +1,7 @@
 package io.github.code_akram.or2.service
 
+import io.github.code_akram.or2.app.MemoryPrefStore
+import io.github.code_akram.or2.app.SessionMarker
 import io.github.code_akram.or2.connection.FakePort
 import io.github.code_akram.or2.connection.FakeTrust
 import io.github.code_akram.or2.connection.HostConnections
@@ -124,6 +126,45 @@ class ServiceTest {
         runCurrent()
         assertEquals(before + 2, host.shown.size)
         controller.close()
+    }
+
+    @Test
+    fun theSessionMarkerFollowsTheRealHoldersOpenTerminalsAndSurvivesOnlyAKill() = runTest {
+        val store = MemoryPrefStore()
+        val port = FakePort()
+        var listener: HostListener? = null
+        val holder = HostConnections({ _, l -> listener = l; port }, FakeTrust(), StandardTestDispatcher(testScheduler), UnconfinedTestDispatcher(testScheduler))
+        val marker = SessionMarker(store)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            holder.serviceSnapshots().collect { marker.onOpenSessions(it.sessions > 0) }
+        }
+        runCurrent()
+        assertFalse(SessionMarker(store).diedWithSessions) // Idle at start: nothing to resume.
+
+        holder.connect(testHost(7, "Alpha"), byteArrayOf(1))
+        listener!!.onHostStateChanged(HostState.Connected(0u))
+        advanceUntilIdle()
+        assertFalse(SessionMarker(store).diedWithSessions) // A connection alone is not a session.
+
+        holder.openTerminal(holder.host(7)!!, TerminalTarget.Shell)
+        advanceUntilIdle()
+        // The process is killed here: the next one finds the marker.
+        assertTrue(SessionMarker(store).diedWithSessions)
+
+        // An orderly end clears it: the last session closes (Disconnect all, the user's close, a remote exit).
+        port.terminals[0].second.onStateChanged(SessionState.Closed(CloseReason.Disconnected))
+        advanceUntilIdle()
+        assertFalse(SessionMarker(store).diedWithSessions)
+
+        // A session whose host connection is lost still counts (mosh survives it): killed now, it resumes.
+        holder.openTerminal(holder.host(7)!!, TerminalTarget.Shell)
+        listener!!.onHostStateChanged(HostState.Closed(CloseReason.Failed(io.github.code_akram.or2.ffi.SessionFailure.ConnectionLost("x"))))
+        advanceUntilIdle()
+        assertTrue(SessionMarker(store).diedWithSessions)
+        holder.disconnectAll()
+        port.terminals[1].second.onStateChanged(SessionState.Closed(CloseReason.Disconnected))
+        advanceUntilIdle()
+        assertFalse(SessionMarker(store).diedWithSessions)
     }
 
     @Test

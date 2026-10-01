@@ -88,11 +88,11 @@ fn unreachable_addresses_close_with_each_error_listed_from_a_rust_thread() {
         panic!("expected Unreachable")
     };
     assert!(
-        message.contains("address 0: ConnectionRefused"),
+        message.contains("address 0: connection refused"),
         "{message}"
     );
     assert!(
-        message.contains("address 1: ConnectionRefused"),
+        message.contains("address 1: connection refused"),
         "{message}"
     );
     assert!(
@@ -100,6 +100,84 @@ fn unreachable_addresses_close_with_each_error_listed_from_a_rust_thread() {
         "no host names in diagnostics"
     );
     assert!(matches!(handle.state(), HostState::Closed(_)));
+}
+
+/// A transport whose connections never complete: a host that silently drops every packet.
+struct Blackhole;
+
+impl Transport for Blackhole {
+    type Stream = tokio::io::DuplexStream;
+
+    async fn connect(&self, _: &crate::transport::Endpoint) -> std::io::Result<Self::Stream> {
+        std::future::pending().await
+    }
+}
+
+fn connect_over_blackhole(
+    options: HostOptions,
+    addresses: &[(&str, u16)],
+) -> (
+    HostHandle,
+    sync::Receiver<(HostState, std::thread::ThreadId)>,
+) {
+    let (observer, states) = recorder();
+    let handle = crate::ssh::connect_host_with(
+        Arc::new(Blackhole),
+        request(addresses, &[]),
+        observer,
+        options,
+    );
+    (handle, states)
+}
+
+#[test]
+fn a_connect_timeout_that_fires_while_the_race_runs_says_what_each_address_did() {
+    // The per-address allowance is longer than the connect timeout here, so the overall timer
+    // ends it: the host is unreachable (no address ever connected), not "timed out".
+    let (_handle, states) = connect_over_blackhole(
+        HostOptions {
+            connect_timeout: Duration::from_millis(400),
+            address_timeout: Duration::from_secs(60),
+            ..HostOptions::default()
+        },
+        &[("a.invalid", 22), ("b.invalid", 22)],
+    );
+    let CloseReason::Failed(SessionFailure::Unreachable(message)) = closed(&states) else {
+        panic!("expected Unreachable")
+    };
+    assert!(
+        message.contains("address 0: still trying after"),
+        "{message}"
+    );
+    assert!(
+        message.contains("address 1: still trying after"),
+        "{message}"
+    );
+    assert!(!message.contains("invalid"), "no host names: {message}");
+}
+
+#[test]
+fn each_address_gets_its_own_timeout_and_the_failure_lists_them_all() {
+    let started = std::time::Instant::now();
+    let (_handle, states) = connect_over_blackhole(
+        HostOptions {
+            connect_timeout: Duration::from_secs(30),
+            address_timeout: Duration::from_millis(300),
+            stagger: Duration::from_millis(100),
+            ..HostOptions::default()
+        },
+        &[("a.invalid", 22), ("b.invalid", 22)],
+    );
+    let CloseReason::Failed(SessionFailure::Unreachable(message)) = closed(&states) else {
+        panic!("expected Unreachable")
+    };
+    assert!(
+        message.contains("address 0: no answer within 0.3 s")
+            && message.contains("address 1: no answer within 0.3 s"),
+        "{message}"
+    );
+    // Far inside the overall timeout: one blackholed address cannot consume the whole budget.
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 #[test]
@@ -227,6 +305,14 @@ struct Shared {
     /// asked: a duplicate descriptor would keep the connection open after the server ends.
     socket: Mutex<Option<std::net::TcpStream>>,
     keep_socket: bool,
+    channel_events: Mutex<Option<sync::Sender<(&'static str, russh::ChannelId)>>>,
+    focus_hangs: AtomicBool,
+    open_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Holds back the confirmation of the next streamlocal open.
+    unix_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Whether the server answers `pty-req` and `shell` (it never does by default: the setup
+    /// timeout tests need a server that stays silent).
+    shell_answers: AtomicBool,
 }
 
 struct Server {
@@ -258,13 +344,32 @@ impl server::Handler for Server {
         reply: server::ChannelOpenHandle,
         _: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        let channel_id = channel.id();
         drop(channel);
+        let gate = self.shared.open_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let shared = self.shared.clone();
+            if let Some(tx) = shared.channel_events.lock().unwrap().as_ref() {
+                let _ = tx.send(("pending", channel_id));
+            }
+            tokio::spawn(async move {
+                let _ = gate.await;
+                reply.accept().await;
+                if let Some(tx) = shared.channel_events.lock().unwrap().as_ref() {
+                    let _ = tx.send(("accepted", channel_id));
+                }
+            });
+            return Ok(());
+        }
         if self.shared.refuse_channels.load(Ordering::SeqCst) {
             reply
                 .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
                 .await;
         } else {
             reply.accept().await;
+            if let Some(tx) = self.shared.channel_events.lock().unwrap().as_ref() {
+                let _ = tx.send(("session", channel_id));
+            }
         }
         Ok(())
     }
@@ -276,7 +381,19 @@ impl server::Handler for Server {
         reply: server::ChannelOpenHandle,
         _: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        let channel_id = channel.id();
         drop(channel);
+        let gate = self.shared.unix_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            if let Some(tx) = self.shared.channel_events.lock().unwrap().as_ref() {
+                let _ = tx.send(("pending", channel_id));
+            }
+            tokio::spawn(async move {
+                let _ = gate.await;
+                reply.accept().await;
+            });
+            return Ok(());
+        }
         let behaviour = self.shared.streamlocal.lock().unwrap().clone();
         match behaviour {
             Streamlocal::Herdr => reply.accept().await,
@@ -308,6 +425,12 @@ impl server::Handler for Server {
                 "{\"id\":\"or2_focus\",\"result\":{\"type\":\"ok\"}}\n"
             };
             self.shared.focused.lock().unwrap().push(pane);
+            if let Some(tx) = self.shared.channel_events.lock().unwrap().as_ref() {
+                let _ = tx.send(("focus", channel));
+            }
+            if self.shared.focus_hangs.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             session.data(channel, reply.as_bytes().to_vec())?;
         } else if request.contains("session.snapshot") {
             session.data(
@@ -320,10 +443,42 @@ impl server::Handler for Server {
 
     async fn channel_close(
         &mut self,
-        _: russh::ChannelId,
+        channel_id: russh::ChannelId,
         _: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        if let Some(tx) = self.shared.channel_events.lock().unwrap().as_ref() {
+            let _ = tx.send(("close", channel_id));
+        }
         self.shared.closes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn pty_request(
+        &mut self,
+        channel: russh::ChannelId,
+        _: &str,
+        _: u32,
+        _: u32,
+        _: u32,
+        _: u32,
+        _: &[(russh::Pty, u32)],
+        session: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        if self.shared.shell_answers.load(Ordering::SeqCst) {
+            session.channel_success(channel)?;
+        }
+        Ok(())
+    }
+
+    /// A login shell that just stays open.
+    async fn shell_request(
+        &mut self,
+        channel: russh::ChannelId,
+        session: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        if self.shared.shell_answers.load(Ordering::SeqCst) {
+            session.channel_success(channel)?;
+        }
         Ok(())
     }
 
@@ -351,6 +506,31 @@ impl server::Handler for Server {
                     finish(session, channel, 1)
                 }
             };
+        }
+        if command.starts_with("sh -c") && command.contains("or2:list-begin") {
+            // The probe's second script: finds herdr and lists its sessions in one exec. It
+            // hangs with the first script when the test says the probe hangs.
+            session.channel_success(channel)?;
+            if self.shared.probe_hangs.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            let probe = *self.shared.probe.lock().unwrap();
+            let path = probe
+                .lines()
+                .find_map(|line| line.strip_prefix("or2:herdr:"))
+                .unwrap_or("");
+            let mut output = format!("or2:herdr:{path}\n");
+            if !path.is_empty() {
+                let listing = *self.shared.herdr_list.lock().unwrap();
+                let (json, status) = match listing {
+                    HerdrList::Fixture => (HERDR_LISTING, 0),
+                    HerdrList::Json(json) => (json, 0),
+                    HerdrList::Fails => ("", 1),
+                };
+                output.push_str(&format!("or2:list-begin\n{json}\nor2:list-end:{status}\n"));
+            }
+            session.data(channel, output.into_bytes())?;
+            return finish(session, channel, 0);
         }
         if command.starts_with("sh -c") {
             self.shared.probes.fetch_add(1, Ordering::SeqCst);
@@ -505,6 +685,11 @@ impl Fixture {
             closes: AtomicUsize::new(0),
             socket: Mutex::new(None),
             keep_socket,
+            channel_events: Mutex::new(None),
+            focus_hangs: AtomicBool::new(false),
+            open_gate: Mutex::new(None),
+            unix_gate: Mutex::new(None),
+            shell_answers: AtomicBool::new(false),
         });
         let (listener, port) = runtime().block_on(async {
             let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -1331,8 +1516,14 @@ fn a_stalled_outbound_path_cannot_hold_an_exec_or_the_probe_past_the_exec_timeou
     let ssh = fixture.ssh();
     // Two channels confirmed while the path still works: one for the exec under test, one to
     // fill russh's outbound queue.
-    let exec_channel = runtime().block_on(ssh.open_channel()).unwrap();
-    let filler_channel = runtime().block_on(ssh.open_channel()).unwrap();
+    let exec_channel = runtime()
+        .block_on(ssh.start_open().wait())
+        .unwrap()
+        .into_inner();
+    let filler_channel = runtime()
+        .block_on(ssh.start_open().wait())
+        .unwrap()
+        .into_inner();
 
     stall.stall();
     let filler = runtime().spawn(async move {
@@ -1533,4 +1724,492 @@ fn focusing_a_herdr_pane_needs_herdr() {
     );
     assert!(fixture.shared.focused.lock().unwrap().is_empty());
     fixture.handle.disconnect();
+}
+
+/// The session channel opened beside a pane focus that is still pending is closed, exactly once,
+/// when the terminal is given up: the join holding it must not drop it unclosed.
+#[test]
+fn a_terminal_given_up_while_its_focus_waits_closes_the_channel_opened_beside_it() {
+    let fixture = Fixture::connected_with(Duration::from_secs(5), PROBE_WITH_HERDR);
+    runtime().block_on(fixture.handle.capabilities()).unwrap();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    fixture.shared.focus_hangs.store(true, Ordering::SeqCst);
+    let (tx, states) = sync::channel();
+    let terminal = fixture
+        .handle
+        .open_terminal_with(
+            TerminalTarget::Herdr {
+                session: None,
+                pane_id: Some("w2:p1".into()),
+            },
+            TerminalTransport::Ssh,
+            TerminalSize::new(80, 24).unwrap(),
+            Arc::new(SessionRecorder(tx)),
+        )
+        .unwrap();
+    // The session channel is accepted and the focus request has arrived (and is held).
+    let mut session = None;
+    let mut focused = false;
+    while session.is_none() || !focused {
+        match events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            ("session", id) => session = Some(id),
+            ("focus", _) => focused = true,
+            _ => {}
+        }
+    }
+    let session = session.unwrap();
+    terminal.disconnect();
+    assert_eq!(session_closed(&states), CloseReason::Disconnected);
+    let mut closes = 0;
+    while let Ok(event) = events.recv_timeout(Duration::from_millis(500)) {
+        if event == ("close", session) {
+            closes += 1;
+        }
+    }
+    assert_eq!(closes, 1, "the session channel must be closed exactly once");
+    fixture.handle.disconnect();
+}
+
+fn late_open_confirmation_closes(within_grace: bool) {
+    let fixture = Fixture::connected_with(Duration::from_secs(5), PROBE_WITH_HERDR);
+    runtime().block_on(fixture.handle.capabilities()).unwrap();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    fixture.shared.focus_hangs.store(true, Ordering::SeqCst);
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *fixture.shared.open_gate.lock().unwrap() = Some(gate);
+    let (tx, states) = sync::channel();
+    let terminal = fixture
+        .handle
+        .open_terminal_with(
+            TerminalTarget::Herdr {
+                session: None,
+                pane_id: Some("w2:p1".into()),
+            },
+            TerminalTransport::Ssh,
+            TerminalSize::new(80, 24).unwrap(),
+            Arc::new(SessionRecorder(tx)),
+        )
+        .unwrap();
+    let mut pending = None;
+    let mut focus = false;
+    while pending.is_none() || !focus {
+        match events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            ("pending", id) => pending = Some(id),
+            ("focus", _) => focus = true,
+            _ => {}
+        }
+    }
+    let id = pending.unwrap();
+    terminal.disconnect();
+    if within_grace {
+        release.send(()).unwrap();
+        assert_eq!(session_closed(&states), CloseReason::Disconnected);
+    } else {
+        // The terminal's Closed event proves its bounded cleanup has finished. Only now
+        // deliver the confirmation, on a host connection that remains alive.
+        assert_eq!(session_closed(&states), CloseReason::Disconnected);
+        release.send(()).unwrap();
+    }
+    let mut closed_channel = false;
+    while !closed_channel {
+        match events.recv_timeout(Duration::from_millis(700)) {
+            Ok(("close", closed)) if closed == id => closed_channel = true,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    // A fresh public query demonstrates that the shared host is usable after cancellation.
+    runtime()
+        .block_on(fixture.handle.list_tmux_sessions())
+        .unwrap();
+    fixture.handle.disconnect();
+    assert!(
+        closed_channel,
+        "confirmation after cleanup left session channel {id:?} unclosed (within_grace={within_grace})"
+    );
+}
+
+#[test]
+fn an_open_confirmed_within_the_grace_of_a_given_up_terminal_is_closed() {
+    late_open_confirmation_closes(true);
+}
+
+#[test]
+fn an_open_confirmed_after_a_given_up_terminal_closed_is_still_closed() {
+    late_open_confirmation_closes(false);
+}
+
+#[test]
+fn an_open_the_server_never_confirms_ends_with_the_connection() {
+    let mut fixture = Fixture::connected_with(Duration::from_secs(5), PROBE_WITH_HERDR);
+    let ssh = fixture.ssh();
+    runtime().block_on(fixture.handle.capabilities()).unwrap();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    fixture.shared.focus_hangs.store(true, Ordering::SeqCst);
+    // The confirmation is held back for good.
+    let (_release, gate) = tokio::sync::oneshot::channel::<()>();
+    *fixture.shared.open_gate.lock().unwrap() = Some(gate);
+    let (tx, states) = sync::channel();
+    let terminal = fixture
+        .handle
+        .open_terminal_with(
+            TerminalTarget::Herdr {
+                session: None,
+                pane_id: Some("w2:p1".into()),
+            },
+            TerminalTransport::Ssh,
+            TerminalSize::new(80, 24).unwrap(),
+            Arc::new(SessionRecorder(tx)),
+        )
+        .unwrap();
+    while events.recv_timeout(Duration::from_secs(5)).unwrap().0 != "pending" {}
+    terminal.disconnect();
+    assert_eq!(session_closed(&states), CloseReason::Disconnected);
+    // The terminal is gone, the connection owns the open that is still outstanding.
+    assert_eq!(ssh.outstanding_opens(), 1);
+    fixture.handle.disconnect();
+    wait_for(|| ssh.outstanding_opens() == 0);
+    // And nothing is started on a connection that is over.
+    let mut late = ssh.start_open();
+    assert!(runtime().block_on(late.wait()).is_err());
+    assert_eq!(ssh.outstanding_opens(), 0);
+}
+
+#[test]
+fn an_exec_whose_open_is_confirmed_after_its_deadline_has_the_channel_closed() {
+    let mut fixture = Fixture::connected_with(Duration::from_millis(300), PROBE_WITH_TMUX);
+    let ssh = fixture.ssh();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *fixture.shared.open_gate.lock().unwrap() = Some(gate);
+    // The server holds the confirmation back past the exec's deadline.
+    let error = runtime()
+        .block_on(ssh.exec_rendered("tmux list-sessions"))
+        .expect_err("the open outlasts the deadline");
+    assert_eq!(error, RemoteError::TimedOut);
+    let id = loop {
+        if let ("pending", id) = events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            break id;
+        }
+    };
+    release.send(()).unwrap();
+    let mut closed = false;
+    while let Ok((kind, channel)) = events.recv_timeout(Duration::from_secs(2)) {
+        if kind == "close" && channel == id {
+            closed = true;
+            break;
+        }
+    }
+    assert!(
+        closed,
+        "the late-confirmed exec channel {id:?} was never closed"
+    );
+    // The connection is healthy and the open task is gone.
+    wait_for(|| ssh.outstanding_opens() == 0);
+    assert!(
+        runtime()
+            .block_on(ssh.exec_rendered("tmux list-sessions"))
+            .is_ok()
+    );
+    fixture.handle.disconnect();
+}
+
+#[test]
+fn a_streamlocal_open_confirmed_after_its_deadline_has_the_channel_closed() {
+    let mut fixture = Fixture::connected_with(Duration::from_millis(300), PROBE_WITH_HERDR);
+    let ssh = fixture.ssh();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *fixture.shared.unix_gate.lock().unwrap() = Some(gate);
+    // The server holds the confirmation back past the open's deadline.
+    let error = runtime()
+        .block_on(ssh.open_unix("/run/herdr.sock"))
+        .err()
+        .expect("the open outlasts the deadline");
+    assert_eq!(error, RemoteError::TimedOut);
+    let id = loop {
+        if let ("pending", id) = events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            break id;
+        }
+    };
+    release.send(()).unwrap();
+    let mut closed = false;
+    while let Ok((kind, channel)) = events.recv_timeout(Duration::from_secs(2)) {
+        if kind == "close" && channel == id {
+            closed = true;
+            break;
+        }
+    }
+    assert!(
+        closed,
+        "the late-confirmed streamlocal channel {id:?} was never closed"
+    );
+    // The connection is healthy and the open task is gone.
+    wait_for(|| ssh.outstanding_opens() == 0);
+    // The stream must drop inside the runtime.
+    assert!(runtime().block_on(async { ssh.open_unix("/run/herdr.sock").await.is_ok() }));
+    fixture.handle.disconnect();
+}
+
+// Complete the producer without consuming its oneshot answer. Joining is an event wait,
+// so this deterministically reaches the delivery/cancellation race without sleeps or polling.
+fn dropped_or_consumed_delivered_open(kind: OpenKind, consume: bool) {
+    let mut fixture = Fixture::connected(Duration::from_secs(5));
+    let ssh = fixture.ssh();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    let mut pending = ssh.start_open_of(kind);
+    let mut tasks = ssh.opens.lock().unwrap().take().unwrap();
+    runtime().block_on(async {
+        timeout(Duration::from_secs(5), tasks.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    });
+    *ssh.opens.lock().unwrap() = Some(tasks);
+    if consume {
+        runtime().block_on(async {
+            pending.wait().await.unwrap().close().await.unwrap();
+        });
+    }
+    drop(pending);
+    let until = std::time::Instant::now() + Duration::from_millis(700);
+    let closed_channel = loop {
+        match events.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
+            Ok(("close", _)) => break true,
+            Ok(_) => {}
+            Err(_) => break false,
+        }
+    };
+    // Still a live shared connection, so disconnecting cannot hide the leak.
+    runtime()
+        .block_on(ssh.exec_rendered("tmux list-sessions"))
+        .unwrap();
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+    assert!(
+        closed_channel,
+        "a delivered but unconsumed confirmation was dropped without closing"
+    );
+}
+
+#[test]
+fn a_delivered_session_open_dropped_unconsumed_is_closed() {
+    dropped_or_consumed_delivered_open(OpenKind::Session, false);
+}
+
+#[test]
+fn a_delivered_streamlocal_open_dropped_unconsumed_is_closed() {
+    dropped_or_consumed_delivered_open(OpenKind::Streamlocal("/run/herdr.sock".into()), false);
+}
+
+#[test]
+fn a_delivered_session_open_taken_and_closed_by_the_caller_is_closed() {
+    dropped_or_consumed_delivered_open(OpenKind::Session, true);
+}
+
+#[test]
+fn a_delivered_streamlocal_open_taken_and_closed_by_the_caller_is_closed() {
+    dropped_or_consumed_delivered_open(OpenKind::Streamlocal("/run/herdr.sock".into()), true);
+}
+
+#[test]
+fn pending_opens_end_on_host_close_without_retaining_the_host() {
+    for unix in [false, true] {
+        let mut fixture = Fixture::connected(Duration::from_secs(5));
+        let ssh = fixture.ssh();
+        let weak = Arc::downgrade(&ssh);
+        let (tx, events) = sync::channel();
+        *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+        let (_release, gate) = oneshot::channel::<()>();
+        let mut pending = if unix {
+            *fixture.shared.unix_gate.lock().unwrap() = Some(gate);
+            ssh.start_open_of(OpenKind::Streamlocal("/run/herdr.sock".into()))
+        } else {
+            *fixture.shared.open_gate.lock().unwrap() = Some(gate);
+            ssh.start_open()
+        };
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(5)).unwrap().0,
+            "pending"
+        );
+        fixture.handle.disconnect();
+        assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+        assert!(runtime().block_on(async {
+            timeout(Duration::from_secs(2), pending.wait())
+                .await
+                .unwrap()
+                .is_err()
+        }));
+        assert_eq!(ssh.outstanding_opens(), 0);
+        assert!(ssh.opens.lock().unwrap().is_none());
+        assert!(ssh.me.upgrade().is_some());
+        assert_eq!(
+            runtime().block_on(ssh.exec_rendered("tmux list-sessions")),
+            Err(RemoteError::Closed)
+        );
+        assert!(matches!(
+            runtime().block_on(ssh.open_unix("/run/herdr.sock")),
+            Err(RemoteError::Closed)
+        ));
+        drop(pending);
+        drop(ssh);
+        drop(fixture);
+        assert!(weak.upgrade().is_none(), "an ended open retained the host");
+    }
+}
+
+fn cancel_public_open_after_delivery(unix: bool) {
+    let mut fixture = Fixture::connected(Duration::from_secs(5));
+    let ssh = fixture.ssh();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    let (release, gate) = oneshot::channel();
+    if unix {
+        *fixture.shared.unix_gate.lock().unwrap() = Some(gate);
+    } else {
+        *fixture.shared.open_gate.lock().unwrap() = Some(gate);
+    }
+    runtime().block_on(async {
+        let mut operation = Box::pin(async {
+            if unix {
+                ssh.open_unix("/run/herdr.sock").await.map(|_| ())
+            } else {
+                ssh.exec_rendered("tmux list-sessions").await.map(|_| ())
+            }
+        });
+        // Drive the public caller once, to start its channel open; the gate prevents an answer.
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(operation.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(5)).unwrap().0,
+            "pending"
+        );
+        let mut tasks = ssh.opens.lock().unwrap().take().unwrap();
+        release.send(()).unwrap();
+        timeout(Duration::from_secs(5), tasks.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        *ssh.opens.lock().unwrap() = Some(tasks);
+        // The producer delivered successfully, but the caller has not resumed to receive it.
+        drop(operation);
+    });
+    let until = std::time::Instant::now() + Duration::from_millis(700);
+    let closed_channel = loop {
+        match events.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
+            Ok(("close", _)) => break true,
+            Ok(_) => {}
+            Err(_) => break false,
+        }
+    };
+    runtime()
+        .block_on(ssh.exec_rendered("tmux list-sessions"))
+        .unwrap();
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+    assert!(
+        closed_channel,
+        "cancelled public open leaked delivered channel (unix={unix})"
+    );
+}
+
+#[test]
+fn an_exec_cancelled_after_its_open_was_delivered_has_the_channel_closed() {
+    cancel_public_open_after_delivery(false);
+}
+
+#[test]
+fn a_streamlocal_open_cancelled_after_delivery_has_the_channel_closed() {
+    cancel_public_open_after_delivery(true);
+}
+
+/// Runs `terminal_session::channel_task` on its own and aborts it once its channel is open and
+/// either running (a shell) or still waiting for the herdr pane focus, as the host does with a
+/// terminal task that outlasts its close grace; then counts the closes the server sees for the
+/// session channel.
+fn abort_a_terminal_task_and_count_closes(target: TerminalTarget, focus_waits: bool) {
+    let mut fixture = Fixture::connected_with(Duration::from_secs(5), PROBE_WITH_HERDR);
+    let ssh = fixture.ssh();
+    fixture.shared.shell_answers.store(true, Ordering::SeqCst);
+    runtime().block_on(fixture.handle.capabilities()).unwrap();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    fixture
+        .shared
+        .focus_hangs
+        .store(focus_waits, Ordering::SeqCst);
+    let (session_events, mut incoming) = mpsc::channel(32);
+    let (_writes, outgoing) = mpsc::unbounded_channel();
+    let (_size, latest_size) = watch::channel(TerminalSize::new(80, 24).unwrap());
+    let (_stop_signal, stop) = watch::channel(false);
+    let task = runtime().spawn(async move {
+        super::terminal_session::channel_task(
+            ssh,
+            target,
+            &session_events,
+            outgoing,
+            latest_size,
+            stop,
+        )
+        .await
+    });
+    let mut session = None;
+    let mut focus = false;
+    while session.is_none() || (focus_waits && !focus) {
+        match events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            ("session", id) => session = Some(id),
+            ("focus", _) => focus = true,
+            _ => {}
+        }
+    }
+    if !focus_waits {
+        // A shell: wait until it runs (`Connected`), so the abort lands in the pump.
+        runtime().block_on(async {
+            while !matches!(
+                incoming.recv().await,
+                Some(crate::ssh::pump::Event::Connected)
+            ) {}
+        });
+    }
+    let session = session.unwrap();
+    task.abort();
+    assert!(runtime().block_on(task).unwrap_err().is_cancelled());
+    let mut closes = 0;
+    while let Ok(event) = events.recv_timeout(Duration::from_millis(700)) {
+        if event == ("close", session) {
+            closes += 1;
+        }
+    }
+    assert_eq!(
+        closes, 1,
+        "an aborted terminal task must close its channel once"
+    );
+    fixture.handle.disconnect();
+}
+
+#[test]
+fn an_aborted_terminal_task_closes_a_running_channel_exactly_once() {
+    abort_a_terminal_task_and_count_closes(TerminalTarget::Shell, false);
+}
+
+#[test]
+fn an_aborted_terminal_task_closes_a_channel_still_waiting_for_its_focus_exactly_once() {
+    abort_a_terminal_task_and_count_closes(
+        TerminalTarget::Herdr {
+            session: None,
+            pane_id: Some("w2:p1".into()),
+        },
+        true,
+    );
 }

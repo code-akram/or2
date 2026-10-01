@@ -146,7 +146,11 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   (its session is gone or its host is not connected), a **Resume card** sits above SESSIONS: an
   `ActionCard` with the kicker `RESUME`, the title `Alpha: herdr w1:p2`, the muted line "Unlocks
   if needed, then returns to this terminal." and the transport it had as the mono meta line
-  (`Mosh`/`SSH`); tapping it unlocks, connects and reopens it.
+  (`Mosh`/`SSH`); tapping it unlocks, connects and reopens it. When the battery exemption was declined a
+  small, dismissible card above SESSIONS says "Background connections may drop" with an **Allow** text
+  action and a close glyph (`Or2Card` on `SurfaceRaised`, `Secondary` muted text, no modal). A host
+  that was unreachable shows, under its failure (or under `Asleep`), one `MonoSmall` muted line per
+  address: `host:port \u00b7 what happened`.
 - **Transport preference (host form):** under the inbox switch, a `Transport` label and an
   `Auto` / `SSH` / `Mosh` segmented control (the 32 dp control above) with one muted `Secondary`
   sentence that follows the selection (`Mosh when the host has mosh-server; SSH if mosh cannot

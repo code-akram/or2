@@ -62,11 +62,15 @@ struct State {
     exec: Result<ExecOutput, RemoteError>,
     exec_log: Vec<String>,
     open_error: Option<RemoteError>,
+    /// Sockets nothing listens on: opening one is `Io`, as a stale path is over OpenSSH.
+    dead_sockets: Vec<String>,
     opened: Vec<String>,
     snapshots: VecDeque<Step>,
     /// Per `events.subscribe`: `Some((code, message))` rejects it and closes the stream.
     subscribe_script: VecDeque<Option<(String, String)>>,
     focus_error: Option<(String, String)>,
+    /// A focus to hold after its request was recorded: how many focuses to let pass first.
+    focus_gate: Option<(usize, Arc<Notify>, Arc<Notify>)>,
     streams: Vec<mpsc::UnboundedSender<Command>>,
     served: Vec<Served>,
 }
@@ -89,10 +93,12 @@ impl FakeHost {
                 exec: Ok(output(0, "", "")),
                 exec_log: Vec::new(),
                 open_error: None,
+                dead_sockets: Vec::new(),
                 opened: Vec::new(),
                 snapshots: VecDeque::new(),
                 subscribe_script: VecDeque::new(),
                 focus_error: None,
+                focus_gate: None,
                 streams: Vec::new(),
                 served: Vec::new(),
             })),
@@ -112,12 +118,25 @@ impl FakeHost {
         lock(&self.state).exec = Err(error);
     }
 
+    pub fn clear_exec_log(&self) {
+        lock(&self.state).exec_log.clear();
+    }
+
+    pub fn clear_focus_error(&self) {
+        lock(&self.state).focus_error = None;
+    }
+
     pub fn exec_log(&self) -> Vec<String> {
         lock(&self.state).exec_log.clone()
     }
 
     pub fn set_open_error(&self, error: Option<RemoteError>) {
         lock(&self.state).open_error = error;
+    }
+
+    /// Opening `path` fails like a socket nothing listens on (other paths are unaffected).
+    pub fn kill_socket(&self, path: &str) {
+        lock(&self.state).dead_sockets.push(path.to_owned());
     }
 
     /// Sockets opened so far.
@@ -147,6 +166,17 @@ impl FakeHost {
             .into_iter()
             .map(|entry| entry.map(|(code, message)| (code.to_owned(), message.to_owned())))
             .collect();
+    }
+
+    /// Holds the reply of the next `pane.focus` (after herdr recorded it): `entered` is
+    /// notified, and the reply is sent when `release` is.
+    pub fn hold_next_focus(&self, entered: Arc<Notify>, release: Arc<Notify>) {
+        self.hold_focus_after(0, entered, release);
+    }
+
+    /// As [`Self::hold_next_focus`], for the focus after `skip` others.
+    pub fn hold_focus_after(&self, skip: usize, entered: Arc<Notify>, release: Arc<Notify>) {
+        lock(&self.state).focus_gate = Some((skip, entered, release));
     }
 
     pub fn fail_focus(&self, code: &str, message: &str) {
@@ -200,6 +230,11 @@ impl RemoteHost for FakeHost {
             state.opened.push(path.to_owned());
             if let Some(error) = state.open_error.clone() {
                 return Err(error);
+            }
+            if state.dead_sockets.iter().any(|dead| dead == path) {
+                return Err(RemoteError::Io(
+                    "the socket could not be connected to on the host".into(),
+                ));
             }
         }
         let (client, server) = duplex(1 << 20);
@@ -291,11 +326,23 @@ async fn serve(state: Arc<Mutex<State>>, stream: DuplexStream) {
                 .as_str()
                 .unwrap_or("")
                 .to_owned();
-            let failure = {
+            let (failure, gate) = {
                 let mut state = lock(&state);
                 state.served.push(Served::Focus(pane.clone()));
-                state.focus_error.clone()
+                let gate = match state.focus_gate.take() {
+                    Some((0, entered, release)) => Some((entered, release)),
+                    Some((skip, entered, release)) => {
+                        state.focus_gate = Some((skip - 1, entered, release));
+                        None
+                    }
+                    None => None,
+                };
+                (state.focus_error.clone(), gate)
             };
+            if let Some((entered, release)) = gate {
+                entered.notify_one();
+                release.notified().await;
+            }
             let reply = match failure {
                 Some((code, message)) => error(&code, &message),
                 None => format!("{{\"id\":{id:?},\"result\":{{\"type\":\"ok\"}}}}\n"),
