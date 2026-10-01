@@ -1,5 +1,5 @@
 //! mosh: a Rust client for mosh's State Synchronization Protocol, interoperating with stock
-//! `mosh-server` (no FFI export in M2; M3 adds the choice in the app).
+//! `mosh-server`. M3 serves it as a terminal transport on a host connection (`ssh::mosh_session`).
 //!
 //! ```text
 //! bootstrap ──▶ MoshParams ──▶ start ──▶ SessionHandle (standard lifecycle and frames)
@@ -29,4 +29,5 @@ pub mod ssp;
 
 pub use bootstrap::{BootstrapError, MoshKey, MoshParams, bootstrap, terminate};
 pub use driver::{CONNECT_TIMEOUT, HealthObserver, LinkControl, start, start_with};
+pub(crate) use driver::{Plan, run_session};
 pub use ssp::session::LinkHealth;

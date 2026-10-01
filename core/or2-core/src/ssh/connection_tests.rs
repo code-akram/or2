@@ -11,7 +11,7 @@ use tokio::net::TcpListener;
 
 use super::*;
 use crate::herdr::{HerdrObserver, HerdrState, HerdrUnavailable};
-use crate::host::{TerminalTarget, TmuxSession};
+use crate::host::{TerminalTarget, TerminalTransport, TmuxSession};
 use crate::keys::ClientKey;
 use crate::session::{SessionFailure, SessionObserver, SessionState};
 use crate::ssh::connect_host;
@@ -754,6 +754,49 @@ fn a_host_without_tmux_or_herdr_reports_not_installed_everywhere_without_opening
             .is_err()
     );
     fixture.handle.disconnect();
+}
+
+#[test]
+fn a_mosh_terminal_on_a_host_without_mosh_server_is_not_installed_before_anything_runs() {
+    // tmux and herdr may be there; mosh-server decides first, so no pane is focused and no
+    // exec channel is opened (this server has no exec support for a mosh-server command, and
+    // no PTY at all).
+    for probe in [PROBE_WITH_TMUX, PROBE_WITH_HERDR, PROBE_WITHOUT_PROGRAMS] {
+        let fixture = Fixture::connected_with(Duration::from_secs(5), probe);
+        for target in [
+            TerminalTarget::Shell,
+            TerminalTarget::Tmux {
+                session_name: "work".into(),
+            },
+            TerminalTarget::Herdr {
+                session: None,
+                pane_id: Some("w1:p1".into()),
+            },
+        ] {
+            let (tx, states) = sync::channel();
+            let _session = fixture
+                .handle
+                .open_terminal_with(
+                    target,
+                    TerminalTransport::Mosh,
+                    TerminalSize::new(80, 24).unwrap(),
+                    Arc::new(SessionRecorder(tx)),
+                )
+                .unwrap();
+            assert_eq!(
+                states.recv_timeout(Duration::from_secs(5)).unwrap(),
+                SessionState::Closed(CloseReason::Failed(SessionFailure::NotInstalled {
+                    program: "mosh-server".into()
+                }))
+            );
+            assert!(states.recv_timeout(Duration::from_millis(100)).is_err());
+        }
+        assert!(
+            fixture.shared.focused.lock().unwrap().is_empty(),
+            "no pane was focused"
+        );
+        fixture.handle.disconnect();
+    }
 }
 
 /// A terminal on a fixture host: its callback states.

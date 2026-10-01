@@ -1,19 +1,23 @@
-//! Shared by the disposable OpenSSH integration tests (`host.rs`). Only
+//! Shared by the disposable OpenSSH integration tests (`host.rs`, `host_mosh.rs`). Only
 //! temporary keys/configuration and an ephemeral loopback listener are used; no home keys,
 //! system sshd or existing authorization are touched.
 #![allow(dead_code)]
 
 use std::fs;
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use or2_core::frame::{CellWidth, Row};
 use or2_core::keys::ClientKey;
 use or2_core::session::{SessionHandle, SessionState};
 use or2_core::term::TerminalSize;
+use or2_core::transport::{DatagramSocket, DatagramTransport, DirectUdp, Endpoint};
 
 pub fn sshd_available() -> bool {
     Path::new("/usr/bin/sshd").exists()
@@ -301,5 +305,234 @@ impl Grid {
     /// True if `text` appears in the current screen (after applying any waiting frame).
     pub fn contains(&mut self, handle: &SessionHandle, text: &str) -> bool {
         self.refresh(handle).contains(text)
+    }
+}
+
+/// A TCP relay the test can cut: loss without touching sshd.
+pub struct Proxy {
+    pub port: u16,
+    connections: Arc<Mutex<Vec<TcpStream>>>,
+    stop: Arc<AtomicBool>,
+    /// Bytes relayed client to server and server to client so far.
+    pub to_server: Arc<AtomicUsize>,
+    pub to_client: Arc<AtomicUsize>,
+}
+
+impl Proxy {
+    pub fn new(target: u16) -> Self {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connections = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (kept, stopping) = (connections.clone(), stop.clone());
+        let to_server = Arc::new(AtomicUsize::new(0));
+        let to_client = Arc::new(AtomicUsize::new(0));
+        let counters = (to_server.clone(), to_client.clone());
+        std::thread::spawn(move || {
+            while !stopping.load(Ordering::SeqCst) {
+                let Ok((client, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                client.set_nonblocking(false).unwrap();
+                let upstream = TcpStream::connect((Ipv4Addr::LOCALHOST, target)).unwrap();
+                for (mut from, mut to, count) in [
+                    (
+                        client.try_clone().unwrap(),
+                        upstream.try_clone().unwrap(),
+                        counters.0.clone(),
+                    ),
+                    (
+                        upstream.try_clone().unwrap(),
+                        client.try_clone().unwrap(),
+                        counters.1.clone(),
+                    ),
+                ] {
+                    std::thread::spawn(move || {
+                        let mut buffer = [0u8; 16 * 1024];
+                        while let Ok(length) = std::io::Read::read(&mut from, &mut buffer) {
+                            if length == 0
+                                || std::io::Write::write_all(&mut to, &buffer[..length]).is_err()
+                            {
+                                break;
+                            }
+                            count.fetch_add(length, Ordering::SeqCst);
+                        }
+                        let _ = to.shutdown(Shutdown::Both);
+                    });
+                }
+                kept.lock().unwrap().extend([client, upstream]);
+            }
+        });
+        Self {
+            port,
+            connections,
+            stop,
+            to_server,
+            to_client,
+        }
+    }
+
+    pub fn cut(&self) {
+        for connection in self.connections.lock().unwrap().iter() {
+            let _ = connection.shutdown(Shutdown::Both);
+        }
+    }
+}
+
+impl Drop for Proxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.cut();
+    }
+}
+
+/// Like [`sshd_ready`] for `mosh-server` (`OR2_REQUIRE_MOSH`), which the sshd sessions find on
+/// the standard path.
+pub fn mosh_ready() -> bool {
+    let found = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .chain([PathBuf::from("/usr/bin")])
+        .any(|directory| directory.join("mosh-server").is_file());
+    ready("mosh-server", "OR2_REQUIRE_MOSH", found)
+}
+
+/// Whether process `pid`'s environment carries this sshd's private `TMUX_TMPDIR`, i.e. one of
+/// the fixture's sessions started it (or something it started).
+fn belongs_to(pid: u32, tmux_dir: &Path) -> bool {
+    let marker = format!("TMUX_TMPDIR={}", tmux_dir.display());
+    fs::read(format!("/proc/{pid}/environ")).is_ok_and(|environ| {
+        environ
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == marker.as_bytes())
+    })
+}
+
+fn comm(pid: u32) -> Option<String> {
+    fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|name| name.trim().to_owned())
+}
+
+fn all_pids() -> Vec<u32> {
+    fs::read_dir("/proc")
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every process named `name` that one of this sshd's sessions started. That is how a test
+/// finds the `mosh-server` a host connection to the fixture started, without touching any
+/// other process.
+pub fn fixture_processes(sshd: &Sshd, name: &str) -> Vec<u32> {
+    all_pids()
+        .into_iter()
+        .filter(|pid| comm(*pid).as_deref() == Some(name) && belongs_to(*pid, &sshd.tmux_dir))
+        .collect()
+}
+
+/// Waits until `condition` holds, up to `limit`.
+pub fn wait_until(limit: Duration, what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + limit;
+    while !condition() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Kills, when dropped (also while panicking), the `mosh-server`s and the shells under them
+/// that this fixture's sessions started: only processes carrying the fixture's private
+/// `TMUX_TMPDIR`, named like what `mosh-server` runs, each re-checked right before the
+/// signal. Create it first, so a test that fails halfway leaves nothing behind.
+pub struct MoshReaper {
+    tmux_dir: PathBuf,
+}
+
+impl MoshReaper {
+    pub fn new(sshd: &Sshd) -> Self {
+        Self {
+            tmux_dir: sshd.tmux_dir.clone(),
+        }
+    }
+}
+
+impl Drop for MoshReaper {
+    fn drop(&mut self) {
+        for pid in all_pids() {
+            let Some(name) = comm(pid) else { continue };
+            if matches!(
+                name.as_str(),
+                "mosh-server" | "bash" | "zsh" | "sh" | "fish"
+            ) && belongs_to(pid, &self.tmux_dir)
+                && comm(pid).as_deref() == Some(name.as_str())
+            {
+                let _ = Command::new("kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .status();
+            }
+        }
+    }
+}
+
+/// A datagram transport over real UDP that records its sockets (bytes received on each), and
+/// optionally drops everything the server sends back: a firewalled UDP port, where our
+/// datagrams leave and nothing returns.
+#[derive(Clone, Default)]
+pub struct TestUdp {
+    pub sockets: Arc<Mutex<Vec<Arc<AtomicUsize>>>>,
+    pub blackhole: bool,
+}
+
+pub struct TestSocket {
+    inner: tokio::net::UdpSocket,
+    received: Arc<AtomicUsize>,
+    blackhole: bool,
+}
+
+impl DatagramSocket for TestSocket {
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        DatagramSocket::local_addr(&self.inner)
+    }
+
+    fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+        DatagramSocket::peer_addr(&self.inner)
+    }
+
+    fn try_send(&self, datagram: &[u8]) -> std::io::Result<usize> {
+        DatagramSocket::try_send(&self.inner, datagram)
+    }
+
+    fn poll_recv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<std::io::Result<usize>> {
+        if self.blackhole {
+            // Read and discard so the kernel buffer does not fill; never report a datagram.
+            while let Poll::Ready(Ok(_)) = DatagramSocket::poll_recv(&self.inner, cx, buf) {}
+            return Poll::Pending;
+        }
+        let polled = DatagramSocket::poll_recv(&self.inner, cx, buf);
+        if let Poll::Ready(Ok(length)) = &polled {
+            self.received.fetch_add(*length, Ordering::SeqCst);
+        }
+        polled
+    }
+}
+
+impl DatagramTransport for TestUdp {
+    type Socket = TestSocket;
+
+    async fn bind(&self, endpoint: &Endpoint) -> std::io::Result<TestSocket> {
+        let inner = DirectUdp.bind(endpoint).await?;
+        let received = Arc::new(AtomicUsize::new(0));
+        self.sockets.lock().unwrap().push(received.clone());
+        Ok(TestSocket {
+            inner,
+            received,
+            blackhole: self.blackhole,
+        })
     }
 }

@@ -8,6 +8,7 @@
 
 mod client;
 mod connection;
+mod mosh_session;
 mod pump;
 mod terminal_session;
 
@@ -16,7 +17,7 @@ use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 
 use crate::host::{HostConnectRequest, HostHandle, HostObserver};
-use crate::transport::{DirectTcp, Transport};
+use crate::transport::{DatagramTransport, DirectTcp, Transport};
 
 pub use connection::HostOptions;
 #[cfg(any(test, feature = "test-support"))]
@@ -60,4 +61,17 @@ pub fn connect_host_with<T: Transport>(
     options: HostOptions,
 ) -> HostHandle {
     connection::start(transport, request, observer, options)
+}
+
+/// [`connect_host_with`] that also chooses the datagram transport mosh terminals use (the
+/// default is [`DirectUdp`]). For tests that watch or sabotage the UDP side, and for a
+/// network-bound transport.
+pub fn connect_host_with_datagrams<T: Transport, D: DatagramTransport>(
+    transport: Arc<T>,
+    datagrams: Arc<D>,
+    request: HostConnectRequest,
+    observer: Arc<dyn HostObserver>,
+    options: HostOptions,
+) -> HostHandle {
+    connection::start_datagrams(transport, datagrams, request, observer, options)
 }

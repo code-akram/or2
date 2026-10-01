@@ -257,6 +257,15 @@ impl RemoteCommand {
         self
     }
 
+    /// The program followed by its arguments, for a caller that hands them to another program
+    /// as its own argument vector (mosh-server's command). Environment assignments are not part
+    /// of it.
+    pub fn argv(&self) -> Vec<String> {
+        std::iter::once(self.program.clone())
+            .chain(self.args.iter().cloned())
+            .collect()
+    }
+
     /// `'program' 'arg' …`, or `env 'K=V' … 'program' 'arg' …` with assignments. Every token is
     /// single-quoted and an embedded `'` written as `'\''`, which bash, zsh, fish and sh read
     /// the same. Fails with [`RemoteError::Unquotable`] for a token containing a backslash or

@@ -19,6 +19,12 @@
 //! [`session::SessionFailure::CommandFailed`] for a failed helper command). Queries
 //! ([`HostHandle::capabilities`], [`HostHandle::list_tmux_sessions`]) carry a oneshot reply and
 //! are bounded by [`QUERY_TIMEOUT`].
+//!
+//! **What closing the host does to its terminals depends on the transport.** SSH terminals are
+//! channels of the connection and close with it: `Disconnected` for a user disconnect, else the
+//! host's failure. A mosh terminal ([`TerminalTransport::Mosh`]) needs the connection only to
+//! bootstrap `mosh-server`, so **losing the connection leaves it running**; a user disconnect
+//! still closes it (`Disconnected`, with mosh's shutdown handshake so the server exits).
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -161,8 +167,9 @@ pub trait HostObserver: Send + Sync {
     fn state_changed(&self, state: &HostState);
 }
 
-/// How a terminal reaches the host: a PTY channel on the host's SSH connection, or a mosh
-/// session that the SSH connection only bootstraps.
+/// How a terminal reaches the host: a PTY channel on the host's SSH connection (it ends with
+/// the connection), or a mosh session that the SSH connection only bootstraps (it survives the
+/// connection's loss, not the user's disconnect).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalTransport {
     Ssh,
@@ -407,8 +414,9 @@ impl HostHandle {
         self.send(HostCommand::RejectHostKey)
     }
 
-    /// Idempotent. Closes every terminal and watch on the host; `Closed` arrives through the
-    /// observer.
+    /// Idempotent. Closes every terminal and watch on the host (mosh terminals too: this is the
+    /// user's disconnect; a *lost* connection leaves mosh terminals running); `Closed` arrives
+    /// through the observer after theirs.
     pub fn disconnect(&self) {
         let _ = self.commands.send(HostCommand::Disconnect);
     }
