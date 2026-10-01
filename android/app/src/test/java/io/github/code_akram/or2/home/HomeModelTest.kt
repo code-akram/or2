@@ -80,7 +80,7 @@ class HomeModelTest {
         assertEquals(HostDot.CONNECTED, hostCardStatus(HostState.Connected(0u), unlocking = false, blockedAgents = 0, sleeps = true).dot)
     }
 
-    private val twoAddresses = listOf(HostEndpoint("blackstark.local", 22), HostEndpoint("10.255.255.1", 22))
+    private val twoAddresses = listOf(HostEndpoint("workstation.local", 22), HostEndpoint("198.51.100.20", 22))
     private val unreachable = HostState.Closed(
         CloseReason.Failed(
             SessionFailure.Unreachable("TCP connection failed: address 0: name not resolved (mDNS) after 3 tries; address 1: no answer within 6 s"),
@@ -92,7 +92,7 @@ class HomeModelTest {
         val status = hostCardStatus(unreachable, unlocking = false, blockedAgents = 0, addresses = twoAddresses)
         assertEquals(HostDot.FAILED, status.dot)
         assertEquals(
-            "blackstark.local:22 \u00b7 name not resolved (mDNS) after 3 tries\n10.255.255.1:22 \u00b7 no answer within 6 s",
+            "workstation.local:22 \u00b7 name not resolved (mDNS) after 3 tries\n198.51.100.20:22 \u00b7 no answer within 6 s",
             status.detail,
         )
         // Without the host's addresses (or for another failure) there is nothing to add.
@@ -111,7 +111,7 @@ class HomeModelTest {
         val quiet = hostCardStatus(unreachable, unlocking = false, blockedAgents = 0, sleeps = true, addresses = twoAddresses)
         assertTrue(quiet.asleep)
         assertNull(quiet.failure)
-        assertTrue(quiet.detail!!.contains("blackstark.local:22"))
+        assertTrue(quiet.detail!!.contains("workstation.local:22"))
         // A rejected key is no sleep, whatever the flag says.
         val rejected = hostCardStatus(HostState.Closed(CloseReason.Failed(SessionFailure.AuthenticationRejected)), false, 0, sleeps = true)
         assertFalse(rejected.asleep)

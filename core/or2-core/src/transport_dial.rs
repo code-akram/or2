@@ -91,7 +91,7 @@ impl Default for DialTiming {
     }
 }
 
-/// Whether `host` is an mDNS name (`blackstark.local`, `Name.LOCAL.`).
+/// Whether `host` is an mDNS name (`workstation.local`, `Name.LOCAL.`).
 fn is_local_name(host: &str) -> bool {
     host.trim_end_matches('.')
         .to_ascii_lowercase()

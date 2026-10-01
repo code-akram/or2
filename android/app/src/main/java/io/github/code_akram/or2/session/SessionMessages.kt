@@ -69,7 +69,7 @@ private val ADDRESS_OUTCOME = Regex("""address (\d+): (.+?)(?:; (?=address \d+: 
 
 /**
  * What each address of an unreachable host did, one line per address, in the words of the core
- * (`blackstark.local:22 · name not resolved (mDNS) after 3 tries`). The core names addresses by their
+ * (`workstation.local:22 · name not resolved (mDNS) after 3 tries`). The core names addresses by their
  * position only (no host names in diagnostics); the app knows the list and puts the names back, for its
  * own screen. Null when [message] says nothing per address, or names an address this host does not have.
  */

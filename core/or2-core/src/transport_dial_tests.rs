@@ -159,7 +159,7 @@ async fn dial_with(
 
 #[test]
 fn only_dot_local_names_are_mdns_names() {
-    for name in ["blackstark.local", "Mac.LOCAL", "mac.local."] {
+    for name in ["workstation.local", "Mac.LOCAL", "mac.local."] {
         assert!(is_local_name(name), "{name}");
     }
     for name in [
@@ -282,7 +282,7 @@ async fn a_dot_local_name_that_fails_to_resolve_is_tried_up_to_three_times() {
         answer(0, Ok(vec![v4(1)])),
     ]);
     let connector = FakeConnector::new(vec![(v4(1), Dial::Succeed(10))]);
-    let (result, elapsed) = dial_with(&resolver, &connector, "blackstark.local").await;
+    let (result, elapsed) = dial_with(&resolver, &connector, "workstation.local").await;
     assert_eq!(result.unwrap(), v4(1));
     // 1.5 s for the failed try, the 250 ms pause, then an instant answer and the connect.
     assert_eq!(resolver.asked(), [0, 1_750]);
@@ -293,7 +293,7 @@ async fn a_dot_local_name_that_fails_to_resolve_is_tried_up_to_three_times() {
 async fn a_dot_local_name_that_never_resolves_fails_after_three_tries_and_says_mdns() {
     let resolver = FakeResolver::new(vec![answer(600, Err(io::ErrorKind::NotFound))]);
     let connector = FakeConnector::new(Vec::new());
-    let (result, elapsed) = dial_with(&resolver, &connector, "blackstark.local").await;
+    let (result, elapsed) = dial_with(&resolver, &connector, "workstation.local").await;
     let error = result.unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
     assert_eq!(error.to_string(), "name not resolved (mDNS) after 3 tries");
@@ -308,7 +308,7 @@ async fn the_dot_local_tries_stop_at_four_seconds_however_many_remain() {
     // the 4 s window, so it is cut there and no third one starts.
     let resolver = FakeResolver::new(vec![answer(1_900, Err(io::ErrorKind::NotFound))]);
     let connector = FakeConnector::new(Vec::new());
-    let (result, elapsed) = dial_with(&resolver, &connector, "blackstark.local").await;
+    let (result, elapsed) = dial_with(&resolver, &connector, "workstation.local").await;
     assert_eq!(
         result.unwrap_err().to_string(),
         "name not resolved (mDNS) within 4 s"

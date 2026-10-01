@@ -118,7 +118,7 @@ class HomeUiDeviceTest {
 
     @Test
     fun anUnreachableHostSaysWhatEachAddressDidInMutedMonoLines() {
-        val mac = uiHost(6, "Mac", addresses = listOf(HostEndpoint("mac.local", 22), HostEndpoint("10.255.255.1", 22)))
+        val mac = uiHost(6, "Mac", addresses = listOf(HostEndpoint("mac.local", 22), HostEndpoint("198.51.100.20", 22)))
         val unreachable = HostState.Closed(
             CloseReason.Failed(
                 SessionFailure.Unreachable("TCP connection failed: address 0: name not resolved (mDNS) after 3 tries; address 1: no answer within 6 s"),
@@ -128,7 +128,7 @@ class HomeUiDeviceTest {
         compose.onNodeWithTag("host-failure:6", useUnmergedTree = true).assertIsDisplayed()
         compose.onNodeWithTag("host-detail-lines:6", useUnmergedTree = true).assertIsDisplayed()
         compose.onNodeWithText("mac.local:22 \u00b7 name not resolved (mDNS) after 3 tries", substring = true, useUnmergedTree = true).assertIsDisplayed()
-        compose.onNodeWithText("10.255.255.1:22 \u00b7 no answer within 6 s", substring = true, useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("198.51.100.20:22 \u00b7 no answer within 6 s", substring = true, useUnmergedTree = true).assertIsDisplayed()
     }
 
     @Test

@@ -2252,7 +2252,7 @@ vanished) leaves no terminal: the one that was opened is dismissed, as is one wh
 ### Unreachable hosts explain themselves
 
 The host card (Home) and the host page show, under the failure and in muted mono, what **each address**
-did: `blackstark.local:22 \u00b7 name not resolved (mDNS) after 3 tries` and `10.255.255.1:22 \u00b7 no answer
+did: `workstation.local:22 \u00b7 name not resolved (mDNS) after 3 tries` and `198.51.100.20:22 \u00b7 no answer
 within 6 s`. The core names addresses by position only; `unreachableDetail` puts the host's own names
 back (an `Unreachable` message of the form `address N: <outcome>; address M: ...`, see "Address
 racing"). A host with the **sleeps** flag whose connection ended `Unreachable`, `TimedOut` or lost reads
