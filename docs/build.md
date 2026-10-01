@@ -111,6 +111,21 @@ for Android arm64. Install that Zig version on `PATH` for a fresh setup and chec
 before building. The dependency's Rust build script drives Zig; no checked-in terminal binary
 or Kotlin protocol implementation is used.
 
+## herdr client
+
+`core/or2-core/src/herdr/generated.rs` is generated; do not edit it. After a herdr update run
+`scripts/gen-herdr-types.sh` (needs `python3`, `rustfmt` and `cargo install cargo-typify
+--version 0.10.0-alpha.1 --locked`; `--herdr PATH` picks the binary, `--offline` regenerates
+from the checked-in `schema.json`, `--check` fails when the checked-in files are stale), then
+review the diff of `schema.json` and the protocol note in `docs/contracts.md`.
+
+`core/or2-core/tests/herdr_live.rs` runs the client against a real herdr: each test starts its
+own `herdr --session or2-test-<pid>-<n> server` (every `HERDR_*` variable removed, so it never
+reaches the session it may be run from), talks only to that socket, and stops and deletes that
+session. It looks for `herdr` in `OR2_HERDR`, `PATH`, then `~/.local/bin`; without one it skips
+with a message, or fails if `OR2_REQUIRE_HERDR` is set. The restart test waits for two 10 s
+retry intervals (about 20 s in all).
+
 Debug artifacts:
 - `android/app/build/outputs/apk/debug/app-debug.apk`
 - `android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk`

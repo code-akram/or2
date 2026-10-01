@@ -117,8 +117,9 @@ answers first.
 
 - herdr exposes newline-delimited JSON over a Unix socket. The default session lives at
   `~/.config/herdr/herdr.sock`; named sessions (`herdr --session <name>`) live at
-  `~/.config/herdr/sessions/<name>/herdr.sock`. Discover paths with `herdr [--session <name>]
-  status server` over an exec channel; never hard-code them.
+  `~/.config/herdr/sessions/<name>/herdr.sock`. Discover paths with
+  `herdr session list --json` (`socket_path`, `running`, `default`) over an exec channel; never
+  hard-code them.
 - Non-interactive SSH does not load the user's PATH (herdr is often in `~/.local/bin`). Probe
   common locations and cache the herdr path per host.
 - or2 reaches the socket through OpenSSH streamlocal forwarding
@@ -128,11 +129,13 @@ answers first.
   **no sequence number**, so events received during the snapshot are invalidations, not patches:
   install the snapshot, then do serialized authoritative refreshes, repeating if another event
   arrives mid-read. On `events_lost`, resubscribe and reconcile. Re-snapshot after every reconnect.
-- `pane.agent_status_changed` subscriptions need a `pane_id`, so or2 subscribes per pane and adds
-  subscriptions as panes appear.
-- Types are generated from `herdr api schema --json`, never hand-written. The bundle needs a
-  normalization step first (extract `schemas.success_response`, `schemas.event`, …, rewrite their
-  `$ref`s), then cargo-typify; generated code needs `regress`. Test against sanitized fixtures.
+- `pane.agent_status_changed` subscriptions need a `pane_id`, so or2 subscribes per pane. A
+  subscription cannot grow, so when panes appear a new stream covering every current pane
+  replaces the old one and the view is read again.
+- Types are generated from `herdr api schema --json` by `scripts/gen-herdr-types.sh`, never
+  hand-written. The bundle needs a normalization step first (extract `schemas.success_response`,
+  `schemas.event`, …, rewrite their `$ref`s, drop validation keywords, open string enums), then
+  cargo-typify. Test against sanitized fixtures and an isolated live session.
 - Clients must ignore unknown fields and treat unsupported methods as normal errors.
 - M0 measured 365 ms from SSH connect to snapshot installed on the Arch host.
 
@@ -322,7 +325,7 @@ carries terminals, tmux/probe exec channels and herdr streamlocal channels (FFI 
   `contract_probe_host`; Kotlin JVM contract test.
 - [ ] Lane A1: host driver over russh with multiplexed channels, address racing, capability
   probe, tmux listing and attach, terminal targets, `connect_host`; OpenSSH interop tests.
-- [ ] Lane A2: generated herdr types, discovery, subscribe/snapshot/reconcile watch, focus;
+- [x] Lane A2: generated herdr types, discovery, subscribe/snapshot/reconcile watch, focus;
   fixture and live isolated-session tests.
 - [ ] Lane A3: vendored mosh-rs behind `DatagramTransport`, `Screen` over libghostty,
   bootstrap and session driver; live tests against local `mosh-server`.

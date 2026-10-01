@@ -246,8 +246,8 @@ this text disagree, fix one of them in the same change.
 Lane 0 has landed. A2 and A3 land independently. A1 and B land together: A1 removes the M1
 `connect` export and B removes its Kotlin use. `connect_host` exists from lane 0 so Kotlin
 compiles against it, but until A1 lands it closes every connection with
-`Failed { Internal }` (never a pretend success). Likewise lane 0's `herdr::watch` and
-`herdr::focus_pane` report "not integrated" failures until A2 replaces them.
+`Failed { Internal }` (never a pretend success). Lane A2 has landed: `herdr::run`, `watch` and
+`focus_pane` are the real client.
 
 ## Remote commands (`or2_core::remote`)
 
@@ -419,53 +419,112 @@ activity_unix: i64 }`, sorted by most recent activity.
 ## herdr (`or2_core::herdr`)
 
 - **Types** are generated from `herdr api schema --json` by `scripts/gen-herdr-types.sh`
-  (normalize: extract `schemas.*`, rewrite `$ref`s; then cargo-typify). The normalized schema
-  and the generated `herdr/generated.rs` are checked in with the herdr version they came from.
-  Deserialization ignores unknown fields; unknown enum values map to an `Unknown` variant
-  rather than failing the whole message. Never hand-edit the generated file.
-- **Discovery:** `<herdr> session list --json` gives each session's name, `running` and
-  `socket_path`. Never hard-code socket paths. `HostCapabilities.herdr_sessions` reports name,
-  `running` and `is_default`; `socket_path` is not reported to Kotlin. `run` and `focus_pane`
-  rediscover it themselves with that command, using the herdr path they are given.
-- **Watch:** `herdr::watch(host, herdr, session, observer) -> HerdrWatchHandle`. Opens one long-lived
-  streamlocal event channel and short-lived request channels. Bootstrap: `events.subscribe`
-  and wait for its ack, then `session.snapshot`; events arriving during a read are
-  invalidations, not patches: install the snapshot, then do serialized authoritative refreshes,
-  repeating while another event arrived mid-read. Subscribe per pane to
-  `pane.agent_status_changed` as panes appear. On `events_lost` or a dropped event channel,
-  resubscribe and re-snapshot.
+  (`scripts/herdr_schema.py` normalizes, then cargo-typify). The normalized schema
+  `herdr/schema.json` (with the herdr version and protocol it came from: 0.9.3, protocol 22)
+  and `herdr/generated.rs` are checked in; `generated.rs` has one module per schema family
+  (`request`, `success_response`, `error_response`, `event`, `subscription_event`) and the
+  constants `HERDR_VERSION` and `PROTOCOL`. Never hand-edit it: fix the script and
+  regenerate (`--offline` regenerates from the checked-in schema, `--check` verifies both
+  files). Normalization decisions: `$ref`s become local; validation keywords a client has no use
+  for (`pattern`, `propertyNames`, `maxProperties`, `minProperties`) are dropped, so one odd map
+  key cannot fail a snapshot and no `regress` dependency is needed; in every family herdr
+  *sends*, a string enum becomes `oneOf [enum, string]`, which typify renders as an untagged
+  enum whose second variant holds any unknown value (the projection maps it to
+  `AgentStatus::Unknown`); the bundle's `request` (an `id` plus a `oneOf` of `{method,
+  params}`) is split so typify generates an adjacently tagged `RequestBody` enum, and
+  `herdr::wire` adds the `id`. Unknown fields are ignored (no `deny_unknown_fields`).
+  *Event payloads are not typed at runtime*: events are invalidations, so the stream reader
+  classifies a line by its top-level key (`error`, `result`, `event`) and never fails on an
+  event it cannot decode. The event families are generated for later consumers; their
+  internally tagged `EventData` is not tolerant of an unknown event type.
+- **Discovery:** `<herdr> session list --json` over `RemoteHost::exec` gives each session's name,
+  `default`, `running` and `socket_path` (or2 reads only those; other fields are ignored). A
+  `None` session is the entry with `default: true`, `Some(name)` the entry with that name.
+  Never hard-code socket paths. Exit status 126/127 is `NotInstalled`; another failure or
+  unreadable output is `Failed`; a missing or stopped session is `NotRunning`.
+  `HostCapabilities.herdr_sessions` reports name, `running` and `is_default`; `socket_path` is
+  not reported to Kotlin. `run` and `focus_pane` rediscover it themselves on every attempt,
+  using the herdr path they are given.
+- **Watch:** `herdr::watch(host, herdr, session, observer) -> HerdrWatchHandle` is `channel`
+  plus a task running `run`. One *attempt*: discover; open one long-lived streamlocal event
+  stream and `events.subscribe` (bounded by the 10 s request timeout), wait for the ack;
+  then reconcile: `session.snapshot` on a separate short-lived stream, install it, and read
+  again while an event arrived during the read (events are invalidations, never patches).
+  Reads are at least 100 ms apart and events that arrive before a read starts are covered by
+  it. Any line on the event stream other than the ack, including an unparseable or unknown
+  one, is an invalidation.
+  - *Subscriptions* (minimal set that keeps the view current): `workspace.created`, `.updated`,
+    `.renamed`, `.moved`, `.reordered`, `.closed`, `.focused`; `tab.created`, `.closed`,
+    `.focused`, `.renamed`, `.moved`; `pane.created`, `.closed`, `.updated`, `.focused`,
+    `.moved`, `.exited`, `.agent_detected`; plus `pane.agent_status_changed` per pane (herdr
+    requires the `pane_id`). Not subscribed: `workspace.metadata_updated`, `worktree.*`,
+    `layout.updated`, `pane.output_matched`, `pane.scroll_changed` (nothing in the view depends
+    on them).
+  - *Panes appearing.* A subscription cannot grow, and herdr rejects the whole request, and
+    closes the stream, if a named pane no longer exists. The first stream therefore carries
+    only the lifecycle subscriptions. After each installed snapshot, if a pane `(pane_id,
+    terminal_id)` is not covered, a new stream with the lifecycle subscriptions and every
+    current pane replaces the old one, and the view is read again (events between the read and
+    the new subscription are lost). A rejection (a pane closed meanwhile) re-reads the panes and
+    retries; the fourth consecutive rejection fails the attempt (`Failed`).
+  - *Recovery.* `events_lost` (an `error` line on the event stream, after which herdr closes it),
+    any other error line, or a dropped stream ends the attempt with a 500 ms pause and a new
+    attempt (rediscover, subscribe, snapshot). The last view stays delivered meanwhile; the
+    state changes only if the new attempt fails.
+- **Protocol:** the snapshot's `protocol` must be at least `generated::PROTOCOL` (22); an older
+  herdr is `IncompatibleProtocol { protocol }` (final), a newer one is accepted (herdr adds
+  fields, which are ignored). A snapshot that cannot be read is `Failed`.
 - **States** (`HerdrState`): `Starting` (initial, not delivered), `Live { view }`,
   `Unavailable { reason, message }`, `Closed`. `reason`: `NotInstalled` and
-  `IncompatibleProtocol { protocol }` are final; `NotRunning` and `Failed` retry every 10 s
-  while the host is connected (the state is redelivered only when it changes). `Closed` is
-  delivered once, last, after `stop()` or host close, then the observer is released.
-- **Rust API** (lane 0): `herdr::channel(observer) -> (HerdrWatchHandle, HerdrWatchDriver)`
-  (the same split as `session`: the handle's `state()` and `stop()` never block, the driver
-  delivers states in order and `Closed` exactly once, then releases the observer; dropping the
-  driver closes it; dropping every handle stops it). `herdr::watch(host, herdr, session, observer)`
-  is `channel` plus a task running `herdr::run(host, herdr, session, driver)` on the process
-  runtime (`herdr` is the absolute path from the capability probe; a caller whose probe found
-  none reports `Unavailable { NotInstalled }` itself and does not call them); the host driver uses `channel` and `run` itself so the handle can be returned
-  synchronously. A state equal to the current one is not redelivered; after a final
-  `Unavailable` only `Closed` is accepted. `focus_pane` returns `HerdrError`
-  (`NotIntegrated`, `Remote`, `Failed`). Until lane A2, `run` reports
-  `Unavailable { Failed, "herdr client not integrated" }` and waits for the stop, and
-  `focus_pane` always fails with `NotIntegrated`.
-- **View** (`HerdrView`) is or2's projection, delivered whole, coalesced to at most one
-  delivery per 100 ms: `version`, `protocol`, `focused_pane_id`, `workspaces`
-  (`workspace_id, number, label, focused, agent_status`), `tabs` (`tab_id, workspace_id,
-  number, label, focused, agent_status`), `panes` (`pane_id, tab_id, workspace_id, label,
-  agent, agent_status, cwd, title, focused`) and `agents` (`pane_id, tab_id, workspace_id,
-  name, agent, display_agent, status, cwd, title, focused, state_change_seq`). `AgentStatus`:
-  `Idle`, `Working`, `Blocked`, `Done`, `Unknown`. Field types follow herdr's schema:
-  `version: u64` is or2's own counter (it increases with every delivery of one watch),
-  `protocol: u32` is herdr's protocol number, `focused_pane_id` and pane/agent `label`, `name`,
-  `agent`, `display_agent`, `cwd`, `title` are optional, `state_change_seq` is `u64`; the FFI
-  records are `HerdrView`, `HerdrWorkspace`, `HerdrTab`, `HerdrPane`, `HerdrAgent`.
-- **Focus:** `herdr::focus_pane(host, herdr, session, pane_id)` sends one `pane.focus` request. It
-  changes what the user's herdr clients show; tests use isolated named sessions only.
-- Tests never touch the default herdr session or any session they did not create. Live tests
-  start `herdr --session or2-test-<unique> server` and stop/delete it afterwards.
+  `IncompatibleProtocol { protocol }` are final; `NotRunning` (no such session, stopped, or its
+  socket refuses connections) and `Failed` (anything else: unreadable output, timeout, refused
+  channel, rejected request) retry every 10 s while the host is connected. `Unavailable` is
+  redelivered only when its *reason* changes, so a message that differs between attempts does
+  not repeat it. `Closed` is delivered once, last, after `stop()` or host close
+  (`RemoteError::Closed` from any call), then the observer is released. A stop interrupts every
+  wait, including a read in flight.
+- **Delivery.** `HerdrView` is delivered whole, at most once per 100 ms (the first view at once,
+  a burst collapses to its latest view), and only when it differs from the last delivered view
+  (compared without `version`, which is or2's own counter: it starts at 1 and increases with
+  every delivery of one watch). After `Unavailable` the next `Live` is always delivered.
+- **Rust API.** `herdr::channel(observer) -> (HerdrWatchHandle, HerdrWatchDriver)` (the same split
+  as `session`: the handle's `state()` and `stop()` never block, the driver delivers states in
+  order and `Closed` exactly once, then releases the observer; dropping the driver closes it;
+  dropping every handle stops it). `herdr::run(host, herdr, session, driver)` drives a driver
+  until it stops (`herdr` is the absolute path from the capability probe; a caller whose probe
+  found none reports `Unavailable { NotInstalled }` itself and does not call it); the host driver
+  uses `channel` and `run` itself so the handle can be returned synchronously. A state equal to
+  the current one is not redelivered; after a final `Unavailable` only `Closed` is accepted.
+  `focus_pane` returns `HerdrError` (`Remote`, `Failed`; lane A2 removed lane 0's
+  `NotIntegrated`, which has no meaning any more). The retry, resubscribe and coalescing
+  intervals live in `herdr::watch::Timing` (crate-private; tests shorten them or run under a
+  paused clock).
+- **View** (`HerdrView`) is or2's projection of the snapshot, in herdr's order: `version`,
+  `protocol`, `focused_pane_id`, `workspaces` (`workspace_id, number, label, focused,
+  agent_status`), `tabs` (`tab_id, workspace_id, number, label, focused, agent_status`), `panes`
+  (`pane_id, tab_id, workspace_id, label, agent, agent_status, cwd, title, focused`) and `agents`
+  (`pane_id, tab_id, workspace_id, name, agent, display_agent, status, cwd, title, focused,
+  state_change_seq`). `AgentStatus`: `Idle`, `Working`, `Blocked`, `Done`, `Unknown`. Field types
+  follow herdr's schema: `version: u64`, `protocol: u32`, `focused_pane_id` and pane/agent
+  `label`, `name`, `agent`, `display_agent`, `cwd`, `title` are optional, `state_change_seq` is
+  `u64`; the FFI records are `HerdrView`, `HerdrWorkspace`, `HerdrTab`, `HerdrPane`,
+  `HerdrAgent`. `cwd` is the pane's `cwd` (not `foreground_cwd`) and `title` its `title`
+  (not `terminal_title`).
+- **Focus:** `herdr::focus_pane(host, herdr, session, pane_id)` rediscovers the socket and sends
+  one `pane.focus` request on a short-lived stream (10 s bound). It changes what the user's
+  herdr clients show; tests use isolated named sessions only. An error response (for example
+  `pane_not_found`) is `HerdrError::Failed`.
+- **Tests.** Unit tests run the watch against `herdr::testing::FakeHost`, a scripted
+  `RemoteHost` (a fake herdr over in-memory streams) under tokio's paused clock, with sanitized
+  fixtures in `herdr/fixtures/` (captured from isolated test sessions; the agent, unknown-value
+  and `events_lost` fixtures are written from the schema and the socket documentation). They
+  cover bootstrap order, events during a read, coalescing, `events_lost`, dropped streams,
+  the 10 s retry, final reasons, rejected subscriptions and stop. The live test
+  (`tests/herdr_live.rs`) starts `herdr --session or2-test-<pid>-<n> server` with every
+  `HERDR_*` variable removed (so it starts empty and cannot reach the user's session), drives it
+  through its socket, and stops and deletes exactly that session; it is skipped with a message
+  when herdr is absent unless `OR2_REQUIRE_HERDR` is set. Tests never touch the default herdr
+  session or any session they did not create.
 
 ## mosh core (`or2_core::mosh`, no FFI in M2)
 
