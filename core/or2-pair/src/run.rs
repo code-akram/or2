@@ -152,6 +152,11 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
         env.version
     )?;
 
+    // Fail before doing anything: with nobody to confirm there is no point in showing a code.
+    if !options.no_listen && !options.check_only && !env.can_ask {
+        return Err(RunError::NotInteractive);
+    }
+
     let ssh_port = options.ssh_port.unwrap_or_else(|| {
         std::fs::read_to_string(env.etc_ssh.join("sshd_config"))
             .ok()
@@ -209,9 +214,6 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
     let mut otp = None;
     let mut pair = Vec::new();
     if !options.no_listen {
-        if !env.can_ask {
-            return Err(RunError::NotInteractive);
-        }
         let bind: Vec<IpAddr> = if options.bind.is_empty() {
             addresses::bindable(&addresses)
         } else {
