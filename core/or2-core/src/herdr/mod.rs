@@ -8,16 +8,30 @@
 //! Starting ──▶ Live ⇄ Unavailable ──▶ Closed (terminal, once)
 //! ```
 //!
-//! **Not integrated yet.** [`run`] and [`focus_pane`] fail honestly until the herdr client
-//! (generated wire types, discovery, subscribe/snapshot reconciliation) replaces them.
+//! The client behind it: [`generated`] holds herdr's wire types (generated from
+//! `herdr api schema --json`, never edited), [`wire`] the newline-delimited JSON layer,
+//! `discovery` finds a session's socket with `session list --json`, `project` turns a
+//! `session.snapshot` into the [`view`], and `watch` keeps it current from subscribe, snapshot
+//! and invalidating events. Everything reaches herdr through [`RemoteHost`].
 
+pub mod generated;
 pub mod view;
+pub mod wire;
+
+mod discovery;
+mod project;
+#[cfg(test)]
+mod testing;
+mod watch;
+#[cfg(test)]
+mod watch_tests;
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::mpsc;
 
 use crate::remote::{RemoteError, RemoteHost};
+use generated::request::{PaneTarget, RequestBody};
 
 pub use view::{Agent, AgentStatus, HerdrView, Pane, Tab, Workspace};
 
@@ -80,11 +94,9 @@ pub trait HerdrObserver: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HerdrError {
-    #[error("the herdr client is not integrated yet")]
-    NotIntegrated,
     #[error(transparent)]
     Remote(#[from] RemoteError),
-    /// herdr answered with an error.
+    /// herdr is missing, its session is not running, or it answered with an error.
     #[error("herdr failed: {0}")]
     Failed(String),
 }
@@ -216,46 +228,55 @@ pub fn watch<H: RemoteHost>(
     handle
 }
 
-/// Drives `driver` until it is stopped, then closes it. `herdr` is the absolute path from the
-/// capability probe. The session's socket is not an input: the client finds it with
-/// `<herdr> session list --json` (`socket_path`), so it never leaves the herdr module.
-///
-/// Not integrated: reports `Unavailable { Failed }` and waits for the stop. Never a pretend
-/// `Live`.
+/// Drives `driver` until it is stopped or the host closes, then closes it. `herdr` is the
+/// absolute path from the capability probe. The session's socket is not an input: the client
+/// finds it with `<herdr> session list --json` (`socket_path`), so it never leaves the herdr
+/// module. See [`watch`](self::watch) for the protocol: subscribe, snapshot, invalidating
+/// events, `events_lost` recovery, and the retry rules for each [`HerdrUnavailable`].
 pub async fn run<H: RemoteHost>(
     host: Arc<H>,
     herdr: String,
     session: Option<String>,
-    mut driver: HerdrWatchDriver,
+    driver: HerdrWatchDriver,
 ) {
-    let _ = (host, herdr, session);
-    let _ = driver.transition(HerdrState::Unavailable {
-        reason: HerdrUnavailable::Failed,
-        message: "herdr client not integrated".into(),
-    });
-    driver.stopped().await;
-    driver.close();
+    watch::run(host, herdr, session, driver, watch::Timing::default()).await;
 }
 
-/// Focuses `pane_id` in `session` with one `pane.focus` request. `herdr` is the absolute path
-/// from the capability probe. It changes what the user's herdr clients show.
-///
-/// Not integrated: always fails with [`HerdrError::NotIntegrated`].
+/// Focuses `pane_id` in `session` with one `pane.focus` request on a short-lived stream.
+/// `herdr` is the absolute path from the capability probe. It changes what the user's herdr
+/// clients show.
 pub async fn focus_pane<H: RemoteHost>(
     host: &H,
     herdr: &str,
     session: Option<&str>,
     pane_id: &str,
 ) -> Result<(), HerdrError> {
-    let _ = (host, herdr, session, pane_id);
-    Err(HerdrError::NotIntegrated)
+    let socket = discovery::locate(host, herdr, session)
+        .await
+        .map_err(|error| match error {
+            discovery::DiscoveryError::Remote(error) => HerdrError::Remote(error),
+            other => HerdrError::Failed(other.to_string()),
+        })?;
+    wire::call(
+        host,
+        &socket,
+        "or2_focus",
+        &RequestBody::PaneFocus(PaneTarget {
+            pane_id: pane_id.to_owned(),
+        }),
+        watch::Timing::default().request,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| match error {
+        wire::WireError::Remote(error) => HerdrError::Remote(error),
+        other => HerdrError::Failed(other.to_string()),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote::LocalHost;
-
     #[derive(Default)]
     struct Recorder(Mutex<Vec<HerdrState>>);
 
@@ -385,48 +406,5 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(driver.stopped());
-    }
-
-    #[tokio::test]
-    async fn the_unintegrated_watch_fails_honestly_and_closes_on_stop() {
-        let recorder = Arc::new(Recorder::default());
-        let handle = watch(
-            Arc::new(LocalHost::new()),
-            "/usr/bin/herdr".into(),
-            None,
-            recorder.clone(),
-        );
-        for _ in 0..200 {
-            if handle.state() != HerdrState::Starting {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert_eq!(
-            handle.state(),
-            HerdrState::Unavailable {
-                reason: HerdrUnavailable::Failed,
-                message: "herdr client not integrated".into()
-            }
-        );
-        handle.stop();
-        // The state flips before the observer runs, so wait on the recorder.
-        for _ in 0..200 {
-            if lock(&recorder.0).len() == 2 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let events = lock(&recorder.0).clone();
-        assert_eq!(events.len(), 2, "{events:?}");
-        assert_eq!(events[1], HerdrState::Closed);
-    }
-
-    #[tokio::test]
-    async fn focus_is_not_integrated() {
-        assert_eq!(
-            focus_pane(&LocalHost::new(), "/usr/bin/herdr", Some("work"), "p1").await,
-            Err(HerdrError::NotIntegrated)
-        );
     }
 }
