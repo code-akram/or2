@@ -830,7 +830,11 @@ refuses (leaving the link as it was) any socket whose peer IP or port differs: a
 resolves to another address on a later rebind, a round-robin or changed DNS record, the other
 address family. Sockets are opened from the IP literal, so no resolver is involved, and a
 transport that connects elsewhere anyway is caught by the check (an IPv6 scope id or flow
-label is not part of the identity; scoped link-local IPv6 is not supported for mosh). A
+label is not part of the identity). `start` takes an `IpAddr`, which has no scope, so a
+scoped link-local IPv6 host cannot be named to it; the host driver passes the SSH peer's whole
+`SocketAddr` (`run_session`'s `Plan::peer`), and `Link` opens its sockets from the literal with
+the scope id (`fe80::1%3`, read numerically by the resolver), so such a host works over a
+host connection. A
 datagram refused as too large
 (`EMSGSIZE`) drops the datagram size to 500 and stays there, as mosh does. The Android network
 binding in M3 is another `DatagramTransport`.
@@ -936,8 +940,8 @@ would leave it and its shell on the host for good, once per retry. `terminate` s
 to `MoshParams::server_pid` through the exec channel, and only if the process there is named
 `mosh-server` (a reused id is left alone; one already gone is not an error). **Whoever calls
 `bootstrap` and `start` must call it when the session closes `Failed { TimedOut }` before ever
-reaching `Connected`, or is disconnected before it did** (the host driver does: M3, "Mosh
-terminals");
+reaching `Connected`, or is disconnected before it did, or ends `Failed` after it did** (the host
+driver does: M3, "Mosh terminals");
 `bootstrap` itself calls it when the server started but its answer was unusable (it reads
 the pid from either stream *before* wiping stdout, so a pid printed on stdout beside an unusable
 CONNECT line is still cleaned up). A
@@ -987,8 +991,10 @@ the same command, frame and publish rules as the SSH driver:
   are ignored: mosh has no host key.
 - `LinkControl::roam()` is the hook for Android's network callback: open a new socket now
   instead of after ten silent seconds. `HealthObserver::link_health(LinkHealth { since_heard_ms,
-  since_ack_ms })` is called about once a second from the driver thread: the hook for M3's
-  network-health reporting.
+  since_ack_ms })` is called once a second from the driver thread, every sample and before
+  `Connected` as well (a caller can show "waiting"): the hook for M3's network-health
+  reporting. (The session observer's own link health, M3, is throttled; see "Link health"
+  under "M3-A implementation".)
 
 **Findings.** mosh keeps no scrollback; see the M0 consequences in `design.md`. The live test
 needed `SSH_CONNECTION` set (this machine's own login session made `-s` bind a public address).
@@ -1248,7 +1254,9 @@ impl Session {
 #[uniffi::export] pub fn network_changed();   // every live mosh session roams; every host
                                               // connection sends an SSH keepalive at once
 pub trait SessionListener {                   // added method
-    /// mosh only, at most once a second and only when a value changes.
+    /// mosh only, at most once a second, and only when what the UI shows changes: the first
+    /// sample, the link turning stale (`since_heard_ms > 5000`), each further whole second of
+    /// silence while stale, and recovery. See "Link health" under "M3-A implementation".
     fn on_link_health(&self, health: LinkHealth) -> Result<(), ListenerError>;
 }
 #[derive(uniffi::Record)] pub struct LinkHealth { since_heard_ms: u64, since_ack_ms: u64 }
@@ -1297,22 +1305,55 @@ session `Failed { Internal { "mosh terminals land with M3-A" } }` is gone.
    a missing tmux or herdr itself).
 3. The target's command as `RemoteCommand::argv()`, built by the code the SSH path uses
    (`terminal_session::program`): `<tmux> -u new-session -A -s <name>`, `<herdr>` or `<herdr>
-   --session <name>`, nothing for `Shell` (the login shell). A herdr pane is focused first, over
+   --session <name>`, nothing for `Shell` (the login shell). `argv()` returns `None` for a
+   command that carries environment assignments (an argument vector cannot), and the session
+   closes `Failed { Internal }` rather than run the command without them; none do today. A
+   herdr pane is focused first, over
    SSH, exactly as for an SSH terminal (`CommandFailed` on failure, before any server exists).
 4. `mosh::bootstrap(host, caps, size, argv)` with the probed path and UTF-8 locale; then
    `mosh::run_session` (the driver of `mosh::start_with`, see below) with `DirectUdp` and
-   `Link` pinned to `peer_addr().ip()` plus the bootstrap's port. A resize during the bootstrap
+   `Link` pinned to `peer_addr()` with the bootstrap's port (`set_port`, so an IPv6 scope id
+   and flow label are kept). A resize during the bootstrap
    is carried into the session (latest wins); other input during it is dropped (the session is
    `Connecting`, as for SSH).
-5. **Cleanup.** Whenever the session ends without ever having been `Connected` (UDP blocked:
-   `Failed { TimedOut }` after `HostOptions::mosh_connect_timeout`, 15 s in production; any other
-   failure; a disconnect), `mosh::terminate(host, server_pid)` runs (bounded by the exec timeout)
-   **before** the session reports `Closed`. A disconnect (session or user host disconnect) while
-   the bootstrap exec is still running lets it finish for up to 2 s more so the server it started
-   can be stopped; cutting the exec shorter loses the pid and the server stays (the limitation
-   documented under `mosh::terminate`). If the host connection is already gone `terminate` fails
-   quietly and the server stays until someone stops it: a loss can leave a server nobody ever
-   reached only in that narrow window.
+5. **Cleanup.** `mosh::terminate(host, server_pid)` runs **before** the session reports `Closed`
+   whenever the session ends without ever having been `Connected` (UDP blocked: `Failed {
+   TimedOut }` after `HostOptions::mosh_connect_timeout`, 15 s in production; any other failure;
+   a disconnect) **and whenever it ends `Failed` after `Connected`** (an internal error such as
+   a screen fault: the key lived only in memory, so nobody can reattach, and `mosh-server` has
+   no idle timeout). A `Disconnected` after `Connected` is the shutdown handshake's job, and
+   `RemoteExited` means the server is gone. The decision is `owes_cleanup(connected, reason)`.
+   **Bounds.** `terminate` is bounded by `CLEANUP_BUDGET` (5 s, or the host's exec timeout when
+   that is shorter), not by the exec timeout alone, so closing has a known worst case:
+   `ABANDON_GRACE` (2 s) + `GOODBYE_TIMEOUT` (1 s) + `CLEANUP_BUDGET` (5 s) =
+   `mosh_session::CLOSE_BUDGET` (8 s). A disconnect (session or user host disconnect) while the
+   bootstrap exec is still running lets it finish for up to `ABANDON_GRACE` more so the server
+   it started can be stopped; cutting the exec shorter loses the pid and the server stays (the
+   limitation documented under `mosh::terminate`). **A disconnect starts nothing new:**
+   `prepare` carries a cancellation flag the abandon sets, checked after the capability probe
+   (before the pane focus) and after the focus (before the exec), so a disconnect during the
+   probe or the focus focuses no pane and starts no server; only an exec already running is
+   waited for.
+   **The host waits for this.** On a user disconnect of the host the host driver waits
+   `SESSIONS_CLOSE_GRACE` (3 s) for its SSH terminals and watches as before, and for mosh
+   sessions until `CLOSE_BUDGET` (8 s) after the close began (a second drain tracker, held by
+   each mosh session's watcher), so the SSH connection stays up while a session stops its
+   server over it, and the session's `Closed` still precedes the host's, also on a slow link.
+   Past the budget the host closes anyway (a wedged session must not hold it open). A loss of
+   the host releases the tracker at once, as before.
+   **Known leak windows.** If the host connection is already gone `terminate` fails quietly and
+   the server stays until someone stops it. That is not only a narrow window: a host lost after
+   the bootstrap but before the first datagram (the very case AUTO's fallback targets, UDP
+   blocked on cellular, together with a flaky link) leaves the session waiting out
+   `mosh_connect_timeout` and closing `Failed { TimedOut }` with a server nobody can stop from
+   inside the app: the pid is known, but or2 keeps no key to reconnect with and Rust keeps no
+   storage, so there is nobody to retry. Likewise a session that ends `Failed` after the host
+   is lost, and a pid lost by a cut bootstrap. Accepted for M3: the server's shell is the one
+   the user would have been given anyway, and Android's reconnect (M3-B) uses a new server.
+   **M3-B hand-off:** a `Failed { TimedOut }` close does not promise the server was stopped; a
+   transport fallback to SSH after it is still right, and the UI must not claim cleanup.
+   A deliberately retained pid for a later best-effort terminate over a fresh host connection
+   is possible (the app would have to hold it) and is not done.
 
 **Host close semantics.** A mosh session ignores the host connection once it is running.
 `HostDriver` gives every terminal the host's `closing` watch; a small watcher task per mosh
@@ -1321,7 +1362,8 @@ makes the session disconnect with mosh's shutdown handshake (the server exits; t
 `Closed { Disconnected }` before the host's `Closed`, as for SSH terminals, because the watcher
 holds the host's drain tracker until the session has closed); any other reason is a loss: the
 watcher drops its tracker at once (the host does not wait for the session) and the session
-carries on. SSH terminals keep M2's rule unchanged. After a loss the host takes no more terminals
+carries on. The tracker is the mosh one (see "Bounds" above), waited for up to
+`CLOSE_BUDGET`, not the 3 s of SSH terminals. SSH terminals keep M2's rule unchanged. After a loss the host takes no more terminals
 (`HostError::Closed`), the mosh session remains usable, and its own `disconnect()` closes it
 `Disconnected` with the handshake. The session keeps an `Arc` to the (dead) SSH host object for
 its lifetime; that costs memory only.
@@ -1338,14 +1380,21 @@ optional `HealthObserver`, the roam signal and `shutdown`, a `Notify` that ends 
 datagrams, request, observer, options)` chooses the datagram transport (tests, and Android's
 network-bound transport later). `connect_host`/`connect_host_with` use `DirectUdp`.
 
-**Link health.** The mosh driver samples the link once a second and offers each sample to a
-`HealthThrottle` before `SessionDriver::publish_link_health` (which only delivers while
-`Connected`): at most one report a second, and only when `since_heard_ms` or `since_ack_ms`
-differs from the last report. The values are millisecond-exact, so on a live link they change
-every sample and one report a second is what Kotlin sees; the throttle guarantees the contract
-whatever the sampling. `mosh::start_with`'s separate `HealthObserver` hook is unchanged (every
-sample, including before `Connected`). FFI `SessionListener.on_link_health` is the observer's
-`link_health`. Never called for SSH terminals.
+**Link health.** `SessionDriver::publish_link_health` only delivers while `Connected`. The
+mosh driver reports through a `HealthThrottle`: the first sample after `Connected`; the link
+turning stale (`since_heard_ms > 5000`, the grey-out threshold, `STALE_AFTER_MS`); then once per
+further whole second of silence while stale (so "Last heard 12 s ago" counts); and recovery. A
+healthy link is **not** reported again: its values are millisecond-exact and would change on
+every sample, which is a callback and a recomposition per session per second for nothing (the
+intent of "only when a value changes"; the FFI contract's "at most once a second" holds as an
+upper bound). `since_ack_ms` alone does not trigger a report; it is delivered with the next
+one. The throttle also schedules the driver's wake-ups (`next_check`): a healthy link is looked
+at again when it would turn stale, a stale one every second, so an idle healthy session wakes
+only for its own protocol timers (and a session with no health duty at all, with no observer
+and not yet connected, not for health). `mosh::start_with`'s separate `HealthObserver` hook is
+unchanged: every sample, once a second, including before `Connected`, with no throttle. FFI
+`SessionListener.on_link_health` is the observer's `link_health`. Never called for SSH
+terminals.
 
 **Roaming.** `Session.roam()` sends `Command::Roam` (any state; a closed session ignores it),
 which the mosh driver turns into `request_rebind` (a new socket now, as `LinkControl::roam`);
@@ -1360,7 +1409,11 @@ request and the server's reply cross the connection at once (a live test counts 
 a relay). It does **not** give the connection a deadline: russh counts unanswered *scheduled*
 keepalives (15 s, 3 misses) and an immediate one is not counted, so a connection that the
 change silently blackholed is still noticed by the TCP/keepalive timeouts the write meets, not
-by this call alone. That is the contract's wording ("does not by itself close a connection") and
+by this call alone. The queueing itself is bounded (`KEEPALIVE_QUEUE_TIMEOUT`, 5 s): russh
+stops reading its outbound queue while a TCP write is blocked, so on a blackholed link each
+call's task would otherwise wait forever and a flapping network would pile them up; one that
+times out is dropped (the connection is not draining, and the TCP and scheduled keepalive
+timeouts already apply). That is the contract's wording ("does not by itself close a connection") and
 is deliberate: a hard deadline here would turn every brief handover into a lost host.
 
 **Tests.** `core/or2-core/tests/host_mosh.rs` (loopback sshd + real `mosh-server`, both
@@ -1372,11 +1425,20 @@ SSH terminals fail with the host's reason, the host takes no new terminals, the 
 after the session's own disconnect); user host disconnect (sessions `Disconnected` before the
 host, servers exit); blocked UDP (a transport that drops everything the server sends) gives
 `TimedOut` with the server terminated and the connection intact; a disconnect, and a host
-disconnect, before the first datagram terminate the server. The mosh-server processes are
+disconnect, before the first datagram terminate the server; a user disconnect of the host
+while the bootstrap exec is still running, over a relay that holds every chunk 500 ms (a slow
+link, with a `mosh-server` wrapper that waits first), takes longer than the terminals' 3 s grace
+and still closes the session before the host with the server stopped; a disconnect during the
+probe executes no `mosh-server` at all; host loss while the session is still connecting leaves
+it to time out (`TimedOut`, not the host's `ConnectionLost`; the server then leaks, as
+documented above). The mosh-server processes are
 found by the fixture's private `TMUX_TMPDIR` in their environment and killed by exact pid when
 the test ends however it ends. `connection_tests.rs`: `NotInstalled` for every target
 without opening a channel or focusing a pane. `mosh::driver` tests: throttle, health through the
-observer (not before `Connected`, about once a second), `Session.roam`, the shutdown signal.
+session observer (silent before `Connected`; healthy once; stale then every second; recovery),
+the hook (every sample, also before `Connected`), `Session.roam`, the shutdown signal.
+`mosh_session`: which session ends owe a cleanup, and the close budget covers its steps.
+`remote`: `argv()` refuses an environment. `link`: the scoped IPv6 literal.
 FFI unit tests: the registry (roams live mosh sessions only, forgets closed and released ones).
 `HostConnectNativeTest` runs a real mosh terminal through the generated Kotlin bindings.
 
