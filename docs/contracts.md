@@ -665,32 +665,49 @@ direct-streamlocal open (`open_unix`: the herdr client, watch and focus sockets)
 `a_streamlocal_open_confirmed_after_its_deadline_has_the_channel_closed`. Every channel open on
 the connection is therefore the connection's own task.
 **Ownership across the hand-off.** The task delivers the confirmed channel to the caller inside a
-guard (`OpenedChannel`) whose `Drop` closes it through the connection (a background task of the
-same set, bounded by `CHANNEL_CLOSE_GRACE`; nothing to do once the connection is over), and
-`PendingOpen::wait` takes the channel out of the guard in the same poll that receives it, so the
-caller's own duty to close starts at that moment and the channel is never unowned across an
-`await`. A caller cancelled after the task delivered but before it received (an exec or a
-streamlocal open dropped, a `PendingOpen` dropped) leaves the answer queued; `PendingOpen`'s
-`Drop` closes the oneshot and receives and drops a queued answer, so the guard closes the
-channel. Tests `a_delivered_session_open_dropped_unconsumed_is_closed`,
+guard (`OpenedChannel`) that derefs to the channel; `PendingOpen::wait` returns the guard itself,
+and a caller cancelled after the task delivered but before it received (an exec or a streamlocal
+open dropped, a `PendingOpen` dropped) leaves the answer queued, which `PendingOpen`'s `Drop`
+receives and drops, so the guard closes the channel. Tests
+`a_delivered_session_open_dropped_unconsumed_is_closed`,
 `a_delivered_streamlocal_open_dropped_unconsumed_is_closed`,
 `an_exec_cancelled_after_its_open_was_delivered_has_the_channel_closed`,
 `a_streamlocal_open_cancelled_after_delivery_has_the_channel_closed` (and, as controls, the two
 `..._taken_and_closed_by_the_caller_is_closed` and
 `pending_opens_end_on_host_close_without_retaining_the_host`).
-**No unowned path.** `PendingOpen::wait` returns the `OpenedChannel` guard itself (it derefs to the
-channel; `close()` closes it deliberately and `into_inner()` disarms it), so a terminal's
-`channel_task` holds the channel in the guard from the moment it is delivered: through the focus
-join, `pty-req` and the program request, and into `pump_channel`, whose write half is in its own
-close-on-cancel guard (disarmed when the server closed the channel, the connection broke or the
-pump closed it on a stop). A terminal task the host aborts (the 2 x `CHANNEL_CLOSE_GRACE` wait in
-`drive` ran out) therefore still closes its channel, once, wherever it was. Tests
-`an_aborted_terminal_task_closes_a_running_channel_exactly_once` and
-`an_aborted_terminal_task_closes_a_channel_still_waiting_for_its_focus_exactly_once`. The other
-holders of a raw channel take over without an `await` in between (`ExecChannel` for an exec, which
-closes on drop and disarms only once the server closed the channel; `ChannelStream` for a
-streamlocal socket, which russh closes on drop), so every session, exec and streamlocal channel is
-owned from confirmation to close.
+**One close obligation, no deadline.** The invariant: *from the moment the server confirms a
+session channel until either its `Close` is queued or its connection ends, the channel is owned by
+a guard or by a task of the connection's own set; no path drops it with the `Close` unqueued.*
+Closing is `SshHost::close_owned`, the only place a channel's `close()` is awaited: the future
+that owns the channel is moved into a task of the connection's set which awaits it with **no
+deadline**, because russh's `close` waits for room in its bounded command queue (ten messages,
+full when the shared reader is stuck behind a slow write or another terminal) and dropping that
+await, by a cancellation or a timeout, drops the raw channel without a `Close` ever queued. The
+task ends when the `Close` is queued, or with the connection (a channel goes with its connection,
+and `hold` ends the set). Everything else hands the channel over: `OpenedChannel::close` and
+`OpenedWriter::close` (the write half of a split channel that `pump_channel` runs) await a oneshot
+from that task, and may be bounded or cancelled by the caller (the terminal's `Closed` waits
+`CHANNEL_CLOSE_GRACE` for it and no longer), the task keeping the obligation; the `Drop` of both
+guards, `ExecChannel`'s drop and a cancelled or aborted pump or terminal task start the same task.
+A guard is disarmed only by `into_inner` (a hand-over to the next owner with no `await` in
+between: `open_unix` into a `ChannelStream`, which russh itself closes on drop with an unbounded
+send, and `ExecChannel::finished`, once the server has closed the channel) or when the server
+closed the channel or the connection broke (`pump_channel`). A terminal task that the host aborts
+(the 2 x `CHANNEL_CLOSE_GRACE` wait in `drive` ran out) therefore still closes its channel, once,
+wherever it was; a terminal `Closed` can precede the `Close` reaching the server when the queue is
+full, never replace it. Tests (the queue is filled by freezing the shared reader at an open
+confirmation and sending ten keepalives): `a_cancelled_guard_close_with_a_full_queue_still_closes_the_channel`,
+`a_timed_out_guard_close_with_a_full_queue_still_closes_the_channel`,
+`a_dropped_guard_with_a_full_queue_still_closes_the_channel`,
+`a_cancelled_pump_with_a_full_queue_still_closes_the_channel`,
+`a_pump_stop_with_a_full_queue_still_closes_the_channel`,
+`a_cancelled_exec_close_with_a_full_queue_still_closes_the_channel`,
+`a_terminal_disconnect_with_a_full_queue_still_closes_its_channel_once_the_queue_drains`; and
+`an_aborted_terminal_task_closes_a_running_channel_exactly_once`,
+`an_aborted_terminal_task_closes_a_channel_still_waiting_for_its_focus_exactly_once`,
+`a_terminal_task_aborted_while_pty_or_shell_reply_is_pending_closes_its_channel_once`, with the
+controls `a_guard_close_the_queue_lets_finish_closes_the_channel_once` and
+`a_guard_dropped_after_the_host_is_gone_does_nothing`.
 
 ### tmux
 

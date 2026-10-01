@@ -297,8 +297,7 @@ pub(super) async fn channel_task(
         return CloseReason::Failed(failure);
     }
     let _ = events.send(Event::Connected).await;
-    // `pump_channel` takes over the duty to close it, with no `await` in between.
-    match pump_channel(channel.into_inner(), events, &mut writes, stopped(stop)).await {
+    match pump_channel(channel, events, &mut writes, stopped(stop)).await {
         Ok(reason) => reason,
         Err(failure) => CloseReason::Failed(failure),
     }

@@ -15,6 +15,7 @@ use std::time::Duration;
 use russh::client;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
+use super::connection::{OpenedChannel, OpenedWriter};
 use crate::session::{CloseReason, Command, SessionDriver, SessionFailure, SessionState};
 use crate::submit::SubmitSequencer;
 use crate::term::TerminalSize;
@@ -282,16 +283,15 @@ impl TerminalPump {
 ///
 /// The channel ending with an exit status or signal is `RemoteExited`; ending without one is
 /// loss.
-pub(crate) async fn pump_channel(
-    channel: russh::Channel<client::Msg>,
+pub(super) async fn pump_channel(
+    channel: OpenedChannel,
     events: &mpsc::Sender<Event>,
     writes: &mut mpsc::UnboundedReceiver<Write>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<CloseReason, SessionFailure> {
-    let (mut reader, writer) = channel.split();
-    // An abort or any other cancellation of this future closes the channel; the paths below that
-    // end it themselves disarm the guard.
-    let mut writer = CloseOnCancel(Some(writer));
+    let (mut reader, mut writer): (_, OpenedWriter) = channel.split();
+    // An abort or any other cancellation of this future closes the channel through the
+    // connection; the paths below that know the server closed it disarm the guard.
     let mut exit_status = None;
     let mut exit_signal = false;
     let reading = async {
@@ -351,40 +351,10 @@ pub(crate) async fn pump_channel(
             result
         }
         None => {
-            // Best effort: the host may already be gone.
-            if let Some(writer) = writer.disarm() {
-                let _ = tokio::time::timeout(CHANNEL_CLOSE_GRACE, writer.close()).await;
-            }
+            // Wait for the `Close` to be queued, but only so long: the connection finishes it
+            // if the queue is full, and the session's `Closed` must not wait for that.
+            let _ = tokio::time::timeout(CHANNEL_CLOSE_GRACE, writer.close()).await;
             Ok(CloseReason::Disconnected)
-        }
-    }
-}
-
-/// The write half of a running terminal channel, closed in the background if dropped while
-/// armed (the pump was cancelled): a raw channel does not close itself, and the program on it
-/// would run on.
-struct CloseOnCancel(Option<russh::ChannelWriteHalf<client::Msg>>);
-
-impl CloseOnCancel {
-    fn disarm(&mut self) -> Option<russh::ChannelWriteHalf<client::Msg>> {
-        self.0.take()
-    }
-}
-
-impl std::ops::Deref for CloseOnCancel {
-    type Target = russh::ChannelWriteHalf<client::Msg>;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref().expect("an armed channel writer")
-    }
-}
-
-impl Drop for CloseOnCancel {
-    fn drop(&mut self) {
-        if let Some(writer) = self.0.take() {
-            super::runtime().spawn(async move {
-                let _ = tokio::time::timeout(CHANNEL_CLOSE_GRACE, writer.close()).await;
-            });
         }
     }
 }
