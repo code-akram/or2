@@ -565,18 +565,61 @@ impl HostConnection {                     // all non-blocking unless async
 
 ## Android (lane B)
 
+Lane B has landed in the app; it builds against `connect_host` and so needs lane A1 to connect
+for real (until then every connection closes with `Failed { Internal }`, which the UI reports).
+
 - **Room v2** with a real `Migration(1, 2)` (never destructive: Keystore-bound keys cannot be
-  recreated). New `host_addresses(hostId → hosts.id ON DELETE CASCADE, position, hostname,
+  recreated). New `host_addresses(hostId -> hosts.id ON DELETE CASCADE, position, hostname,
   port, PRIMARY KEY(hostId, position))`; the migration moves each host's `hostname`/`port` to
-  position 0 and drops those columns. `hosts` gains `showInInbox` (default true). Export the
-  schema (`exportSchema = true`, `app/schemas/`) and add a `MigrationTestHelper` device test.
-- Any change to a host's address list or ports clears its trust (M1's rule, generalised).
-- **Holder:** an application-scoped `HostConnections` keeps at most one `HostConnection` per
-  host and any number of terminal sessions per connection. Unlocking: one biometric prompt per
-  distinct key record; hosts sharing a key are connected from one decryption, wiping the array
-  after the last `connect_host` call. Host-key prompts move from sessions to hosts.
-- **Screens:** Inbox (start destination): agents across all `showInInbox` hosts, blocked first,
-  each with host, workspace/tab, agent and status; tap opens a `Herdr { session, pane_id }`
-  terminal. Host screen: connection state, Shell, tmux sessions (attach, new by name), herdr
-  sessions. Terminal: the M1 terminal screen per session, plus a switcher between open
-  sessions. Host form: ordered address list.
+  position 0 and drops those columns. `hosts` gains `showInInbox` (default true) and is altered in
+  place (`ADD COLUMN`, `DROP COLUMN`), never dropped: with foreign keys on, dropping `hosts`
+  would cascade away `trusted_host_keys`. Trust therefore survives the upgrade (the destination
+  is unchanged). The schema is exported (`app/schemas/`, KSP arg `room.schemaLocation`; version
+  1 is the shipped M1 shape). Tests: `MigrationSqlTest` (JVM, real SQLite) and
+  `MigrationDeviceTest` (`MigrationTestHelper`).
+- **Trust is keyed to the host's ordered address list.** Any change to it clears trust: a
+  hostname, a port, an added, removed or reordered entry (a reorder changes nothing about what
+  is trusted, but "any change" is the rule and the cost is one re-prompt). Label, username, key
+  and inbox flag do not. `TrustStore.replaceTrust` takes the `Host` the prompt was raised for and
+  fails if its address list changed meanwhile. A live connection ends when the destination,
+  username or key changes (`connectionAffectedBy`), not for a label or inbox edit.
+- **Holder:** an application-scoped `HostConnections` (main-dispatcher-confined) keeps at most
+  one connection per host and any number of terminals per connection. A host that is not closed
+  (or being disconnected) is never connected a second time; a closed one is replaced by a fresh
+  connection when the user connects again. `HostPort` is the app's view of `HostConnection`
+  (the generated class returns the concrete `Session` and `HerdrWatch`, which tests cannot
+  fake); production wraps the native object, tests supply fakes.
+- **Unlocking:** one biometric prompt per distinct key record (`planUnlock`, `connectGrouped`).
+  Every requested host that shares the key connects from that one decryption: the array is
+  wiped (in a `finally`) after the last `connect_host` call returns or throws, never between
+  calls, because the request keeps a reference to it. A host whose connect fails does not stop
+  the others (the first error is rethrown afterwards); a failed or cancelled unlock ends the
+  batch; hosts without a key are reported at the end.
+- **Host-key prompts live on the host**: persist trust before approving, bound to the presented
+  fingerprint, with M1's expiry checks. The host screen shows the dialog; a prompt for a host
+  whose screen is not showing appears as a dialog naming the host.
+- **Terminals** keep M1's per-session lifecycle: the final frame stays readable through
+  `Closed`; a display lease delays native `close()` until the screen leaves composition.
+  Closing a host closes its terminals through their own callbacks; they stay listed (with their
+  final frame) until the user closes them, and forgetting a connection never touches them.
+- **Capabilities and watches:** when a connection reaches `Connected` the holder calls
+  `capabilities()` once and starts one `watch_herdr` per running herdr session (none when herdr
+  is not installed). The default session is watched with `None`, never by its listed name.
+  "Refresh" re-queries and adds watches for new sessions and stops those of vanished ones. A
+  watch the host refuses is shown as `Unavailable`. Watches run for every connected host; the
+  inbox shows only those flagged `showInInbox`, read from the current host list.
+- **Screens:** Inbox (start destination): agents across all `showInInbox` hosts grouped blocked,
+  working, done, idle (then unknown), each row with host, agent display name, workspace and
+  tab, status chip and cwd; within a status by host, session, workspace, tab, pane, so a refresh
+  never reshuffles rows. Per-host status with unlock/retry/open actions and "Connect all" (one
+  prompt per key). Tapping a row opens `Herdr { session, pane_id }`. Host screen: connection
+  state and address used, host-key prompt, Shell, tmux sessions (attach, create by name with the
+  Rust name rules checked first, refresh) and herdr sessions. Terminal: the M1 terminal screen
+  per session, a switcher among open sessions, and Back to the previous screen without
+  disconnecting; open terminals are also listed on the inbox and host screens. Hosts and Keys
+  remain tabs. Navigation is a small saved back stack rooted at a tab.
+- **Host form:** ordered address list (add, remove, reorder, a port per address, 1 to 8), username,
+  key, and the inbox switch. Hostnames and the username are trimmed before saving.
+- The M1 `connect` export has no Kotlin use left; its JVM contract test was replaced by
+  `ConnectHostContractTest` and `HostConnectionsNativeTest`, whose sshd cases are `@Ignore`d
+  until lane A1 lands.
