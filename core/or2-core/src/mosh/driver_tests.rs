@@ -4,6 +4,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Instant as StdInstant;
 
@@ -454,4 +455,131 @@ fn an_invalid_endpoint_is_refused_synchronously() {
     let observer = Arc::new(Recorder(Mutex::new(sender)));
     assert!(start(params(60001, KEY, 80, 24), "bad host", observer.clone()).is_err());
     assert!(start(params(0, KEY, 80, 24), "127.0.0.1", observer).is_err());
+}
+
+/// A transport whose sockets open only when told to (after the first `free` binds, which are
+/// immediate): a name resolver that is slow, or never answers.
+struct Gated {
+    gate: Arc<tokio::sync::Notify>,
+    binds: Arc<AtomicUsize>,
+    free: usize,
+}
+
+impl Gated {
+    fn new(free: usize) -> (Self, Arc<tokio::sync::Notify>, Arc<AtomicUsize>) {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let binds = Arc::new(AtomicUsize::new(0));
+        let transport = Self {
+            gate: gate.clone(),
+            binds: binds.clone(),
+            free,
+        };
+        (transport, gate, binds)
+    }
+}
+
+impl DatagramTransport for Gated {
+    type Socket = <DirectUdp as DatagramTransport>::Socket;
+
+    async fn bind(&self, endpoint: &Endpoint) -> std::io::Result<Self::Socket> {
+        let attempt = self.binds.fetch_add(1, Ordering::SeqCst);
+        if attempt >= self.free {
+            self.gate.notified().await;
+        }
+        DirectUdp.bind(endpoint).await
+    }
+}
+
+fn start_gated(
+    transport: Gated,
+    port: u16,
+) -> (SessionHandle, LinkControl, mpsc::Receiver<SessionState>) {
+    let (sender, states) = mpsc::channel();
+    let (handle, control) = spawn(
+        transport,
+        params(port, KEY, 20, 5),
+        "127.0.0.1",
+        Arc::new(Recorder(Mutex::new(sender))),
+        None,
+        CONNECT_TIMEOUT,
+    )
+    .unwrap();
+    (handle, control, states)
+}
+
+#[tokio::test]
+async fn a_disconnect_does_not_wait_for_the_first_socket() {
+    // The resolver never answers.
+    let (transport, _gate, _binds) = Gated::new(0);
+    let (handle, _control, states) = start_gated(transport, 60002);
+    handle.disconnect();
+    let started = StdInstant::now();
+    assert_eq!(
+        state(&states).await,
+        SessionState::Closed(CloseReason::Disconnected)
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn a_resize_while_the_first_socket_opens_is_not_lost() {
+    let mut server = FakeServer::new(KEY).await;
+    let (transport, gate, _binds) = Gated::new(0);
+    let (handle, _control, _states) = start_gated(transport, server.port());
+    handle.resize(TerminalSize::new(30, 6).unwrap()).unwrap();
+    // Give the driver time to take the command while the socket is still not open.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    gate.notify_one();
+    let heard = server
+        .hear_until(|heard| heard.iter().any(|h| !h.resizes.is_empty()))
+        .await;
+    assert!(heard.iter().any(|h| h.resizes.contains(&(30, 6))));
+}
+
+#[tokio::test]
+async fn a_rebind_stuck_on_the_resolver_does_not_freeze_the_session() {
+    let mut server = FakeServer::new(KEY).await;
+    // The first socket opens at once; every later one waits for a resolver that never answers.
+    let (transport, _gate, binds) = Gated::new(1);
+    let (handle, control, states) = start_gated(transport, server.port());
+    let mut grid = Grid::default();
+    server.hear(Duration::from_secs(5)).await.unwrap();
+    server.say(b"hi").await;
+    assert_eq!(state(&states).await, SessionState::Connected);
+
+    control.roam();
+    let deadline = StdInstant::now() + Duration::from_secs(5);
+    while binds.load(Ordering::SeqCst) < 2 {
+        assert!(StdInstant::now() < deadline, "the rebind never started");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Stuck: but input still goes out, and frames still come in.
+    handle.send_text("x".into()).unwrap();
+    server
+        .hear_until(|heard| heard.iter().any(|h| h.keys == b"x"))
+        .await;
+    server.say(b"ok").await;
+    grid.wait_for(&handle, "hiok").await;
+
+    // The attempt is given up after a while and tried again.
+    let deadline = StdInstant::now() + REBIND_TIMEOUT + REBIND_RETRY + Duration::from_secs(3);
+    while binds.load(Ordering::SeqCst) < 3 {
+        assert!(
+            StdInstant::now() < deadline,
+            "a rebind that never finishes was never retried"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // And a disconnect is served in the middle of it.
+    handle.disconnect();
+    server
+        .hear_until(|heard| heard.iter().any(|h| h.new_num == SHUTDOWN_NUM))
+        .await;
+    server.say_goodbye().await;
+    assert_eq!(
+        state(&states).await,
+        SessionState::Closed(CloseReason::Disconnected)
+    );
 }

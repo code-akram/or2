@@ -9,7 +9,9 @@
 //! dead network is mosh's point. It ends when the server announces the end of the session
 //! (`RemoteExited`), the user disconnects, or something internal breaks.
 
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
+use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,6 +39,10 @@ const GOODBYE_TIMEOUT: Duration = Duration::from_secs(1);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 /// How long to wait before trying to open another socket after one failed.
 const REBIND_RETRY: Duration = Duration::from_secs(1);
+/// How long opening another socket may take, name resolution included, before it is given up
+/// and retried. It runs beside the rest of the session, so this only bounds how long a rotation
+/// can be stuck, not how long the session is unresponsive.
+const REBIND_TIMEOUT: Duration = Duration::from_secs(3);
 /// How many datagrams are taken in one go before frames and commands get a turn.
 const MAX_DATAGRAMS_PER_TURN: usize = 64;
 
@@ -147,20 +153,35 @@ async fn run<T: DatagramTransport>(
 ) -> Result<CloseReason, SessionFailure> {
     let key = params.key.to_base64_key().map_err(internal)?;
     let screen = GhosttyScreen::new(params.size).map_err(internal)?;
-    let mut link = match timeout(connect_timeout, Link::open(Arc::new(transport), endpoint)).await {
-        Ok(Ok(link)) => link,
-        Ok(Err(error)) => {
-            return Err(SessionFailure::Unreachable(format!(
-                "UDP socket failed ({:?}): {error}",
-                error.kind()
-            )));
+    // Opening the first socket resolves the host name, which can take as long as the resolver
+    // does: a disconnect (or a dropped handle) must not wait for it. A resize is remembered.
+    let mut size = params.size;
+    let open = timeout(connect_timeout, Link::open(Arc::new(transport), endpoint));
+    tokio::pin!(open);
+    let mut link = loop {
+        tokio::select! {
+            opened = &mut open => match opened {
+                Ok(Ok(link)) => break link,
+                Ok(Err(error)) => {
+                    return Err(SessionFailure::Unreachable(format!(
+                        "UDP socket failed ({:?}): {error}",
+                        error.kind()
+                    )));
+                }
+                Err(_) => return Err(SessionFailure::TimedOut),
+            },
+            command = driver.next_command() => match command {
+                Command::Disconnect => return Ok(CloseReason::Disconnected),
+                Command::Resize(new) => size = new,
+                // Nothing to send to yet, and host keys do not exist.
+                _ => {}
+            },
         }
-        Err(_) => return Err(SessionFailure::TimedOut),
     };
     let mut session = Session::new(&key, link.peer_is_ipv6(), screen);
     // The server starts at 80x24 whatever we want; say so in the first datagram.
     session
-        .resize(params.size.rows(), params.size.columns())
+        .resize(size.rows(), size.columns())
         .map_err(internal)?;
 
     let mut buffer = [0u8; RECEIVE_MTU];
@@ -169,15 +190,16 @@ async fn run<T: DatagramTransport>(
     let mut published = u64::MAX;
     let mut next_rebind = Instant::now();
     let mut next_health = Instant::now() + HEALTH_INTERVAL;
+    // The socket being opened for a rebind, and when to give up on it.
+    let mut opening: Option<Opening<T>> = None;
+    let mut opening_deadline = Instant::now();
 
     loop {
         let tick = session.tick().map_err(internal)?;
         send(&link, &mut session, &tick.datagrams);
-        if tick.rebind && Instant::now() >= next_rebind {
-            match link.rebind().await {
-                Ok(()) => session.note_rebound(),
-                Err(_) => next_rebind = Instant::now() + REBIND_RETRY,
-            }
+        if tick.rebind && opening.is_none() && Instant::now() >= next_rebind {
+            opening = Some(Box::pin(link.next_socket()));
+            opening_deadline = Instant::now() + REBIND_TIMEOUT;
         }
         if let Some(observer) = &health
             && Instant::now() >= next_health
@@ -199,7 +221,7 @@ async fn run<T: DatagramTransport>(
                         Ok(length) => {
                             match session.handle_datagram(&buffer[..length]) {
                                 Ok(_) => {
-                                    link.prune(std::time::Instant::now());
+                                    link.authenticated(std::time::Instant::now());
                                     if !connected {
                                         connected = true;
                                         driver
@@ -263,6 +285,21 @@ async fn run<T: DatagramTransport>(
                     }
                 }
             }
+            opened = poll_fn(|cx| match opening.as_mut() {
+                Some(opening) => opening.as_mut().poll(cx),
+                None => std::task::Poll::Pending,
+            }), if opening.is_some() => {
+                opening = None;
+                match opened.and_then(|socket| link.adopt(socket)) {
+                    Ok(()) => session.note_rebound(),
+                    Err(_) => next_rebind = Instant::now() + REBIND_RETRY,
+                }
+            }
+            () = sleep_until(opening_deadline), if opening.is_some() => {
+                // A resolver that never answers: drop the attempt and try again shortly.
+                opening = None;
+                next_rebind = Instant::now() + REBIND_RETRY;
+            }
             () = roam.notified() => session.request_rebind(),
             () = sleep(wait) => {}
             () = sleep_until(deadline), if !connected => {
@@ -271,6 +308,10 @@ async fn run<T: DatagramTransport>(
         }
     }
 }
+
+/// A socket being opened for a rebind.
+type Opening<T> =
+    Pin<Box<dyn Future<Output = io::Result<<T as DatagramTransport>::Socket>> + Send>>;
 
 /// Sends datagrams from the newest socket. A refused or dropped send costs nothing the protocol
 /// does not already repair, since it resends state; only "too large" changes behaviour.
