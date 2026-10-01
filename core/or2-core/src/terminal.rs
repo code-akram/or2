@@ -4,6 +4,7 @@
 use libghostty_vt::key::{Action, Encoder, Event, Key as PhysicalKey, Mods};
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::screen::{CellWide, Screen};
+use libghostty_vt::snapshot::Decoder;
 use libghostty_vt::style::{RgbColor, StyleColor, Underline as GhosttyUnderline};
 use libghostty_vt::terminal::ScrollViewport;
 use libghostty_vt::{RenderState, Terminal};
@@ -36,7 +37,44 @@ pub struct TerminalEngine {
 
 impl TerminalEngine {
     pub fn new(size: TerminalSize, reply: impl Fn(&[u8]) + 'static) -> Result<Self, TerminalError> {
-        let mut terminal = Terminal::new(size.columns(), size.rows())?;
+        Self::from_terminal(Terminal::new(size.columns(), size.rows())?, size, reply)
+    }
+
+    /// Restores an engine from [`TerminalEngine::snapshot`] bytes, at the geometry they were
+    /// taken at; call [`TerminalEngine::resize`] to change it. Callbacks and options are not
+    /// part of a snapshot, so `reply` and the default colours are installed again, and the
+    /// first frame is a full one. Continuation tracking is off, as on a new engine.
+    pub fn from_snapshot(
+        snapshot: &[u8],
+        reply: impl Fn(&[u8]) + 'static,
+    ) -> Result<Self, TerminalError> {
+        let terminal = Decoder::new_buf(snapshot)?.decode()?;
+        let size = TerminalSize::new(terminal.cols()?, terminal.rows()?)
+            .map_err(|_| libghostty_vt::Error::InvalidValue)?;
+        Self::from_terminal(terminal, size, reply)
+    }
+
+    /// The complete terminal state (screen, scrollback, modes and any unfinished escape
+    /// sequence) as an opaque byte string for [`TerminalEngine::from_snapshot`]. An unfinished
+    /// sequence needs [`TerminalEngine::track_continuation`] to have been called before the
+    /// input that left it unfinished; otherwise this fails.
+    pub fn snapshot(&self) -> Result<Vec<u8>, TerminalError> {
+        let bytes = self.terminal.encode_snapshot_alloc(None)?;
+        Ok(bytes.map(|bytes| bytes.to_vec()).unwrap_or_default())
+    }
+
+    /// Makes [`TerminalEngine::snapshot`] work at any point in the input, not only between
+    /// complete escape sequences, by retaining up to `max_bytes` of an unfinished one.
+    pub fn track_continuation(&mut self, max_bytes: usize) -> Result<(), TerminalError> {
+        self.terminal.set_continuation_max_bytes(max_bytes)?;
+        Ok(())
+    }
+
+    fn from_terminal(
+        mut terminal: Terminal<'static, 'static>,
+        size: TerminalSize,
+        reply: impl Fn(&[u8]) + 'static,
+    ) -> Result<Self, TerminalError> {
         terminal.set_default_fg_color(Some(RgbColor {
             r: 255,
             g: 255,
@@ -59,6 +97,11 @@ impl TerminalEngine {
 
     pub fn write(&mut self, bytes: &[u8]) {
         self.terminal.vt_write(bytes);
+    }
+
+    /// The grid size the engine publishes frames at.
+    pub fn size(&self) -> TerminalSize {
+        self.size
     }
 
     pub fn resize(&mut self, size: TerminalSize) -> Result<(), TerminalError> {
