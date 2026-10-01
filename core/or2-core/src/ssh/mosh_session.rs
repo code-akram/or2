@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{Notify, mpsc, oneshot};
-use tokio::time::timeout;
+use tokio::time::{Instant, sleep_until, timeout};
 
 use super::connection::{Closing, SshHost, closed_reason};
 use super::runtime;
@@ -64,8 +64,12 @@ pub(super) struct Open<D> {
     pub(super) closing: Closing,
     /// Held while the session depends on the host's closing order (see [`watch_host`]).
     pub(super) tracker: mpsc::Sender<()>,
-    /// How long to wait for the server's first datagram.
+    /// How long to wait for the server's first datagram, from the end of the bootstrap.
     pub(super) connect_timeout: Duration,
+    /// An absolute moment by which the session must be `Connected` (bootstrap, socket and first
+    /// datagram all spend from it), when the caller gave a budget (AUTO's). Past it the session
+    /// stops what it started and closes `Failed { TimedOut }`.
+    pub(super) deadline: Option<Instant>,
 }
 
 type Prepare<'a> =
@@ -82,6 +86,7 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
         closing,
         tracker,
         connect_timeout,
+        deadline,
     } = open;
     let Some(peer) = peer else {
         driver.close(CloseReason::Failed(SessionFailure::Internal(
@@ -102,9 +107,25 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
     let cancelled = AtomicBool::new(false);
     let mut prepare: Prepare<'_> = Box::pin(prepare(&host, &target, size, &cancelled));
     let mut abandoned = false;
+    let mut expired = false;
+    // Never fires without a budget.
+    let expiry = async {
+        match deadline {
+            Some(deadline) => sleep_until(deadline).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(expiry);
     let prepared = loop {
         tokio::select! {
             result = &mut prepare => break result,
+            () = &mut expiry, if !expired => {
+                // The budget is spent before a server answered: start nothing new, let a
+                // running exec finish for the grace so its server can be stopped.
+                expired = true;
+                cancelled.store(true, Ordering::SeqCst);
+                break abandon(&mut prepare).await;
+            }
             command = driver.next_command() => match command {
                 Command::Disconnect => {
                     abandoned = true;
@@ -122,11 +143,23 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
             }
         }
     };
+    // Why a start that is given up ends: the user's disconnect, or the spent budget.
+    let given_up = if abandoned {
+        CloseReason::Disconnected
+    } else {
+        CloseReason::Failed(SessionFailure::TimedOut)
+    };
     let mut params = match prepared {
-        Ok(Some(params)) => params,
+        Ok(Some(params)) if !abandoned && !expired => params,
+        Ok(Some(params)) => {
+            // The server exists and nobody will ever connect to it.
+            cleanup(&host, params.server_pid).await;
+            driver.close(given_up);
+            return;
+        }
         // Cancelled before a server was started: nothing to stop.
         Ok(None) => {
-            driver.close(CloseReason::Disconnected);
+            driver.close(given_up);
             return;
         }
         Err(failure) => {
@@ -139,12 +172,6 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
         }
     };
     let pid = params.server_pid;
-    if abandoned {
-        // The server exists and nobody will ever connect to it.
-        cleanup(&host, pid).await;
-        driver.close(CloseReason::Disconnected);
-        return;
-    }
     params.size = size;
     // The address the SSH connection reached, with the server's port: an IPv6 scope id and
     // flow label stay (a link-local host is reachable only through its interface).
@@ -159,6 +186,7 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
             roam: Arc::new(Notify::new()),
             shutdown,
             connect_timeout,
+            deadline,
         },
         &mut driver,
     )

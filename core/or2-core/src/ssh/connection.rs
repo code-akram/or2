@@ -611,13 +611,15 @@ fn dispatch<D: DatagramTransport>(
             transport: TerminalTransport::Ssh,
             size,
             driver,
+            ..
         } => spawn_terminal(host, target, size, driver, closing, tracker),
         HostCommand::OpenTerminal {
             target,
             transport: TerminalTransport::Mosh,
             size,
+            deadline,
             driver,
-        } => spawn_mosh(host, target, size, driver, closing, mosh),
+        } => spawn_mosh(host, target, size, deadline, driver, closing, mosh),
         HostCommand::Capabilities { reply } => {
             let host = Arc::clone(host);
             let (mut closing, tracker) = (closing.clone(), tracker.clone());
@@ -697,6 +699,7 @@ fn spawn_mosh<D: DatagramTransport>(
     host: &Arc<SshHost>,
     target: TerminalTarget,
     size: TerminalSize,
+    deadline: Option<Instant>,
     session: SessionDriver,
     closing: &Closing,
     mosh: &MoshContext<'_, D>,
@@ -710,6 +713,7 @@ fn spawn_mosh<D: DatagramTransport>(
         closing: closing.clone(),
         tracker: mosh.tracker.clone(),
         connect_timeout: mosh.connect_timeout,
+        deadline,
     };
     // A failed spawn drops the closure and with it the driver, which closes the session with
     // `Failed(Internal)`.

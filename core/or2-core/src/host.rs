@@ -28,8 +28,10 @@
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant;
 
 use crate::herdr::{self, HerdrObserver, HerdrWatchDriver, HerdrWatchHandle};
 use crate::keys::{ClientKey, KeyError};
@@ -305,6 +307,11 @@ pub enum HostCommand {
         target: TerminalTarget,
         transport: TerminalTransport,
         size: TerminalSize,
+        /// Mosh only: the moment by which the session must be `Connected` (bootstrap, socket
+        /// and first authenticated datagram together), else it closes `Failed { TimedOut }`
+        /// with its server terminated. `None`: the host's `mosh_connect_timeout`, counted from
+        /// the end of the bootstrap.
+        deadline: Option<Instant>,
         driver: SessionDriver,
     },
     Capabilities {
@@ -440,13 +447,32 @@ impl HostHandle {
         size: TerminalSize,
         observer: Arc<dyn SessionObserver>,
     ) -> Result<SessionHandle, HostError> {
+        self.open_terminal_within(target, transport, size, None, observer)
+    }
+
+    /// [`HostHandle::open_terminal_with`] with a budget for a mosh terminal: it must be
+    /// `Connected` within `budget` **of this call** (the deadline is absolute, so the probe,
+    /// the pane focus, the bootstrap, the socket and the first authenticated datagram all
+    /// spend from the same allowance), else it closes `Failed { TimedOut }` after stopping
+    /// the server it may have started. `None` keeps the host's own `mosh_connect_timeout`,
+    /// counted from the end of the bootstrap. Ignored for SSH terminals.
+    pub fn open_terminal_within(
+        &self,
+        target: TerminalTarget,
+        transport: TerminalTransport,
+        size: TerminalSize,
+        budget: Option<Duration>,
+        observer: Arc<dyn SessionObserver>,
+    ) -> Result<SessionHandle, HostError> {
         self.require_connected()?;
         target.validate()?;
+        let deadline = budget.map(|budget| Instant::now() + budget);
         let (handle, driver) = session::channel(observer);
         self.send(HostCommand::OpenTerminal {
             target,
             transport,
             size,
+            deadline,
             driver,
         })?;
         Ok(handle)
@@ -1159,6 +1185,42 @@ mod tests {
     }
 
     #[test]
+    fn a_terminal_budget_becomes_an_absolute_deadline_at_the_call() {
+        let (_recorder, handle, mut driver) = setup(false);
+        connect(&mut driver);
+        let sessions = Arc::new(SessionRecorder::default());
+        let before = Instant::now();
+        let _plain = handle
+            .open_terminal_with(
+                TerminalTarget::Shell,
+                TerminalTransport::Mosh,
+                size(),
+                sessions.clone(),
+            )
+            .unwrap();
+        let _budgeted = handle
+            .open_terminal_within(
+                TerminalTarget::Shell,
+                TerminalTransport::Mosh,
+                size(),
+                Some(Duration::from_secs(5)),
+                sessions,
+            )
+            .unwrap();
+        let after = Instant::now();
+        let HostCommand::OpenTerminal { deadline, .. } = driver.blocking_next_command() else {
+            panic!("expected OpenTerminal");
+        };
+        assert_eq!(deadline, None, "no budget keeps the host's own timeout");
+        let HostCommand::OpenTerminal { deadline, .. } = driver.blocking_next_command() else {
+            panic!("expected OpenTerminal");
+        };
+        let deadline = deadline.expect("a budget gives a deadline");
+        assert!(deadline >= before + Duration::from_secs(5));
+        assert!(deadline <= after + Duration::from_secs(5));
+    }
+
+    #[test]
     fn terminals_and_watches_are_created_by_the_handle_and_failed_when_the_host_closes() {
         let (_recorder, handle, mut driver) = setup(false);
         connect(&mut driver);
@@ -1183,6 +1245,7 @@ mod tests {
             transport,
             size: got_size,
             driver: mut session_driver,
+            ..
         } = driver.blocking_next_command()
         else {
             panic!("expected OpenTerminal");

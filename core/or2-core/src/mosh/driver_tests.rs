@@ -934,6 +934,7 @@ async fn the_shutdown_signal_disconnects_with_the_goodbye_handshake() {
         roam: Arc::new(Notify::new()),
         shutdown: shutdown.clone(),
         connect_timeout: CONNECT_TIMEOUT,
+        deadline: None,
     };
     // The session future is not `Send` (libghostty): its own thread, as in production.
     let session = std::thread::spawn(move || {
@@ -975,10 +976,49 @@ async fn the_shutdown_signal_disconnects_with_the_goodbye_handshake() {
             roam: Arc::new(Notify::new()),
             shutdown,
             connect_timeout: CONNECT_TIMEOUT,
+            deadline: None,
         },
         &mut driver,
     )
     .await;
     assert_eq!(reason, CloseReason::Disconnected);
     assert_eq!(driver.state(), SessionState::Connecting);
+}
+
+/// An absolute deadline replaces the connect timeout: a server that never answers fails the
+/// session `TimedOut` at the deadline (not after the 15 s timeout), still `Connecting` so the
+/// caller owes a cleanup, and a deadline already past fails it at once.
+#[tokio::test]
+async fn an_absolute_deadline_ends_a_session_the_server_never_answers() {
+    for (deadline, longest) in [
+        (Duration::from_millis(400), Duration::from_secs(5)),
+        (Duration::ZERO, Duration::from_secs(2)),
+    ] {
+        let server = FakeServer::new(KEY).await;
+        let (_handle, mut driver) = channel(Arc::new(Recorder(Mutex::new(mpsc::channel().0))));
+        let plan = Plan {
+            transport: Arc::new(DirectUdp),
+            peer: SocketAddr::new(LOCALHOST, server.port()),
+            params: params(server.port(), KEY, 20, 5),
+            health: None,
+            roam: Arc::new(Notify::new()),
+            shutdown: Arc::new(Notify::new()),
+            connect_timeout: CONNECT_TIMEOUT,
+            deadline: Some(Instant::now() + deadline),
+        };
+        let started = StdInstant::now();
+        let session = std::thread::spawn(move || {
+            crate::ssh::runtime().block_on(async move {
+                let reason = run_session(plan, &mut driver).await;
+                (reason, driver.state())
+            })
+        });
+        let (reason, state_then) = tokio::task::spawn_blocking(move || session.join().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(reason, CloseReason::Failed(SessionFailure::TimedOut));
+        assert_eq!(state_then, SessionState::Connecting);
+        assert!(started.elapsed() >= deadline, "{:?}", started.elapsed());
+        assert!(started.elapsed() < longest, "{:?}", started.elapsed());
+    }
 }

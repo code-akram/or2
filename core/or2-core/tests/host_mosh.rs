@@ -278,14 +278,27 @@ impl Live {
         transport: TerminalTransport,
         size: (u16, u16),
     ) -> Term {
+        self.open_raw_within(tag, target, transport, size, None)
+    }
+
+    /// [`Live::open_raw`] with a budget for the whole mosh start (`open_terminal_within`).
+    fn open_raw_within(
+        &self,
+        tag: &str,
+        target: TerminalTarget,
+        transport: TerminalTransport,
+        size: (u16, u16),
+        budget: Option<Duration>,
+    ) -> Term {
         let (tx, states) = mpsc::channel();
         let health = Arc::new(Mutex::new(Vec::new()));
         let handle = self
             .host
-            .open_terminal_with(
+            .open_terminal_within(
                 target,
                 transport,
                 TerminalSize::new(size.0, size.1).unwrap(),
+                budget,
                 Arc::new(SessionObs {
                     tag: tag.into(),
                     tx,
@@ -552,6 +565,100 @@ fn blocked_udp_times_out_and_the_server_is_terminated() {
     ssh.quiet();
     ssh.send("echo fallback-$((6*7))\n");
     ssh.wait("fallback-42");
+    live.host.disconnect();
+}
+
+/// AUTO's budget (API 9) is an absolute deadline: with UDP blocked the session fails `TimedOut`
+/// when the budget is spent, not after the host's 15 s first-datagram timeout, and the server
+/// is stopped; the connection serves the SSH fallback at once.
+#[test]
+fn a_budget_ends_a_blocked_start_early_and_the_server_is_terminated() {
+    require!();
+    let live = Live::with(
+        TestUdp {
+            blackhole: true,
+            ..TestUdp::default()
+        },
+        HostOptions::default(),
+    );
+    let started = Instant::now();
+    let term = live.open_raw_within(
+        "m",
+        TerminalTarget::Shell,
+        TerminalTransport::Mosh,
+        (80, 24),
+        Some(Duration::from_millis(1200)),
+    );
+    assert_eq!(term.closed(), CloseReason::Failed(SessionFailure::TimedOut));
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_millis(1200), "{elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "the host's own 15 s timeout did not apply: {elapsed:?}"
+    );
+    // The server was started, and `mosh::terminate` stopped it.
+    live.wait_no_servers("mosh::terminate to stop the server");
+    assert!(matches!(live.host.state(), HostState::Connected { .. }));
+    let mut ssh = live.open("s", TerminalTarget::Shell, TerminalTransport::Ssh);
+    ssh.quiet();
+    ssh.send("echo fallback-$((6*7))\n");
+    ssh.wait("fallback-42");
+    live.host.disconnect();
+}
+
+/// The budget covers the bootstrap too, not only the wait for the first datagram: a
+/// `mosh-server` that is slow to start (1 s) with a budget of 300 ms ends the session
+/// `TimedOut`, and the server the exec went on to start is found and stopped.
+#[test]
+fn a_budget_spent_in_the_bootstrap_still_stops_the_server_it_started() {
+    require!();
+    let live = Live::with_slow_bootstrap("1");
+    let slow = live.slow.as_ref().unwrap();
+    // The probe is cached by an SSH terminal, so only the bootstrap is in flight.
+    let ssh = live.open("s", TerminalTarget::Shell, TerminalTransport::Ssh);
+    let started = Instant::now();
+    let term = live.open_raw_within(
+        "m",
+        TerminalTarget::Shell,
+        TerminalTransport::Mosh,
+        (80, 24),
+        Some(Duration::from_millis(300)),
+    );
+    assert_eq!(term.closed(), CloseReason::Failed(SessionFailure::TimedOut));
+    assert!(slow.started(), "the bootstrap had begun");
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "the exec was let finish so its server could be stopped: {:?}",
+        started.elapsed()
+    );
+    live.wait_no_servers("the server started by the cut bootstrap to be stopped");
+    assert!(matches!(live.host.state(), HostState::Connected { .. }));
+    ssh.handle.disconnect();
+    live.host.disconnect();
+}
+
+/// A budget is a ceiling, not a delay: a healthy start well inside it connects and works, and
+/// the session then lives on without any deadline.
+#[test]
+fn a_generous_budget_does_not_affect_a_healthy_mosh_start() {
+    require!();
+    let live = Live::new();
+    let mut term = live.open_raw_within(
+        "m",
+        TerminalTarget::Shell,
+        TerminalTransport::Mosh,
+        (80, 24),
+        Some(Duration::from_secs(5)),
+    );
+    assert_eq!(term.next(), SessionState::Connected);
+    term.quiet();
+    // Past the budget the session is still the same session.
+    std::thread::sleep(Duration::from_millis(5500));
+    term.send("echo late-$((6*7))\n");
+    term.wait("late-42");
+    term.handle.disconnect();
+    assert_eq!(term.closed(), CloseReason::Disconnected);
+    live.wait_no_servers("the server to exit after the disconnect");
     live.host.disconnect();
 }
 

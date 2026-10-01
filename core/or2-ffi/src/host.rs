@@ -1,9 +1,10 @@
-//! Host connection contract for Kotlin (FFI API 8): request, state, errors, terminal targets,
+//! Host connection contract for Kotlin (FFI API 9): request, state, errors, terminal targets,
 //! queries, the `HostConnection` object and the `HostListener` callback. See
 //! docs/contracts.md for threading and ownership rules.
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use or2_core::host as core;
 use or2_core::term::TerminalSize;
@@ -339,19 +340,30 @@ impl HostConnection {
     /// `Connected` once the channel is open (SSH) or the first datagram from the server
     /// authenticates (mosh); failures close it through its listener. Only allowed while the
     /// host is `Connected`.
+    ///
+    /// `mosh_budget_ms` (API 9) is for `Mosh` only and ignored for `Ssh`: a deadline counted
+    /// from this call by which the session must be `Connected`, the capability probe, the pane
+    /// focus, the `mosh-server` bootstrap, the UDP socket and the first authenticated datagram
+    /// all spending from it. When it is spent first the session stops the server it started
+    /// and closes `Failed { TimedOut }` (after the bootstrap exec has had up to 2 s to report
+    /// its server, and the stop up to 5 s, so the close can come that much later). `None`
+    /// keeps the default: 15 s for the first datagram, counted from the end of the bootstrap.
+    /// Kotlin passes 5000 for an Auto choice and `None` for an explicit Mosh.
     pub fn open_terminal(
         &self,
         target: TerminalTarget,
         transport: TerminalTransport,
         columns: u16,
         rows: u16,
+        mosh_budget_ms: Option<u32>,
         listener: Box<dyn SessionListener>,
     ) -> Result<Arc<Session>, HostError> {
         let size = TerminalSize::new(columns, rows).map_err(|_| HostError::EmptyDimension)?;
-        let handle = self.handle.open_terminal_with(
+        let handle = self.handle.open_terminal_within(
             target.into(),
             transport.into(),
             size,
+            mosh_budget_ms.map(|ms| Duration::from_millis(u64::from(ms))),
             Arc::new(crate::session::ListenerObserver(listener)),
         )?;
         Ok(Session::new(handle, transport))
@@ -602,6 +614,7 @@ mod tests {
                 TerminalTransport::Ssh,
                 0,
                 24,
+                None,
                 Box::new(Silent)
             )
             .err(),
