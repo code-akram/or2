@@ -6,3 +6,4 @@ target/
 /android/.kotlin/
 /android/local.properties
 /android/**/build/
+/.claude/worktrees/

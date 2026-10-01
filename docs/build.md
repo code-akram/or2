@@ -86,6 +86,14 @@ is. The in-process russh server tests in `ssh/connection_tests.rs` (no sshd need
 refused channels, terminal setup timeout, cancelled execs, the connect timer around the
 host-key prompt and a dying connection task.
 
+`core/or2-core/tests/mosh_live.rs` starts a real
+`mosh-server` on loopback (through `mosh::bootstrap` over `LocalHost`) and checks the
+roaming, resize and disconnect interop; it needs `mosh-server`, `/bin/bash` and the `kill`
+binary on `PATH`/at `/bin/bash`, and kills exactly the process ids it started, even when it
+panics. **CI must install mosh and set `OR2_REQUIRE_MOSH=1`** (any value), which turns the
+skip into a failure; otherwise that interop claim is never verified. It needs no network
+beyond 127.0.0.1 and does not touch `~/.ssh` or any sshd.
+
 Gradle builds the host library, generates Kotlin under `app/build/generated/uniffi/kotlin`,
 and cross-builds the release Rust library into `app/build/generated/uniffi/jniLibs/arm64-v8a`.
 The app has minSdk 34, compile/targetSdk 36, and no Google Play Services/FCM dependencies.

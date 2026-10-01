@@ -204,12 +204,21 @@ protocol/terminal prototypes on Android yet.
 | herdr over SSH | russh Ed25519 auth, exec socket discovery, streamlocal, subscribe + snapshot, live events on an isolated session all pass; schema codegen partial (needs normalization); Android arm64 builds | russh 0.63.3 (aws-lc-rs) |
 
 Consequences for `or2-core`:
-- Vendor mosh-rs eventually: inject the UDP `Transport` instead of it owning a `UdpSocket`, and
-  add source-interface selection for real Wi-Fi-to-mobile-data migration.
-- Open for M3: mosh-rs renders into its own framebuffer (a caller-provided `Screen`) and exposes
-  no raw host-byte stream, but or2 keeps terminal state in libghostty-vt. Either add a raw-bytes
-  tap to mosh-rs or live-test `at-least/mosh` (GPL-3.0-or-later, has `take_host_bytes()`,
-  repository moved to "conch").
+- mosh-rs is vendored (M2, lane A3) with the UDP socket injected through `DatagramTransport`.
+  Source-interface selection for real Wi-Fi-to-mobile-data migration is M3: it is a
+  `DatagramTransport` that binds each new socket to the current Android network, which the
+  rebind-on-roam path already drives.
+- Resolved in M2: or2 keeps terminal state in libghostty-vt without a raw host-byte tap. The
+  vendored `Screen` is implemented over libghostty and copies are libghostty terminal snapshots,
+  so `at-least/mosh` was not needed.
+- mosh keeps no scrollback of its own: the server sends diffs of the visible screen, which scroll
+  only for lines that scrolled between two frames. A fast burst (`seq 1 200`) arrives as one
+  repaint and leaves no history in libghostty; a slow one leaves a little (libghostty caps it, so
+  an endless paced stream costs about 70 KB and 0.2 ms per snapshot at worst; see contracts). Scrollback inside a
+  mosh session is therefore not like SSH; tmux or herdr provides history there.
+- `mosh-server -s` binds the UDP port to the address in the exec channel's `SSH_CONNECTION`, so
+  the client must send to the address the SSH connection reached (with address racing, the
+  winning one), not to a different name or address of the same host.
 - `mosh-server` refuses to start without a UTF-8 locale. or2 sets `LANG=C.UTF-8` (or the host's
   UTF-8 locale) in the bootstrap command.
 
@@ -329,7 +338,7 @@ carries terminals, tmux/probe exec channels and herdr streamlocal channels (FFI 
   probe, tmux listing and attach, terminal targets, `connect_host`; OpenSSH interop tests.
 - [x] Lane A2: generated herdr types, discovery, subscribe/snapshot/reconcile watch, focus;
   fixture and live isolated-session tests.
-- [ ] Lane A3: vendored mosh-rs behind `DatagramTransport`, `Screen` over libghostty,
+- [x] Lane A3: vendored mosh-rs behind `DatagramTransport`, `Screen` over libghostty,
   bootstrap and session driver; live tests against local `mosh-server`.
 - [ ] Lane B: Room v2 migration, multi-address hosts, host connection holder, inbox, host
   screen with tmux picker, session switcher.
@@ -345,7 +354,7 @@ carries terminals, tmux/probe exec channels and herdr streamlocal channels (FFI 
 | Core | Rust, bound with uniffi | One implementation of protocols; testable on the desktop |
 | Terminal engine | libghostty-vt | MIT; the engine herdr itself vendors |
 | SSH | russh 0.63 (aws-lc-rs backend) | Pure Rust, async, streamlocal verified in M0 |
-| mosh | mosh-rs, vendored later | Only candidate verified against stock mosh-server 1.4.0 |
+| mosh | mosh-rs, vendored (M2) | Only candidate verified against stock mosh-server 1.4.0 |
 | Persistence | Room (Kotlin) | Idiomatic Android; Rust stays storage-free |
 | Rendering | Hardware-accelerated Android Canvas | Selected renderer; measure frame times, no custom GPU backend in M1 |
 | Package ID | `io.github.code_akram.or2` | Change if a domain is preferred |
