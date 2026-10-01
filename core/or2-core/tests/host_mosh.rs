@@ -899,3 +899,80 @@ fn a_failed_goodbye_still_stops_the_server_on_a_host_disconnect() {
     require!();
     a_failed_goodbye_stops_the_server_over_ssh(Ending::HostDisconnect);
 }
+/// The host is lost (the mosh session survives), then the user disconnects the retained host:
+/// it must still close the surviving session, though the SSH driver is gone.
+#[test]
+fn disconnecting_a_lost_host_closes_its_surviving_mosh_session() {
+    require!();
+    let live = Live::new();
+    let mut mosh = live.mosh("m", TerminalTarget::Shell);
+    mosh.quiet();
+    mosh.send("echo before-$((6*7))\n");
+    mosh.wait("before-42");
+    live.proxy.cut();
+    let CloseReason::Failed(SessionFailure::ConnectionLost(_)) = live.host_closed() else {
+        panic!("expected the host to be lost")
+    };
+    assert_eq!(mosh.handle.state(), SessionState::Connected);
+    live.host.disconnect();
+    assert_eq!(mosh.closed(), CloseReason::Disconnected);
+    // The handshake over UDP ended the server; the host's own `Closed` is not repeated.
+    live.wait_no_servers("the server to exit after the lost host's disconnect");
+    assert!(
+        live.states
+            .recv_timeout(Duration::from_millis(300))
+            .is_err(),
+        "the host closed once"
+    );
+    live.host.disconnect();
+}
+
+/// Releasing the last handle of a lost host closes its surviving mosh sessions too.
+#[test]
+fn releasing_a_lost_host_closes_its_surviving_mosh_session() {
+    require!();
+    let live = Live::new();
+    let mut mosh = live.mosh("m", TerminalTarget::Shell);
+    mosh.quiet();
+    mosh.send("echo before-$((6*7))\n");
+    mosh.wait("before-42");
+    live.proxy.cut();
+    let CloseReason::Failed(SessionFailure::ConnectionLost(_)) = live.host_closed() else {
+        panic!("expected the host to be lost")
+    };
+    assert_eq!(mosh.handle.state(), SessionState::Connected);
+    drop(live.host);
+    assert_eq!(mosh.closed(), CloseReason::Disconnected);
+    wait_until(
+        Duration::from_secs(10),
+        "the server to exit after the lost host was released",
+        || fixture_processes(&live.sshd, "mosh-server").is_empty(),
+    );
+}
+
+/// A user disconnect that races the loss of the connection reaches the mosh session whichever
+/// the host driver sees first.
+#[test]
+fn a_host_disconnect_racing_the_loss_of_the_connection_still_closes_mosh_sessions() {
+    require!();
+    for round in 0..3 {
+        let live = Live::new();
+        let mut mosh = live.mosh("m", TerminalTarget::Shell);
+        mosh.quiet();
+        mosh.send("echo race-$((6*7))\n");
+        mosh.wait("race-42");
+        if round == 1 {
+            live.host.disconnect();
+            live.proxy.cut();
+        } else {
+            live.proxy.cut();
+            live.host.disconnect();
+        }
+        assert_eq!(mosh.closed(), CloseReason::Disconnected, "round {round}");
+        match live.host_closed() {
+            CloseReason::Disconnected | CloseReason::Failed(SessionFailure::ConnectionLost(_)) => {}
+            other => panic!("round {round}: unexpected host close {other:?}"),
+        }
+        live.wait_no_servers("the server to exit after the raced disconnect");
+    }
+}

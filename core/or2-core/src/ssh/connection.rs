@@ -44,7 +44,7 @@ use super::terminal_session;
 use crate::herdr::{self, HerdrState, HerdrUnavailable, HerdrWatchDriver};
 use crate::host::{
     HostCapabilities, HostCommand, HostConnectRequest, HostDriver, HostError, HostHandle,
-    HostObserver, HostState, TerminalTarget, TerminalTransport, TmuxSession,
+    HostObserver, HostState, TerminalTarget, TerminalTransport, TmuxSession, UserCancel,
 };
 use crate::probe;
 use crate::remote::{ExecOutput, OUTPUT_CAP, RemoteError, RemoteHost, SecretBytes};
@@ -488,6 +488,7 @@ async fn drive<T: Transport, D: DatagramTransport>(
     let (tracker, mut drained) = mpsc::channel::<()>(1);
     // The same for mosh sessions, which are waited for longer (see `mosh_session::CLOSE_BUDGET`).
     let (mosh_tracker, mut mosh_drained) = mpsc::channel::<()>(1);
+    let user_cancel = driver.user_cancel();
     let mut connected: Option<Arc<SshHost>> = None;
     let mut peer_addr: Option<SocketAddr> = None;
     let mut decision = None;
@@ -549,6 +550,7 @@ async fn drive<T: Transport, D: DatagramTransport>(
                                 peer: peer_addr,
                                 connect_timeout: options.mosh_connect_timeout,
                                 tracker: &mosh_tracker,
+                                user_cancel: &user_cancel,
                             };
                             dispatch(command, host, &closing, &tracker, &mosh);
                         }
@@ -691,6 +693,9 @@ struct MoshContext<'a, D> {
     connect_timeout: Duration,
     /// Held by every mosh session until it has closed.
     tracker: &'a mpsc::Sender<()>,
+    /// The user's disconnect, which outlives this driver (a mosh session survives a lost
+    /// connection and must still be closed by the user's disconnect of the host).
+    user_cancel: &'a UserCancel,
 }
 
 fn spawn_mosh<D: DatagramTransport>(
@@ -709,6 +714,7 @@ fn spawn_mosh<D: DatagramTransport>(
         size,
         closing: closing.clone(),
         tracker: mosh.tracker.clone(),
+        user_cancel: mosh.user_cancel.clone(),
         connect_timeout: mosh.connect_timeout,
     };
     // A failed spawn drops the closure and with it the driver, which closes the session with

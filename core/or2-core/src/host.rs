@@ -29,7 +29,7 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::herdr::{self, HerdrObserver, HerdrWatchDriver, HerdrWatchHandle};
 use crate::keys::{ClientKey, KeyError};
@@ -342,8 +342,16 @@ impl HostCommand {
     }
 }
 
+/// Becomes `true` once the user has ended the host: an explicit `disconnect()` or the release
+/// of the last handle. Unlike the command queue it belongs to the shared state, not to the
+/// host driver, so it still works after the driver has exited (a lost connection): the mosh
+/// sessions that survive the loss listen to it. It never goes back to `false`.
+pub(crate) type UserCancel = watch::Receiver<bool>;
+
 struct Shared {
     state: Mutex<HostState>,
+    /// See [`UserCancel`].
+    user_cancel: watch::Sender<bool>,
     /// The remote address the winning TCP connection reached; set before `Connected`.
     peer: Mutex<Option<SocketAddr>>,
 }
@@ -355,6 +363,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 pub fn channel(observer: Arc<dyn HostObserver>) -> (HostHandle, HostDriver) {
     let shared = Arc::new(Shared {
         state: Mutex::new(HostState::Connecting),
+        user_cancel: watch::channel(false).0,
         peer: Mutex::new(None),
     });
     let (sender, receiver) = mpsc::unbounded_channel();
@@ -376,6 +385,14 @@ pub fn channel(observer: Arc<dyn HostObserver>) -> (HostHandle, HostDriver) {
 pub struct HostHandle {
     shared: Arc<Shared>,
     commands: mpsc::UnboundedSender<HostCommand>,
+}
+
+impl Drop for HostHandle {
+    /// Releasing the last handle is the user's disconnect, for the sessions that outlive a
+    /// lost connection too (the command queue closing only tells a live driver).
+    fn drop(&mut self) {
+        self.shared.user_cancel.send_replace(true);
+    }
 }
 
 impl HostHandle {
@@ -417,7 +434,12 @@ impl HostHandle {
     /// Idempotent. Closes every terminal and watch on the host (mosh terminals too: this is the
     /// user's disconnect; a *lost* connection leaves mosh terminals running); `Closed` arrives
     /// through the observer after theirs.
+    ///
+    /// Also works after the connection was lost: the host driver is gone by then, so the
+    /// request goes through the shared [`UserCancel`] signal, which the mosh sessions that
+    /// survived the loss still listen to.
     pub fn disconnect(&self) {
+        self.shared.user_cancel.send_replace(true);
         let _ = self.commands.send(HostCommand::Disconnect);
     }
 
@@ -569,6 +591,11 @@ impl HostDriver {
 
     pub fn state(&self) -> HostState {
         lock(&self.shared.state).clone()
+    }
+
+    /// The signal that the user has ended the host, which stays usable after this driver exits.
+    pub(crate) fn user_cancel(&self) -> UserCancel {
+        self.shared.user_cancel.subscribe()
     }
 
     /// Records the address the winning connection reached, to be set before the move to
@@ -934,6 +961,29 @@ mod tests {
                 "host task ended without closing".into()
             )))
         );
+    }
+
+    #[test]
+    fn the_users_disconnect_is_a_signal_that_outlives_the_driver() {
+        // An explicit disconnect sets it, and still does once the driver (and with it the
+        // command queue) is gone, as after a lost connection.
+        let (_recorder, handle, driver) = setup(false);
+        let cancel = driver.user_cancel();
+        assert!(!*cancel.borrow());
+        drop(driver);
+        assert!(
+            !*cancel.borrow(),
+            "a lost driver is not the user's disconnect"
+        );
+        handle.disconnect();
+        assert!(*cancel.borrow());
+
+        // So does releasing the last handle, and a late subscriber sees it too.
+        let (_recorder, handle, driver) = setup(false);
+        let cancel = driver.user_cancel();
+        drop(driver);
+        drop(handle);
+        assert!(*cancel.borrow());
     }
 
     #[tokio::test]

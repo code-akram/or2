@@ -1383,17 +1383,27 @@ session `Failed { Internal { "mosh terminals land with M3-A" } }` is gone.
    is possible (the app would have to hold it) and is not done.
 
 **Host close semantics.** A mosh session ignores the host connection once it is running.
-`HostDriver` gives every terminal the host's `closing` watch; a small watcher task per mosh
-terminal reads it: a `Disconnected` reason (user disconnect, or the release of the last handle)
-makes the session disconnect with mosh's shutdown handshake (the server exits; the session is
-`Closed { Disconnected }` before the host's `Closed`, as for SSH terminals, because the watcher
-holds the host's drain tracker until the session has closed); any other reason is a loss: the
-watcher drops its tracker at once (the host does not wait for the session) and the session
-carries on. The tracker is the mosh one (see "Bounds" above), waited for up to
-`CLOSE_BUDGET`, not the 3 s of SSH terminals. SSH terminals keep M2's rule unchanged. After a loss the host takes no more terminals
-(`HostError::Closed`), the mosh session remains usable, and its own `disconnect()` closes it
-`Disconnected` with the handshake. The session keeps an `Arc` to the (dead) SSH host object for
-its lifetime; that costs memory only.
+`HostDriver` gives every terminal the host's `closing` watch, and a small watcher task per mosh
+terminal reads it together with a second signal, the **user-cancellation signal**
+(`host::UserCancel`, a `watch<bool>` in the host's shared state): `HostHandle::disconnect()`
+sets it directly, and so does the release of the last handle (`Drop`), independent of the
+command queue, so it still works after the SSH host driver has exited. A `Disconnected`
+reason on `closing` (user disconnect, or release) or the cancel signal makes the session
+disconnect with mosh's shutdown handshake (the server exits; the session is `Closed {
+Disconnected }` before the host's `Closed`, as for SSH terminals, because the watcher holds
+the host's drain tracker until the session has closed). Any other reason on `closing` is a
+loss: the watcher drops its tracker at once (the host does not wait for the session) and the
+session carries on, **but the watcher stays subscribed to the cancel signal**: a later
+`HostHandle::disconnect()` or release of the lost host closes the surviving session
+`Disconnected` with the handshake (and, if the goodbye is not confirmed, the cleanup over SSH
+is attempted, which fails quietly with the connection gone). The host's own `Closed` is still
+delivered exactly once (it happened at the loss). A disconnect that races the loss reaches the
+session whichever the host driver sees first, since the signal does not depend on the driver.
+The tracker is the mosh one (see "Bounds" above), waited for up to `CLOSE_BUDGET`, not the 3 s
+of SSH terminals. SSH terminals keep M2's rule unchanged. After a loss the host takes no more
+terminals (`HostError::Closed`), the mosh session remains usable, and its own `disconnect()`
+closes it `Disconnected` with the handshake. The session keeps an `Arc` to the (dead) SSH host
+object for its lifetime; that costs memory only.
 
 **Shared driver.** `mosh::driver` was split so the host driver can own the `SessionDriver`:
 `start_with` still creates its own channel and thread; `run_session(Plan, &mut SessionDriver) ->

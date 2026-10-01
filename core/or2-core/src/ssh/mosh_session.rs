@@ -31,7 +31,7 @@ use tokio::time::timeout;
 use super::connection::{Closing, SshHost, closed_reason};
 use super::runtime;
 use super::terminal_session::{not_installed, program, remote_failure};
-use crate::host::TerminalTarget;
+use crate::host::{TerminalTarget, UserCancel};
 use crate::mosh::{self, GOODBYE_TIMEOUT, MoshParams, Plan, run_session};
 use crate::session::{CloseReason, Command, SessionDriver, SessionFailure, SessionState};
 use crate::term::TerminalSize;
@@ -64,6 +64,8 @@ pub(super) struct Open<D> {
     pub(super) closing: Closing,
     /// Held while the session depends on the host's closing order (see [`watch_host`]).
     pub(super) tracker: mpsc::Sender<()>,
+    /// The user's disconnect of the host, which outlives the host driver (see [`watch_host`]).
+    pub(super) user_cancel: UserCancel,
     /// How long to wait for the server's first datagram.
     pub(super) connect_timeout: Duration,
 }
@@ -81,6 +83,7 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
         size,
         closing,
         tracker,
+        user_cancel,
         connect_timeout,
     } = open;
     let Some(peer) = peer else {
@@ -93,7 +96,13 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
     };
     let shutdown = Arc::new(Notify::new());
     let (done, finished) = oneshot::channel::<()>();
-    runtime().spawn(watch_host(closing, shutdown.clone(), finished, tracker));
+    runtime().spawn(watch_host(
+        closing,
+        user_cancel,
+        shutdown.clone(),
+        finished,
+        tracker,
+    ));
     // Dropped when this function returns, after the session's `Closed`.
     let _done = done;
 
@@ -245,28 +254,54 @@ async fn cleanup(host: &SshHost, pid: Option<u32>) {
     }
 }
 
-/// Ties the session to the host's closing. A user disconnect of the host (`Disconnected`) ends
-/// the session through `shutdown`, and the watcher keeps its `tracker` until the session has
-/// closed, so the host reports `Closed` after it, as for SSH terminals. Any other end of the
-/// host is a loss: the session carries on without the SSH connection, and the tracker is
-/// released at once so the host does not wait for it.
+/// Ties the session to the host's end. A user disconnect of the host ends the session through
+/// `shutdown`, and the watcher keeps its `tracker` until the session has closed, so the host
+/// reports `Closed` after it, as for SSH terminals. Two signals say the user has gone: the
+/// host's `closing` reason `Disconnected`, and `user_cancel`, which belongs to the host's
+/// shared state and so also works after the host driver has exited, and when the disconnect
+/// races the loss and the driver never processes it.
+///
+/// Any other end of the host (`closing` with a failure) is a loss: the session carries on
+/// without the SSH connection and the tracker is released at once, so the host does not wait
+/// for it. The watcher then stays subscribed to `user_cancel`: the user can still disconnect
+/// (or release) the lost host later, which must close the surviving session. Nothing is held
+/// for the host then (its `Closed` was already delivered, once).
 async fn watch_host(
     mut closing: Closing,
+    mut user_cancel: UserCancel,
     shutdown: Arc<Notify>,
     mut finished: oneshot::Receiver<()>,
     tracker: mpsc::Sender<()>,
 ) {
-    let _tracker = tracker;
-    tokio::select! {
+    let mut tracker = Some(tracker);
+    let user_gone = tokio::select! {
         reason = closed_reason(&mut closing) => {
             if reason == CloseReason::Disconnected {
-                shutdown.notify_one();
-                // Resolves when the session's task is done (its sender is dropped).
-                let _ = (&mut finished).await;
+                true
+            } else {
+                // A loss: the session outlives the connection; the host need not wait.
+                tracker = None;
+                tokio::select! {
+                    () = cancelled(&mut user_cancel) => true,
+                    _ = &mut finished => false,
+                }
             }
         }
-        _ = &mut finished => {}
+        () = cancelled(&mut user_cancel) => true,
+        _ = &mut finished => false,
+    };
+    if user_gone {
+        shutdown.notify_one();
+        // Resolves when the session's task is done (its sender is dropped); the tracker, if
+        // still held, keeps the host's `Closed` behind the session's.
+        let _ = (&mut finished).await;
     }
+    drop(tracker);
+}
+
+/// Resolves once the user has ended the host. A host whose state vanished reads as ended.
+async fn cancelled(user_cancel: &mut UserCancel) {
+    let _ = user_cancel.wait_for(|cancelled| *cancelled).await;
 }
 
 #[cfg(test)]
