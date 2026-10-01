@@ -2136,6 +2136,13 @@ a cold launcher start resumes at once, exactly as the recents path does:
   hosts are read (the same effect as the recents path, which still handles a saved terminal
   destination), starts `resumeLast()` (one grouped biometric, connect, reopen the remembered target)
   and leaves Home's Resume card as the fallback when the fingerprint is cancelled.
+- **Surviving recreation.** The marker is consumed once, so the continuation it starts is saved state:
+  `pendingResume` (the terminal to reopen once the host is connected) is `rememberSaveable` through
+  `PendingResumeSaver` (`LastTerminal.encode`/`decode`), not `remember`. A rotation or restored process
+  while the biometric, the battery explanation or the connect is pending therefore still reopens the
+  remembered target exactly once when the host connects (`ResumeStep.OPEN` clears it), with no extra
+  tap; a connect that ended without a connection still gives up (`ABORT`) and clears it. Tests:
+  `ReattachTest` (the saver), `PendingResumeDeviceTest` (state restoration, compile-checked here).
 - Tests: `ReattachTest` (marker lifecycle across "processes", the one-shot, the decision, a closed
   target never resumed).
 

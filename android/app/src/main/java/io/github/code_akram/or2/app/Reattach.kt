@@ -1,5 +1,10 @@
 package io.github.code_akram.or2.app
 
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import io.github.code_akram.or2.connection.ActiveTerminal
 import io.github.code_akram.or2.connection.UserCloseListener
 import io.github.code_akram.or2.data.Host
@@ -48,6 +53,22 @@ data class LastTerminal(val hostId: Long, val target: TerminalTarget, val transp
         }
     }
 }
+
+/**
+ * The terminal a resume that is waiting on its host's connection will reopen, as saved state: the
+ * cold-launch marker is taken once per process, so the continuation must survive the activity being
+ * recreated (rotation, process restore) while the biometric, the battery explanation or the connect
+ * is in flight. Nothing pending saves nothing.
+ */
+val PendingResumeSaver: Saver<LastTerminal?, String> = Saver(
+    save = { it?.encode() },
+    restore = { LastTerminal.decode(it) },
+)
+
+/** The pending resume of [Or2App], kept across recreation (see [PendingResumeSaver]). */
+@Composable
+fun rememberPendingResume(): MutableState<LastTerminal?> =
+    rememberSaveable(stateSaver = PendingResumeSaver) { mutableStateOf<LastTerminal?>(null) }
 
 /**
  * The last focused terminal, in app-private preferences (Rust has no storage). The user closing a

@@ -209,7 +209,8 @@ fun Or2App(
         last, terminals.map { OpenSession(it.id, it.host.id, it.target, closedStates[it.id] != true) },
         connectedHosts, hosts.map { it.id }.toSet(),
     )
-    var pendingResume by remember { mutableStateOf<LastTerminal?>(null) }
+    // Saved state: a rotation (or a restored process) while the connect is pending must not lose the target.
+    var pendingResume by rememberPendingResume()
     val resumeCard = when {
         pendingResume != null -> null
         reattach is Reattach.Reopen -> resumeCardOf(reattach.last, hosts)

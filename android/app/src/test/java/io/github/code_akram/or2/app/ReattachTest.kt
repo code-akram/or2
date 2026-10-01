@@ -27,6 +27,20 @@ class ReattachTest {
     }
 
     @Test
+    fun aPendingResumeTargetSurvivesTheSavedStateRoundTripAndNothingStaysNothing() {
+        // Rotation (or process death) during a cold resume: the continuation is saved state, not
+        // `remember`, so the recreated composition still knows which terminal to reopen.
+        val scope = androidx.compose.runtime.saveable.SaverScope { true }
+        for (target in listOf(last, LastTerminal(3, TerminalTarget.Shell, TerminalTransport.SSH), LastTerminal(4, TerminalTarget.Tmux("a b"), TerminalTransport.MOSH))) {
+            val saved = with(PendingResumeSaver) { scope.save(target) }
+            assertNotNull(saved)
+            assertEquals(target, PendingResumeSaver.restore(saved!!))
+        }
+        assertNull(with(PendingResumeSaver) { scope.save(null) }) // Nothing pending: nothing saved.
+        assertNull(PendingResumeSaver.restore("garbage")) // Not ours: nothing pending.
+    }
+
+    @Test
     fun anythingThatIsNotOurEncodingDecodesToNothing() {
         for (text in listOf(null, "", "garbage", "x|SSH|shell", "7|TELNET|shell", "7|SSH|tmux", "7|SSH|tmux|-", "7|SSH|herdr|-", "7|SSH|shell|extra", "7|SSH|zsh")) {
             assertNull(text, LastTerminal.decode(text))
