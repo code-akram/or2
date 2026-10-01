@@ -872,7 +872,9 @@ to `MoshParams::server_pid` through the exec channel, and only if the process th
 `mosh-server` (a reused id is left alone; one already gone is not an error). **Whoever calls
 `bootstrap` and `start` must call it when the session closes `Failed { TimedOut }` before ever
 reaching `Connected`, or is disconnected before it did** (lane A1/M3 own that call site);
-`bootstrap` itself calls it when the server started but its answer was unusable. A
+`bootstrap` itself calls it when the server started but its answer was unusable (it reads
+the pid from either stream *before* wiping stdout, so a pid printed on stdout beside an unusable
+CONNECT line is still cleaned up). A
 `MOSH_SERVER_NETWORK_TMOUT` is deliberately not set: it would also end a healthy session whose
 client was offline for a while. An exec that fails after the server started (a timeout) loses
 the pid and cannot be cleaned up.

@@ -145,11 +145,15 @@ pub async fn bootstrap(
         .exec(&command(server, &caps.utf8_locale, target))
         .await?;
     let params = parse_output(&output, size);
-    // stdout carried the key.
+    // The pid may be on either stream, so read it before stdout (which carried the key) is
+    // wiped; only the integer is kept.
+    let started = if params.is_err() {
+        detached_pid(&output)
+    } else {
+        None
+    };
     output.stdout.zeroize();
-    if params.is_err()
-        && let Some(pid) = detached_pid(&output)
-    {
+    if let Some(pid) = started {
         // It started but its answer is unusable: nobody will ever connect to it.
         let _ = terminate(host, pid).await;
     }
@@ -577,6 +581,23 @@ mod tests {
             let ran = host.ran.lock().unwrap();
             assert_eq!(ran.len(), 2, "the start, then the cleanup");
             assert!(ran[1].contains("kill -TERM 77"), "{}", ran[1]);
+        }
+
+        // The detached pid printed on stdout, next to the unusable CONNECT line, is read before
+        // stdout is wiped.
+        let host = FakeHost::new(Ok(output(
+            Some(0),
+            &format!("MOSH CONNECT 70000 {KEY}\n[mosh-server detached, pid = 78]\n"),
+            "",
+        )));
+        let error = bootstrap(&host, &caps(Some("/x/mosh-server")), size(), &[])
+            .await
+            .unwrap_err();
+        assert_eq!(error, BootstrapError::InvalidPort);
+        {
+            let ran = host.ran.lock().unwrap();
+            assert_eq!(ran.len(), 2, "the start, then the cleanup");
+            assert!(ran[1].contains("kill -TERM 78"), "{}", ran[1]);
         }
 
         // A failure without a detached server has nothing to stop.
