@@ -52,3 +52,38 @@ Wake-on-LAN, TCP wake probe and keep-screen-on (see design M4 backlog).
   OFL); **FIDO2/YubiKey** keys.
 - **Usage view** for agents (limits and context left), from what herdr and the agents' own
   status lines expose.
+
+## Research-backed priorities (October 2026)
+
+From the [Moshi study](research/2026-10-moshi-study/README.md): reliability is where Moshi
+keeps paying (half of its connection items are fixes), Chat View is its biggest bet, and
+multiplexer navigation is second. or2 should support few agents well and never add a cloud.
+
+**Next (small, after M3 lands):**
+1. Local notifications from herdr events: exactly one per Blocked/Done edge
+   (`state_change_seq`), none when the pane is on screen, opt-in per host, tap opens the pane.
+2. Wheel-aware scrolling: a swipe in tmux (mouse on) or herdr scrolls the pane, not shell
+   history; a scroll-to-bottom button; tap links (including wrapped URLs).
+3. Project herdr's `agent_session` into the inbox model (unlocks Chat View and precise tap
+   routing).
+4. From the reference-app pass: scan for SSH servers, recent directories / one-tap shells,
+   gestures, hardware shortcuts, OSC 52 clipboard, optional app lock.
+
+**M4:** image paste over SFTP (`russh-sftp`, Apache-2.0; EXIF-stripped, downscaled, uploaded to
+a private cache dir, path inserted without Enter); notification actions (reply through
+`submit_text`, approve/deny with confirmation) and an Android 16 Live Update summary; a history
+sheet that pages tmux/herdr history under mosh; an ntfy hook snippet as opt-in remote push
+(metadata-only payload by default); bring-your-own-key dictation; Wake-on-LAN, TCP wake probe,
+keep-screen-on.
+
+**M5:** Chat View v1 for Claude Code then Codex (transcripts read over exec, located from
+herdr's `agent_session`), approval cards, diff viewer (git over exec), web preview (SSH
+`direct-tcpip` into a WebView), UnifiedPush connector.
+
+**Later / maybe:** on-device dictation (sherpa-onnx + Moonshine/Parakeet; F-Droid needs
+from-source ONNX builds), zellij (≥ 0.44), tmux control mode, file browser, FIDO2/YubiKey,
+Eternal Terminal only if UDP is blocked somewhere the owner works.
+
+**Decisions needed** (see the synthesis's open questions): whether a Rust HTTPS transport is
+acceptable (BYOK dictation, UnifiedPush) or an explicit exception; Chat View agent scope;
+whether or2 may run `tmux set mouse on` with consent; dictation languages.
