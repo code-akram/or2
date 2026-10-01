@@ -60,7 +60,7 @@ fun statusColor(status: AgentStatus): Color = when (status) {
 }
 
 private fun linkColor(link: LinkStatus): Color? = when (link) {
-    LinkStatus.NOT_CONNECTED -> null
+    LinkStatus.NOT_CONNECTED, LinkStatus.ASLEEP -> null
     LinkStatus.CONNECTING -> Or2Colors.Accent
     LinkStatus.NEEDS_HOST_KEY -> Or2Colors.Attention
     LinkStatus.CONNECTED -> Or2Colors.Done
@@ -87,7 +87,7 @@ fun InboxScreen(
     addHost: () -> Unit = {},
 ) {
     val connectable = state.hosts.filter {
-        it.host.keyId != null && (it.link == LinkStatus.NOT_CONNECTED || it.link == LinkStatus.FAILED)
+        it.host.keyId != null && it.link.canConnect
     }
     val anyConnected = state.hosts.any { it.link == LinkStatus.CONNECTED }
     Column(modifier.fillMaxSize()) {
@@ -185,7 +185,7 @@ private fun HostStatusRow(row: InboxHostRow, busy: Boolean, connect: () -> Unit,
             // herdr's own explanation, muted: why there are no agents here.
             row.herdrNote?.let { Text(it, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.testTag("inbox-herdr-note:${row.host.id}")) }
         }
-        if (row.link == LinkStatus.NOT_CONNECTED || failed) {
+        if (row.link.canConnect) {
             PillButton(if (failed) "Retry" else "Unlock", connect, Modifier.testTag("inbox-connect:${row.host.id}"), compact = true,
                 enabled = !busy && row.host.keyId != null)
         }

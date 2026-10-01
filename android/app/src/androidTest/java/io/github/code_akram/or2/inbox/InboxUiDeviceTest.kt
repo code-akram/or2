@@ -149,4 +149,14 @@ class InboxUiDeviceTest {
         compose.onNodeWithTag("inbox-herdr-note:1", useUnmergedTree = true).assertIsDisplayed()
         compose.onNodeWithText(note).assertIsDisplayed()
     }
+
+    @Test
+    fun aSleepingHostReadsAsleepInMutedTextAndCanStillBeUnlocked() {
+        var connected: Host? = null
+        show(InboxState(listOf(row(uiHost(1, "MacBook", sleeps = true), LinkStatus.ASLEEP, "Asleep")), emptyList()), connect = { connected = it })
+        compose.onNodeWithText("Asleep").assertIsDisplayed()
+        compose.onNodeWithText("Retry").assertDoesNotExist() // Not a failure to retry.
+        compose.onNodeWithTag("inbox-connect:1").assertIsEnabled().performClick() // The user knows it woke up.
+        compose.runOnIdle { assertEquals(1L, connected!!.id) }
+    }
 }

@@ -64,4 +64,20 @@ class ReconnectOfferTest {
         advanceUntilIdle()
         assertNull(reconnectOffer(listOf(a), user.hosts.value))
     }
+
+    @Test
+    fun aSleepingHostIsNeverOffered() {
+        val laptop = testHost(6, "MacBook", keyId = "k1", sleeps = true)
+        assertNull(reconnectOffer(listOf(laptop)) { true }) // Lost, but it sleeps: "asleep", not an offer.
+        val offer = reconnectOffer(listOf(laptop, a, b)) { true }!!
+        assertEquals(listOf(a, b), offer.hosts)
+        assertEquals(1, offer.prompts)
+    }
+
+    @Test
+    fun theChipSaysWhoAndHowManyFingerprints() {
+        assertEquals("Reconnect Alpha \u00b7 1 fingerprint", io.github.code_akram.or2.app.reconnectChipLabel(reconnectOffer(listOf(a)) { true }!!))
+        assertEquals("Reconnect 2 hosts \u00b7 1 fingerprint", io.github.code_akram.or2.app.reconnectChipLabel(reconnectOffer(listOf(a, b)) { true }!!))
+        assertEquals("Reconnect 3 hosts \u00b7 2 fingerprints", io.github.code_akram.or2.app.reconnectChipLabel(reconnectOffer(listOf(a, b, c)) { true }!!))
+    }
 }

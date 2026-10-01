@@ -168,7 +168,7 @@ fun HomeScreen(
         Or2Sheet({ options = null }, title = host.label, done = "Done") {
             Column(Modifier.padding(horizontal = Or2Dimens.Gutter).padding(bottom = Or2Dimens.Gutter)) {
                 GroupCard(color = Or2Colors.SurfaceRaisedRow) {
-                    val live = card.link != LinkStatus.NOT_CONNECTED && card.link != LinkStatus.FAILED
+                    val live = !card.link.canConnect
                     if (!live) {
                         ListRow("Connect", icon = Or2Icons.Power, enabled = !busy && host.keyId != null,
                             subtitle = if (host.keyId == null) "Select a key first" else null,
@@ -246,6 +246,8 @@ fun HostCardView(card: HostCard, onClick: () -> Unit, onLongClick: () -> Unit, m
                         Text(status.progress, style = Or2Type.Mono, color = Or2Colors.Accent, maxLines = 1, modifier = Modifier.testTag("host-progress:${host.id}"))
                     status.failure != null ->
                         Text(status.failure, style = Or2Type.Secondary, color = Or2Colors.Danger, maxLines = 2, modifier = Modifier.testTag("host-failure:${host.id}"))
+                    status.asleep ->
+                        Text("Asleep", style = Or2Type.Secondary, color = Or2Colors.TextMuted, maxLines = 1, modifier = Modifier.testTag("host-asleep:${host.id}"))
                     else ->
                         Text(hostAddressLine(host), style = Or2Type.Mono, color = Or2Colors.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -259,6 +261,7 @@ fun HostCardView(card: HostCard, onClick: () -> Unit, onLongClick: () -> Unit, m
 private fun hostStateDescription(status: HostCardStatus): String = when {
     status.progress != null -> status.progress
     status.failure != null -> "Connection failed"
+    status.asleep -> "Asleep"
     else -> when (status.dot) {
         HostDot.NONE -> "Not connected"
         HostDot.CONNECTED -> "Connected"

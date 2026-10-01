@@ -149,4 +149,27 @@ class ReattachTest {
         exempt = false
         assertFalse(prompt.takeIfDue()) // And it was consumed.
     }
+
+    // --- process death: resume at once, with no tap beyond the fingerprint ----------------------
+
+    private fun host(id: Long, keyId: String? = "k") = io.github.code_akram.or2.connection.testHost(id, "H$id", keyId = keyId)
+
+    @Test
+    fun aProcessThatDiedOnATerminalResumesAtOnceWhenItCanBeUnlocked() {
+        assertTrue(shouldAutoResume(last, listOf(host(7)), connectedHosts = emptySet()))
+        // Nothing remembered (the user ended it), a deleted host, or a host without a key: only the Resume card is left.
+        assertFalse(shouldAutoResume(null, listOf(host(7)), emptySet()))
+        assertFalse(shouldAutoResume(last, listOf(host(8)), emptySet()))
+        assertFalse(shouldAutoResume(last, listOf(host(7, keyId = null)), emptySet()))
+        // Already connected (it cannot be after a death, but a reopen is not a resume).
+        assertFalse(shouldAutoResume(last, listOf(host(7)), setOf(7)))
+    }
+
+    @Test
+    fun theAutoResumeAgreesWithTheDecisionThatOffersTheResumeCard() {
+        // Whenever the decision is Resume for a host that has a key, the auto path would also resume.
+        val hosts = listOf(host(7))
+        assertEquals(Reattach.Resume(last), decideReattach(last, emptyList(), emptySet(), setOf(7)))
+        assertTrue(shouldAutoResume(last, hosts, emptySet()))
+    }
 }

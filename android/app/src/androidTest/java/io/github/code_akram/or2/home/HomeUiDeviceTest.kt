@@ -49,7 +49,7 @@ class HomeUiDeviceTest {
     private val calls = mutableListOf<String>()
 
     private fun card(host: Host, state: HostState?, blocked: Int = 0, unlocking: Boolean = false) =
-        HostCard(host, hostCardStatus(state, unlocking, blocked), linkStatus(state))
+        HostCard(host, hostCardStatus(state, unlocking, blocked, host.sleeps), linkStatus(state, host.sleeps))
 
     private fun show(
         hosts: List<HostCard>, sessions: List<HomeSession> = emptyList(), keyCount: Int = 1, blocked: Int = 0, working: Int = 0,
@@ -218,5 +218,20 @@ class HomeUiDeviceTest {
     fun withNothingToResumeThereIsNoResumeCard() {
         show(listOf(card(one, HostState.Connected(0u))))
         compose.onNodeWithTag("home-resume").assertDoesNotExist()
+    }
+
+    @Test
+    fun aSleepingHostsLostConnectionReadsAsleepInMutedTextNotAFailure() {
+        val laptop = uiHost(6, "MacBook", sleeps = true)
+        val lost = HostState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("reset")))
+        show(listOf(card(laptop, lost), card(uiHost(7, "Server"), lost)))
+        compose.onNodeWithTag("host-asleep:6", useUnmergedTree = true).assertTextEquals("Asleep")
+        compose.onNodeWithTag("host-failure:6", useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithTag("host-dot:6", useUnmergedTree = true).assertDoesNotExist()
+        // A host that is not flagged keeps showing the failure.
+        compose.onNodeWithTag("host-failure:7", useUnmergedTree = true).assertIsDisplayed()
+        // A tap still connects it (the user knows it woke up), like any unconnected host.
+        compose.onNodeWithTag("host:6").performTouchInput { longClick() }
+        compose.onNodeWithTag("option-connect").assertIsDisplayed()
     }
 }

@@ -222,4 +222,22 @@ class InboxModelTest {
         holder.hosts.value.keys.toList().forEach(holder::dismissHost)
         assertEquals(emptyList<PendingHostKey>(), holder.pendingHostKeys().first())
     }
+
+    @Test
+    fun aSleepingHostThatWentQuietIsAsleepNotFailed() {
+        val lost = HostState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("reset")))
+        assertEquals(LinkStatus.FAILED, linkStatus(lost)) // Not flagged: a failure to retry.
+        assertEquals(LinkStatus.FAILED, linkStatus(lost, sleeps = false))
+        assertEquals(LinkStatus.ASLEEP, linkStatus(lost, sleeps = true))
+        assertEquals(LinkStatus.ASLEEP, linkStatus(HostState.Closed(CloseReason.Failed(SessionFailure.TimedOut)), sleeps = true))
+        assertEquals(LinkStatus.ASLEEP, linkStatus(HostState.Closed(CloseReason.Failed(SessionFailure.Unreachable("no route"))), sleeps = true))
+        // A rejected key is no sleep, and a deliberate disconnect is not a loss at all.
+        assertEquals(LinkStatus.FAILED, linkStatus(HostState.Closed(CloseReason.Failed(SessionFailure.AuthenticationRejected)), sleeps = true))
+        assertEquals(LinkStatus.FAILED, linkStatus(HostState.Closed(CloseReason.Failed(SessionFailure.HostKeyRejected)), sleeps = true))
+        assertEquals(LinkStatus.NOT_CONNECTED, linkStatus(HostState.Closed(CloseReason.Disconnected), sleeps = true))
+        assertEquals(LinkStatus.CONNECTED, linkStatus(HostState.Connected(0u), sleeps = true))
+        // An asleep host can still be tapped to connect (the user knows it woke up), like any unconnected one.
+        assertTrue(LinkStatus.ASLEEP.canConnect && LinkStatus.FAILED.canConnect && LinkStatus.NOT_CONNECTED.canConnect)
+        assertFalse(LinkStatus.CONNECTED.canConnect || LinkStatus.CONNECTING.canConnect || LinkStatus.NEEDS_HOST_KEY.canConnect)
+    }
 }

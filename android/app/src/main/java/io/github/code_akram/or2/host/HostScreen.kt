@@ -113,7 +113,7 @@ fun HostScreen(
     pickerOffered: Boolean = false,
     setPickerOffered: (Boolean) -> Unit = {},
 ) {
-    val link = linkStatus(hostState)
+    val link = linkStatus(hostState, host.sleeps)
     var pickerOpen by rememberSaveable { mutableStateOf(false) }
     val offered by rememberUpdatedState(pickerOffered)
     LaunchedEffect(link) {
@@ -141,7 +141,7 @@ fun HostScreen(
                 AttentionCard("Select a key", "Edit this host and choose the SSH key it signs in with.", onClick = edit)
             }
             when (link) {
-                LinkStatus.NOT_CONNECTED, LinkStatus.FAILED ->
+                LinkStatus.NOT_CONNECTED, LinkStatus.FAILED, LinkStatus.ASLEEP ->
                     PrimaryButton(if (host.keyId == null) "Select a key first" else "Unlock and connect", connect,
                         Modifier.testTag("host-connect"), enabled = !busy && host.keyId != null)
                 LinkStatus.CONNECTED -> {
@@ -184,13 +184,13 @@ fun HostScreen(
 
 @Composable
 private fun StatusCard(host: Host, hostState: HostState?, link: LinkStatus) {
-    val message = hostState?.let(::hostStateMessage) ?: LinkStatus.NOT_CONNECTED.label
+    val message = if (link == LinkStatus.ASLEEP) LinkStatus.ASLEEP.label else hostState?.let(::hostStateMessage) ?: LinkStatus.NOT_CONNECTED.label
     val color = when (link) {
         LinkStatus.FAILED -> Or2Colors.Danger
         LinkStatus.CONNECTED -> Or2Colors.Done
         LinkStatus.NEEDS_HOST_KEY -> Or2Colors.Attention
         LinkStatus.CONNECTING -> Or2Colors.Accent
-        LinkStatus.NOT_CONNECTED -> Or2Colors.TextMuted
+        LinkStatus.NOT_CONNECTED, LinkStatus.ASLEEP -> Or2Colors.TextMuted
     }
     Or2Card {
         Row(Modifier.padding(Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {

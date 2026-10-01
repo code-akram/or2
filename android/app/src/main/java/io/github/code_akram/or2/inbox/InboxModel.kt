@@ -12,6 +12,7 @@ import io.github.code_akram.or2.ffi.HerdrUnavailable
 import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HostCapabilities
 import io.github.code_akram.or2.ffi.HostState
+import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.session.hostStateMessage
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -27,15 +28,34 @@ enum class LinkStatus(val label: String) {
     NEEDS_HOST_KEY("Waiting for host-key decision"),
     CONNECTED("Connected"),
     FAILED("Connection failed"),
+
+    /** A host the user marked as sleeping (a laptop) whose connection is gone: muted, not a failure. */
+    ASLEEP("Asleep"),
+    ;
+
+    /** A tap may start a connection: nothing is connecting or connected. */
+    val canConnect get() = this == NOT_CONNECTED || this == FAILED || this == ASLEEP
 }
 
-fun linkStatus(state: HostState?): LinkStatus = when (state) {
+/**
+ * [sleeps] is the host's own flag: when its connection ended because the host stopped answering
+ * ([isSleepFailure]) it reads [LinkStatus.ASLEEP], not [LinkStatus.FAILED]. A rejected key or host
+ * key is no sleep, whatever the flag says.
+ */
+fun linkStatus(state: HostState?, sleeps: Boolean = false): LinkStatus = when (state) {
     null -> LinkStatus.NOT_CONNECTED
     HostState.Connecting, HostState.Authenticating -> LinkStatus.CONNECTING
     is HostState.AwaitingHostKeyDecision -> LinkStatus.NEEDS_HOST_KEY
     is HostState.Connected -> LinkStatus.CONNECTED
-    is HostState.Closed -> if (state.reason is CloseReason.Failed) LinkStatus.FAILED else LinkStatus.NOT_CONNECTED
+    is HostState.Closed -> when (val reason = state.reason) {
+        is CloseReason.Failed -> if (sleeps && isSleepFailure(reason.failure)) LinkStatus.ASLEEP else LinkStatus.FAILED
+        else -> LinkStatus.NOT_CONNECTED
+    }
 }
+
+/** The host went quiet (connection lost, unreachable, timed out): what a sleeping host looks like from here. */
+fun isSleepFailure(failure: SessionFailure): Boolean =
+    failure is SessionFailure.ConnectionLost || failure is SessionFailure.Unreachable || failure is SessionFailure.TimedOut
 
 /** One agent row of the inbox. */
 data class InboxItem(
@@ -178,10 +198,11 @@ private fun hostFlow(host: Host, active: ActiveHost?): Flow<Pair<InboxHostRow, L
         return flowOf(InboxHostRow(host, LinkStatus.NOT_CONNECTED, LinkStatus.NOT_CONNECTED.label, null, 0) to emptyList())
     }
     return combine(active.state, active.capabilities, active.capabilitiesError, active.liveViews(host)) { state, caps, capsError, views ->
-        val link = linkStatus(state)
+        val link = linkStatus(state, host.sleeps)
         val sources = if (link == LinkStatus.CONNECTED) views.mapNotNull { it.third } else emptyList()
         val note = if (link == LinkStatus.CONNECTED) herdrNote(caps, capsError, views.map { it.first.name to it.second }) else null
-        InboxHostRow(host, link, hostStateMessage(state), note, sources.sumOf { it.view.agents.size }) to sources
+        val message = if (link == LinkStatus.ASLEEP) LinkStatus.ASLEEP.label else hostStateMessage(state)
+        InboxHostRow(host, link, message, note, sources.sumOf { it.view.agents.size }) to sources
     }
 }
 
@@ -196,7 +217,7 @@ fun HostConnections.hostStates(): Flow<Map<Long, HostState>> = hosts.flatMapLate
 @OptIn(ExperimentalCoroutinesApi::class)
 fun HostConnections.linkStatuses(): Flow<Map<Long, LinkStatus>> = hosts.flatMapLatest { active ->
     if (active.isEmpty()) flowOf(emptyMap())
-    else combine(active.values.map { a -> a.state.map { a.host.id to linkStatus(it) } }) { it.toMap() }
+    else combine(active.values.map { a -> a.state.map { a.host.id to linkStatus(it, a.host.sleeps) } }) { it.toMap() }
 }
 
 /** A host-key decision the user has not made yet. */
