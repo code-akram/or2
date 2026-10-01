@@ -58,8 +58,13 @@ pub struct Address {
     /// What goes into the pairing code: an IP literal or a name.
     pub text: String,
     pub kind: Kind,
-    /// The interface it lives on, when it is an interface address.
+    /// The interface it lives on, when it is an interface address (also when the user named it
+    /// with `--address`).
     pub interface: Option<String>,
+    /// Whether the pairing listener may bind it by default: an overlay or LAN interface address.
+    /// This is about what the address *is*, not about where `--address` put it in the list, so
+    /// naming a detected address to put it first does not take its listener away.
+    pub bindable: bool,
 }
 
 impl Address {
@@ -161,10 +166,19 @@ pub fn gather(interfaces: &[Iface], hostname: Option<&str>, requested: &[String]
         }
     };
     for text in requested {
+        // An address the user names that is one of this host's own keeps what the interface
+        // says it is (its name and whether the listener may bind it); only its place in the
+        // list is the user's choice.
+        let own = text
+            .parse::<IpAddr>()
+            .ok()
+            .and_then(|ip| interfaces.iter().find(|iface| iface.ip == ip))
+            .and_then(|iface| classify(iface).map(|kind| (iface, kind)));
         push(Address {
             text: text.clone(),
             kind: Kind::Requested,
-            interface: None,
+            interface: own.map(|(iface, _)| iface.name.clone()),
+            bindable: own.is_some_and(|(_, kind)| matches!(kind, Kind::Overlay | Kind::Lan)),
         });
     }
     for iface in interfaces {
@@ -173,6 +187,7 @@ pub fn gather(interfaces: &[Iface], hostname: Option<&str>, requested: &[String]
                 text: iface.ip.to_string(),
                 kind,
                 interface: Some(iface.name.clone()),
+                bindable: matches!(kind, Kind::Overlay | Kind::Lan),
             });
         }
     }
@@ -181,6 +196,7 @@ pub fn gather(interfaces: &[Iface], hostname: Option<&str>, requested: &[String]
             text: name,
             kind: Kind::Mdns,
             interface: None,
+            bindable: false,
         });
     }
     // Stable: addresses of one kind keep the order the system listed them in.
@@ -193,7 +209,7 @@ pub fn gather(interfaces: &[Iface], hostname: Option<&str>, requested: &[String]
 pub fn bindable(addresses: &[Address]) -> Vec<IpAddr> {
     addresses
         .iter()
-        .filter(|address| matches!(address.kind, Kind::Overlay | Kind::Lan))
+        .filter(|address| address.bindable)
         .filter_map(Address::ip)
         .collect()
 }
@@ -298,6 +314,60 @@ mod tests {
         let order: Vec<_> = addresses.iter().map(|a| a.text.as_str()).collect();
         assert_eq!(order, ["dev.example.org", "192.168.1.20", "box.local"]);
         assert_eq!(addresses[1].kind, Kind::Requested);
+    }
+
+    fn bound(addresses: &[Address]) -> Vec<String> {
+        bindable(addresses)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn naming_a_detected_address_moves_it_first_without_losing_its_listener() {
+        // Finding 8: `--address 192.168.1.20` on a host whose only usable interface is that one
+        // used to leave nothing to bind.
+        let lan = [iface("eth0", "192.168.1.20")];
+        let addresses = gather(&lan, None, &["192.168.1.20".into()]);
+        assert_eq!(bound(&addresses), ["192.168.1.20"]);
+        assert_eq!(addresses[0].kind, Kind::Requested, "still listed first");
+        assert_eq!(addresses[0].interface.as_deref(), Some("eth0"));
+
+        // Several interfaces: naming the LAN one puts it ahead of the overlay one, and both
+        // keep their listener.
+        let both = [iface("zt0", "10.147.17.5"), iface("eth0", "192.168.1.20")];
+        let addresses = gather(&both, Some("box"), &["192.168.1.20".into()]);
+        let order: Vec<_> = addresses.iter().map(|a| a.text.as_str()).collect();
+        assert_eq!(order, ["192.168.1.20", "10.147.17.5", "box.local"]);
+        assert_eq!(bound(&addresses), ["192.168.1.20", "10.147.17.5"]);
+
+        // The same for an overlay address named ahead of a LAN one.
+        let addresses = gather(&both, None, &["10.147.17.5".into()]);
+        assert_eq!(bound(&addresses), ["10.147.17.5", "192.168.1.20"]);
+    }
+
+    #[test]
+    fn naming_what_is_not_bindable_does_not_make_it_bindable() {
+        // A public interface address, a container bridge and a name stay unbound by default,
+        // however they are named.
+        let interfaces = [
+            iface("eth1", "203.0.113.9"),
+            iface("docker0", "172.17.0.1"),
+            iface("lo", "127.0.0.1"),
+        ];
+        let addresses = gather(
+            &interfaces,
+            None,
+            &[
+                "203.0.113.9".into(),
+                "172.17.0.1".into(),
+                "127.0.0.1".into(),
+                "dev.example.org".into(),
+                "10.9.9.9".into(),
+            ],
+        );
+        assert!(bound(&addresses).is_empty(), "{:?}", bound(&addresses));
+        assert_eq!(addresses.len(), 5, "all five are still advertised");
     }
 
     #[test]

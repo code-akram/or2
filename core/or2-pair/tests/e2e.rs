@@ -582,6 +582,32 @@ fn the_code_and_the_confirmation_name_the_account_whose_file_is_written() {
 }
 
 #[test]
+fn naming_a_detected_address_with_address_keeps_every_default_listener() {
+    // Finding 8: `--address <the LAN address>` put it first and dropped it from the bind list.
+    let world = World::new();
+    let net = Recording(Mutex::default());
+    let mut options = options();
+    options.bind.clear();
+    options.addresses = vec!["192.168.1.20".into()];
+    let result = pair_with(
+        &world,
+        &options,
+        &Auto::new(Answer::Yes),
+        WINDOW,
+        &net,
+        true,
+        |_| (),
+    );
+    assert!(matches!(result.exit, Err(RunError::Listen(_))));
+    let bound = net.0.lock().unwrap();
+    let expected: Vec<IpAddr> = vec![
+        "192.168.1.20".parse().unwrap(),
+        "10.147.17.5".parse().unwrap(),
+    ];
+    assert_eq!(*bound, [expected], "the named address first, nothing lost");
+}
+
+#[test]
 fn a_host_with_only_a_public_address_refuses_to_listen_by_default() {
     // The same fake world but the only interface is public: nothing is bindable.
     struct PublicOnly;

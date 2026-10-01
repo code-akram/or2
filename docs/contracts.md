@@ -2377,7 +2377,9 @@ it uses). By default it binds the *listed* overlay and LAN interface addresses (
 public address, a wildcard or a name. `--bind <ip>` (repeatable) chooses addresses explicitly, including
 public ones and `0.0.0.0`/`::`, with a warning; a wildcard bind advertises the host's own overlay and LAN
 addresses. Container bridges and VM networks (`docker*`, `br-*`, `veth*`, `virbr*`, `vmnet*`, `bridge*`, ...)
-are neither listed nor bound. IPv6 interface addresses are not listed yet.
+are neither listed nor bound. IPv6 interface addresses are not listed yet. `--address` only changes the
+*order* in the code: naming one of the host's own addresses (to put it first) keeps its interface, its kind and
+its listener, and naming an address that is not bindable (public, a bridge, a name) does not make it bindable.
 
 ### Why a Net trait in the CLI
 
