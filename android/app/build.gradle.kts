@@ -68,6 +68,13 @@ android {
         java.srcDir(generatedBindings)
         jniLibs.srcDir(generatedLibraries)
     }
+    // MigrationTestHelper reads the exported schemas as instrumented-test assets.
+    sourceSets["androidTest"].assets.srcDir("$projectDir/schemas")
+}
+
+ksp {
+    // Room schema JSONs are checked in so migrations can be tested against every shipped version.
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 kotlin {
@@ -108,10 +115,13 @@ dependencies {
     implementation("net.java.dev.jna:jna:5.17.0@aar")
 
     testImplementation("junit:junit:4.13.2")
+    // Runs the Room migration SQL on real SQLite (Apache-2.0; test-only).
+    testImplementation("org.xerial:sqlite-jdbc:3.53.4.0")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     testRuntimeOnly("net.java.dev.jna:jna:5.17.0")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.room:room-testing:2.8.3")
     androidTestImplementation(platform("androidx.compose:compose-bom:2025.10.00"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
 }
