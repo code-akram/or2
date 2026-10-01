@@ -72,6 +72,8 @@ class ConnectionService : Service() {
         controller.close()
         scope.cancel()
         super.onDestroy()
+        // Stopped from outside while connections are open (it stops itself only when nothing is): start it again.
+        (application as Or2Application).reviveService()
     }
 
     private fun createChannel() {

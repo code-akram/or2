@@ -39,16 +39,25 @@ class Or2Application : Application() {
             .also { it.userClose = reattach }
     }
 
-    private var watching = false
+    private var starter: ServiceStarter? = null
 
     /** Starts the foreground service whenever a host or session opens and it is not running. Idempotent. */
     fun watchConnections() {
-        if (watching) return
-        watching = true
-        val starter = ServiceStarter { ConnectionService.start(this) }
+        if (starter != null) return
+        val created = ServiceStarter { ConnectionService.start(this) }
+        starter = created
         CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate).launch {
-            connections.serviceSnapshots().collect(starter::onSnapshot)
+            connections.serviceSnapshots().collect(created::onSnapshot)
         }
+    }
+
+    /**
+     * Starts the service again when connections are open and it is not running: it was destroyed
+     * from outside, or a start was refused while the app was in the background. Call on main when
+     * the service is destroyed and when the app comes to the foreground.
+     */
+    fun reviveService() {
+        starter?.recheck()
     }
 
     fun isBatteryExempt(): Boolean = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)

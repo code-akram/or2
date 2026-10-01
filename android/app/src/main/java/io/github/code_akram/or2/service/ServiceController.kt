@@ -5,6 +5,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * What the Android service delegates to: showing the ongoing notification and ending itself.
@@ -39,6 +40,7 @@ class ServiceController(
 
     fun begin() {
         state.running = true
+        state.begins.incrementAndGet()
         host.show(notificationContent(current))
         if (job != null) return
         job = scope.launch {
@@ -70,6 +72,9 @@ class ServiceRunState {
     @Volatile
     var running = false
 
+    /** How many times the service has begun (`onStartCommand`): lets a test tell "never started" from "started, then stopped". */
+    val begins = AtomicInteger()
+
     companion object {
         /** The process's one service. */
         val Process = ServiceRunState()
@@ -79,10 +84,22 @@ class ServiceRunState {
 /**
  * Starts the service whenever something is open and it is not running (a connection began, or the
  * service stopped a moment ago and the user connected again). Feed it [ServiceSnapshot]s; it calls
- * [start] on the main thread.
+ * [start] on the main thread. A snapshot only arrives when the set of open things changes, so
+ * [recheck] covers the other way to end up with connections and no service: the service was
+ * destroyed from outside (the user stopped it, or a start was swallowed because the app was in the
+ * background). The app calls it when the service is destroyed and when it returns to the foreground.
  */
 class ServiceStarter(private val state: ServiceRunState = ServiceRunState.Process, private val start: () -> Unit) {
+    private var latest: ServiceSnapshot? = null
+
     fun onSnapshot(snapshot: ServiceSnapshot) {
+        latest = snapshot
+        recheck()
+    }
+
+    /** Starts the service if the latest snapshot has something open and it is not running. */
+    fun recheck() {
+        val snapshot = latest ?: return
         if (!snapshot.idle && !state.running) start()
     }
 }

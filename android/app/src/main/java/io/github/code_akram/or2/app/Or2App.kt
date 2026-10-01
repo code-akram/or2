@@ -188,16 +188,11 @@ fun Or2App(
         else activations.launchReuse(terminal) { enter(it, replace) }
     }
 
+    // Under AUTO a tap right after connecting waits (briefly) for the capability probe, so the
+    // terminal does not silently open over SSH on a host that has mosh-server.
     fun openTerminal(active: ActiveHost, target: TerminalTarget) {
-        try {
-            val terminal = connections.openTerminal(active, target)
-            actions.message(null)
-            navigate(nav.push(Destination.Terminal(terminal.id)))
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: HostException) {
-            actions.message(hostErrorMessage(error))
-        }
+        actions.message(null)
+        activations.launchOpen(active, target) { enter(it, replace = false) }
     }
 
     // --- reattach: the last focused terminal, and what to do when the app returns -----------------
@@ -253,11 +248,16 @@ fun Or2App(
         if (top is Destination.Terminal && connections.terminal(top.terminalId) == null) navigate(NavStack())
     }
 
-    // Leaving and returning: see the contract's reattach, battery and reconnect rules.
+    // Leaving and returning: see the contract's reattach, battery and reconnect rules. The flags
+    // are saved state: the foreground service keeps the process alive, so the system can destroy
+    // and recreate the activity while it is in the background (memory pressure, "don't keep
+    // activities", a long time away), exactly when the connection is most likely to have died. The
+    // work itself waits for the stored hosts to be read, which a recreated activity has not yet done.
     val activity = LocalActivity.current
-    var returning by remember { mutableStateOf(false) }
-    var stoppedOnTerminal by remember { mutableStateOf(false) }
-    var batteryExplanation by remember { mutableStateOf(false) }
+    var returning by rememberSaveable { mutableStateOf(false) }
+    var stoppedOnTerminal by rememberSaveable { mutableStateOf(false) }
+    var returned by remember { mutableStateOf(false) }
+    var batteryExplanation by rememberSaveable { mutableStateOf(false) }
     var offer by remember { mutableStateOf<ReconnectOffer?>(null) }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
         if (activity?.isChangingConfigurations == true) return@LifecycleEventEffect
@@ -268,13 +268,19 @@ fun Or2App(
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
         if (!returning) return@LifecycleEventEffect
         returning = false
+        returned = true
+    }
+    LaunchedEffect(returned, loaded) {
+        if (!returned || !loaded) return@LaunchedEffect
+        returned = false
+        val stored = hostsNow.value
         if (actions.battery.takeIfDue()) batteryExplanation = true
-        offer = reconnectOffer(hosts, connections.hosts.value)
+        offer = reconnectOffer(stored, connections.hosts.value)
         val liveHosts = connections.hosts.value.filterValues { it.state.value is HostState.Connected }.keys
         val decision = decideReattach(
             actions.reattach.last.value,
             connections.terminals.value.map { OpenSession(it.id, it.host.id, it.target, it.state.value !is SessionState.Closed) },
-            liveHosts, hosts.map { it.id }.toSet(),
+            liveHosts, stored.map { it.id }.toSet(),
         )
         when {
             !stoppedOnTerminal -> Unit
@@ -286,11 +292,11 @@ fun Or2App(
             }
             decision is Reattach.Reopen -> reopen(decision.last)
             else -> {
-                // Nothing of it is left to show: a terminal screen for a session that is gone gives way to Home's Resume card.
+                // A terminal screen for a terminal that is gone (dismissed, or lost with a process that
+                // died) gives way to Home. A terminal that closed stays: its reason and final frame are
+                // the user's to read and dismiss, and Home's Resume card is there when it can be resumed.
                 val top = NavStack.decode(saved).current
-                if (top is Destination.Terminal && connections.terminal(top.terminalId).let { it == null || it.state.value is SessionState.Closed }) {
-                    navigate(NavStack())
-                }
+                if (top is Destination.Terminal && connections.terminal(top.terminalId) == null) navigate(NavStack())
             }
         }
     }

@@ -58,14 +58,31 @@ class MainActivity : FragmentActivity() {
     private val app get() = application as Or2Application
     private lateinit var model: AppViewModel
     private var busy by mutableStateOf(false)
-    private var afterNotificationAnswer: (() -> Unit)? = null
+
+    /**
+     * The hosts of a connect that waits for the `POST_NOTIFICATIONS` dialog, by id. It is saved
+     * with the instance state: the dialog's result goes to whichever activity instance exists when
+     * it returns (rotation, a theme change or process death while it is up), and the tap must not
+     * be lost with the old one. [busy] covers the wait, so a second tap cannot start a connect in
+     * parallel and a Resume waiting on the connect does not take the quiet moment for its end.
+     */
+    private var pendingConnect: LongArray? = null
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         // Granted or not, connecting goes on: the service runs without its notification being visible.
-        afterNotificationAnswer?.also { afterNotificationAnswer = null }?.invoke()
+        val ids = pendingConnect ?: return@registerForActivityResult
+        pendingConnect = null
+        lifecycleScope.launch {
+            val hosts = ids.toList().mapNotNull { app.database.dao().host(it) }
+            // Back to back with no suspension between: busy never reads false in between.
+            busy = false
+            if (hosts.isNotEmpty()) startConnect(hosts)
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingConnect = savedInstanceState?.getLongArray(PENDING_CONNECT)
+        if (pendingConnect != null) busy = true
         app.watchConnections()
         enableEdgeToEdge(
             // Dark only: transparent bars with light icons over the app's own background.
@@ -156,23 +173,43 @@ class MainActivity : FragmentActivity() {
         model.saveHost(host, previous) {
             if (previous == null) return@saveHost
             if (connectionAffectedBy(previous, host)) app.connections.release(host.id, closeTerminals = false)
-            else app.connections.setWatching(host.id, host.showInInbox)
+            else {
+                app.connections.setWatching(host.id, host.showInInbox)
+                app.connections.setTransport(host.id, host.transport)
+            }
         }
     }
 
     /** The first connection asks for `POST_NOTIFICATIONS` (Android 13+), once; then connects either way. */
     private fun connect(hosts: List<Host>) {
+        if (busy) return
         val granted = checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         if (app.notificationPolicy.shouldAsk(Build.VERSION.SDK_INT, granted)) {
             app.notificationPolicy.markAsked()
-            afterNotificationAnswer = { startConnect(hosts) }
+            pendingConnect = hosts.map { it.id }.toLongArray()
+            busy = true
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
             startConnect(hosts)
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        // Connections without a service (it was stopped from outside, or a start was refused in the background): back to the foreground is the moment it may start.
+        app.reviveService()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        pendingConnect?.let { outState.putLongArray(PENDING_CONNECT, it) }
+    }
+
     private fun startConnect(hosts: List<Host>) = operation { connectGrouped(hosts, app.connections, biometricUnlocker) }
+
+    private companion object {
+        const val PENDING_CONNECT = "pending_connect"
+    }
 
     /**
      * The system's own "let this app ignore battery optimisations?" dialog; shown only after our

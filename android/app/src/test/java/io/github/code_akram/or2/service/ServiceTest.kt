@@ -175,6 +175,40 @@ class ServiceTest {
     }
 
     @Test
+    fun aServiceDestroyedFromOutsideWhileSomethingIsOpenIsStartedAgainOnRecheck() {
+        val state = ServiceRunState()
+        var starts = 0
+        val starter = ServiceStarter(state) { starts++ }
+        starter.recheck() // No snapshot yet: nothing to start for.
+        assertEquals(0, starts)
+
+        starter.onSnapshot(ServiceSnapshot(listOf(HostEntry(1, "A", 1))))
+        assertEquals(1, starts)
+        state.running = true // The service came up...
+        starter.recheck()
+        assertEquals(1, starts)
+        state.running = false // ...and was stopped from outside; no snapshot changed, so only a recheck notices.
+        starter.recheck()
+        assertEquals(2, starts)
+
+        starter.onSnapshot(ServiceSnapshot(emptyList())) // Everything closed: a destroyed service stays destroyed.
+        starter.recheck()
+        assertEquals(2, starts)
+    }
+
+    @Test
+    fun theControllerCountsEachBeginSoATestCanTellNeverStartedFromStartedAndStopped() = runTest {
+        val state = ServiceRunState()
+        val controller = ServiceController(this, MutableStateFlow(ServiceSnapshot(emptyList())), RecordingHost(), state)
+        assertEquals(0, state.begins.get())
+        controller.begin()
+        assertEquals(1, state.begins.get())
+        runCurrent()
+        assertFalse(state.running) // Stopped itself, and the count still says it started.
+        assertEquals(1, state.begins.get())
+    }
+
+    @Test
     fun networkChangesAreDebouncedByHalfASecond() = runTest {
         var notified = 0
         val changes = NetworkChanges(this, initial = 1L) { notified++ }

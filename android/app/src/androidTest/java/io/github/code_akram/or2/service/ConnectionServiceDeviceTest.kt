@@ -101,9 +101,12 @@ class ConnectionServiceDeviceTest {
     @Test
     fun aServiceStartedWithNothingOpenStopsItself() {
         // It must still post its notification at once (Android's deadline), then notice there is nothing to hold.
+        // First prove it really started (a refused start would also leave nothing running and no notification),
+        // then that it stopped itself.
+        val begun = ServiceRunState.Process.begins.get()
         context.startForegroundService(ConnectionService.startIntent(context))
-        Thread.sleep(2_000)
-        assertFalse(ServiceRunState.Process.running)
-        assertTrue(notification() == null)
+        await("the service to start") { ServiceRunState.Process.begins.get() > begun }
+        await("the service to stop itself") { !ServiceRunState.Process.running }
+        await("the notification to go") { notification() == null }
     }
 }
