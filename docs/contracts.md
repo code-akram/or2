@@ -2232,3 +2232,142 @@ listener timeout and one-shot behaviour, bind-address policy. Rust core: parser 
 tests, exchange against the real CLI listener in-process (loopback). Kotlin: review-screen and
 persistence logic with fakes; JVM end-to-end against a CLI listener on loopback; device test
 compiles (camera needs the phone).
+
+## Easy pair: implementation and decisions (FFI API 11)
+
+Implemented on `easy-pair`: `core/or2-pair` (the CLI), `or2_core::pair`, `or2-ffi`'s `pair` module
+and the Android screens. The user guide is [Pair a host](pairing.md). Where the text above left room,
+or where the code differs from it, this section is the contract.
+
+### The pairing code
+
+`or2-pair:1?name=<label>&user=<u>&port=<p>&a=<addr>…&hk=<algo> <base64>&pair=<ip>:<port>…&otp=<base32>`
+
+- Values are percent-encoded (`A-Za-z0-9-._~` and `:` stay, everything else `%XX`; `+` is a plus, never a
+  space). At most 1024 bytes: the CLI drops the lowest-priority addresses (the last) to fit and says so.
+- `a` is one to eight addresses (names or IP literals, no duplicates), each at the one SSH `port`, in the
+  order the phone tries them. `hk` is one plain public key (`ssh-ed25519`, `ecdsa-sha2-nistp256/384/521`
+  or `ssh-rsa`) with no comment. `name` and `user` are 1 to 64 characters without control characters.
+- `pair` is one to **four** IP literals (`<v4>:<port>` or `[<v6>]:<port>`, never a name, never a wildcard
+  or multicast address), in preference order; the phone races them through `Transport`. The spec above
+  says one; several are a superset, used when the listener is bound to a LAN and an overlay address.
+- `otp` is exactly 26 canonical uppercase base32 characters (128 bits, no padding).
+- **`--no-listen` omits `pair` and `otp`** (both or neither; one without the other is invalid). The phone
+  then saves the host with its key trusted and shows its own public key line to install by hand.
+- The parser is strict: unknown fields, repeated single fields, a bad escape, a non-IP `pair`, an
+  unsupported version (`UnsupportedVersion`, distinct from `Malformed`) are all refused with a typed error.
+
+### The exchange
+
+```text
+host  -> {"v":1,"nonce":"<base64, 32 bytes>"}
+phone -> {"v":1,"key":"<algo> <base64>","device":"<label>","mac":"<base64 HMAC-SHA256(otp, nonce || key)>"}
+host  -> {"ok":true} | {"ok":false,"reason":"authentication|key|declined|timeout|request|failed"}
+```
+
+`otp` here is the 16 decoded bytes; `key` is the exact text of the field, as sent (the phone sends
+`<algorithm> <base64>` and drops the key's comment); `device` is not under the MAC (the host's person sees
+and confirms the key's fingerprint, which is). Lines are bounded (256 bytes for the hello, 512 for the
+reply, 2048 for the request). The host verifies with `Mac::verify_slice` (constant time) **before** it
+looks at or shows anything about the key.
+
+**Timing.** The phone gives every connect, the hello and the write 10 s (`PairTiming::step`). The wait for
+the verdict is the host's own 120 s window plus a margin (125 s), because that wait is a person typing `y`;
+a flat 10 s there would make the confirmation impossible. The host's whole window is 120 s from the moment
+it starts listening, and it is also the deadline of the confirmation question.
+
+**One attempt.** The listener serves one *attempt*. An attempt starts when a connection has sent
+something after the hello; whatever happens from then on (bad MAC, bad key, `n`, timeout, success, a write
+error) ends the listener. A connection that sends nothing before it closes or times out (10 s) is not an
+attempt, so a port scan, or a connection the phone raced and dropped, cannot end the pairing.
+
+**Confirmation.** `Authorize this key for <user>? [y/N]`, answered only by `y` or `yes`. It is asked on the
+terminal and only if standard input is a terminal (otherwise the CLI refuses to listen): `yes | or2-pair`
+cannot answer. The `Confirm` trait is public so tests can answer; there is no flag or variable that says
+yes, and the shipped binary has no test hook (the auto-confirming `or2-pair-testhost` is a separate binary
+behind the `test-support` feature, never built by `cargo install` or a plain build).
+
+**`authorized_keys`.** As specified, plus: the line is rebuilt from the validated key (algorithm and key
+data parsed and checked; nothing else from the phone is written), the device label is reduced to ASCII
+letters, digits, `.`, `_`, `-` (at most 32 characters; the same text is shown at the prompt, so a label
+cannot inject terminal escapes or a second line), the date in the comment is UTC, a missing final newline is
+repaired, the backup is `authorized_keys.or2-backup-<UTC date>-<time>` (mode 0600, never overwrites an
+earlier one), and a key already present (any options, any comment) changes nothing, not even a backup.
+
+### Bind policy: what "non-public" means
+
+The listener binds only addresses that are *not public*: IPv4 10/8, 172.16/12, 192.168/16, carrier-grade NAT
+100.64/10, link-local 169.254/16, loopback; IPv6 fc00::/7, fe80::/10, `::1`; and any address on an interface
+named `zt*`, `tailscale*` or `ZeroTier*` (an overlay's own network is private to its members whatever range
+it uses). By default it binds the *listed* overlay and LAN interface addresses (one shared port) and never a
+public address, a wildcard or a name. `--bind <ip>` (repeatable) chooses addresses explicitly, including
+public ones and `0.0.0.0`/`::`, with a warning; a wildcard bind advertises the host's own overlay and LAN
+addresses. Container bridges and VM networks (`docker*`, `br-*`, `veth*`, `virbr*`, `vmnet*`, `bridge*`, ...)
+are neither listed nor bound. IPv6 interface addresses are not listed yet.
+
+### Why a Net trait in the CLI
+
+AGENTS.md routes all network traffic through `Transport`. `or2-pair` is a host-side tool, not the app's
+network path: it has no phone, no overlay binding and no async runtime, and it must not depend on
+`or2-core` (which carries russh and the Zig-built terminal engine) for `cargo install`. All of its sockets
+(the sshd probe and the listener) sit behind one small trait in `core/or2-pair/src/net.rs`, the only file
+that opens a socket, so the listener is replaceable in tests and the rule's intent (no scattered sockets)
+holds. The **phone** side uses `or2_core::pair` over `Transport` (`DirectTcp` through `race`).
+
+### FFI (API 11)
+
+- `parse_pair_payload(text) -> PairOffer` (`PairParseError`: `NotPairingCode`, `UnsupportedVersion`, `TooLong`,
+  `Malformed`, `MissingField`/`DuplicateField`/`InvalidField {field}`, `UnknownField`).
+- `PairOffer { name, username, port, addresses, host_key: PublicKeyInfo, exchange: Option<PairExchange> }`;
+  `PairExchange { endpoints, secret: PairSecret }`. **The one-time password never reaches Kotlin**:
+  `PairSecret` is an opaque Rust object (`wipe()`, `is_wiped()`; redacted `Debug`; the generated
+  `toString()` prints a pointer). `exchange` is `None` for a `--no-listen` code.
+- `async pair_submit_key(offer, public_key_line, device_label) -> Result<(), PairError>` (`NoExchange`, `Wiped`,
+  `InvalidOffer`, `InvalidKey`, `InvalidDevice`, `Unreachable`, `TimedOut`, `Protocol`, `ConnectionLost`,
+  `Declined`, `AuthenticationFailed`, `KeyNotAccepted`, `HostTimedOut`, `BadRequest`, `Refused`). It wipes the
+  secret on success and when the host refused (the code is spent); after network failures the secret stays so
+  the same code can be retried while the host listens. Cancelling the coroutine closes the connection.
+- The text of a code is a JVM `String` and cannot be wiped (like a passphrase); it is never logged, never put
+  in saved state, and dropped when the flow leaves the screens.
+
+### Android
+
+- **Add host** (Home's FAB, the empty-state card, the inbox) opens a sheet with two cards: **Easy pair with
+  QR** (kicker `FASTEST`, "Recommended · ~1 min") and **Set up manually** (the existing form, unchanged).
+- **Scan**: CameraX (`camera-core`, `-camera2`, `-lifecycle`, `-view` 1.5.3, Apache-2.0) and ZXing core 3.5.4
+  (Apache-2.0, pure Java); no Google Play Services or ML Kit. The camera permission is requested when the
+  scan screen opens (the user chose to scan), once; a denial leaves the paste field. `CAMERA` is declared with
+  `uses-feature ... required=false`. Frames are analysed on a private thread (newest only, 1280x720), a
+  light-on-dark code is read by a second attempt on the inverted image, and nothing is recorded.
+- **Review**: name and user (editable), the addresses (read only), the host key's fingerprint, and the key to
+  authorize (an existing key, or **New key**: Ed25519 generated and saved first, with the usual biometric
+  prompt, so a failed exchange leaves a key that a retry reuses). **Confirm on the host**: the phone key's
+  fingerprint and a cancel button while the host's person answers.
+- **After `ok`** the host is saved with its addresses (the offer's port on each), user and key, and the code's
+  `hk` is stored as its trusted host key **in one Room transaction** (`AppDao.saveHostWithTrust`, no schema
+  change) before anything connects; then the usual connect runs (one biometric unlock; no first-use prompt).
+  A different key presented later is the M1 changed-key path. If saving fails after the host accepted the key,
+  the retry saves without a second exchange (the code is spent).
+- A code without a listener saves the host and trust at once and shows the key line (Copy, Share) to install.
+- The flow (`pair/PairFlow.kt`) is logic over `PairBackend` and `PairStore`; it lives in a `ViewModel`
+  (a rotation or the permission dialog does not lose the code) and is cancelled, and the code wiped, when the
+  pairing screens are left.
+
+### Tests
+
+CLI unit tests (73), five tests of the built binary (`tests/cli.rs`: usage, exit codes, `--check`, no listening without a
+terminal, each with a throwaway HOME) and a loopback end-to-end suite in a temporary home (`tests/e2e.rs`, 18: the
+or2-core client against the CLI listener in process, with an automatic-yes `Confirm` that lives only in the
+tests): payload round trip through the strict parser, address ordering, MAC good/bad/replayed/swapped-key,
+`authorized_keys` create/permissions/backup/duplicate/newline repair/two-in-a-second, listener timeout,
+one-shot behaviour, idle connections, bind policy (including a public-only host and an explicit public bind),
+`--no-listen`, `--check`, non-interactive refusal, and an independent QR decoder (`rqrr`) reading the drawing.
+`or2_core::pair`: 32 table and exchange tests (every field, timing on a paused clock, bounded reads, racing).
+Kotlin JVM: `PairFlowTest` (fakes), `QrDecoderTest` (ZXing's writer through the decoder: stride, inverted,
+rotated, noisy, 1 KB), `PairMessagesTest`, `HostRecordsTest` (`saveHostWithTrust`), `ManifestTest`,
+`NavigationTest`, and `PairEndToEndTest`: `or2-pair-testhost` on loopback in a temporary home, the real native
+parser and exchange, the flow, then a real `connect_host` to a disposable sshd with the paired host key
+(Connected with no prompt) and the paired key. `PairUiDeviceTest` compiles (the camera needs the phone).
+
+Open: the camera path itself (CameraX binding, autofocus, a QR on a real monitor) and the permission dialog
+have not been run on a phone; a Windows host has not been run at all.
