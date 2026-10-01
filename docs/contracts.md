@@ -656,8 +656,12 @@ The channel is closed exactly once and the terminal's `Closed` is unchanged. Tes
 `a_terminal_given_up_while_its_focus_waits_closes_the_channel_opened_beside_it`,
 `an_open_confirmed_within_the_grace_of_a_given_up_terminal_is_closed`,
 `an_open_confirmed_after_a_given_up_terminal_closed_is_still_closed` and
-`an_open_the_server_never_confirms_ends_with_the_connection`. (An exec's open,
-`exec_rendered`, is still bounded by its own deadline, which is not covered by this.)
+`an_open_the_server_never_confirms_ends_with_the_connection`. An exec's channel open
+(`exec_rendered`: the probe, tmux and herdr execs) takes the same path (the connection holds a
+`Weak` to its own `Arc`, so the `&self` trait method can start one): a confirmation that arrives
+after the exec's deadline (`TimedOut`) is closed by the connection, test
+`an_exec_whose_open_is_confirmed_after_its_deadline_has_the_channel_closed`. The direct-streamlocal
+open (`open_unix`) is still bounded by its own deadline only.
 
 ### tmux
 

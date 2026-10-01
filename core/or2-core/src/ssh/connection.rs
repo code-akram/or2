@@ -139,6 +139,9 @@ pub(super) struct SshHost {
     /// The session-channel opens still waiting for the server's answer (see
     /// [`SshHost::start_open`]). `None` once the connection is over.
     opens: Mutex<Option<JoinSet<()>>>,
+    /// This connection's own `Arc`, for the `&self` callers (the [`RemoteHost`] methods) that
+    /// start an open.
+    me: Weak<SshHost>,
 }
 
 /// Every established SSH connection of the process, for [`network_changed`]. Weak: a closed
@@ -435,7 +438,10 @@ impl RemoteHost for SshHost {
     /// server's `MaxSessions`.
     async fn exec_rendered(&self, line: &str) -> Result<ExecOutput, RemoteError> {
         let deadline = Instant::now() + self.exec_timeout;
-        let channel = timeout_at(deadline, self.handle.channel_open_session())
+        // The open is the connection's (see `start_open`): past the deadline, a confirmation that
+        // arrives late is closed by the connection instead of orphaned on it.
+        let mut opening = self.me.upgrade().ok_or(RemoteError::Closed)?.start_open();
+        let channel = timeout_at(deadline, opening.wait())
             .await
             .map_err(|_| RemoteError::TimedOut)?
             .map_err(remote_error)?;
@@ -1084,7 +1090,7 @@ async fn hold(
     authenticate(&mut handle, username, &key).await?;
     // The key is needed for authentication only; do not keep it for the connection's lifetime.
     drop(key);
-    let host = Arc::new(SshHost {
+    let host = Arc::new_cyclic(|me| SshHost {
         handle,
         exec_timeout: options.exec_timeout,
         capabilities: OnceCell::new(),
@@ -1092,6 +1098,7 @@ async fn hold(
         focus: herdr::FocusGate::new(),
         servers: mosh_session::ServerDebt::default(),
         opens: Mutex::new(Some(JoinSet::new())),
+        me: me.clone(),
     });
     register(&host);
     // However this function ends, also when the host driver aborts it, the opens that are still

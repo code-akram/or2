@@ -1823,3 +1823,43 @@ fn an_open_the_server_never_confirms_ends_with_the_connection() {
     assert!(runtime().block_on(late.wait()).is_err());
     assert_eq!(ssh.outstanding_opens(), 0);
 }
+
+#[test]
+fn an_exec_whose_open_is_confirmed_after_its_deadline_has_the_channel_closed() {
+    let mut fixture = Fixture::connected_with(Duration::from_millis(300), PROBE_WITH_TMUX);
+    let ssh = fixture.ssh();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *fixture.shared.open_gate.lock().unwrap() = Some(gate);
+    // The server holds the confirmation back past the exec's deadline.
+    let error = runtime()
+        .block_on(ssh.exec_rendered("tmux list-sessions"))
+        .expect_err("the open outlasts the deadline");
+    assert_eq!(error, RemoteError::TimedOut);
+    let id = loop {
+        if let ("pending", id) = events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            break id;
+        }
+    };
+    release.send(()).unwrap();
+    let mut closed = false;
+    while let Ok((kind, channel)) = events.recv_timeout(Duration::from_secs(2)) {
+        if kind == "close" && channel == id {
+            closed = true;
+            break;
+        }
+    }
+    assert!(
+        closed,
+        "the late-confirmed exec channel {id:?} was never closed"
+    );
+    // The connection is healthy and the open task is gone.
+    wait_for(|| ssh.outstanding_opens() == 0);
+    assert!(
+        runtime()
+            .block_on(ssh.exec_rendered("tmux list-sessions"))
+            .is_ok()
+    );
+    fixture.handle.disconnect();
+}
