@@ -663,6 +663,70 @@ fn a_budget_spent_in_the_bootstrap_still_stops_the_server_it_started() {
     live.host.disconnect();
 }
 
+/// Once the budget has won, the reason stays `TimedOut` whatever the overdue bootstrap then does
+/// during its grace: a late error must not turn into `CommandFailed` (AUTO would not fall back).
+/// The bootstrap here fails one second in, past the 300 ms budget and inside the 2 s grace.
+#[test]
+fn a_bootstrap_error_after_the_budget_is_still_timed_out() {
+    require!();
+    let slow = SlowServer::new("0");
+    fs::write(
+        slow.directory.path().join("bin/mosh-server"),
+        "#!/bin/sh\nsleep 1\necho late-bootstrap-failure >&2\nexit 1\n",
+    )
+    .unwrap();
+    let live = Live::build(TestUdp::default(), HostOptions::default(), Some(slow));
+    // Warm the capability probe so only the bootstrap is in flight.
+    block_on(live.host.capabilities()).unwrap();
+    let terminal = live.open_raw_within(
+        "late-error",
+        TerminalTarget::Shell,
+        TerminalTransport::Mosh,
+        (80, 24),
+        Some(Duration::from_millis(300)),
+    );
+    assert_eq!(
+        terminal.closed(),
+        CloseReason::Failed(SessionFailure::TimedOut)
+    );
+    assert!(matches!(live.host.state(), HostState::Connected { .. }));
+    live.host.disconnect();
+}
+
+/// The same when the bootstrap outlasts the 2 s grace as well: abandoned, `TimedOut`, and the
+/// connection stays usable.
+#[test]
+fn a_bootstrap_that_outlasts_the_grace_is_timed_out_too() {
+    require!();
+    let slow = SlowServer::new("0");
+    fs::write(
+        slow.directory.path().join("bin/mosh-server"),
+        "#!/bin/sh\nsleep 4\necho too-late >&2\nexit 1\n",
+    )
+    .unwrap();
+    let live = Live::build(TestUdp::default(), HostOptions::default(), Some(slow));
+    block_on(live.host.capabilities()).unwrap();
+    let started = Instant::now();
+    let terminal = live.open_raw_within(
+        "grace-exhausted",
+        TerminalTarget::Shell,
+        TerminalTransport::Mosh,
+        (80, 24),
+        Some(Duration::from_millis(300)),
+    );
+    assert_eq!(
+        terminal.closed(),
+        CloseReason::Failed(SessionFailure::TimedOut)
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(2000) && elapsed < Duration::from_secs(4),
+        "the exec was waited for through the grace only: {elapsed:?}"
+    );
+    assert!(matches!(live.host.state(), HostState::Connected { .. }));
+    live.host.disconnect();
+}
+
 /// A budget is a ceiling, not a delay: a healthy start well inside it connects and works, and
 /// the session then lives on without any deadline.
 #[test]

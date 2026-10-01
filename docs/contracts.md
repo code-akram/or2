@@ -1800,7 +1800,10 @@ branch of the loop that waits for the bootstrap: when it fires first, nothing ne
 focus and the exec check the same cancellation flag a disconnect uses), a bootstrap exec already
 running gets up to `ABANDON_GRACE` (2 s) to report its server's pid, that server is stopped
 (`mosh::terminate`, bounded by `CLEANUP_BUDGET`, 5 s) and the session closes
-`Failed { TimedOut }`. Once the bootstrap is over, the same instant bounds the socket open and the
+`Failed { TimedOut }`. The reason is the budget's whatever the overdue bootstrap then does: success
+(its server is stopped), an error during the grace (a `CommandFailed` it returns late is dropped, so
+AUTO still falls back) or running out the grace all close `Failed { TimedOut }`; a user disconnect that
+won keeps `Disconnected` the same way. Once the bootstrap is over, the same instant bounds the socket open and the
 first authenticated datagram (`Plan.deadline` replaces `connect_timeout`, which applies only without
 one). The session therefore reports `Closed` at the budget in the usual blocked-UDP case plus one
 exec to stop the server, and at worst at budget + 2 s + 5 s when the host is slow or half-gone (the

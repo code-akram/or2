@@ -184,8 +184,12 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
             return;
         }
         Err(failure) => {
-            driver.close(if abandoned {
-                CloseReason::Disconnected
+            // Whoever won (the user's disconnect, the spent budget) keeps its reason: an
+            // overdue bootstrap that fails during the grace is not what the session ends with
+            // (AUTO's fallback is chosen by `TimedOut`). Nothing else is owed here: a failed
+            // bootstrap that did start a server stopped it itself.
+            driver.close(if abandoned || expired {
+                given_up
             } else {
                 CloseReason::Failed(failure)
             });

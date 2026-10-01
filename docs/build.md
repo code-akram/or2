@@ -95,7 +95,7 @@ host-key prompt and a dying connection task.
 `core/or2-core/tests/host_mosh.rs` runs mosh terminals through a host connection to the
 disposable sshd with a real `mosh-server` (bootstrap, roam, link health, host loss and disconnect,
 blocked UDP, cleanup of unreached servers, and AUTO's absolute start budget: a blocked start and a
-slow bootstrap both ending `TimedOut` at the budget with the server stopped, unconfirmed goodbyes stopped
+slow bootstrap both ending `TimedOut` at the budget with the server stopped (and a bootstrap that fails late, or outlasts the grace, still `TimedOut`), unconfirmed goodbyes stopped
 over SSH, stops kept as host debt when no channel is free, and a server orphaned by a dead client stopped by
 pid over a new connection with a non-mosh pid left alone); it needs `sshd`, `tmux` and `mosh-server`, skips
 with a message otherwise, and `OR2_REQUIRE_SSHD`, `OR2_REQUIRE_TMUX` and `OR2_REQUIRE_MOSH`
