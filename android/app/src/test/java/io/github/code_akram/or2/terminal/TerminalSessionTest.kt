@@ -10,6 +10,7 @@ import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalCell
 import io.github.code_akram.or2.ffi.TerminalFrame
 import io.github.code_akram.or2.ffi.TerminalRow
+import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.ffi.Underline
 import io.github.code_akram.or2.ffi.ViewportScroll
 import org.junit.Assert.*
@@ -40,6 +41,8 @@ class TerminalSessionTest {
         override fun approveHostKey(fingerprint: String) { touch() }
         override fun rejectHostKey() { touch() }
         override fun disconnect() { touch() }
+        override fun transport(): TerminalTransport { touch(); return TerminalTransport.SSH }
+        override fun roam() { touch() }
     }
 
     @Test fun destroyedInputStopsAllSubsequentCallsAndRetainsTheLastGrid() {

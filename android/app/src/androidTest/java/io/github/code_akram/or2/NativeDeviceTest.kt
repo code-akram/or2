@@ -10,6 +10,7 @@ import io.github.code_akram.or2.ffi.HostConnectRequest
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.KeyException
+import io.github.code_akram.or2.ffi.LinkHealth
 import io.github.code_akram.or2.ffi.Renderer
 import io.github.code_akram.or2.ffi.SessionListener
 import io.github.code_akram.or2.ffi.SessionState
@@ -36,7 +37,7 @@ class NativeDeviceTest {
     @Test
     fun loadsPackagedArm64LibraryAndRoundTripsThroughUniFfi() {
         val info = buildInfo()
-        assertEquals(7u, info.apiVersion)
+        assertEquals(8u, info.apiVersion)
         assertEquals(34u, info.minimumAndroidSdk)
         assertEquals(Renderer.CANVAS, info.renderer)
         val size = terminalSize(97u, 31u)
@@ -71,6 +72,8 @@ class NativeDeviceTest {
             threads.add(Thread.currentThread())
             frames.add(Thread.currentThread())
         }
+
+        override fun onLinkHealth(health: LinkHealth) = Unit
 
         fun next(): SessionState {
             val state = states.poll(5, TimeUnit.SECONDS)

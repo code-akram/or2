@@ -42,6 +42,7 @@ import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HerdrWorkspace
 import io.github.code_akram.or2.ffi.HostCapabilities
 import io.github.code_akram.or2.ffi.HostState
+import io.github.code_akram.or2.ffi.LinkHealth
 import io.github.code_akram.or2.ffi.PublicKeyInfo
 import io.github.code_akram.or2.ffi.Session
 import io.github.code_akram.or2.ffi.SessionFailure
@@ -306,6 +307,7 @@ class UiGalleryActivity : ComponentActivity() {
                         if (state is SessionState.AwaitingHostKeyDecision) runOnUiThread { probe?.approveHostKey(state.presented.fingerprint) }
                     }
                     override fun onFrameReady() { probeFrames.trySend(Unit) }
+                    override fun onLinkHealth(health: LinkHealth) = Unit
                 },
             ).also { probe = it }
         } finally {

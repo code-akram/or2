@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
+import io.github.code_akram.or2.ffi.LinkHealth
 import io.github.code_akram.or2.ui.Or2Theme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -77,6 +78,7 @@ class TerminalProbeActivity : ComponentActivity() {
                         }
                     }
                     override fun onFrameReady() { frames.trySend(Unit) }
+                    override fun onLinkHealth(health: LinkHealth) = Unit
                 },
             )
         } finally {

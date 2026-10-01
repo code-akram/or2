@@ -307,6 +307,8 @@ fn apply_input(
         // mosh has no host key prompt: the SSH connection that ran the bootstrap made that
         // decision.
         Command::ApproveHostKey { .. } | Command::RejectHostKey => {}
+        // The network changed: rotate to a new socket now (`LinkControl::roam` does the same).
+        Command::Roam => session.request_rebind(),
         Command::Resize(size) => {
             session
                 .resize(size.rows(), size.columns())

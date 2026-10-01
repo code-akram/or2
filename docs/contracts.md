@@ -1267,7 +1267,37 @@ pub trait SessionListener {                   // added method
 - **Roaming:** Kotlin calls `network_changed()` from its connectivity callback (default network
   changed or lost-then-available). New sockets follow the process's current default network.
 - `contract_probe_host` supports `Mosh` deterministically (connects, echoes like SSH, reports a
-  fixed health sequence, `roam()` is counted and shown in the echo row).
+  fixed health sequence, `roam()` is counted and shown in the echo row). Exactly:
+  - `capabilities().mosh_server` is `Some("/usr/bin/mosh-server")` (it was `None` before API 8),
+    so AUTO picks mosh against the probe.
+  - After its first frame a Mosh probe terminal delivers three `on_link_health` calls, in order,
+    `(since_heard_ms, since_ack_ms)` = `(300, 300)`, `(6000, 9000)`, `(400, 400)`: healthy,
+    stale (past the 5 s grey-out), recovered. SSH probe terminals never call it.
+  - Each `roam()` (or `network_changed()` while the session is open) adds one to a counter shown
+    in row 2, the echo row: `roams N` when nothing was typed, else the latest text echo then
+    `| roams N` (`text 78 | roams 2`). SSH probe terminals ignore `roam()`.
+  - `transport()` returns what `open_terminal` was given.
+
+### M3-A FFI surface status (API 8, first commit on `m3/a`)
+
+The FFI surface above is real and final; the mosh implementation behind it follows on the same
+branch. Until then, deviations to know about:
+
+- `HostConnection.open_terminal(.., Mosh, ..)` on a real host validates like SSH, then closes
+  the session `Failed { Internal { message: "mosh terminals land with M3-A" } }` from a Rust
+  thread. This is an honest failure, not a stub that succeeds; M3-B must not rely on it (AUTO
+  falls back only on `TimedOut` or `NotInstalled`).
+- Core: `HostHandle::open_terminal_with(target, transport, size, observer)` carries the choice
+  (`HostCommand::OpenTerminal.transport`); `open_terminal` is the SSH shorthand.
+  `SessionHandle::roam()` sends `Command::Roam`, which the SSH pump ignores and the mosh driver
+  turns into a socket rotation (`request_rebind`). `SessionObserver::link_health` defaults to a
+  no-op.
+- `network_changed()` calls `roam()` on every live mosh session (the FFI keeps weak references
+  to them) and sends an SSH keepalive (`keepalive@openssh.com`, reply requested) on every
+  established host connection (russh `Handle::send_keepalive`). The keepalive makes a connection
+  that the network change silently broke fail within the existing keepalive/TCP timeouts of the
+  write instead of waiting for the next 15 s tick; it does not by itself close a connection,
+  and a healthy one just gets a reply that is ignored.
 
 ## Android
 

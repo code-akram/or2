@@ -33,6 +33,13 @@ pub(crate) fn runtime() -> &'static Runtime {
     })
 }
 
+/// The device's network changed: every live SSH connection sends a keepalive at once, so a
+/// connection the change silently broke is noticed now. mosh sessions roam through their own
+/// handles (`SessionHandle::roam`).
+pub fn network_changed() {
+    connection::network_changed();
+}
+
 /// Connects to a host over TCP: races its addresses, verifies the host key, authenticates and
 /// serves terminals, queries and herdr watches until closed. Returns at once; the state
 /// changes and the final `Closed` arrive through `observer` on a Rust-owned thread.

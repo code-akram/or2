@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 use crate::frame::{Frame, FrameError, FrameMailbox, TakenFrame};
 use crate::input::{KeyInput, ViewportScroll};
 use crate::keys::{ClientKey, KeyError};
+use crate::mosh::LinkHealth;
 use crate::term::TerminalSize;
 use crate::transport::{Endpoint, EndpointError};
 use crate::trust::{HostKey, HostKeyVerdict};
@@ -181,6 +182,9 @@ pub trait SessionObserver: Send + Sync {
     fn state_changed(&self, state: &SessionState);
     /// The frame mailbox became non-empty. Not repeated until the renderer takes the frame.
     fn frame_ready(&self);
+    /// mosh only: how long the server has been silent. Called from the driver's thread, in
+    /// order with the other callbacks. Other transports never call it.
+    fn link_health(&self, _health: LinkHealth) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +202,8 @@ pub enum Command {
     Scroll(ViewportScroll),
     /// The renderer lost its grid: publish a full frame.
     FullFrame,
+    /// The network changed: a mosh driver opens a new socket now; every other driver ignores it.
+    Roam,
     /// Explicit disconnect, or every handle was dropped.
     Disconnect,
 }
@@ -331,6 +337,12 @@ impl SessionHandle {
         self.send(Command::FullFrame)
     }
 
+    /// The network changed (mosh: open a new socket now). Never fails: a closed session has
+    /// nothing to roam, and drivers other than mosh ignore it.
+    pub fn roam(&self) {
+        let _ = self.commands.send(Command::Roam);
+    }
+
     /// The merged changes since the last take, or `None` if nothing changed. Frames published
     /// before the session closed remain takeable afterwards.
     pub fn take_frame(&self) -> Option<TakenFrame> {
@@ -416,6 +428,15 @@ impl SessionDriver {
         *lock(&self.shared.state) = SessionState::Closed(CloseReason::Disconnected);
         self.commands.close();
         self.observer = None;
+    }
+
+    /// Reports link health to the observer while the session is connected (mosh only).
+    pub fn publish_link_health(&mut self, health: LinkHealth) {
+        if *lock(&self.shared.state) == SessionState::Connected
+            && let Some(observer) = &self.observer
+        {
+            observer.link_health(health);
+        }
     }
 
     pub fn publish(&mut self, frame: Frame) -> Result<(), PublishError> {
@@ -698,6 +719,47 @@ mod tests {
         assert_eq!(handle.reject_host_key(), Err(SessionError::Closed));
         handle.disconnect();
         assert!(handle.take_frame().unwrap().frame.is_full());
+    }
+
+    #[test]
+    fn roam_never_fails_is_ordered_with_input_and_ignored_once_closed() {
+        let (_, handle, mut driver) = setup(false);
+        // Allowed in any state, including before `Connected`.
+        handle.roam();
+        driver.transition(SessionState::Connected).unwrap();
+        handle.send_text("a".into()).unwrap();
+        handle.roam();
+        assert_eq!(driver.blocking_next_command(), Command::Roam);
+        assert_eq!(driver.blocking_next_command(), Command::Text("a".into()));
+        assert_eq!(driver.blocking_next_command(), Command::Roam);
+        driver.close(CloseReason::Disconnected);
+        handle.roam();
+    }
+
+    #[test]
+    fn link_health_reaches_the_observer_only_while_connected() {
+        #[derive(Default)]
+        struct Health(Mutex<Vec<LinkHealth>>);
+        impl SessionObserver for Health {
+            fn state_changed(&self, _: &SessionState) {}
+            fn frame_ready(&self) {}
+            fn link_health(&self, health: LinkHealth) {
+                lock(&self.0).push(health);
+            }
+        }
+        let health = Arc::new(Health::default());
+        let (_handle, mut driver) = channel(health.clone());
+        let sample = LinkHealth {
+            since_heard_ms: 6000,
+            since_ack_ms: 7000,
+        };
+        driver.publish_link_health(sample);
+        assert!(lock(&health.0).is_empty(), "not before Connected");
+        driver.transition(SessionState::Connected).unwrap();
+        driver.publish_link_health(sample);
+        driver.close(CloseReason::Disconnected);
+        driver.publish_link_health(sample);
+        assert_eq!(*lock(&health.0), [sample], "not after Closed");
     }
 
     #[test]

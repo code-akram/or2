@@ -23,6 +23,7 @@ import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalFrame
 import io.github.code_akram.or2.ffi.TerminalKey
+import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.ffi.ViewportScroll
 import org.junit.Assert.*
 import org.junit.Test
@@ -102,6 +103,8 @@ class TerminalDeviceTest {
         fun publish(frame: TerminalFrame) { pending = frame; onFrameReady() }
         override fun takeFrame(): TerminalFrame? = pending.also { pending = null }
         override fun state(): SessionState = SessionState.Connected
+        override fun transport() = TerminalTransport.SSH
+        override fun roam() = Unit
         override fun approveHostKey(fingerprint: String) = Unit
         override fun rejectHostKey() = Unit
         override fun disconnect() = Unit

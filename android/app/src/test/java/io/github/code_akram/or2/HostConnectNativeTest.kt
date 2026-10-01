@@ -14,6 +14,7 @@ import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalFrame
 import io.github.code_akram.or2.ffi.TerminalKey
 import io.github.code_akram.or2.ffi.TerminalTarget
+import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.ffi.connectHost
 import io.github.code_akram.or2.ffi.generateEd25519Key
 import java.net.InetAddress
@@ -85,7 +86,7 @@ class HostConnectNativeTest {
 
                     // A shell terminal on the connection: echo, resize, exit status.
                     val shell = RecordingListener().also { it.timeline = timeline; it.timelineTag = "shell" }
-                    val session = host.openTerminal(TerminalTarget.Shell, 80u, 24u, shell)
+                    val session = host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 80u, 24u, shell)
                     assertEquals(SessionState.Connected, shell.awaitState<SessionState.Connected>())
                     val grid = mutableMapOf<Int, String>()
                     session.sendText("stty -echo; printf '\\033[2J\\033[H'; printf 'OR2-%s\\n' READY\n")
@@ -104,7 +105,7 @@ class HostConnectNativeTest {
 
                     // A second terminal shares the connection; ending the first leaves it up.
                     val second = RecordingListener().also { it.timeline = timeline; it.timelineTag = "second" }
-                    val other = host.openTerminal(TerminalTarget.Shell, 60u, 20u, second)
+                    val other = host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 60u, 20u, second)
                     second.awaitState<SessionState.Connected>()
                     session.sendText("exit 17\n")
                     assertEquals(CloseReason.RemoteExited(17u), shell.awaitState<SessionState.Closed>().reason)
@@ -118,7 +119,7 @@ class HostConnectNativeTest {
                     assertEquals(CloseReason.Disconnected, recorder.await<HostState.Closed>().reason)
                     assertThrows(HostException.Closed::class.java) { runBlocking { host.capabilities() } }
                     assertThrows(HostException.Closed::class.java) {
-                        host.openTerminal(TerminalTarget.Shell, 80u, 24u, RecordingListener())
+                        host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 80u, 24u, RecordingListener())
                     }
                     recorder.assertQuiet()
                     second.assertNoMoreStates()

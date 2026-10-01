@@ -14,10 +14,12 @@ import io.github.code_akram.or2.ffi.HostConnection
 import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
+import io.github.code_akram.or2.ffi.LinkHealth
 import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionListener
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalTarget
+import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.ffi.TmuxSession
 import io.github.code_akram.or2.ffi.connectHost
 import kotlinx.coroutines.CancellationException
@@ -45,7 +47,7 @@ interface HostPort : AutoCloseable {
     fun approveHostKey(fingerprint: String)
     fun rejectHostKey()
     fun disconnect()
-    fun openTerminal(target: TerminalTarget, columns: UShort, rows: UShort, listener: SessionListener): SessionInterface
+    fun openTerminal(target: TerminalTarget, transport: TerminalTransport, columns: UShort, rows: UShort, listener: SessionListener): SessionInterface
     suspend fun capabilities(): HostCapabilities
     suspend fun listTmuxSessions(): List<TmuxSession>
     fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface
@@ -59,8 +61,8 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
     override fun approveHostKey(fingerprint: String) = connection.approveHostKey(fingerprint)
     override fun rejectHostKey() = connection.rejectHostKey()
     override fun disconnect() = connection.disconnect()
-    override fun openTerminal(target: TerminalTarget, columns: UShort, rows: UShort, listener: SessionListener): SessionInterface =
-        connection.openTerminal(target, columns, rows, listener)
+    override fun openTerminal(target: TerminalTarget, transport: TerminalTransport, columns: UShort, rows: UShort, listener: SessionListener): SessionInterface =
+        connection.openTerminal(target, transport, columns, rows, listener)
     override suspend fun capabilities() = connection.capabilities()
     override suspend fun listTmuxSessions() = connection.listTmuxSessions()
     override fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface =
@@ -451,8 +453,11 @@ class HostConnections(
             override fun onFrameReady() {
                 scope.launch { terminal.mutableFrames.emit(Unit) }
             }
+
+            // Link health is mosh-only; the SSH transport is the only one the app opens so far.
+            override fun onLinkHealth(health: LinkHealth) = Unit
         }
-        val session = port.openTerminal(target, 80u, 24u, listener)
+        val session = port.openTerminal(target, TerminalTransport.SSH, 80u, 24u, listener)
         nextTerminalId++
         terminal.mutableHandle.value = session
         mutableTerminals.value += terminal

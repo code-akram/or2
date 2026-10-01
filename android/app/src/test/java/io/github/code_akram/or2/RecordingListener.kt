@@ -1,5 +1,6 @@
 package io.github.code_akram.or2
 
+import io.github.code_akram.or2.ffi.LinkHealth
 import io.github.code_akram.or2.ffi.SessionListener
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.Session
@@ -20,6 +21,7 @@ import org.junit.Assert.fail
 class RecordingListener(private val throwAfterRecording: Boolean = false) : SessionListener {
     val states = LinkedBlockingQueue<SessionState>()
     private val frameReady = LinkedBlockingQueue<Unit>()
+    val healths = LinkedBlockingQueue<LinkHealth>()
     val callbackThreads: MutableSet<Thread> = ConcurrentHashMap.newKeySet()
     private val active = AtomicInteger()
 
@@ -41,6 +43,8 @@ class RecordingListener(private val throwAfterRecording: Boolean = false) : Sess
 
     override fun onFrameReady() = record { frameReady.add(Unit) }
 
+    override fun onLinkHealth(health: LinkHealth) = record { healths.add(health) }
+
     private fun record(action: () -> Unit) {
         if (active.incrementAndGet() != 1) overlapped = true
         callbackThreads.add(Thread.currentThread())
@@ -55,6 +59,12 @@ class RecordingListener(private val throwAfterRecording: Boolean = false) : Sess
         assertNotNull("timed out waiting for ${T::class.simpleName}", state)
         if (state !is T) fail("expected ${T::class.simpleName}, got $state")
         return state as T
+    }
+
+    fun awaitHealth(): LinkHealth {
+        val health = healths.poll(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        assertNotNull("timed out waiting for link health", health)
+        return health!!
     }
 
     fun assertNoMoreStates() {

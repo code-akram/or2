@@ -21,7 +21,7 @@
 //! connection ended with. Queries still running are dropped, so their callers see `Closed`.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use russh::client::{self as russh_client, Handle};
@@ -38,7 +38,7 @@ use super::terminal_session;
 use crate::herdr::{self, HerdrState, HerdrUnavailable, HerdrWatchDriver};
 use crate::host::{
     HostCapabilities, HostCommand, HostConnectRequest, HostDriver, HostError, HostHandle,
-    HostObserver, HostState, TerminalTarget, TmuxSession,
+    HostObserver, HostState, TerminalTarget, TerminalTransport, TmuxSession,
 };
 use crate::probe;
 use crate::remote::{ExecOutput, OUTPUT_CAP, RemoteError, RemoteHost, SecretBytes};
@@ -108,6 +108,34 @@ pub(super) struct SshHost {
     capabilities: OnceCell<HostCapabilities>,
     /// The last herdr session list read successfully (the probe's own list until then).
     sessions: probe::SessionsCache,
+}
+
+/// Every established SSH connection of the process, for [`network_changed`]. Weak: a closed
+/// host is dropped by its owners, never kept alive here.
+static LIVE_HOSTS: Mutex<Vec<Weak<SshHost>>> = Mutex::new(Vec::new());
+
+fn register(host: &Arc<SshHost>) {
+    let mut live = LIVE_HOSTS.lock().unwrap_or_else(PoisonError::into_inner);
+    live.retain(|weak| weak.upgrade().is_some_and(|host| !host.handle.is_closed()));
+    live.push(Arc::downgrade(host));
+}
+
+/// The device's network changed: send an SSH keepalive on every live connection at once, so a
+/// connection that the change silently broke is noticed by the keepalive and TCP timeouts
+/// from now, instead of after the next scheduled keepalive. Returns at once; the keepalives
+/// are sent on the network runtime. A healthy connection is unaffected (the server's reply is
+/// ignored).
+pub(super) fn network_changed() {
+    let hosts: Vec<Arc<SshHost>> = {
+        let mut live = LIVE_HOSTS.lock().unwrap_or_else(PoisonError::into_inner);
+        live.retain(|weak| weak.upgrade().is_some_and(|host| !host.handle.is_closed()));
+        live.iter().filter_map(Weak::upgrade).collect()
+    };
+    for host in hosts {
+        runtime().spawn(async move {
+            let _ = host.handle.send_keepalive(true).await;
+        });
+    }
 }
 
 impl SshHost {
@@ -500,9 +528,27 @@ fn dispatch(
     match command {
         HostCommand::OpenTerminal {
             target,
+            transport: TerminalTransport::Ssh,
             size,
             driver,
         } => spawn_terminal(host, target, size, driver, closing, tracker),
+        // Placeholder until the mosh bootstrap is wired in: an honest failure from a Rust
+        // thread (never a callback on the caller's), not a session that pretends to work.
+        HostCommand::OpenTerminal {
+            transport: TerminalTransport::Mosh,
+            mut driver,
+            ..
+        } => {
+            // A failed spawn drops the closure and with it the driver, which closes the
+            // session with `Failed(Internal)`.
+            let _ = std::thread::Builder::new()
+                .name("or2-mosh-unavailable".into())
+                .spawn(move || {
+                    driver.close(CloseReason::Failed(SessionFailure::Internal(
+                        "mosh terminals land with M3-A".into(),
+                    )));
+                });
+        }
         HostCommand::Capabilities { reply } => {
             let host = Arc::clone(host);
             let (mut closing, tracker) = (closing.clone(), tracker.clone());
@@ -755,6 +801,7 @@ async fn hold(
         capabilities: OnceCell::new(),
         sessions: probe::SessionsCache::new(),
     });
+    register(&host);
     if events
         .send(HostEvent::Connected {
             address_index,

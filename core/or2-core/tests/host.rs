@@ -22,7 +22,7 @@ use common::{Grid, Sshd, sshd_ready, tmux_ready};
 use or2_core::herdr::{HerdrObserver, HerdrState, HerdrUnavailable};
 use or2_core::host::{
     HerdrSessionInfo, HostConnectRequest, HostError, HostHandle, HostObserver, HostState,
-    TerminalTarget,
+    TerminalTarget, TerminalTransport,
 };
 use or2_core::input::{Key, KeyInput, Modifiers};
 use or2_core::keys::ClientKey;
@@ -1101,6 +1101,46 @@ fn names_are_validated_before_anything_runs() {
         assert_eq!(result.err(), Some(HostError::InvalidName));
         assert!(states.recv_timeout(Duration::from_millis(50)).is_err());
     }
+    live.host.disconnect();
+}
+
+#[test]
+fn network_changed_keeps_a_healthy_connection_and_a_mosh_terminal_fails_honestly() {
+    require_sshd!();
+    let live = Live::new();
+    or2_core::ssh::network_changed();
+    let (tx, states) = mpsc::channel();
+    let handle = live
+        .host
+        .open_terminal_with(
+            TerminalTarget::Shell,
+            TerminalTransport::Mosh,
+            TerminalSize::new(80, 24).unwrap(),
+            Arc::new(SessionObs {
+                tag: "mosh".into(),
+                tx,
+                log: live.log.clone(),
+            }),
+        )
+        .unwrap();
+    handle.roam();
+    let term = Term {
+        handle,
+        states,
+        grid: Grid::default(),
+    };
+    assert_eq!(
+        term.closed(),
+        CloseReason::Failed(SessionFailure::Internal(
+            "mosh terminals land with M3-A".into()
+        ))
+    );
+    // The keepalive reply and the failed terminal leave the connection usable.
+    or2_core::ssh::network_changed();
+    let mut shell = live.open("sh", TerminalTarget::Shell, 80, 24);
+    shell.quiet();
+    shell.send("echo roamed-$((20+22))\n");
+    shell.wait("roamed-42");
     live.host.disconnect();
 }
 
