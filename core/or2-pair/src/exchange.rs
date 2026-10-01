@@ -679,7 +679,8 @@ pub fn serve(listener: &mut dyn PairListener, session: &Session<'_>, deadline: I
     }
 }
 
-#[cfg(test)]
+// These tests authorize keys, which only the Unix implementation does.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};

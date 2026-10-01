@@ -71,12 +71,22 @@ pub struct CheckInput<'a> {
     /// Directories searched for programs: `PATH` plus the usual user and package-manager ones.
     pub program_dirs: &'a [PathBuf],
     pub platform: Platform,
+    /// Whether keys are installed by hand on this platform: `authorized_keys` is then neither
+    /// opened nor inspected.
+    pub manual_keys: bool,
 }
 
 pub fn run(input: &CheckInput<'_>) -> Vec<Check> {
     let mut out = Vec::new();
     out.push(sshd(input));
-    out.extend(authorized_keys(input.account));
+    if input.manual_keys {
+        out.push(check(
+            Level::Info,
+            "authorized_keys is not checked: or2-pair does not write it on this platform, so you add the phone's key by hand (the instructions follow the pairing code)",
+        ));
+    } else {
+        out.extend(authorized_keys(input.account));
+    }
     let mosh = find_program("mosh-server", input.program_dirs);
     for (name, note) in [
         ("tmux", "optional: or2 can attach to its sessions"),
@@ -186,14 +196,19 @@ pub fn program_dirs(path_var: Option<&std::ffi::OsStr>, home: &Path) -> Vec<Path
     let mut dirs: Vec<PathBuf> = path_var
         .map(|path| std::env::split_paths(path).collect())
         .unwrap_or_default();
-    for extra in [
-        home.join(".local/bin"),
-        home.join(".cargo/bin"),
+    // Without a known home (an account that is only a login) nothing is searched below it, and
+    // never a relative directory.
+    let user_dirs = if home.as_os_str().is_empty() {
+        Vec::new()
+    } else {
+        vec![home.join(".local/bin"), home.join(".cargo/bin")]
+    };
+    for extra in user_dirs.into_iter().chain([
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
         PathBuf::from("/usr/bin"),
         PathBuf::from("/bin"),
-    ] {
+    ]) {
         if !dirs.contains(&extra) {
             dirs.push(extra);
         }
@@ -234,6 +249,7 @@ mod tests {
             net,
             program_dirs: dirs,
             platform,
+            manual_keys: false,
         }
     }
 

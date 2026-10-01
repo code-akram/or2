@@ -17,6 +17,8 @@ OPTIONS:
     --name <label>        Name shown on the phone (default: this machine's host name)
     --user <user>         Must be the account you are running as (the default): keys are only
                           authorized for the current user, in that user's own ~/.ssh
+                          (Windows: required; it names the login for the code, and or2-pair
+                          installs no key there: it prints how to add one by hand)
     --ssh-port <port>     Port sshd listens on (default: Port in /etc/ssh/sshd_config, else 22)
     --address <host>      Add an address to the code, ahead of the detected ones (repeatable),
                           e.g. a DNS name that works from anywhere

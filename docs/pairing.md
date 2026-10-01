@@ -5,7 +5,9 @@ weaken the trust model: the host key is trusted because you scanned it from your
 the phone's SSH key reaches `authorized_keys` only after you confirm it at the host's keyboard.
 Prefer to type everything yourself? See [Set up a host manually](manual-setup.md).
 
-Works for a Mac, a Linux box or a Windows machine with OpenSSH Server. The phone and the host
+Works for a Mac or a Linux box. On Windows (with OpenSSH Server) `or2-pair` prints the code but does
+**not** listen or change any file: you add the phone's key by hand (see
+[Windows](#windows-add-the-key-by-hand)). The phone and the host
 must reach each other: the same Wi-Fi or LAN, or a shared overlay network such as ZeroTier or
 Tailscale. If they cannot, see [Phone not on the same network](#the-phone-is-not-on-the-same-network).
 
@@ -135,9 +137,20 @@ Settings > Network > Firewall.
 group or others (StrictModes). `or2-pair` warns in its checks and, rather than add a key sshd
 would ignore, refuses at the prompt (the phone says the host could not add the key) with the
 path, the mode and the fix: `chmod go-w ~ && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys`.
-Fix it and run `or2-pair` again. On Windows, an administrator's keys live in
-`C:\ProgramData\ssh\administrators_authorized_keys`, which `or2-pair` does not touch: add the key
-there yourself (`--no-listen`).
+Fix it and run `or2-pair` again.
+
+### Windows: add the key by hand
+
+`or2-pair` on Windows needs `--user <your login>` (it does not look the account up), prints the pairing
+code and then says what to do, because it has no safe way yet to check the key file's owner, links and
+permissions there. It never listens and never changes a file. Scan the code (or paste it), let the app show
+its public key, and add that one line yourself:
+
+- an ordinary account: `C:\Users\<login>\.ssh\authorized_keys` (create the `.ssh` folder and the file if
+  they are missing);
+- a member of the Administrators group: `C:\ProgramData\ssh\administrators_authorized_keys` instead,
+  because OpenSSH for Windows ignores the per-user file for administrators. Then restrict it:
+  `icacls "C:\ProgramData\ssh\administrators_authorized_keys" /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F"`.
 
 ### "The host's answer could not be verified"
 

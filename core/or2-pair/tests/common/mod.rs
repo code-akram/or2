@@ -166,6 +166,7 @@ pub fn pair_with<R>(
                 now: &now,
                 window,
                 on_ready: Some(&on_ready),
+                install_keys: true,
             };
             let mut out = Vec::new();
             let exit = run(options, &env, &mut out);

@@ -1,4 +1,5 @@
 //! Regressions from the external fix check of 6afa42e (ported from its probes); fixtures only.
+#![cfg(unix)]
 mod common;
 use common::*;
 use or2_core::pair::{PairError, PairOffer};

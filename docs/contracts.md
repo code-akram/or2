@@ -2283,8 +2283,9 @@ weakening M1's trust model. Manual host entry stays available.
 ## Host side: `or2-pair` CLI
 
 A small Rust binary in a new workspace crate `core/or2-pair` (the one justified new crate: it is
-a separate host-side tool, not part of the app library). Builds for macOS, Linux and Windows
-(OpenSSH for Windows). Installed with `cargo install`, a Homebrew formula building from source,
+a separate host-side tool, not part of the app library). Pairs on macOS and Linux (every Unix); on
+Windows it builds (`x86_64-pc-windows-gnu` is checked) but **does not listen or write any key file**: see
+"Platforms without key installation" below. Installed with `cargo install`, a Homebrew formula building from source,
 or release binaries later. GPL-3.0-or-later; dependencies exactly pinned (e.g. `qrcode` for
 terminal QR rendering).
 
@@ -2459,8 +2460,8 @@ generic refusal). The confirmation and the write run on the listener's own threa
 
 **The account.** The login in the code, the name in the prompt and the home whose `~/.ssh/authorized_keys`
 is written are one value (`or2_pair::account::Account`), resolved from the operating system's account
-database for the **effective user** of the process (`getpwuid_r(geteuid())`; Windows: `USERNAME` and
-`USERPROFILE`). `$HOME` and `$USER` are ignored, so `sudo` with a retained `HOME` cannot split them.
+database for the **effective user** of the process (`getpwuid_r(geteuid())`; Unix only, see "Platforms
+without key installation" for the rest). `$HOME` and `$USER` are ignored, so `sudo` with a retained `HOME` cannot split them.
 `--user` may only repeat that name: any other value is refused before anything is checked, printed or
 bound (`--user X is not the account this runs as (Y)`). There is no privileged "pair for another user"
 mode; run `or2-pair` as that user. The prompt also shows the file that will change. On the phone, the
@@ -2496,8 +2497,33 @@ is refused as "not a regular file" without blocking (a blocking write open of a 
 The file is read, backed up (the backup is created exclusively, also relative to the `~/.ssh` handle) and
 appended to (one `write` on an `O_APPEND` handle; a failed write truncates back to the old length) through
 those same handles, under an advisory `flock`, so a path replaced after the checks changes nothing. Files over
-8 MiB are not read. On Windows only symbolic links and junctions are refused, by path; ownership and ACL
-checks are not done there.
+8 MiB are not read. There is no implementation of this for any other platform (see below).
+
+**Platforms without key installation (every target that is not Unix, in practice Windows).** An earlier
+version wrote `authorized_keys` on Windows by path (symbolic links and junctions refused, no owner, hard-link or
+ACL check, a separate read, backup and reopen) and took the account from the login and profile environment
+variables of the process; the fix check of 6afa42e found both unsound (a replaced path or a hard link could
+redirect the confirmed append; the two variables can name different accounts). Until a Windows path with
+checked handles, owner and ACL checks exists and is tested, **a non-Unix build installs nothing**:
+
+- `Env::install_keys` is `false` (`cfg!(unix)` in the binary). The run behaves like `--no-listen` whatever was
+  asked: no socket is bound, no one-time password is made, nothing is asked at the keyboard, no key file is
+  opened, inspected or backed up; `--check` reports that `authorized_keys` is not checked. It prints the code
+  (without `pair`/`otp`) and then exact manual instructions, and exits 0 (`Exit::CodeOnly`). On Windows the
+  instructions give both files: `C:\Users\<login>\.ssh\authorized_keys` for an ordinary account and
+  `C:\ProgramData\ssh\administrators_authorized_keys` for a member of the Administrators group (OpenSSH for
+  Windows ignores the per-user file for them), with the `icacls` command that restricts the latter to
+  Administrators and SYSTEM. The phone's `--no-listen` flow shows the public key to paste.
+- No account is looked up. `--user <login>` is **required** and only names the login shipped in the code
+  (`Account::login_only`: no home, no uid, nothing that decides whose file is touched). The sources never read
+  `USERNAME`, `USERPROFILE`, `HOMEDRIVE` or `HOMEPATH` (a test greps for them).
+- `authorized_keys::add` fails (`Unsupported`) and `writable` says no on such a target, and `add` refuses an
+  account without a home on every target, so a mistake elsewhere cannot write through an empty path. The
+  Unix-only tests (`exchange`, `authorized_keys`, the loopback integration tests) are not built there;
+  `tests/manual_keys.rs` runs everywhere.
+- Verified here: `cargo clippy -p or2-pair --lib --bins --all-features --target x86_64-pc-windows-gnu -D warnings`
+  passes. The test suite cannot be built for that target in this environment (the `or2-core` dev-dependency
+  needs a MinGW C compiler for `aws-lc-sys`), and no Windows host has run the binary.
 
 **StrictModes is enforced, not just warned about.** sshd ignores `authorized_keys` when the file, `~/.ssh`
 or the home directory is writable by group or others (mode `& 022`). `or2-pair` checks the same three
@@ -2596,4 +2622,4 @@ parser and exchange, the flow, then a real `connect_host` to a disposable sshd w
 (Connected with no prompt) and the paired key. `PairUiDeviceTest` compiles (the camera needs the phone).
 
 Open: the camera path itself (CameraX binding, autofocus, a QR on a real monitor) and the permission dialog
-have not been run on a phone; a Windows host has not been run at all.
+have not been run on a phone; a Windows host has not been run at all (and installs no key, see above).
