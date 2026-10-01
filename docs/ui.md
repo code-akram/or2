@@ -75,9 +75,40 @@ Catppuccin Mocha (MIT). Dark only for M2; the terminal default theme uses the sa
 - **Stepper:** pill `− value +` in `surfaceTrack`.
 - **Text field:** filled `surface`, 16 dp radius, no outline; label above in `text`;
   placeholder in mono `textMuted`.
-- **Terminal toolbar:** a floating pill of 36 dp rounded-square keys (`surface` on a darker
-  pill), icons for modifiers (Ctrl, Shift, Esc, Tab, arrows, paste) and a trailing keyboard
-  toggle; horizontally scrollable, latched modifiers drawn in `accent`.
+- **Home:** top-level screen with trailing icon buttons only. Sections in order: SESSIONS
+  (open sessions as live terminal thumbnail cards, ~45 % width, rounded 16 dp, with a host
+  pill and a transport pill — `SSH`/`Mosh` — overlaid, title and mono path below; tap
+  resumes), CONNECTIONS (host cards, "Long press for options." hint right-aligned in the
+  section header), then status chips. A FAB adds a host.
+- **Session picker sheet:** opens after a host connects (and from a host card): a
+  segmented control (`herdr` / `tmux` / `Recent`) with a trailing "Skip" pill that opens a
+  plain shell; below, one grouped list of workspaces or sessions (name, muted mono context
+  line, trailing `● Focused` / attached marker).
+- **Terminal screen:** the terminal sits in a full-height card with a 28 dp top radius and a
+  drag handle (drag down to minimise to the SESSIONS thumbnail). Header row inside the card:
+  a small round "minimise" button, a sidebar toggle, the mono title (`host: path`) in
+  `textMuted`, and a trailing transport badge (`Mosh` in a teal pill, `SSH` in `surface`).
+  The terminal is edge to edge below it with a thin `accent` scroll indicator on the right.
+- **Terminal toolbar:** a floating pill (`background` at ~85 % on a `surface` pill) of 48 dp
+  rounded-square keys (`surface`): `Ctrl`, `Esc`, `Tab` as mono text, then icon keys
+  (arrow pad, sidebar/panes, paste, history), then — separated — the composer and keyboard
+  toggles without key backgrounds. Latched modifiers draw in `accent`. Horizontally
+  scrollable when it overflows.
+- **Arrow pad:** the arrow key expands a floating 3×3 cluster above the toolbar: Backspace,
+  Up, Clear-line / Left, Enter, Right / Down; keys are 56 dp `surface` squares with 16 dp
+  radius, a grab handle above collapses it. Keys auto-repeat on hold.
+- **Composer (chat input):** a rounded 24 dp `surface` card docked above the IME with a mono
+  placeholder (`Message <agent>...`), a row of icon actions (attach, snippets, jump to
+  window/tab, close) and, right-aligned, dictation and a circular send button (`surfaceTrack`
+  until there is text, then `accent`). Sending writes the text plus Enter to the session;
+  this is the quick-reply path for blocked agents.
+
+## Terminal defaults
+
+- Default terminal font size is small: the owner prefers dense text (Moshi's 8 pt minimum
+  feels right). Default to the equivalent cell size (about 55 columns on a 1440 px-wide
+  phone in portrait), pinch to zoom, and remember the size per device.
+- Terminal colours default to the same Catppuccin Mocha palette (background `#1E1E2E`).
 
 ## Motion and feedback
 
