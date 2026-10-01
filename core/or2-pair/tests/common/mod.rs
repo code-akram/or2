@@ -191,6 +191,16 @@ pub fn phone_pairs(code: &str, public_key: &str, device: &str) -> Result<(), Pai
 }
 
 pub fn phone_submits(offer: &PairOffer, public_key: &str, device: &str) -> Result<(), PairError> {
+    phone_submits_within(offer, public_key, device, Duration::from_secs(5))
+}
+
+/// The phone with its own patience for the host's greeting and for each step.
+pub fn phone_submits_within(
+    offer: &PairOffer,
+    public_key: &str,
+    device: &str,
+    step: Duration,
+) -> Result<(), PairError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -201,7 +211,7 @@ pub fn phone_submits(offer: &PairOffer, public_key: &str, device: &str) -> Resul
         public_key,
         device,
         PairTiming {
-            step: Duration::from_secs(5),
+            step,
             verdict: Duration::from_secs(30),
         },
     ))

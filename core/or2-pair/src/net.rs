@@ -13,7 +13,7 @@ use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
 /// One accepted connection.
-pub trait Connection: Read + Write {
+pub trait Connection: Read + Write + Send {
     /// Who connected, for the screen (`192.168.1.50:51234`).
     fn peer(&self) -> String;
     /// The peer's IP address, when it has one.

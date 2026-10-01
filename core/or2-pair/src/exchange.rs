@@ -8,7 +8,8 @@
 //!
 //! Reasons: `authentication` (the MAC did not verify), `key` (not a key this tool authorizes),
 //! `declined` (the person typed no), `timeout` (nobody answered in time), `request` (unreadable
-//! or oversized request), `failed` (this host could not write `authorized_keys`).
+//! or oversized request), `busy` (another verified request is already being handled), `failed`
+//! (this host could not write `authorized_keys`).
 //!
 //! # One attempt
 //!
@@ -16,15 +17,26 @@
 //! request that is well formed, within the size limit, **and whose HMAC verifies**: only the
 //! holder of the one-time password can make one. Everything else (a bare newline, junk, an
 //! unfinished or oversized line, a wrong proof, silence) is refused or ignored without ending the
-//! pairing, so a scanner that probes the port cannot burn the code. Each connection gets
-//! [`PRE_AUTH`] in total to deliver its request, and a peer address whose requests were refused
-//! [`MAX_FAILURES_PER_PEER`] times is no longer greeted. The one-time password only ever
-//! authenticates a MAC over this connection's fresh nonce, so a recorded request is useless on
-//! another connection.
+//! pairing, so a scanner that probes the port cannot burn the code. The one-time password only
+//! ever authenticates a MAC over this connection's fresh nonce, so a recorded request is useless
+//! on another connection.
+//!
+//! # Concurrency and what an unauthenticated peer can cost
+//!
+//! Every accepted connection is handled on its own thread, so an idle socket occupies only
+//! itself: an honest phone is served at once while idle sockets wait out their time. The cost of
+//! an unauthenticated peer is bounded ([`Limits`]): each connection has [`PRE_AUTH`] in total to
+//! deliver its one request line (at most [`REQUEST_LIMIT`] bytes), at most [`MAX_ACTIVE`]
+//! connections are handled at once and [`MAX_ACTIVE_PER_PEER`] per peer address (more are closed
+//! unanswered), and a peer address whose requests were refused [`MAX_FAILURES_PER_PEER`] times is
+//! no longer greeted. Only one verified request is taken (a second one is told `busy`): the
+//! confirmation and the write happen on the listener's own thread.
 
 use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -42,12 +54,41 @@ use crate::net::{Connection, PairListener};
 
 /// The host's listening window, from the moment it starts listening.
 pub const WINDOW: Duration = Duration::from_secs(120);
-/// Each read or write on a connection.
+/// A write of a reply.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest request line accepted.
 pub const REQUEST_LIMIT: usize = 2048;
-/// The whole time a connection has to deliver its request line once it was greeted.
+/// The whole time a connection has to deliver its request line once it was accepted.
 pub const PRE_AUTH: Duration = Duration::from_secs(8);
+/// Connections handled at once.
+pub const MAX_ACTIVE: usize = 16;
+/// Connections handled at once from one peer address (the phone races up to four endpoints).
+pub const MAX_ACTIVE_PER_PEER: usize = 4;
+/// A peer address that has sent this many refused requests is not greeted again.
+pub const MAX_FAILURES_PER_PEER: u32 = 5;
+
+/// How the cost of unauthenticated peers is bounded; the defaults are the module's constants.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub pre_auth: Duration,
+    pub max_active: usize,
+    pub max_active_per_peer: usize,
+    pub max_failures_per_peer: u32,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            pre_auth: PRE_AUTH,
+            max_active: MAX_ACTIVE,
+            max_active_per_peer: MAX_ACTIVE_PER_PEER,
+            max_failures_per_peer: MAX_FAILURES_PER_PEER,
+        }
+    }
+}
+
+/// How long a thread waits in one read before it looks at the clock and the stop flag.
+const SLICE: Duration = Duration::from_millis(50);
 
 /// `HMAC-SHA256(otp, nonce || key)`.
 fn mac_of(otp: &[u8; 16], nonce: &[u8], key: &str) -> Hmac<Sha256> {
@@ -68,6 +109,7 @@ pub struct Session<'a> {
     /// Fills a buffer with random bytes (the nonce).
     pub random: &'a dyn Fn(&mut [u8]),
     pub now: &'a dyn Fn() -> DateTime,
+    pub limits: Limits,
 }
 
 #[derive(Debug)]
@@ -97,7 +139,8 @@ pub struct Stats {
     pub silent: u32,
     /// Connections refused for an unreadable request or a proof that did not verify.
     pub rejected: u32,
-    /// Connections closed unanswered because their peer had already failed too often.
+    /// Connections closed unanswered (too many at once, or a peer that failed too often) or told
+    /// `busy`.
     pub dropped: u32,
 }
 
@@ -106,46 +149,6 @@ pub struct Stats {
 pub struct Served {
     pub outcome: Outcome,
     pub stats: Stats,
-}
-
-/// A peer address that has sent this many refused requests is not greeted again.
-pub const MAX_FAILURES_PER_PEER: u32 = 5;
-
-/// Serves connections until one makes the attempt or `deadline` passes.
-pub fn serve(listener: &mut dyn PairListener, session: &Session<'_>, deadline: Instant) -> Served {
-    let mut stats = Stats::default();
-    let mut failures: HashMap<IpAddr, u32> = HashMap::new();
-    let finish = |outcome, stats| Served { outcome, stats };
-    loop {
-        // The window is checked before every accept and again after it: a socket that was
-        // queued before the end but is returned after it is closed, not greeted.
-        if Instant::now() >= deadline {
-            return finish(Outcome::TimedOut, stats);
-        }
-        let mut connection = match listener.accept(deadline) {
-            Ok(Some(connection)) => connection,
-            Ok(None) => return finish(Outcome::TimedOut, stats),
-            Err(error) => return finish(Outcome::ListenFailed(error), stats),
-        };
-        if Instant::now() >= deadline {
-            return finish(Outcome::TimedOut, stats);
-        }
-        let peer = connection.peer_ip();
-        if peer.is_some_and(|ip| failures.get(&ip).copied().unwrap_or(0) >= MAX_FAILURES_PER_PEER) {
-            stats.dropped += 1;
-            continue;
-        }
-        match attempt(connection.as_mut(), session, deadline) {
-            Attempt::Over(outcome) => return finish(outcome, stats),
-            Attempt::Silent => stats.silent += 1,
-            Attempt::Rejected => {
-                stats.rejected += 1;
-                if let Some(ip) = peer {
-                    *failures.entry(ip).or_default() += 1;
-                }
-            }
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -165,30 +168,42 @@ enum Line {
     Silent,
 }
 
-/// Reads one line of at most `limit` bytes.
-fn read_line(connection: &mut dyn Connection, limit: usize, until: Instant) -> Line {
+/// Reads one line of at most `limit` bytes, giving up at `until` (for the whole line, however
+/// slowly it trickles in) or when `stop` is set.
+fn read_line(
+    connection: &mut dyn Connection,
+    limit: usize,
+    until: Instant,
+    stop: &AtomicBool,
+) -> Line {
     let mut line = Vec::new();
     let mut chunk = [0u8; 256];
+    let gave_up = |line: &Vec<u8>| {
+        if line.is_empty() {
+            Line::Silent
+        } else {
+            Line::Broken
+        }
+    };
     loop {
-        let wait = until
-            .saturating_duration_since(Instant::now())
-            .min(IO_TIMEOUT);
-        if wait.is_zero() || connection.set_timeout(wait).is_err() {
-            return if line.is_empty() {
-                Line::Silent
-            } else {
-                Line::Broken
-            };
+        let wait = until.saturating_duration_since(Instant::now()).min(SLICE);
+        if wait.is_zero() || stop.load(Ordering::Relaxed) || connection.set_timeout(wait).is_err() {
+            return gave_up(&line);
         }
         let count = match connection.read(&mut chunk) {
-            Ok(0) | Err(_) => {
-                return if line.is_empty() {
-                    Line::Silent
-                } else {
-                    Line::Broken
-                };
-            }
+            Ok(0) => return gave_up(&line),
             Ok(count) => count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => return gave_up(&line),
         };
         let end = chunk[..count].iter().position(|byte| *byte == b'\n');
         line.extend_from_slice(&chunk[..end.unwrap_or(count)]);
@@ -215,28 +230,31 @@ fn reply(connection: &mut dyn Connection, ok: bool, reason: &str) {
     let _ = connection.flush();
 }
 
-/// What one connection came to.
-#[derive(Debug)]
-pub enum Attempt {
-    /// It sent nothing (or hung up): not an attempt.
+/// What a connection came to before anyone was asked anything.
+enum Pre {
+    /// It sent nothing (or hung up).
     Silent,
-    /// It sent something that is not a verified request: a request that is unreadable, oversized
-    /// or of another version, or whose proof did not verify. Refused, and not an attempt.
+    /// It sent something that is not a verified request: unreadable, oversized, another
+    /// version, or a proof that did not verify. Refused.
     Rejected,
-    /// A verified request: the one attempt, whatever came of it.
-    Over(Outcome),
+    /// A verified request, but another one was already taken: told `busy`.
+    Busy,
+    /// A verified request that is the one taken: the attempt.
+    Verified(Request),
 }
 
-/// One connection, as the module docs describe.
-pub fn attempt(
+/// The part of a connection that needs no thread-shared state beyond two flags: greet, read the
+/// request, check its proof, and (for the first verified request only) claim the attempt.
+fn pre_auth(
     connection: &mut dyn Connection,
-    session: &Session<'_>,
-    deadline: Instant,
-) -> Attempt {
-    let mut nonce = [0u8; 32];
-    (session.random)(&mut nonce);
+    nonce: &[u8; 32],
+    otp: &[u8; 16],
+    until: Instant,
+    stop: &AtomicBool,
+    claimed: &AtomicBool,
+) -> Pre {
     let hello = format!("{{\"v\":1,\"nonce\":\"{}\"}}\n", STANDARD.encode(nonce));
-    let wait = deadline
+    let wait = until
         .saturating_duration_since(Instant::now())
         .min(IO_TIMEOUT);
     let greeted = !wait.is_zero()
@@ -244,45 +262,68 @@ pub fn attempt(
         && connection.write_all(hello.as_bytes()).is_ok()
         && connection.flush().is_ok();
     if !greeted {
-        return Attempt::Silent;
+        return Pre::Silent;
     }
 
-    // However long the peer takes, it only gets `PRE_AUTH` for the whole request.
-    let until = deadline.min(Instant::now() + PRE_AUTH);
-    let line = match read_line(connection, REQUEST_LIMIT, until) {
-        Line::Silent => return Attempt::Silent,
+    let line = match read_line(connection, REQUEST_LIMIT, until, stop) {
+        Line::Silent => return Pre::Silent,
         Line::Broken => {
             reply(connection, false, "request");
-            return Attempt::Rejected;
+            return Pre::Rejected;
         }
         Line::Complete(line) => line,
     };
-    let Ok(request) = serde_json::from_slice::<Request>(&line) else {
-        reply(connection, false, "request");
-        return Attempt::Rejected;
+    let request = match serde_json::from_slice::<Request>(&line) {
+        Ok(request) if request.v == 1 => request,
+        _ => {
+            reply(connection, false, "request");
+            return Pre::Rejected;
+        }
     };
-    if request.v != 1 {
-        reply(connection, false, "request");
-        return Attempt::Rejected;
-    }
 
     // The proof comes first, before anything about the key is looked at or shown. `verify_slice`
     // compares in constant time.
     let proven = STANDARD
         .decode(request.mac.as_bytes())
         .ok()
-        .is_some_and(|mac| {
-            mac_of(&session.otp, &nonce, &request.key)
-                .verify_slice(&mac)
-                .is_ok()
-        });
+        .is_some_and(|mac| mac_of(otp, nonce, &request.key).verify_slice(&mac).is_ok());
     if !proven {
         reply(connection, false, "authentication");
-        return Attempt::Rejected;
+        return Pre::Rejected;
     }
+    // The peer knows the one-time password. Only the first such request is the attempt.
+    if claimed.swap(true, Ordering::SeqCst) {
+        reply(connection, false, "busy");
+        return Pre::Busy;
+    }
+    Pre::Verified(request)
+}
 
-    // From here on the peer knows the one-time password: this is the attempt.
-    Attempt::Over(authorize(connection, session, deadline, &request))
+/// One connection, start to finish, on the calling thread: what `serve` does for each
+/// connection, minus the threads. `None` when it was not the attempt.
+pub fn attempt(
+    connection: &mut dyn Connection,
+    session: &Session<'_>,
+    deadline: Instant,
+) -> Attempt {
+    let mut nonce = [0u8; 32];
+    (session.random)(&mut nonce);
+    let until = deadline.min(Instant::now() + session.limits.pre_auth);
+    let stop = AtomicBool::new(false);
+    let claimed = AtomicBool::new(false);
+    match pre_auth(connection, &nonce, &session.otp, until, &stop, &claimed) {
+        Pre::Silent => Attempt::Silent,
+        Pre::Rejected | Pre::Busy => Attempt::Rejected,
+        Pre::Verified(request) => Attempt::Over(authorize(connection, session, deadline, &request)),
+    }
+}
+
+/// What one connection came to, for [`attempt`].
+#[derive(Debug)]
+pub enum Attempt {
+    Silent,
+    Rejected,
+    Over(Outcome),
 }
 
 /// The authorization of a request whose proof verified: parse the key, ask the person, write.
@@ -339,6 +380,123 @@ fn authorize(
     }
 }
 
+/// What a connection's thread reports back.
+struct Report {
+    peer: Option<IpAddr>,
+    pre: Pre,
+    /// Kept only for the verified request, which the listener's thread answers.
+    connection: Option<Box<dyn Connection>>,
+}
+
+/// What the listener's thread knows about the connections it has handed out.
+#[derive(Default)]
+struct Book {
+    stats: Stats,
+    /// Refused requests, per peer address.
+    failures: HashMap<Option<IpAddr>, u32>,
+    /// Connections being handled, per peer address, and in all.
+    active: HashMap<Option<IpAddr>, usize>,
+    total: usize,
+}
+
+impl Book {
+    /// Takes in what a finished connection reports; the verified request, if it was one.
+    fn absorb(&mut self, report: Report) -> Option<(Box<dyn Connection>, Request)> {
+        self.total -= 1;
+        if let Some(count) = self.active.get_mut(&report.peer) {
+            *count -= 1;
+        }
+        match report.pre {
+            Pre::Silent => self.stats.silent += 1,
+            Pre::Busy => self.stats.dropped += 1,
+            Pre::Rejected => {
+                self.stats.rejected += 1;
+                *self.failures.entry(report.peer).or_default() += 1;
+            }
+            Pre::Verified(request) => return report.connection.map(|c| (c, request)),
+        }
+        None
+    }
+
+    /// Whether a connection from `peer` is not taken on: too many at once, or too many refusals.
+    fn refuses(&self, peer: Option<IpAddr>, limits: &Limits) -> bool {
+        self.failures.get(&peer).copied().unwrap_or(0) >= limits.max_failures_per_peer
+            || self.total >= limits.max_active
+            || self.active.get(&peer).copied().unwrap_or(0) >= limits.max_active_per_peer
+    }
+}
+
+/// Serves connections until one makes the attempt or `deadline` passes.
+///
+/// Each accepted connection gets its own thread (bounded by `limits`), so an idle peer holds
+/// nothing but its own slot. The person is asked, and the file written, on the calling thread.
+pub fn serve(listener: &mut dyn PairListener, session: &Session<'_>, deadline: Instant) -> Served {
+    let limits = session.limits;
+    let (sender, receiver) = mpsc::channel::<Report>();
+    let stop = AtomicBool::new(false);
+    let claimed = AtomicBool::new(false);
+    let mut book = Book::default();
+
+    let outcome = std::thread::scope(|scope| {
+        let outcome = loop {
+            // The window is checked before every accept and again after it: a socket that was
+            // queued before the end but is returned after it is closed, not greeted.
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break Outcome::TimedOut;
+            }
+            let connection = match listener.accept(Instant::now() + remaining.min(SLICE)) {
+                Ok(Some(connection)) => Some(connection),
+                Ok(None) => None,
+                Err(error) => break Outcome::ListenFailed(error),
+            };
+            // What finished meanwhile counts before the new connection is judged.
+            let mut verified = None;
+            while let Ok(report) = receiver.try_recv() {
+                verified = verified.or_else(|| book.absorb(report));
+            }
+            if let Some((mut winner, request)) = verified {
+                break authorize(winner.as_mut(), session, deadline, &request);
+            }
+            let Some(connection) = connection else {
+                continue;
+            };
+            if Instant::now() >= deadline {
+                break Outcome::TimedOut;
+            }
+            let peer = connection.peer_ip();
+            if book.refuses(peer, &limits) {
+                book.stats.dropped += 1;
+                continue;
+            }
+            book.total += 1;
+            *book.active.entry(peer).or_default() += 1;
+            let mut nonce = [0u8; 32];
+            (session.random)(&mut nonce);
+            let until = deadline.min(Instant::now() + limits.pre_auth);
+            let otp = session.otp;
+            let (sender, stop, claimed) = (sender.clone(), &stop, &claimed);
+            scope.spawn(move || {
+                let mut connection = connection;
+                let pre = pre_auth(connection.as_mut(), &nonce, &otp, until, stop, claimed);
+                let keep = matches!(pre, Pre::Verified(_)).then_some(connection);
+                let _ = sender.send(Report {
+                    peer,
+                    pre,
+                    connection: keep,
+                });
+            });
+        };
+        // Let every connection thread finish: they look at this flag between short reads.
+        stop.store(true, Ordering::Relaxed);
+        outcome
+    });
+    Served {
+        outcome,
+        stats: book.stats,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,6 +516,7 @@ mod tests {
         output: Vec<u8>,
         /// After the script runs out: hang up (EOF) or time out.
         then_timeout: bool,
+        peer: String,
     }
 
     impl Script {
@@ -366,7 +525,25 @@ mod tests {
                 input: input.iter().map(|chunk| chunk.to_vec()).collect(),
                 output: Vec::new(),
                 then_timeout: false,
+                peer: "192.168.1.50:5555".into(),
             }
+        }
+
+        /// A peer that connects and then says nothing, as long as it is let.
+        fn idle(peer: &str) -> Self {
+            Self {
+                then_timeout: true,
+                peer: peer.into(),
+                ..Self::new(&[])
+            }
+        }
+    }
+
+    /// Short per-connection limits, so tests with silent peers do not wait for the real 8 s.
+    fn fast() -> Limits {
+        Limits {
+            pre_auth: Duration::from_millis(300),
+            ..Limits::default()
         }
     }
 
@@ -381,7 +558,11 @@ mod tests {
                     }
                     Ok(count)
                 }
-                None if self.then_timeout => Err(io::ErrorKind::TimedOut.into()),
+                None if self.then_timeout => {
+                    // A real socket waits for its timeout before it reports one.
+                    std::thread::sleep(Duration::from_millis(5));
+                    Err(io::ErrorKind::TimedOut.into())
+                }
                 None => Ok(0),
             }
         }
@@ -399,7 +580,7 @@ mod tests {
 
     impl Connection for Script {
         fn peer(&self) -> String {
-            "192.168.1.50:5555".into()
+            self.peer.clone()
         }
         fn set_timeout(&mut self, _: Duration) -> io::Result<()> {
             Ok(())
@@ -465,6 +646,7 @@ mod tests {
                 confirm: &self.confirm,
                 random: &random,
                 now: &now,
+                limits: fast(),
             };
             attempt(
                 connection,
@@ -720,11 +902,15 @@ mod tests {
         fn endpoints(&self) -> Vec<SocketAddr> {
             Vec::new()
         }
-        fn accept(&mut self, _: Instant) -> io::Result<Option<Box<dyn Connection>>> {
-            Ok(self
-                .0
-                .pop_front()
-                .map(|c| Box::new(c) as Box<dyn Connection>))
+        fn accept(&mut self, deadline: Instant) -> io::Result<Option<Box<dyn Connection>>> {
+            if let Some(next) = self.0.pop_front() {
+                // Connections arrive a little apart, so the one before has been dealt with.
+                std::thread::sleep(Duration::from_millis(30));
+                return Ok(Some(Box::new(next) as Box<dyn Connection>));
+            }
+            // Nothing queued: wait, as a real listener does, until the deadline it was given.
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            Ok(None)
         }
     }
 
@@ -738,7 +924,7 @@ mod tests {
         let mut queue = Queue(VecDeque::from([
             Script::new(&[]),
             Script::new(&[&good]),
-            // Never served: the listener is one-shot.
+            // A second verified request: only one is taken, this one is told `busy`.
             Script::new(&[&later]),
         ]));
         let random = |buf: &mut [u8]| buf.fill(7);
@@ -749,6 +935,7 @@ mod tests {
             confirm: &fixture.confirm,
             random: &random,
             now: &now,
+            limits: fast(),
         };
         let outcome = serve(
             &mut queue,
@@ -757,8 +944,9 @@ mod tests {
         )
         .outcome;
         assert!(matches!(outcome, Outcome::Authorized { .. }));
-        assert_eq!(queue.0.len(), 1, "the third connection was never accepted");
-        assert_eq!(fixture.authorized_keys().unwrap().lines().count(), 1);
+        let keys = fixture.authorized_keys().unwrap();
+        assert_eq!(keys.lines().count(), 1, "one attempt, one line");
+        assert!(keys.contains(PHONE), "the first verified request won");
     }
 
     #[test]
@@ -773,6 +961,7 @@ mod tests {
             confirm: &fixture.confirm,
             random: &random,
             now: &now,
+            limits: fast(),
         };
         let outcome = serve(&mut queue, &session, Instant::now()).outcome;
         assert!(matches!(outcome, Outcome::TimedOut));
@@ -798,7 +987,7 @@ mod tests {
     }
     impl Connection for Shared {
         fn peer(&self) -> String {
-            "192.168.1.50:5555".into()
+            self.0.lock().unwrap().peer.clone()
         }
         fn set_timeout(&mut self, _: Duration) -> io::Result<()> {
             Ok(())
@@ -841,6 +1030,7 @@ mod tests {
             confirm: &fixture.confirm,
             random: &random,
             now: &now,
+            limits: fast(),
         };
         // The window ends while `accept` is still waiting; the socket it then returns was queued
         // before the end, but the window is over: no greeting, no request read, nothing written.
@@ -863,6 +1053,7 @@ mod tests {
             confirm: &fixture.confirm,
             random: &random,
             now: &now,
+            limits: fast(),
         };
         let past = Instant::now();
         std::thread::sleep(Duration::from_millis(5));
@@ -884,11 +1075,12 @@ mod tests {
             confirm: &fixture.confirm,
             random: &random,
             now: &now,
+            limits: fast(),
         };
         let outcome = serve(
             &mut queue,
             &session,
-            Instant::now() + Duration::from_secs(60),
+            Instant::now() + Duration::from_millis(1500),
         )
         .outcome;
         (outcome, queue.0.len())
@@ -903,7 +1095,7 @@ mod tests {
         let mut wrong = OTP;
         wrong[0] ^= 1;
         let bad_mac = request_for(&wrong, &nonce_of(7), PHONE, "phone");
-        let (outcome, left) = serve_scripts(
+        let (outcome, _) = serve_scripts(
             &fixture,
             vec![
                 // A scanner's probes: a bare newline, text, an unfinished request, a wrong proof.
@@ -916,7 +1108,6 @@ mod tests {
             ],
         );
         assert!(matches!(outcome, Outcome::Authorized { .. }), "{outcome:?}");
-        assert_eq!(left, 1, "the listener stopped after the phone");
         assert_eq!(fixture.authorized_keys().unwrap().lines().count(), 1);
     }
 
@@ -934,5 +1125,125 @@ mod tests {
         assert!(matches!(outcome, Outcome::TimedOut), "{outcome:?}");
         assert_eq!(left, 0);
         assert!(fixture.authorized_keys().is_none());
+    }
+
+    // --- Finding 4: idle peers hold nothing but their own slot ---------------------------
+
+    /// Serves `listener` with the given limits for `window`.
+    fn serve_with(
+        fixture: &Fixture,
+        listener: &mut dyn PairListener,
+        limits: Limits,
+        window: Duration,
+    ) -> Served {
+        let random = |buf: &mut [u8]| buf.fill(7);
+        let now = || DateTime::from_unix(1_782_867_661);
+        let session = Session {
+            account: &Account::new("alice", fixture.home.path()),
+            otp: OTP,
+            confirm: &fixture.confirm,
+            random: &random,
+            now: &now,
+            limits,
+        };
+        serve(listener, &session, Instant::now() + window)
+    }
+
+    #[test]
+    fn a_phone_is_served_while_idle_peers_wait_out_their_time() {
+        let fixture = Fixture::new(Answer::Yes);
+        let good = request_for(&OTP, &nonce_of(7), PHONE, "phone");
+        let mut queue = Queue(VecDeque::from([
+            Script::idle("192.168.1.60:1000"),
+            Script::idle("192.168.1.60:1001"),
+            Script::idle("192.168.1.61:1000"),
+            Script::new(&[&good]),
+        ]));
+        let limits = Limits {
+            pre_auth: Duration::from_secs(3),
+            ..Limits::default()
+        };
+        let started = Instant::now();
+        let served = serve_with(&fixture, &mut queue, limits, Duration::from_secs(20));
+        assert!(
+            matches!(served.outcome, Outcome::Authorized { .. }),
+            "{:?}",
+            served.outcome
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the idle peers' 3 s did not hold the phone up: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_peer_holds_only_a_few_slots_and_the_rest_are_closed_unanswered() {
+        let fixture = Fixture::new(Answer::Yes);
+        let late = std::sync::Arc::new(std::sync::Mutex::new(Script::idle("192.168.1.60:9")));
+        // Three idle connections from one address with room for two: the third is closed at once.
+        let mut scripts = VecDeque::from([
+            Script::idle("192.168.1.60:1"),
+            Script::idle("192.168.1.60:2"),
+        ]);
+        let mut feeder = Feed {
+            scripts: &mut scripts,
+            last: Some(Shared(late.clone())),
+        };
+        let limits = Limits {
+            pre_auth: Duration::from_millis(400),
+            max_active_per_peer: 2,
+            ..Limits::default()
+        };
+        let served = serve_with(&fixture, &mut feeder, limits, Duration::from_millis(900));
+        assert!(matches!(served.outcome, Outcome::TimedOut));
+        assert_eq!(served.stats.dropped, 1, "{:?}", served.stats);
+        assert_eq!(served.stats.silent, 2, "{:?}", served.stats);
+        assert!(late.lock().unwrap().output.is_empty(), "never greeted");
+    }
+
+    /// Hands out scripts, then one more `last`.
+    struct Feed<'a> {
+        scripts: &'a mut VecDeque<Script>,
+        last: Option<Shared>,
+    }
+
+    impl PairListener for Feed<'_> {
+        fn endpoints(&self) -> Vec<SocketAddr> {
+            Vec::new()
+        }
+        fn accept(&mut self, deadline: Instant) -> io::Result<Option<Box<dyn Connection>>> {
+            std::thread::sleep(Duration::from_millis(30));
+            if let Some(next) = self.scripts.pop_front() {
+                return Ok(Some(Box::new(next)));
+            }
+            if let Some(last) = self.last.take() {
+                return Ok(Some(Box::new(last)));
+            }
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn at_most_so_many_connections_are_handled_at_once() {
+        let fixture = Fixture::new(Answer::Yes);
+        let late = std::sync::Arc::new(std::sync::Mutex::new(Script::idle("192.168.1.99:9")));
+        let mut scripts = VecDeque::from([
+            Script::idle("192.168.1.60:1"),
+            Script::idle("192.168.1.61:1"),
+        ]);
+        let mut feeder = Feed {
+            scripts: &mut scripts,
+            last: Some(Shared(late.clone())),
+        };
+        let limits = Limits {
+            pre_auth: Duration::from_millis(400),
+            max_active: 2,
+            ..Limits::default()
+        };
+        let served = serve_with(&fixture, &mut feeder, limits, Duration::from_millis(900));
+        assert_eq!(served.stats.dropped, 1, "{:?}", served.stats);
+        assert!(late.lock().unwrap().output.is_empty(), "never greeted");
     }
 }

@@ -2287,10 +2287,18 @@ verified request is *not* an attempt and does not end the pairing: silence, a ba
 unfinished or oversized line, a request of another version and a wrong proof are each answered
 (`{"ok":false,"reason":"request"|"authentication"}`) or ignored, and counted for the final report. This
 replaces the earlier "any bytes start an attempt" deviation, under which one probe of a port scanner burnt the
-code. Bounds on what an unauthenticated peer can cost: each greeted connection has 8 s in total (`PRE_AUTH`)
-to deliver its one request line (at most 2048 bytes), and a peer address whose requests were refused 5 times
-is no longer greeted (its connections are closed unanswered). The only way to end the listener without a
-verified request is its 120 s window.
+code. The only way to end the listener without a verified request is its 120 s window.
+
+**Concurrency and bounds.** Every accepted connection is handled on its own thread, so an idle socket holds
+only its own slot and an honest phone is served at once (the previous one-at-a-time loop let one silent peer
+hold every phone behind it for 8-10 s, longer than the phone's 10 s wait for the greeting). What an
+unauthenticated peer can cost is bounded: each connection has 8 s in total (`PRE_AUTH`) to deliver its one
+request line (at most 2048 bytes); at most 16 connections are handled at once and 4 per peer address (the
+phone races up to four endpoints), further ones are closed unanswered rather than left queued; a peer address
+whose requests were refused 5 times is no longer greeted; every thread looks at a stop flag between short
+reads, so the listener ends promptly. Only the first verified request is taken: a second verified request
+while the first is being confirmed is answered `{"ok":false,"reason":"busy"}` (the phone reports it as a
+generic refusal). The confirmation and the write run on the listener's own thread.
 
 **The account.** The login in the code, the name in the prompt and the home whose `~/.ssh/authorized_keys`
 is written are one value (`or2_pair::account::Account`), resolved from the operating system's account

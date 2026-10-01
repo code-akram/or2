@@ -202,6 +202,33 @@ fn a_connection_that_never_speaks_does_not_use_up_the_attempt() {
 }
 
 #[test]
+fn idle_connections_do_not_keep_an_honest_phone_waiting() {
+    // Finding 4: the listener served one connection at a time, so a peer that connected and said
+    // nothing held every phone behind it until its own timeout; two of them outlasted the
+    // phone's 10 s wait for the greeting.
+    let world = World::new();
+    let confirm = Auto::new(Answer::Yes);
+    let key = phone_key();
+    let result = pair(&world, &options(), &confirm, WINDOW, |ready| {
+        // Idle sockets, held open for the whole exchange. Some hear the greeting, some do not.
+        let idle: Vec<std::net::TcpStream> = (0..3)
+            .map(|_| std::net::TcpStream::connect(ready.listening[0]).unwrap())
+            .collect();
+        let offer = PairOffer::parse(&ready.payload).unwrap();
+        let started = Instant::now();
+        // The phone waits two seconds for the greeting, not the shipped ten.
+        let paired = phone_submits_within(&offer, &key, "phone", Duration::from_secs(2));
+        let took = started.elapsed();
+        drop(idle);
+        (paired, took)
+    });
+    let (paired, took) = result.phone.unwrap();
+    assert_eq!(paired, Ok(()), "after {took:?}");
+    assert!(took < Duration::from_secs(2), "{took:?}");
+    assert_eq!(result.exit.unwrap(), Exit::Paired);
+}
+
+#[test]
 fn one_unauthenticated_byte_does_not_use_up_the_attempt() {
     // Finding 3: a scanner that sends a newline (or junk, or a wrong proof) used to end the
     // listener for the phone that follows.
