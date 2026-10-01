@@ -540,10 +540,49 @@ async fn the_end_of_a_failed_attempts_stream_does_not_end_the_watch() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_refused_socket_is_not_running_and_a_refused_channel_is_failed() {
+async fn a_running_session_whose_socket_cannot_be_opened_is_failed_and_names_the_likely_cause() {
+    // The listing says `running: true`, but the open fails with `Io`: what OpenSSH answers
+    // both for a dead socket and for a host that forbids streamlocal forwarding.
     let host = host_with(&two_panes());
     host.set_open_error(Some(RemoteError::Io("connection refused".into())));
     let harness = Harness::start(&host, None);
+    harness
+        .until("unavailable", |h| !h.states().is_empty())
+        .await;
+    let HerdrState::Unavailable { reason, message } = harness.states()[0].clone() else {
+        panic!("expected Unavailable")
+    };
+    assert_eq!(reason, HerdrUnavailable::Failed);
+    for expected in [
+        "running",
+        "over SSH",
+        "connection refused",
+        "AllowStreamLocalForwarding",
+        "DisableForwarding",
+    ] {
+        assert!(
+            message.contains(expected),
+            "{expected:?} missing: {message}"
+        );
+    }
+
+    // It keeps retrying every 10 s without redelivering the unchanged reason, and recovers
+    // once the socket opens.
+    sleep(Duration::from_secs(25)).await;
+    assert_eq!(host.exec_log().len(), 3, "attempts at 0, 10 and 20 s");
+    assert_eq!(harness.states().len(), 1);
+    host.set_open_error(None);
+    harness.live().await;
+    let states = harness.stop().await;
+    assert!(matches!(states[1], HerdrState::Live { .. }));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_session_that_is_not_listed_as_running_stays_not_running_and_a_refused_channel_is_failed()
+{
+    // Not running is decided by the listing, before any socket is opened.
+    let host = host_with(&two_panes());
+    let harness = Harness::start(&host, Some("idle"));
     harness
         .until("unavailable", |h| !h.states().is_empty())
         .await;
@@ -554,17 +593,21 @@ async fn a_refused_socket_is_not_running_and_a_refused_channel_is_failed() {
             ..
         }
     ));
+    assert_eq!(host.served(), [], "nothing was opened");
+    harness.stop().await;
+
+    // A channel the host refuses outright (`Rejected`) is a failure with its own message.
+    let host = host_with(&two_panes());
     host.set_open_error(Some(RemoteError::Rejected("streamlocal disabled".into())));
-    harness.until("failed", |h| h.states().len() == 2).await;
-    assert!(matches!(
-        harness.states()[1],
-        HerdrState::Unavailable {
-            reason: HerdrUnavailable::Failed,
-            ..
-        }
-    ));
-    host.set_open_error(None);
-    harness.live().await;
+    let harness = Harness::start(&host, None);
+    harness
+        .until("unavailable", |h| !h.states().is_empty())
+        .await;
+    let HerdrState::Unavailable { reason, message } = harness.states()[0].clone() else {
+        panic!("expected Unavailable")
+    };
+    assert_eq!(reason, HerdrUnavailable::Failed);
+    assert!(message.contains("streamlocal disabled"), "{message}");
     harness.stop().await;
 }
 

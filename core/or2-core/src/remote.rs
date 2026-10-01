@@ -87,7 +87,9 @@ pub trait RemoteHost: Send + Sync + 'static {
     /// Opens a byte stream to a Unix socket on the host (OpenSSH direct-streamlocal). A socket
     /// that is missing or refuses the connection is [`RemoteError::Io`]; `Rejected` is only for
     /// a host that refuses the channel itself (streamlocal forwarding disabled). The herdr
-    /// watch reports the first as `NotRunning` and the second as `Failed`.
+    /// watch of a session its listing calls running reports both as `Failed` (OpenSSH answers
+    /// a forbidden open like a dead socket, so the message names the host's forwarding policy
+    /// as a likely cause).
     fn open_unix(
         &self,
         path: &str,

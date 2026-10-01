@@ -322,8 +322,8 @@ pub trait RemoteHost: Send + Sync + 'static {
   timeout (`RemoteError::TimedOut`).
 - `RemoteError`: `Closed`, `TimedOut`, `OutputTooLarge`, `Unquotable`, `Rejected(String)` (channel refused,
   e.g. streamlocal forwarding disabled), `Io(String)`.
-  **`open_unix` error mapping** (the herdr watch depends on it: `Io` becomes `NotRunning`,
-  `Rejected` becomes `Failed`): a missing socket or one that refuses the connection is
+  **`open_unix` error mapping** (the herdr watch depends on it: for a session its listing calls
+  running, both `Io` and `Rejected` become `Failed`, with different messages): a missing socket or one that refuses the connection is
   `Io`; `Rejected` is a refusal by the host's policy. Over SSH both arrive as a channel-open
   failure, told apart by its reason code: `SSH_OPEN_ADMINISTRATIVELY_PROHIBITED` is
   `Rejected`; `SSH_OPEN_CONNECT_FAILED` (nothing listens, no such file) is `Io`; any other
@@ -333,7 +333,8 @@ pub trait RemoteHost: Send + Sync + 'static {
   *every* refused direct-streamlocal open with `CONNECT_FAILED`, including one refused by
   `AllowStreamLocalForwarding no` or `DisableForwarding yes` (the sshd log says "refused
   streamlocal port forward"). Over OpenSSH a host that forbids streamlocal forwarding therefore
-  reads as `Io` (herdr `NotRunning`, retried) and cannot be told from a missing socket; the
+  reads as `Io` and cannot be told from a missing socket (the herdr watch therefore says so in
+  its `Failed` message, see *Unreachable socket* under the watch); the
   `Rejected` path is for servers that do send `ADMINISTRATIVELY_PROHIBITED`. The interop tests
   in `tests/host.rs` cover a missing socket and a stale socket file (both `Io`) and a host with
   `AllowStreamLocalForwarding no` (refused, connection stays usable).
@@ -628,7 +629,16 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
   - *Connect cost.* The first view is installed after one subscribe and one snapshot, as in
     the contract sequence; the per-pane resubscribe and its confirming read follow it, and
     every later new pane costs one more of each (a subscription cannot grow). Not yet
-    measured over an OpenSSH-backed host: measure when lane A1 lands.
+    measured over an OpenSSH-backed host: measure on the phone.
+  - *Unreachable socket.* `session list --json` says `running: true` but opening its socket
+    fails with `Io`: that is `Failed`, not `NotRunning`, because the listing already settled
+    whether the session runs. The likeliest cause over OpenSSH is the host's forwarding policy
+    (OpenSSH 10.5 answers a forbidden streamlocal open with `CONNECT_FAILED`, the same as a dead
+    socket), so the message says: the session is listed as running but its socket cannot be
+    reached over SSH, check `AllowStreamLocalForwarding` and `DisableForwarding` in the host's
+    `sshd_config`. The watch keeps retrying every 10 s and recovers when the socket opens (a
+    session that really stopped meanwhile is `NotRunning` on the next listing). Unit-tested with
+    the scripted fake host, and end to end against sshd with `AllowStreamLocalForwarding no`.
   - *Recovery.* `events_lost` (an `error` line on the event stream, after which herdr closes it),
     any other error line, or a dropped stream ends the attempt with a 500 ms pause and a new
     attempt (rediscover, subscribe, snapshot). The last view stays delivered meanwhile; the
@@ -641,9 +651,10 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
   protocol, and an older one is `IncompatibleProtocol` instead of `Failed`.
 - **States** (`HerdrState`): `Starting` (initial, not delivered), `Live { view }`,
   `Unavailable { reason, message }`, `Closed`. `reason`: `NotInstalled` and
-  `IncompatibleProtocol { protocol }` are final; `NotRunning` (no such session, stopped, or its
-  socket refuses connections) and `Failed` (anything else: unreadable output, timeout, refused
-  channel, rejected request) retry every 10 s while the host is connected. `Unavailable` is
+  `IncompatibleProtocol { protocol }` are final; `NotRunning` (no such session, or the listing
+  says it is stopped) and `Failed` (anything else: unreadable output, timeout, refused channel,
+  rejected request, a running session's socket that cannot be opened) retry every 10 s while
+  the host is connected. `Unavailable` is
   redelivered only when its *reason* changes, so a message that differs between attempts does
   not repeat it. `Closed` is delivered once, last, after `stop()` or host close
   (`RemoteError::Closed` from any call), then the observer is released. A stop interrupts every

@@ -644,7 +644,8 @@ fn open_unix_reaches_a_unix_socket_on_the_host_and_maps_a_missing_one_to_io() {
         assert_eq!(&reply, b"PING");
         drop(stream);
         // OpenSSH answers CONNECT_FAILED for a socket that is not there (and for one nothing
-        // listens on): `Io`, which herdr reports as `NotRunning` and retries.
+        // listens on): `Io`, which the herdr watch of a session listed as running reports as
+        // `Failed` and retries.
         let missing = sshd.home().join("missing.sock");
         assert!(matches!(
             remote.open_unix(missing.to_str().unwrap()).await,
@@ -812,14 +813,14 @@ fn user_disconnect_closes_terminals_and_watches_before_the_host_with_disconnecte
             }),
         )
         .unwrap();
-    // The fake herdr lists a default session whose socket does not exist: the real client
-    // reads the listing, finds nothing at the socket and reports NotRunning (and retries).
+    // The fake herdr lists a running default session whose socket does not exist: the real
+    // client reads the listing, cannot open the socket and reports Failed (and retries).
     let first = watch_states.recv_timeout(WAIT).unwrap();
     assert!(
         matches!(
             first,
             HerdrState::Unavailable {
-                reason: HerdrUnavailable::NotRunning,
+                reason: HerdrUnavailable::Failed,
                 ..
             }
         ),
@@ -930,6 +931,48 @@ impl Drop for Proxy {
         self.stop.store(true, Ordering::SeqCst);
         self.cut();
     }
+}
+
+#[test]
+fn a_host_that_forbids_streamlocal_forwarding_makes_the_herdr_watch_failed_and_names_the_cause() {
+    require_sshd!();
+    // The fake herdr lists a running session whose socket really exists and listens, so only
+    // the host's policy refuses the open (OpenSSH says CONNECT_FAILED, like a dead socket).
+    let sshd = Sshd::with_config(false, "AllowStreamLocalForwarding no");
+    let socket = sshd.home().join("herdr.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    install_fake_herdr_listing(
+        &sshd,
+        &format!(
+            r#"{{"sessions":[{{"default":true,"name":"default","running":true,"socket_path":"{}"}}]}}"#,
+            socket.display()
+        ),
+    );
+    let live = Live::with_key(sshd, &ClientKey::generate_ed25519(""));
+    let (tx, watch_states) = mpsc::channel();
+    let watch = live
+        .host
+        .watch_herdr(
+            None,
+            Arc::new(WatchObs {
+                tag: "w".into(),
+                tx,
+                log: live.log.clone(),
+            }),
+        )
+        .unwrap();
+    let HerdrState::Unavailable { reason, message } = watch_states.recv_timeout(WAIT).unwrap()
+    else {
+        panic!("expected Unavailable")
+    };
+    assert_eq!(reason, HerdrUnavailable::Failed);
+    assert!(message.contains("AllowStreamLocalForwarding"), "{message}");
+    assert!(message.contains("DisableForwarding"), "{message}");
+    // The connection itself is healthy.
+    assert_eq!(live.host.state(), HostState::Connected { address_index: 0 });
+    watch.stop();
+    live.host.disconnect();
+    assert_eq!(closed(&live.states), CloseReason::Disconnected);
 }
 
 #[test]

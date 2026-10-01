@@ -31,7 +31,8 @@ pub enum WireError {
     /// The host connection failed or is closed.
     #[error(transparent)]
     Remote(#[from] RemoteError),
-    /// The socket could not be opened (nothing is listening any more).
+    /// The socket could not be opened: nothing listens, or (over OpenSSH, which cannot say
+    /// which) the host forbids streamlocal forwarding.
     #[error("cannot reach the herdr socket: {0}")]
     Unreachable(String),
     #[error("herdr socket i/o failed: {0}")]

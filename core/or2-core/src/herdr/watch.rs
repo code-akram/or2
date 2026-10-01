@@ -127,10 +127,15 @@ impl Exit {
 fn exit_for_wire(error: WireError) -> Exit {
     match error {
         WireError::Remote(RemoteError::Closed) => Exit::HostClosed,
-        WireError::Unreachable(_) => Exit::Unavailable {
-            reason: HerdrUnavailable::NotRunning,
-            message: "the herdr socket does not accept connections".into(),
-        },
+        // Every call of an attempt follows a discovery that found the session running, so a
+        // socket that cannot be opened is not "not running". OpenSSH answers a streamlocal open
+        // that policy forbids with the same failure as a dead socket, and this is the likelier
+        // cause: say so, and keep retrying (`Failed`).
+        WireError::Unreachable(detail) => Exit::failed(format!(
+            "herdr lists this session as running, but its socket cannot be reached over SSH \
+             ({detail}); if the host forbids streamlocal forwarding, check \
+             AllowStreamLocalForwarding and DisableForwarding in its sshd_config"
+        )),
         other => Exit::failed(other.to_string()),
     }
 }
