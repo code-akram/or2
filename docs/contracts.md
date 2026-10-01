@@ -1223,7 +1223,7 @@ calls the removed M1 `connect` export. The loopback-sshd JVM tests (`HostConnect
 
 M3 makes sessions survive the phone's life: a foreground service owns every connection, mosh
 carries terminals across network changes, and the app returns to the same pane. FFI API
-becomes **8**. Everything in M1/M2 still applies unless changed here.
+becomes **8** (**9** with the follow-up below). Everything in M1/M2 still applies unless changed here.
 
 ## Lanes
 
@@ -1262,7 +1262,8 @@ real generated bindings; the implementation follows on the same branch.
 
 impl HostConnection {
     fn open_terminal(&self, target: TerminalTarget, transport: TerminalTransport,
-                     columns: u16, rows: u16, listener: Box<dyn SessionListener>)
+                     columns: u16, rows: u16, mosh_budget_ms: Option<u32>,   // API 9, see the follow-up
+                     listener: Box<dyn SessionListener>)
         -> Result<Arc<Session>, HostError>;
 }
 impl Session {
@@ -1543,7 +1544,8 @@ mosh session. Where the text above left a choice open, this is what the code doe
   `NetworkChanges` tracks the default network's handle: a different network, or the same one
   after it was lost, is a change; the callback's first report of the network that was already the
   default is not. Changes within 500 ms collapse into one `network_changed()` (500 ms after the
-  last event).
+  last event). *Extended by the follow-up:* a changed transport set or interface of the default
+  network, and every return to the foreground, count too (see "M3 follow-up").
 - **Room v3:** `hosts.transport TEXT NOT NULL DEFAULT 'AUTO'` (`TransportPref`: `AUTO`, `SSH`,
   `MOSH`), `Migration(2, 3)` is one additive `ALTER TABLE ... ADD COLUMN` (never destructive),
   schema exported as `3.json`. Tests: JVM (`MigrationSqlTest`: v2 and v1 databases migrate and
@@ -1578,7 +1580,9 @@ mosh session. Where the text above left a choice open, this is what the code doe
   the old native session is closed). This is remembered for the connection
   (`ActiveHost.moshFallbackNote`), so later AUTO terminals on it go straight to SSH, and every one
   shows the note in muted mono under the header (`Mosh could not reach the host over UDP. Using
-  SSH for this connection.`). A new connection starts without the memory. Any other failure, a
+  SSH for this connection.`). A new connection starts without the memory *(follow-up: a timeout
+  is now also remembered per host in Room for 24 h, and AUTO's start has a 5 s budget; see "M3
+  follow-up")*. Any other failure, a
   failure after the terminal connected, a user disconnect, and an explicit `Mosh` preference never
   fall back. If the SSH retry cannot even be started (the host closed meanwhile) the mosh failure
   is shown as it was.
@@ -1597,7 +1601,8 @@ mosh session. Where the text above left a choice open, this is what the code doe
   have a key and whose SSH connection *was lost* (connected once, then closed `Failed`; a deliberate
   disconnect, a remote exit and a connect that never worked are not losses) are offered in a
   dialog: "Reconnect" runs the existing grouped unlock (`connectGrouped`: one biometric per
-  distinct key; the dialog says how many), "Not now" does nothing. No key is retained. When the
+  distinct key; the dialog says how many), "Not now" does nothing *(follow-up: a non-modal chip
+  instead of a dialog, and never for a host marked as sleeping; see "M3 follow-up")*. No key is retained. When the
   user was on the terminal screen of one of those hosts when the app left, accepting also
   resumes that terminal once the host is connected. The offer is computed once, when the app
   returns; a connection that only fails a few seconds later (the keepalive after a network change)
@@ -1657,32 +1662,119 @@ mosh session. Where the text above left a choice open, this is what the code doe
 ## M3 follow-up (advisor review, owner decisions 2026-10-01)
 
 A Fable 5.1 strategy review found that, with ZeroTier carrying both hosts, the default network
-rarely changes on Wi-Fi↔mobile handover, and that OxygenOS process death is the most likely way
-to fail v0 step 3. These changes land after lanes M3-A and M3-B:
+rarely changes on Wi-Fi to mobile handover, and that OxygenOS process death is the most likely way
+to fail v0 step 3. These changes landed after lanes M3-A and M3-B (branch `m3/follow-up`; FFI API
+becomes **9**). Implemented, in the order of the review:
 
-- **`resume_mosh` (owner approved).** After a mosh session reaches `Connected`, Kotlin persists
-  its `MoshResumeTicket { host_id, target, transport, server_port, key, peer_ip, server_pid }`
-  encrypted with a dedicated **non-authentication-bound** AES-256-GCM Keystore key (hardware
-  backed, StrongBox preferred, never exportable, excluded from backup). FFI:
-  `resume_mosh(ticket: MoshResumeTicket, columns, rows, listener) -> Result<Arc<Session>, …>`
-  starts a mosh client from the ticket with no SSH connection and no biometric. Trade-off
-  accepted by the owner: a single session's mosh key rests on the device protected only by the
-  Keystore; it opens only that session and is revoked by killing that `mosh-server`. Tickets
-  are deleted when the session closes for any reason other than process death, when the user
-  disconnects the host, and when the host's addresses or key change. SSH keys stay per-use.
-- **Roaming triggers:** `network_changed()` also fires on default-network
-  `onCapabilitiesChanged`/`onLinkPropertiesChanged` (transport set or interface changes) and on
-  every return to the foreground (debounced 500 ms).
-- **Auto fallback:** mosh's connect deadline for the Auto decision is 5 s (explicit Mosh keeps
-  15 s); a failure is remembered in Room per host (`mosh_failed_until`, 24 h) and always runs
-  `mosh::terminate`.
-- **Return never blocks:** a live or resumable mosh pane is shown immediately; reconnecting an
-  inbox host whose SSH dropped is a non-modal chip (one grouped biometric when tapped). A host
-  marked by the user as "sleeps" (e.g. the MacBook) shows its lost SSH as muted "asleep".
-- **Multi-address mosh:** mosh pins to the address SSH actually reached. Document in the host
-  form: list the address that works on every network first.
-- **Manifest:** `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`, `POST_NOTIFICATIONS`,
-  `ACCESS_NETWORK_STATE`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`.
+- **`resume_mosh`: rejected after review, not implemented.** The owner approved persisting a
+  per-session ticket `{ host_id, target, transport, server_port, key, peer_ip, server_pid }` under a
+  non-authentication-bound Keystore key and resuming a mosh session from it with no SSH
+  connection. An external review proved that unsound, and a read of the vendored protocol code
+  (`mosh/ssp`) agrees:
+  1. **Nonce reuse.** The datagram layer is AES-128-OCB3 whose nonce is the direction bit plus the
+     packet sequence number (`ssp/crypto.rs`, `ssp/packet.rs`); `PacketState::new_packet` counts
+     from 0 for every `Session`. A client started from a persisted key restarts at sequence 0 and
+     re-encrypts different plaintext under nonces the dead client already used with the same key.
+     OCB nonce reuse leaks plaintext relations and allows forgeries. Persisting the counter does
+     not fix it: the process dies at an arbitrary moment, so the last persisted value is always
+     behind the last one used.
+  2. **Missing transport state.** `mosh-server` diffs against the states the client acknowledged
+     (the user-stream state numbers it received, the screen state the client holds). A fresh client
+     has neither: the server drops its instructions (it no longer holds the `old_num` they name) and
+     the client cannot apply the server's diffs (their base is the dead client's screen). Resuming
+     would need the sender and receiver state, the acknowledged screen and the sequence counter
+     persisted continuously, which is neither small nor safe.
+  3. **A key at rest** that opens a live shell on a server that never times out, for little gain over
+     what tmux and herdr already keep.
+
+  **Chosen instead: a fast, prompt-free-but-for-the-fingerprint Resume after process death.** The
+  last focused terminal (host, target, transport) is already remembered (`ReattachMemory`); the
+  remote state lives in tmux or herdr anyway. When the system killed the process and the user comes
+  back through the recents list (the saved destination is a terminal that no longer exists), the app
+  goes Home and resumes at once, with no tap: one grouped biometric (one prompt per distinct key,
+  `connectGrouped`), then the host connects, the remembered target reopens (a herdr pane is focused
+  first, the capability probe awaited briefly so AUTO can still choose mosh) and the terminal is
+  shown. `shouldAutoResume` decides: a remembered terminal whose host still exists, has a key and
+  is not connected. A cold start from the launcher has no saved destination and shows Home's Resume
+  card as before (one tap and the fingerprint). Cancelling the prompt leaves the Resume card. SSH keys
+  stay per-use; no mosh key is ever stored. The cost, accepted: after process death the old
+  `mosh-server` is orphaned (its key died with the process; `mosh-server` has no idle timeout), and
+  the reopened terminal starts a new one. The pane's tmux or herdr session is untouched.
+- **Roaming triggers.** `network_changed()` also fires when the default network's **transport set**
+  changes (`onCapabilitiesChanged`: Wi-Fi to cellular under a VPN keeps the same default network,
+  and this is the only signal) or its **interface** changes (`onLinkPropertiesChanged`), not on every
+  bandwidth or signal-strength callback (the first report is a baseline, a repeat of the same value
+  does nothing), and on **every return to the foreground** (`MainActivity.onStart`), all through the
+  one 500 ms debounce (`NetworkChanges`, now owned by `Or2Application` so the service's callbacks
+  and the activity share it). `NetworkChanges.seed` starts tracking the network that is already the
+  default without counting it. A call with nothing live is free (the registry is empty).
+- **Auto fallback.** Under AUTO, mosh gets a **5 s budget for the whole start** (explicit Mosh keeps
+  the 15 s default). It is an **absolute deadline** counted from the `open_terminal` call, so the
+  capability probe, the pane focus, the `mosh-server` bootstrap, the UDP socket and the first
+  authenticated datagram all spend from it (see "Deadline" below). A mosh terminal that closes
+  `Failed { TimedOut }` before it connected is reopened over SSH on the same `ActiveTerminal` (as
+  before), and the timeout is remembered **per host in Room**: `hosts.mosh_failed_until`, epoch
+  milliseconds, now plus 24 h (`MOSH_PAUSE_MS`). Under AUTO a host with an unexpired memory skips
+  mosh at once, with the muted note `Mosh could not reach this host over UDP recently. Using SSH.`
+  (`MOSH_PAUSED_NOTE`), and tries again once the time has passed (expiry needs no write). The memory
+  is cleared when the host's transport preference or its address list changes (`AppDao.saveHost`,
+  in the same transaction; `HostConnections.setTransport` drops the in-memory copy). An explicit Mosh
+  preference ignores it. Only `TimedOut` is remembered: a missing `mosh-server` is already known from
+  the capability probe on every connection, and installing it must just work. A storage failure while
+  remembering changes nothing else (the connection still remembers in memory). `mosh::terminate` runs
+  on every path that ends without a connected session, the deadline included.
+- **Return never blocks.** A live mosh pane is shown as it is on return, a resumable one resumes (see
+  above), and nothing modal stands in the way: the reconnect offer for an inbox host whose SSH
+  dropped is a **non-modal chip** (`ReconnectChip`, `Reconnect Alpha · 1 fingerprint`, a tap runs the
+  grouped unlock, the close glyph dismisses; it floats with the other notices, at the top of a
+  full-screen terminal), not the dialog of M3-B. The chip lasts while its hosts are still lost. A
+  per-host **sleeps** flag (`hosts.sleeps`, the host form's "Host sleeps when idle" toggle, for a laptop)
+  shows such a host's lost connection as muted `Asleep` (`LinkStatus.ASLEEP`: Home's card, the inbox
+  row, the host screen) instead of a failure, and the reconnect offer never includes it. It still
+  reads asleep only when the host went quiet (connection lost, unreachable, timed out): a rejected
+  key or host key is a failure whatever the flag says. A tap on the host, or `Unlock` in the inbox,
+  still connects it. The one-time battery explanation is still a dialog (asked once, ever).
+- **Multi-address mosh.** Mosh pins to the address SSH actually reached. The host form says so under
+  the address list: `In order of preference. All are tried; the first to answer wins. Mosh stays on
+  the address SSH reached, so list the one that works on every network first.`
+- **Manifest.** `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`, `POST_NOTIFICATIONS`,
+  `ACCESS_NETWORK_STATE` and `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` were all already declared by M3-B
+  (with `INTERNET` and `USE_BIOMETRIC`, seven in all); `ManifestTest` pins the list, the service's
+  `specialUse` type and subtype, and the absence of Play Services and FCM.
+
+**Deadline (FFI API 9).** `HostConnection.open_terminal` gained `mosh_budget_ms: Option<u32>` (the new
+fifth parameter, before the listener): for `Mosh` only, ignored for `Ssh`. Core:
+`HostHandle::open_terminal_within(target, transport, size, budget, observer)` (and
+`HostCommand::OpenTerminal.deadline`) turns the budget into an absolute `tokio::time::Instant` at the
+call; `open_terminal_with` is the same with no budget. In `mosh_session::drive` the deadline is a
+branch of the loop that waits for the bootstrap: when it fires first, nothing new starts (the pane
+focus and the exec check the same cancellation flag a disconnect uses), a bootstrap exec already
+running gets up to `ABANDON_GRACE` (2 s) to report its server's pid, that server is stopped
+(`mosh::terminate`, bounded by `CLEANUP_BUDGET`, 5 s) and the session closes
+`Failed { TimedOut }`. Once the bootstrap is over, the same instant bounds the socket open and the
+first authenticated datagram (`Plan.deadline` replaces `connect_timeout`, which applies only without
+one). The session therefore reports `Closed` at the budget in the usual blocked-UDP case plus one
+exec to stop the server, and at worst at budget + 2 s + 5 s when the host is slow or half-gone (the
+terminate that cannot reach a lost host is the documented limit). Tests: Rust live
+(`host_mosh.rs`: a blocked start with a 1.2 s budget ends `TimedOut` well before the 15 s default and
+the server is stopped, the connection serves the SSH fallback; a 0.3 s budget spent inside a 1 s
+bootstrap still finds and stops the server the cut exec started; a generous budget is no delay and
+the session lives on past it), core unit tests (`driver_tests`: the absolute deadline ends a silent
+server, a past one at once; `host`: a budget becomes an absolute deadline at the call), and the real
+FFI (`HostConnectNativeTest`: a 1 ms budget closes `TimedOut`, the connection intact).
+
+**Room v4.** One schema bump for the follow-up: `hosts.sleeps INTEGER NOT NULL DEFAULT 0` and
+`hosts.mosh_failed_until INTEGER NOT NULL DEFAULT 0`, `MIGRATION_3_4` (two additive `ALTER TABLE ... ADD
+COLUMN`s), exported as `4.json`. Tests: JVM `MigrationSqlTest` (v3 to v4 and v1 to v4 equal a fresh v4,
+data, trust and cascades intact) and device `MigrationDeviceTest` (`MigrationTestHelper` v3 to v4 and
+the full chain, then the DAO round trip including the failure memory's clearing).
+
+**Not done / for the phone.** The service, the network callbacks (the transport-set trigger needs a
+real VPN-carried handover), the chip, process-death auto-resume through the recents list, and the
+5 s Auto budget on cellular have run only on fakes, the Rust suite and compile-checked device tests; the
+acceptance protocol below is where they meet a phone. The orphaned `mosh-server` after process death
+(above) is an open issue: the app could remember its pid (not secret) and stop it over the new SSH
+connection, which needs an exec path in the FFI that does not exist yet.
 
 ### M3 acceptance protocol
 
