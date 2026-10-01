@@ -1667,7 +1667,17 @@ mosh session. Where the text above left a choice open, this is what the code doe
   starts again on every recreation or revisit; remembering it from `hasConnected` would resurrect it and the
   next foreground return would reopen what was ended on purpose. A close processed before the effect runs wins.
   `ReattachRememberTest` runs the effect against the holder's real state (user disconnect, remote exit, a fast
-  exit, dismissal, a lost connection) and the decision on return. It is
+  exit, dismissal, a lost connection) and the decision on return.
+  **Host-wide closes mark every terminal of the host synchronously.** The user's Disconnect of a host, a
+  dismissed or released connection (host deleted; destination, login or key edited) and an edit of the
+  destination or login set `disconnectRequested` on **every** terminal of that host id, on whichever
+  connection generation it was opened (the current one and older ones retained for surviving mosh terminals),
+  before the native disconnect and long before `Closed` arrives: a queued or revisited remembering effect then
+  cannot make one the Resume target again (`Closed(Disconnected)` does not forget), and the memory stays empty
+  after `Closed`. The terminals stay listed with their final frames. An ordinary SSH loss or replacement does
+  not mark anything: a surviving mosh terminal stays eligible and remembered. `HostCloseRememberTest` covers the
+  Disconnect and the destination and login edits (current and older generations, before and after `Closed`), the
+  final frames and the surviving-terminal case. It is
   forgotten when the user ends it: Disconnect or Close of the session, Disconnect of its host,
   deleting the host, "Disconnect all", or the remote shell exiting. Losing the network or the
   connection never forgets it.

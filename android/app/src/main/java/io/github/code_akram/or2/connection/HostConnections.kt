@@ -208,8 +208,9 @@ class ActiveTerminal internal constructor(val id: Long, val host: Host, val targ
     val hasConnected = mutableHasConnected.asStateFlow()
 
     /**
-     * Connected now and not deliberately closing (the user's Disconnect or Close sets the flag before
-     * the native close is reported, and a dismissed terminal is retired): the only state a terminal may
+     * Connected now and not deliberately closing (the user's Disconnect or Close of the terminal or of
+     * its whole host, and a host's release or destination edit, set the flag before the native close is
+     * reported, and a dismissed terminal is retired): the only state a terminal may
      * become the Resume target in. Unlike [hasConnected] it is not history.
      */
     val isOpenForReattach: Boolean
@@ -435,6 +436,7 @@ class HostConnections(
         val older = lingering.filter { it.host.id == hostId }
         if (current == null && older.isEmpty()) return
         userClose?.hostClosed(hostId)
+        markHostTerminalsClosing(hostId)
         current?.let {
             it.disconnectRequested = true
             it.mutablePort.value?.disconnect()
@@ -446,6 +448,7 @@ class HostConnections(
 
     /** Forgets a connection (disconnecting it first). Terminals keep their own lifecycle. */
     fun dismissHost(hostId: Long) {
+        markHostTerminalsClosing(hostId)
         val older = lingering.filter { it.host.id == hostId }
         lingering.removeAll(older)
         older.forEach(::retireHost)
@@ -485,7 +488,22 @@ class HostConnections(
         if (previous.moshIdentity() != updated.moshIdentity()) {
             moshServers?.purge(updated.id)
             userClose?.hostClosed(updated.id)
+            markHostTerminalsClosing(updated.id)
         }
+    }
+
+    /**
+     * Every terminal of [hostId], on whichever connection generation it was opened (the current one
+     * and older ones retained for their surviving mosh terminals), is about to be closed by a host-wide
+     * action (the user's Disconnect, a dismissed or released connection, an edit of its destination
+     * or login). Marked deliberately closing **now**, synchronously, so the screen's remembering effect
+     * (queued, or started again by a revisit while the state still reads `Connected`) cannot make one
+     * the Resume target again before the native `Closed` arrives, and `Closed(Disconnected)` does not
+     * forget. Terminals stay listed with their final frame. An ordinary SSH loss or replacement does
+     * not come through here: its surviving mosh terminals stay eligible.
+     */
+    private fun markHostTerminalsClosing(hostId: Long) {
+        mutableTerminals.value.filter { it.host.id == hostId }.forEach { it.disconnectRequested = true }
     }
 
     private fun retireHost(current: ActiveHost) {
