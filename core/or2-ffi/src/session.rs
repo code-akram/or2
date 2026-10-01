@@ -432,15 +432,18 @@ impl Session {
 /// broke is noticed promptly. Returns at once; callable from any thread.
 #[uniffi::export]
 pub fn network_changed() {
-    let sessions: Vec<Arc<Session>> = {
-        let mut live = MOSH_SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
-        live.retain(|weak| weak.upgrade().is_some_and(|s| s.is_open()));
-        live.iter().filter_map(Weak::upgrade).collect()
-    };
-    for session in sessions {
+    for session in live_mosh_sessions() {
         session.roam();
     }
     or2_core::ssh::network_changed();
+}
+
+/// The registered mosh sessions that are not closed, forgetting the ones that are (or that
+/// Kotlin released).
+fn live_mosh_sessions() -> Vec<Arc<Session>> {
+    let mut live = MOSH_SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
+    live.retain(|weak| weak.upgrade().is_some_and(|s| s.is_open()));
+    live.iter().filter_map(Weak::upgrade).collect()
 }
 
 #[uniffi::export]
@@ -512,5 +515,91 @@ impl Session {
     /// Idempotent; `Closed { Disconnected }` follows through the listener.
     pub fn disconnect(&self) {
         self.handle.disconnect();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use or2_core::session::{Command, SessionObserver, SessionState, channel};
+
+    struct Quiet;
+
+    impl SessionObserver for Quiet {
+        fn state_changed(&self, _: &SessionState) {}
+        fn frame_ready(&self) {}
+    }
+
+    fn open(transport: TerminalTransport) -> (Arc<Session>, or2_core::session::SessionDriver) {
+        let (handle, mut driver) = channel(Arc::new(Quiet));
+        driver.transition(SessionState::Connected).unwrap();
+        (Session::new(handle, transport), driver)
+    }
+
+    fn registered(session: &Arc<Session>) -> bool {
+        let weak = Arc::downgrade(session);
+        MOSH_SESSIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|entry| Weak::ptr_eq(entry, &weak))
+    }
+
+    #[test]
+    fn network_changed_roams_live_mosh_sessions_only() {
+        let (mosh, mut mosh_driver) = open(TerminalTransport::Mosh);
+        let (ssh, mut ssh_driver) = open(TerminalTransport::Ssh);
+        assert!(registered(&mosh));
+        assert!(!registered(&ssh), "SSH sessions have nothing to roam");
+
+        network_changed();
+        assert_eq!(mosh_driver.blocking_next_command(), Command::Roam);
+        // Nothing was queued for the SSH session: the next command is the text sent now.
+        ssh.send_text("a".into()).unwrap();
+        assert_eq!(
+            ssh_driver.blocking_next_command(),
+            Command::Text("a".into())
+        );
+
+        // `Session.roam` is the same command, one session at a time.
+        mosh.roam();
+        assert_eq!(mosh_driver.blocking_next_command(), Command::Roam);
+        ssh.roam();
+        ssh.send_text("b".into()).unwrap();
+        assert_eq!(ssh_driver.blocking_next_command(), Command::Roam);
+        assert_eq!(
+            ssh_driver.blocking_next_command(),
+            Command::Text("b".into())
+        );
+    }
+
+    #[test]
+    fn closed_and_released_mosh_sessions_leave_the_registry() {
+        let (closed, mut closed_driver) = open(TerminalTransport::Mosh);
+        let (released, _released_driver) = open(TerminalTransport::Mosh);
+        let (kept, _kept_driver) = open(TerminalTransport::Mosh);
+        let released_weak = Arc::downgrade(&released);
+        assert!(registered(&closed) && registered(&released) && registered(&kept));
+
+        closed_driver.close(or2_core::session::CloseReason::Disconnected);
+        drop(released);
+        let live = live_mosh_sessions();
+        assert!(live.iter().any(|s| Arc::ptr_eq(s, &kept)));
+        assert!(!live.iter().any(|s| Arc::ptr_eq(s, &closed)));
+        assert!(!registered(&closed), "a closed session is forgotten");
+        assert!(released_weak.upgrade().is_none());
+        assert!(
+            !MOSH_SESSIONS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .any(|entry| Weak::ptr_eq(entry, &released_weak)),
+            "the registry holds no entry for a released session"
+        );
+        // The registry never keeps a session alive.
+        drop(live);
+        let weak = Arc::downgrade(&kept);
+        drop(kept);
+        assert!(weak.upgrade().is_none());
     }
 }

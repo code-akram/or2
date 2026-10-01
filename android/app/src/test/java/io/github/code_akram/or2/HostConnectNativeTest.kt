@@ -16,6 +16,7 @@ import io.github.code_akram.or2.ffi.TerminalKey
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.ffi.connectHost
+import io.github.code_akram.or2.ffi.networkChanged
 import io.github.code_akram.or2.ffi.generateEd25519Key
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -169,6 +170,61 @@ class HostConnectNativeTest {
                     }
                 } finally {
                     stranger.privateKey.fill(0)
+                }
+            } finally {
+                key.privateKey.fill(0)
+            }
+        }
+    }
+
+    @Test
+    fun connectHostRunsAMoshTerminalThroughTheRealFfiRoamsAndReportsHealth() {
+        assumeSshd()
+        assumeMosh()
+        OpenSshFixture().use { fixture ->
+            val key = generateEd25519Key("")
+            try {
+                fixture.directory.resolve("authorized").toFile().writeText(key.publicKey.openssh + "\n")
+                val recorder = HostRecorder()
+                connectHost(request(fixture, key.privateKey.copyOf()), recorder).use { host ->
+                    val prompt = recorder.await<HostState.AwaitingHostKeyDecision>()
+                    host.approveHostKey(prompt.presented.fingerprint)
+                    recorder.await<HostState.Authenticating>()
+                    assertEquals(HostState.Connected(0u), recorder.await<HostState.Connected>())
+
+                    // The probe found the fixture's mosh-server: AUTO would pick mosh here.
+                    assertTrue(runBlocking { host.capabilities() }.moshServer != null)
+                    val listener = RecordingListener()
+                    val session = host.openTerminal(TerminalTarget.Shell, TerminalTransport.MOSH, 80u, 24u, listener)
+                    assertEquals(TerminalTransport.MOSH, session.transport())
+                    assertEquals(SessionState.Connected, listener.awaitState<SessionState.Connected>())
+                    val grid = mutableMapOf<Int, String>()
+                    session.sendText("stty -echo; printf '\\033[2J\\033[H'; printf 'OR2-%s\\n' READY\n")
+                    awaitText(session, listener, grid, "OR2-READY")
+                    session.resize(97u, 31u)
+                    session.sendText("printf 'SIZE:'; stty size\n")
+                    awaitText(session, listener, grid, "SIZE:31 97")
+
+                    // Link health arrives about once a second after Connected; a healthy link is fresh.
+                    val health = listener.awaitHealth()
+                    assertTrue("healthy link: $health", health.sinceHeardMs < 5000u)
+
+                    // Roaming through the FFI: the session's own roam() and the process-wide
+                    // network_changed(); output keeps flowing after each.
+                    session.roam()
+                    session.sendText("printf 'ROAM-%s\\n' ONE\n")
+                    awaitText(session, listener, grid, "ROAM-ONE")
+                    networkChanged()
+                    session.sendText("printf 'ROAM-%s\\n' TWO\n")
+                    awaitText(session, listener, grid, "ROAM-TWO")
+                    assertEquals(HostState.Connected(0u), host.state())
+
+                    // A user disconnect of the host closes the mosh session too, before the host.
+                    host.disconnect()
+                    assertEquals(CloseReason.Disconnected, listener.awaitState<SessionState.Closed>().reason)
+                    assertEquals(CloseReason.Disconnected, recorder.await<HostState.Closed>().reason)
+                    listener.assertNoMoreStates()
+                    assertFalse(listener.overlapped)
                 }
             } finally {
                 key.privateKey.fill(0)

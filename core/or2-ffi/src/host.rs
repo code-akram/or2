@@ -298,7 +298,9 @@ impl HostConnection {
 /// Validates synchronously; networking and all callbacks run on Rust-owned threads. The
 /// connection races the request's addresses, asks for a host-key decision when needed, and
 /// ends with exactly one `Closed`. Terminals and herdr watches on it close first (`Disconnected`
-/// for a user disconnect, else the host's failure), then the host reports `Closed`.
+/// for a user disconnect, else the host's failure), then the host reports `Closed`. The
+/// exception is a mosh terminal: it needs the SSH connection only to start, so a *lost*
+/// connection leaves it running, while a user disconnect closes it like the others.
 #[uniffi::export]
 pub fn connect_host(
     request: HostConnectRequest,
@@ -327,8 +329,8 @@ impl HostConnection {
         Ok(self.handle.reject_host_key()?)
     }
 
-    /// Idempotent. Closes every terminal and watch on the host; `Closed { Disconnected }`
-    /// follows through the listener.
+    /// Idempotent. Closes every terminal (mosh ones too) and watch on the host;
+    /// `Closed { Disconnected }` follows through the listener.
     pub fn disconnect(&self) {
         self.handle.disconnect();
     }

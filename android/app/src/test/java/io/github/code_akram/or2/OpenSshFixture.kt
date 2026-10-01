@@ -104,6 +104,7 @@ internal class OpenSshFixture : AutoCloseable {
     }
 
     override fun close() {
+        stopSessionProcesses()
         process?.let {
             it.destroy()
             if (!it.waitFor(2, TimeUnit.SECONDS)) {
@@ -113,6 +114,36 @@ internal class OpenSshFixture : AutoCloseable {
         }
         directory.toFile().deleteRecursively()
     }
+}
+
+/**
+ * Kills the `mosh-server`s (and the shells under them) that this fixture's sessions started: a
+ * mosh-server outlives its SSH connection by design, so a test that fails halfway would leave
+ * one behind. Only processes carrying this fixture's private `TMUX_TMPDIR` are touched.
+ */
+private fun OpenSshFixture.stopSessionProcesses() {
+    val marker = "TMUX_TMPDIR=${directory.resolve("tmux")}"
+    val names = setOf("mosh-server", "bash", "zsh", "sh", "fish")
+    val proc = Path.of("/proc").toFile().listFiles() ?: return
+    for (entry in proc) {
+        val pid = entry.name.toLongOrNull() ?: continue
+        val comm = runCatching { entry.resolve("comm").readText().trim() }.getOrNull() ?: continue
+        if (comm !in names) continue
+        val environ = runCatching { entry.resolve("environ").readBytes() }.getOrNull() ?: continue
+        if (String(environ, Charsets.ISO_8859_1).split('\u0000').none { it == marker }) continue
+        runCatching { ProcessBuilder("kill", "-KILL", pid.toString()).start().waitFor(2, TimeUnit.SECONDS) }
+    }
+}
+
+/**
+ * Skips the calling test when `mosh-server` is absent, or fails it when `OR2_REQUIRE_MOSH` is set.
+ */
+internal fun assumeMosh() {
+    val available = Files.isExecutable(Path.of("/usr/bin/mosh-server"))
+    if (System.getenv("OR2_REQUIRE_MOSH") != null) {
+        assertTrue("OR2_REQUIRE_MOSH is set but /usr/bin/mosh-server is not installed", available)
+    }
+    assumeTrue("mosh-server is not installed", available)
 }
 
 /**

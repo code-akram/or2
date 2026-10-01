@@ -936,7 +936,8 @@ would leave it and its shell on the host for good, once per retry. `terminate` s
 to `MoshParams::server_pid` through the exec channel, and only if the process there is named
 `mosh-server` (a reused id is left alone; one already gone is not an error). **Whoever calls
 `bootstrap` and `start` must call it when the session closes `Failed { TimedOut }` before ever
-reaching `Connected`, or is disconnected before it did** (lane A1/M3 own that call site);
+reaching `Connected`, or is disconnected before it did** (the host driver does: M3, "Mosh
+terminals");
 `bootstrap` itself calls it when the server started but its answer was unusable (it reads
 the pid from either stream *before* wiping stdout, so a pid printed on stdout beside an unusable
 CONNECT line is still cleaned up). A
@@ -1278,26 +1279,106 @@ pub trait SessionListener {                   // added method
     `| roams N` (`text 78 | roams 2`). SSH probe terminals ignore `roam()`.
   - `transport()` returns what `open_terminal` was given.
 
-### M3-A FFI surface status (API 8, first commit on `m3/a`)
+### M3-A implementation (API 8, on `m3/a`)
 
-The FFI surface above is real and final; the mosh implementation behind it follows on the same
-branch. Until then, deviations to know about:
+The FFI surface is final and the mosh implementation is behind it. `HostConnection.open_terminal(..,
+Mosh, ..)` on a real host now bootstraps a real `mosh-server`; the placeholder that closed the
+session `Failed { Internal { "mosh terminals land with M3-A" } }` is gone.
 
-- `HostConnection.open_terminal(.., Mosh, ..)` on a real host validates like SSH, then closes
-  the session `Failed { Internal { message: "mosh terminals land with M3-A" } }` from a Rust
-  thread. This is an honest failure, not a stub that succeeds; M3-B must not rely on it (AUTO
-  falls back only on `TimedOut` or `NotInstalled`).
-- Core: `HostHandle::open_terminal_with(target, transport, size, observer)` carries the choice
-  (`HostCommand::OpenTerminal.transport`); `open_terminal` is the SSH shorthand.
-  `SessionHandle::roam()` sends `Command::Roam`, which the SSH pump ignores and the mosh driver
-  turns into a socket rotation (`request_rebind`). `SessionObserver::link_health` defaults to a
-  no-op.
-- `network_changed()` calls `roam()` on every live mosh session (the FFI keeps weak references
-  to them) and sends an SSH keepalive (`keepalive@openssh.com`, reply requested) on every
-  established host connection (russh `Handle::send_keepalive`). The keepalive makes a connection
-  that the network change silently broke fail within the existing keepalive/TCP timeouts of the
-  write instead of waiting for the next 15 s tick; it does not by itself close a connection,
-  and a healthy one just gets a reply that is ignored.
+**Open path** (`ssh/mosh_session.rs`, one thread `or2-mosh-open` per terminal, the same shape as
+`or2-terminal`):
+
+1. `peer_addr()` of the host connection, or the session closes
+   `Failed { Internal }` (a transport that cannot say which address it reached; mosh must not
+   run on a re-resolved name). `DirectTcp` always can.
+2. The capability probe (cached). No `mosh-server` closes the session `Failed { NotInstalled {
+   program: "mosh-server" } }` **before anything else runs**, so a host without mosh gets no pane
+   focus and no exec channel, whatever the target is (AUTO then falls back to SSH, which reports
+   a missing tmux or herdr itself).
+3. The target's command as `RemoteCommand::argv()`, built by the code the SSH path uses
+   (`terminal_session::program`): `<tmux> -u new-session -A -s <name>`, `<herdr>` or `<herdr>
+   --session <name>`, nothing for `Shell` (the login shell). A herdr pane is focused first, over
+   SSH, exactly as for an SSH terminal (`CommandFailed` on failure, before any server exists).
+4. `mosh::bootstrap(host, caps, size, argv)` with the probed path and UTF-8 locale; then
+   `mosh::run_session` (the driver of `mosh::start_with`, see below) with `DirectUdp` and
+   `Link` pinned to `peer_addr().ip()` plus the bootstrap's port. A resize during the bootstrap
+   is carried into the session (latest wins); other input during it is dropped (the session is
+   `Connecting`, as for SSH).
+5. **Cleanup.** Whenever the session ends without ever having been `Connected` (UDP blocked:
+   `Failed { TimedOut }` after `HostOptions::mosh_connect_timeout`, 15 s in production; any other
+   failure; a disconnect), `mosh::terminate(host, server_pid)` runs (bounded by the exec timeout)
+   **before** the session reports `Closed`. A disconnect (session or user host disconnect) while
+   the bootstrap exec is still running lets it finish for up to 2 s more so the server it started
+   can be stopped; cutting the exec shorter loses the pid and the server stays (the limitation
+   documented under `mosh::terminate`). If the host connection is already gone `terminate` fails
+   quietly and the server stays until someone stops it: a loss can leave a server nobody ever
+   reached only in that narrow window.
+
+**Host close semantics.** A mosh session ignores the host connection once it is running.
+`HostDriver` gives every terminal the host's `closing` watch; a small watcher task per mosh
+terminal reads it: a `Disconnected` reason (user disconnect, or the release of the last handle)
+makes the session disconnect with mosh's shutdown handshake (the server exits; the session is
+`Closed { Disconnected }` before the host's `Closed`, as for SSH terminals, because the watcher
+holds the host's drain tracker until the session has closed); any other reason is a loss: the
+watcher drops its tracker at once (the host does not wait for the session) and the session
+carries on. SSH terminals keep M2's rule unchanged. After a loss the host takes no more terminals
+(`HostError::Closed`), the mosh session remains usable, and its own `disconnect()` closes it
+`Disconnected` with the handshake. The session keeps an `Arc` to the (dead) SSH host object for
+its lifetime; that costs memory only.
+
+**Shared driver.** `mosh::driver` was split so the host driver can own the `SessionDriver`:
+`start_with` still creates its own channel and thread; `run_session(Plan, &mut SessionDriver) ->
+CloseReason` (crate-private) runs the same loop on a driver the caller holds and does **not**
+close it, so the caller can clean up first (`driver.state()` is still `Connected` iff the session
+ever connected). `Plan` bundles the transport (`Arc`), the pinned peer, `MoshParams`, the
+optional `HealthObserver`, the roam signal and `shutdown`, a `Notify` that ends the session like
+`Command::Disconnect`, with the goodbye handshake (a permit given early is kept). There is no
+`LinkControl` for host sessions: roaming goes through the session (`Command::Roam`, below).
+`HostOptions` gained `mosh_connect_timeout`; `ssh::connect_host_with_datagrams(transport,
+datagrams, request, observer, options)` chooses the datagram transport (tests, and Android's
+network-bound transport later). `connect_host`/`connect_host_with` use `DirectUdp`.
+
+**Link health.** The mosh driver samples the link once a second and offers each sample to a
+`HealthThrottle` before `SessionDriver::publish_link_health` (which only delivers while
+`Connected`): at most one report a second, and only when `since_heard_ms` or `since_ack_ms`
+differs from the last report. The values are millisecond-exact, so on a live link they change
+every sample and one report a second is what Kotlin sees; the throttle guarantees the contract
+whatever the sampling. `mosh::start_with`'s separate `HealthObserver` hook is unchanged (every
+sample, including before `Connected`). FFI `SessionListener.on_link_health` is the observer's
+`link_health`. Never called for SSH terminals.
+
+**Roaming.** `Session.roam()` sends `Command::Roam` (any state; a closed session ignores it),
+which the mosh driver turns into `request_rebind` (a new socket now, as `LinkControl::roam`);
+SSH ignores it. `network_changed()` (FFI) calls `roam()` on every live mosh session through a
+process-wide registry of `Weak<Session>` (registered when a Mosh session is created, pruned on
+every call and registration of closed or released sessions; it never keeps a session alive), and
+then `or2_core::ssh::network_changed()`, which sends an SSH keepalive on every established host
+connection (the same weak registry, `LIVE_HOSTS`). What russh 0.63.3 offers: `Handle::send_keepalive(want_reply)`
+queues a `keepalive@openssh.com` global request (reply requested), serviced by the connection's
+own loop; `Handle::send_ping()` additionally waits for the reply. or2 uses `send_keepalive`: the
+request and the server's reply cross the connection at once (a live test counts the bytes through
+a relay). It does **not** give the connection a deadline: russh counts unanswered *scheduled*
+keepalives (15 s, 3 misses) and an immediate one is not counted, so a connection that the
+change silently blackholed is still noticed by the TCP/keepalive timeouts the write meets, not
+by this call alone. That is the contract's wording ("does not by itself close a connection") and
+is deliberate: a hard deadline here would turn every brief handover into a lost host.
+
+**Tests.** `core/or2-core/tests/host_mosh.rs` (loopback sshd + real `mosh-server`, both
+`OR2_REQUIRE_*`-gated): echo, submit, resize, roam (a second socket carries the output), link
+health, session disconnect (the server process exits) and the connection serving the next
+terminal; the tmux attach and fake herdr commands (and a failed focus starting no server);
+host connection loss through a cuttable relay (the mosh session stays `Connected` and usable,
+SSH terminals fail with the host's reason, the host takes no new terminals, the server exits
+after the session's own disconnect); user host disconnect (sessions `Disconnected` before the
+host, servers exit); blocked UDP (a transport that drops everything the server sends) gives
+`TimedOut` with the server terminated and the connection intact; a disconnect, and a host
+disconnect, before the first datagram terminate the server. The mosh-server processes are
+found by the fixture's private `TMUX_TMPDIR` in their environment and killed by exact pid when
+the test ends however it ends. `connection_tests.rs`: `NotInstalled` for every target
+without opening a channel or focusing a pane. `mosh::driver` tests: throttle, health through the
+observer (not before `Connected`, about once a second), `Session.roam`, the shutdown signal.
+FFI unit tests: the registry (roams live mosh sessions only, forgets closed and released ones).
+`HostConnectNativeTest` runs a real mosh terminal through the generated Kotlin bindings.
 
 ## Android
 
