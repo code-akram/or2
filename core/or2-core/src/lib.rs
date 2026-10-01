@@ -5,6 +5,7 @@ pub mod herdr;
 pub mod host;
 pub mod input;
 pub mod keys;
+pub mod mosh;
 pub mod remote;
 pub mod session;
 pub mod ssh;
