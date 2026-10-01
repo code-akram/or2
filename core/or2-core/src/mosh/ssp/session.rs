@@ -17,7 +17,7 @@
 //! received datagram, [`Session::tick`] returns whatever is due to be sent, and
 //! [`Session::wait_time_ms`] says how long the caller may sleep before calling `tick` again.
 
-use std::time::Instant;
+use tokio::time::Instant;
 
 use super::crypto::{Direction, Session as CryptoSession};
 use super::error::MoshError;
