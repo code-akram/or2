@@ -2,9 +2,10 @@
 
 The Compose app loads `or2-ffi` through generated UniFFI Kotlin/JNA bindings. Host settings,
 encrypted key records and trusted host keys live in Room. `or2-core` remains free of Android,
-UniFFI and persistence dependencies. The production connector calls the real API-3 `connect`
-export; the contract probe is used only by tests. The session screen embeds the Canvas terminal
-with IME and keys-row input, keeping the final displayed frame visible through `Closed`.
+UniFFI and persistence dependencies. The production connector calls the real `connect`
+export (FFI API 4 also exports `connect_host`, not yet used by the app); the contract probes are
+used only by tests. The session screen embeds the Canvas terminal with IME and keys-row input,
+keeping the final displayed frame visible through `Closed`.
 
 ## Shared user-local toolchain
 
@@ -97,7 +98,9 @@ real key exports and AES-GCM on the JVM (not Android Keystore). Device tests
 load the packaged arm64 `.so` with Android JNA. Both cover the bootstrap geometry and errors,
 key generation/import errors, and a `contract_probe_session` lifecycle whose listener callbacks
 arrive on Rust threads (see [contracts](contracts.md)). On the JVM, `SessionContractTest` also
-covers host-key prompts, frames, input echoes, resize, scroll and disconnect, and
+covers host-key prompts, frames, input echoes, resize, scroll and disconnect,
+`HostContractTest` covers the host connection API against `contract_probe_host` (host-key
+decision, suspend queries, terminals, herdr watch, disconnect ordering, validation errors), and
 `KeyContractTest` checks generated and imported keys against `ssh-keygen` using throwaway keys
 in a temporary directory; it is skipped (reported as such) when `ssh-keygen` is not on `PATH`.
 The runtime Rust library does not enable the host-only `bindgen` feature. russh's `aws-lc-sys`

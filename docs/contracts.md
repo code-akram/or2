@@ -8,15 +8,17 @@ document and the tests together, and bumping `API_VERSION` in `or2-ffi` when an 
 
 ## Status
 
-All M1 contracts below are implemented and tested (FFI API 3). M2 changes are specified in
-[M2: hosts, multiplexers and mosh](#m2-hosts-multiplexers-and-mosh) and bump the API to 4.
+All M1 contracts below are implemented and tested. M2 changes are specified in
+[M2: hosts, multiplexers and mosh](#m2-hosts-multiplexers-and-mosh); lane 0 has landed the
+M2 contract types and the FFI API 4 surface (`API_VERSION = 4`), with the lane A1, A2 and B
+behaviour still to come.
 
 | Contract | Implemented and tested | Open |
 |---|---|---|
 | Transport | `Transport` trait, `DirectTcp`, `Endpoint` validation | address racing (M2), UDP (M2 core, M3 export), jump host |
 | Key material | Ed25519 generation, OpenSSH import with passphrase, storage form, typed errors; Keystore/biometric vault in Kotlin | secure-element and FIDO2 keys (later) |
 | Host-key trust | verdicts, prompts bound to the presented fingerprint, Kotlin persistence and UI | per-host trust shared by several addresses (M2) |
-| Session lifecycle | state machine, handle/driver split, `connect` over russh with PTY shell, timeouts, keepalive | sessions as channels of a host connection (M2) |
+| Session lifecycle | state machine, handle/driver split, `connect` over russh with PTY shell, timeouts, keepalive | `Connecting -> Connected` for channel sessions (lane 0); sessions as channels of a host connection (lane A1) |
 | Frames | libghostty-vt adapter, full/delta merge, notify-once mailbox, Canvas drawing | |
 | Input | libghostty key encoding, IME, keys row, scrolling, selection | bracketed paste |
 
@@ -240,7 +242,7 @@ this text disagree, fix one of them in the same change.
 | A3: mosh core | vendored mosh-rs, `DatagramTransport`, `Screen` over libghostty, bootstrap, mosh session driver; **no FFI export** | lane 0 (`RemoteHost`) |
 | B: Android | Room v2, host connection holder, multiple sessions, inbox, host screen with tmux picker, navigation | lane 0 (generated bindings, probe) |
 
-Lane 0 lands first. A2 and A3 land independently. A1 and B land together: A1 removes the M1
+Lane 0 has landed. A2 and A3 land independently. A1 and B land together: A1 removes the M1
 `connect` export and B removes its Kotlin use. `connect_host` exists from lane 0 so Kotlin
 compiles against it, but until A1 lands it closes every connection with
 `Failed { Internal }` (never a pretend success). Likewise lane 0's `herdr::watch` and
@@ -266,15 +268,30 @@ pub trait RemoteHost: Send + Sync + 'static {
   as `env 'K=V' … 'program' 'arg' …`: every token single-quoted, an embedded `'` written as
   `'\''`. That form means the same in POSIX shells and fish provided no token contains a
   backslash or a control character, so rendering rejects those (`RemoteError::Unquotable`).
-  Fixed scripts (the capability probe) run as `sh -c '<script>'` and are tested to contain no
-  `'` or `\`. Untrusted values (session names, pane ids) are only ever separate arguments.
+  Details lane 0 settled: without environment assignments there is no `env` prefix
+  (`'program' 'arg' …`); `Unquotable` also covers an environment name outside
+  `[A-Za-z_][A-Za-z0-9_]*` and a program that is empty, starts with `-` or contains `=`
+  (`env` would misread it). A round-trip test runs the rendered string through `sh`, bash,
+  zsh and fish (each skipped when not installed; fish is not installed on the runner that
+  landed lane 0) and checks the argv arrives exactly.
+  Fixed scripts (the capability probe) run as `sh -c '<script>'` (`remote::render_script`,
+  which rejects a script containing `'` or `\`; newlines are allowed). Untrusted values
+  (session names, pane ids) are only ever separate arguments.
+- Lane 0 put the tmux and probe result types in `or2_core::host` (`TmuxSession`,
+  `HostCapabilities`, `HerdrSessionInfo`) next to the other host types; there is no separate
+  `tmux` module yet (lane A1 adds the command code). The output cap and exec timeout are the
+  constants `remote::OUTPUT_CAP` and `remote::EXEC_TIMEOUT`.
 - `ExecOutput { status: Option<u32>, stdout: Vec<u8>, stderr: Vec<u8> }`; output is capped at
   1 MiB per stream (excess fails with `RemoteError::OutputTooLarge`); each exec has a 10 s
   timeout (`RemoteError::TimedOut`).
 - `RemoteError`: `Closed`, `TimedOut`, `OutputTooLarge`, `Unquotable`, `Rejected(String)` (channel refused,
   e.g. streamlocal forwarding disabled), `Io(String)`.
-- `LocalHost` (feature `test-support`, used by integration tests) implements `RemoteHost` with
-  local processes and `UnixStream`. Production code never uses it.
+- `LocalHost` (feature `test-support`, enabled for or2-core's own tests through a dev-dependency
+  on itself; used by integration tests) implements `RemoteHost` with local processes and
+  `UnixStream`. `exec` runs the *rendered* string through `/bin/sh -c`, so quoting is exercised
+  exactly as on a host; it enforces the output cap and timeout (`LocalHost::with_timeout`
+  shortens the latter for tests, `exec_rendered` runs an already rendered line such as a
+  fixed script). Production code never uses it.
 
 ### Capability probe
 
@@ -310,6 +327,29 @@ Connecting ──▶ AwaitingHostKey ──▶ Authenticating ──▶ Connecte
   session on it (`Disconnected` when the user disconnected the host, else the host's failure),
   stops every herdr watch, and fails pending queries with `Closed`.
 - Queries are allowed only in `Connected` (`NotConnected` before, `Closed` after).
+- **Commands carry drivers, not replies, for handle-returning operations.** `open_terminal` and
+  `watch_herdr` return their handle synchronously (the FFI methods are not `async`), so
+  `HostHandle` creates the `session::channel` / `herdr::channel` pair itself and sends the
+  *driver* to the host driver:
+  `HostCommand::OpenTerminal { target, size, driver: SessionDriver }` and
+  `HostCommand::WatchHerdr { session, driver: HerdrWatchDriver }`. The host driver opens the
+  channel (or starts `herdr::run`) and drives it; if it cannot, it closes that driver with a
+  `Failed` reason. Only the queries (`Capabilities`, `ListTmux`) carry a tokio `oneshot`
+  reply; a dropped reply means `Closed`. (The lane 0 brief listed `observer` and `reply`
+  fields on the first two; that cannot return a handle without blocking.) Target and session
+  names are validated in `HostHandle` before the pair is created, so a rejected request
+  creates no session and fires no callback.
+- `HostDriver::transition(Closed)` stops accepting commands and then fails every command still
+  queued: terminal drivers close with the host's reason (`Disconnected` for a user disconnect,
+  else the host failure), herdr drivers close, query replies are dropped (`Closed`). Sessions
+  and watches the driver already started are its own to close, before it closes the host.
+- Dropping a `HostDriver` closes with `Failed { Internal }`; dropping the last `HostHandle`
+  enqueues `Disconnect`; both as for `session`.
+- Rust API: `HostConnectRequest::new(addresses: &[(&str, u16)], username, private_key,
+  trusted_host_keys)` validates in order: address count (`NoAddresses`, `TooManyAddresses`),
+  each address (`InvalidAddress { index, error }`; FFI keeps only `index`), username, trusted
+  keys (`InvalidTrustedHostKey { index }`), key. `connect_host` (lane 0) closes from a Rust
+  thread with `Failed { Internal("host connections land with lane A1") }`.
 
 ### Terminal sessions on a host
 
@@ -361,13 +401,28 @@ activity_unix: i64 }`, sorted by most recent activity.
   `IncompatibleProtocol { protocol }` are final; `NotRunning` and `Failed` retry every 10 s
   while the host is connected (the state is redelivered only when it changes). `Closed` is
   delivered once, last, after `stop()` or host close, then the observer is released.
+- **Rust API** (lane 0): `herdr::channel(observer) -> (HerdrWatchHandle, HerdrWatchDriver)`
+  (the same split as `session`: the handle's `state()` and `stop()` never block, the driver
+  delivers states in order and `Closed` exactly once, then releases the observer; dropping the
+  driver closes it; dropping every handle stops it). `herdr::watch(host, session, observer)`
+  is `channel` plus a task running `herdr::run(host, session, driver)` on the process
+  runtime; the host driver uses `channel` and `run` itself so the handle can be returned
+  synchronously. A state equal to the current one is not redelivered; after a final
+  `Unavailable` only `Closed` is accepted. `focus_pane` returns `HerdrError`
+  (`NotIntegrated`, `Remote`, `Failed`). Until lane A2, `run` reports
+  `Unavailable { Failed, "herdr client not integrated" }` and waits for the stop, and
+  `focus_pane` always fails with `NotIntegrated`.
 - **View** (`HerdrView`) is or2's projection, delivered whole, coalesced to at most one
   delivery per 100 ms: `version`, `protocol`, `focused_pane_id`, `workspaces`
   (`workspace_id, number, label, focused, agent_status`), `tabs` (`tab_id, workspace_id,
   number, label, focused, agent_status`), `panes` (`pane_id, tab_id, workspace_id, label,
   agent, agent_status, cwd, title, focused`) and `agents` (`pane_id, tab_id, workspace_id,
   name, agent, display_agent, status, cwd, title, focused, state_change_seq`). `AgentStatus`:
-  `Idle`, `Working`, `Blocked`, `Done`, `Unknown`.
+  `Idle`, `Working`, `Blocked`, `Done`, `Unknown`. Field types follow herdr's schema:
+  `version: u64` is or2's own counter (it increases with every delivery of one watch),
+  `protocol: u32` is herdr's protocol number, `focused_pane_id` and pane/agent `label`, `name`,
+  `agent`, `display_agent`, `cwd`, `title` are optional, `state_change_seq` is `u64`; the FFI
+  records are `HerdrView`, `HerdrWorkspace`, `HerdrTab`, `HerdrPane`, `HerdrAgent`.
 - **Focus:** `herdr::focus_pane(host, session, pane_id)` sends one `pane.focus` request. It
   changes what the user's herdr clients show; tests use isolated named sessions only.
 - Tests never touch the default herdr session or any session they did not create. Live tests
@@ -424,7 +479,7 @@ impl HostConnection {                     // all non-blocking unless async
         -> Result<Arc<HerdrWatch>, HostError>;
 }
 // HostError: NotConnected, Closed, NoHostKeyPrompt, HostKeyMismatch, EmptyDimension,
-//            InvalidName, NotInstalled { program }, CommandFailed { message }
+//            InvalidName, NotInstalled { program }, CommandFailed { reason }
 // HostCapabilities { tmux: Option<String>, herdr: Option<String>, mosh_server: Option<String>,
 //                    utf8_locale: String, herdr_sessions: Vec<HerdrSessionInfo { name, running, is_default }> }
 
@@ -434,6 +489,12 @@ impl HostConnection {                     // all non-blocking unless async
 #[derive(uniffi::Object)] pub struct HerdrWatch;   // fn state(&self) -> HerdrState; fn stop(&self);
 ```
 
+- `CommandFailed` carries `reason`, not `message`: a UniFFI error variant field named
+  `message` generates a Kotlin property that clashes with `Throwable.message`. `EmptyDimension`
+  is raised by the FFI layer (core takes a validated `TerminalSize`), like `SessionError`'s.
+  `HerdrState` in the FFI includes `Starting` (what `HerdrWatch.state()` can return before the
+  first change; it is never delivered). The herdr records and `HerdrWatch` live in
+  `or2-ffi/src/herdr.rs`, the host surface in `or2-ffi/src/host.rs`.
 - Async methods use UniFFI's tokio async runtime support and become Kotlin `suspend` functions;
   cancelling the Kotlin coroutine cancels the Rust future. Callbacks keep M1's threading rules:
   a Rust-owned thread, never concurrent per object, in order, may start before the factory
@@ -447,7 +508,19 @@ impl HostConnection {                     // all non-blocking unless async
   data, opens terminals through the M1 probe script, and drives a `HerdrWatch` through
   `Live` (a fixed view with one blocked, one working and one idle agent), one update (the
   blocked agent becomes working) and `Closed` on `stop()`. App code must never call it.
-- `contract_probe_session` stays for the M1 session tests.
+  Details: the probe host runs on one Rust thread with a single-threaded runtime, which also
+  serves its terminals and watches, so callbacks are ordered and never concurrent per object.
+  `open_terminal` targets show in row 0 (`or2 contract probe shell`, `... tmux <name>`,
+  `... herdr <session|default> <pane|->`); a watch's first workspace label is its session name
+  (`default` for `None`); the capabilities have no `mosh_server`, a running `default` herdr
+  session and a stopped `or2-probe` one; tmux lists `main` (3 windows, 1 client) before
+  `build`. Closing the host (user disconnect, or releasing the object) closes its terminals
+  (`Disconnected`) and watches first, then reports the host's `Closed`.
+- API 4 enables UniFFI's `tokio` feature (new locked dependency `async-compat`) and gives
+  `or2-core` tokio's `process` feature (new locked dependency `signal-hook-registry`), both
+  MIT/Apache-2.0; `or2-ffi` also depends on tokio directly for the probe runtime.
+- `contract_probe_session` stays for the M1 session tests; it now runs on the same kind of
+  probe thread (behaviour unchanged).
 
 ## Android (lane B)
 

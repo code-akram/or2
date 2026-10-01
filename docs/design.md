@@ -318,7 +318,7 @@ Scope: M2 plus the Rust half of M3's mosh. Lanes, ownership and interfaces are i
 [contracts: M2](contracts.md#m2-hosts-multiplexers-and-mosh). One SSH connection per host
 carries terminals, tmux/probe exec channels and herdr streamlocal channels (FFI API 4).
 
-- [ ] Lane 0: `remote`, `host`, `herdr::view` and tmux contract types; FFI API 4 surface;
+- [x] Lane 0: `remote`, `host`, `herdr::view` and tmux contract types; FFI API 4 surface;
   `contract_probe_host`; Kotlin JVM contract test.
 - [ ] Lane A1: host driver over russh with multiplexed channels, address racing, capability
   probe, tmux listing and attach, terminal targets, `connect_host`; OpenSSH interop tests.
