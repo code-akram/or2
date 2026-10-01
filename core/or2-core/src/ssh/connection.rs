@@ -15,13 +15,18 @@
 //! down, and only then reports the host's `Closed`: terminals and watches close before the
 //! host, matching the contract probe. The wait is bounded ([`SESSIONS_CLOSE_GRACE`]) because
 //! a terminal thread stuck in a slow observer callback must not hold the host open forever;
-//! a session that outlasts it can still deliver its `Closed` after the host's. A user
+//! a session that outlasts it can still deliver its `Closed` after the host's. Mosh sessions
+//! have their own, longer bound ([`mosh_session::CLOSE_BUDGET`]): closing one can mean stopping
+//! its server over this very connection, which takes round trips, and the connection must
+//! stay up until that is done. A user
 //! disconnect closes terminals with
 //! `Disconnected` and sends each channel's close first; loss closes them with the failure the
 //! connection ended with. Queries still running are dropped, so their callers see `Closed`.
+//! Mosh terminals ([`mosh_session`]) are the exception: they need the connection only to
+//! start, so a loss leaves them running; a user disconnect closes them like the others.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use russh::client::{self as russh_client, Handle};
@@ -32,20 +37,21 @@ use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use super::client::{
     Client, HostKeyRequest, TransportEnd, authenticate, config, handshake_failure, relay,
 };
+use super::mosh_session;
 use super::pump::{CHANNEL_CLOSE_GRACE, connection_error, internal, lost};
 use super::runtime;
 use super::terminal_session;
 use crate::herdr::{self, HerdrState, HerdrUnavailable, HerdrWatchDriver};
 use crate::host::{
     HostCapabilities, HostCommand, HostConnectRequest, HostDriver, HostError, HostHandle,
-    HostObserver, HostState, TerminalTarget, TmuxSession,
+    HostObserver, HostState, TerminalTarget, TerminalTransport, TmuxSession,
 };
 use crate::probe;
 use crate::remote::{ExecOutput, OUTPUT_CAP, RemoteError, RemoteHost, SecretBytes};
 use crate::session::{CloseReason, HostKeyPrompt, SessionDriver, SessionFailure};
 use crate::term::TerminalSize;
 use crate::tmux::{self, TmuxError};
-use crate::transport::{RACE_STAGGER, Transport, race};
+use crate::transport::{DatagramTransport, RACE_STAGGER, Transport, race};
 
 /// Timings, adjustable so tests need not wait for the production values.
 #[derive(Debug, Clone, Copy)]
@@ -57,6 +63,9 @@ pub struct HostOptions {
     pub exec_timeout: Duration,
     /// Delay between address attempts. Production: `transport::RACE_STAGGER`.
     pub stagger: Duration,
+    /// How long a mosh terminal waits for the server's first datagram before it closes
+    /// `TimedOut` (UDP blocked) and stops the server. Production: `mosh::CONNECT_TIMEOUT`.
+    pub mosh_connect_timeout: Duration,
 }
 
 impl Default for HostOptions {
@@ -65,6 +74,7 @@ impl Default for HostOptions {
             connect_timeout: Duration::from_secs(20),
             exec_timeout: crate::remote::EXEC_TIMEOUT,
             stagger: RACE_STAGGER,
+            mosh_connect_timeout: crate::mosh::CONNECT_TIMEOUT,
         }
     }
 }
@@ -72,6 +82,10 @@ impl Default for HostOptions {
 /// How long closing waits for terminals and watches to deliver their `Closed`. Past it the
 /// host closes anyway: the "sessions before host" order holds unless a session is wedged.
 const SESSIONS_CLOSE_GRACE: Duration = Duration::from_secs(3);
+/// How long a keepalive that [`network_changed`] queues may wait for the connection to take it.
+/// Past it the connection is not draining (a blocked write): the keepalive is dropped, so calls
+/// during a flapping network do not pile up tasks.
+const KEEPALIVE_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a watch whose capability probe failed waits before probing again.
 const WATCH_RETRY: Duration = Duration::from_secs(10);
 
@@ -108,6 +122,34 @@ pub(super) struct SshHost {
     capabilities: OnceCell<HostCapabilities>,
     /// The last herdr session list read successfully (the probe's own list until then).
     sessions: probe::SessionsCache,
+}
+
+/// Every established SSH connection of the process, for [`network_changed`]. Weak: a closed
+/// host is dropped by its owners, never kept alive here.
+static LIVE_HOSTS: Mutex<Vec<Weak<SshHost>>> = Mutex::new(Vec::new());
+
+fn register(host: &Arc<SshHost>) {
+    let mut live = LIVE_HOSTS.lock().unwrap_or_else(PoisonError::into_inner);
+    live.retain(|weak| weak.upgrade().is_some_and(|host| !host.handle.is_closed()));
+    live.push(Arc::downgrade(host));
+}
+
+/// The device's network changed: send an SSH keepalive on every live connection at once, so a
+/// connection that the change silently broke is noticed by the keepalive and TCP timeouts
+/// from now, instead of after the next scheduled keepalive. Returns at once; the keepalives
+/// are sent on the network runtime. A healthy connection is unaffected (the server's reply is
+/// ignored).
+pub(super) fn network_changed() {
+    let hosts: Vec<Arc<SshHost>> = {
+        let mut live = LIVE_HOSTS.lock().unwrap_or_else(PoisonError::into_inner);
+        live.retain(|weak| weak.upgrade().is_some_and(|host| !host.handle.is_closed()));
+        live.iter().filter_map(Weak::upgrade).collect()
+    };
+    for host in hosts {
+        runtime().spawn(async move {
+            let _ = timeout(KEEPALIVE_QUEUE_TIMEOUT, host.handle.send_keepalive(true)).await;
+        });
+    }
 }
 
 impl SshHost {
@@ -307,13 +349,49 @@ pub(super) fn start<T: Transport>(
     observer: Arc<dyn HostObserver>,
     options: HostOptions,
 ) -> HostHandle {
-    start_tapped(transport, request, observer, options, None)
+    start_datagrams(
+        transport,
+        Arc::new(crate::transport::DirectUdp),
+        request,
+        observer,
+        options,
+    )
+}
+
+/// [`start`] with the datagram transport that mosh terminals use.
+pub(super) fn start_datagrams<T: Transport, D: DatagramTransport>(
+    transport: Arc<T>,
+    datagrams: Arc<D>,
+    request: HostConnectRequest,
+    observer: Arc<dyn HostObserver>,
+    options: HostOptions,
+) -> HostHandle {
+    start_tapped_with(transport, datagrams, request, observer, options, None)
 }
 
 /// [`start`], also handing the established connection to `tap` (tests drive exec and
 /// streamlocal directly through it).
+#[cfg(any(test, feature = "test-support"))]
 fn start_tapped<T: Transport>(
     transport: Arc<T>,
+    request: HostConnectRequest,
+    observer: Arc<dyn HostObserver>,
+    options: HostOptions,
+    tap: Option<oneshot::Sender<Arc<SshHost>>>,
+) -> HostHandle {
+    start_tapped_with(
+        transport,
+        Arc::new(crate::transport::DirectUdp),
+        request,
+        observer,
+        options,
+        tap,
+    )
+}
+
+fn start_tapped_with<T: Transport, D: DatagramTransport>(
+    transport: Arc<T>,
+    datagrams: Arc<D>,
     request: HostConnectRequest,
     observer: Arc<dyn HostObserver>,
     options: HostOptions,
@@ -324,7 +402,16 @@ fn start_tapped<T: Transport>(
     let runtime = runtime();
     std::thread::Builder::new()
         .name("or2-host".into())
-        .spawn(move || runtime.block_on(drive(transport, request, &mut driver, options, tap)))
+        .spawn(move || {
+            runtime.block_on(drive(
+                transport,
+                datagrams,
+                request,
+                &mut driver,
+                options,
+                tap,
+            ))
+        })
         .expect("create host thread");
     handle
 }
@@ -369,7 +456,7 @@ pub fn connect_tapped<T: Transport>(
 }
 
 /// Publishes why the host closed to every terminal and watch.
-type Closing = watch::Receiver<Option<CloseReason>>;
+pub(super) type Closing = watch::Receiver<Option<CloseReason>>;
 
 /// Resolves with the host's close reason. A host driver that vanished without one reads as a
 /// user disconnect.
@@ -380,8 +467,9 @@ pub(super) async fn closed_reason(closing: &mut Closing) -> CloseReason {
     }
 }
 
-async fn drive<T: Transport>(
+async fn drive<T: Transport, D: DatagramTransport>(
     transport: Arc<T>,
+    datagrams: Arc<D>,
     request: HostConnectRequest,
     driver: &mut HostDriver,
     options: HostOptions,
@@ -398,7 +486,10 @@ async fn drive<T: Transport>(
     // Every terminal thread and watch task holds a clone; `drained.recv()` returns `None`
     // once they are all gone.
     let (tracker, mut drained) = mpsc::channel::<()>(1);
+    // The same for mosh sessions, which are waited for longer (see `mosh_session::CLOSE_BUDGET`).
+    let (mosh_tracker, mut mosh_drained) = mpsc::channel::<()>(1);
     let mut connected: Option<Arc<SshHost>> = None;
+    let mut peer_addr: Option<SocketAddr> = None;
     let mut decision = None;
     let mut deadline = Instant::now() + options.connect_timeout;
     let mut remaining = options.connect_timeout;
@@ -419,6 +510,7 @@ async fn drive<T: Transport>(
                     HostEvent::Connected { address_index, peer, host } => {
                         timing = false;
                         driver.set_peer_addr(peer);
+                        peer_addr = peer;
                         if let Some(tap) = tap.take() {
                             let _ = tap.send(Arc::clone(&host));
                         }
@@ -452,7 +544,13 @@ async fn drive<T: Transport>(
                     // handshake is failed by `transition(Closed)`.
                     command => {
                         if let Some(host) = &connected {
-                            dispatch(command, host, &closing, &tracker);
+                            let mosh = MoshContext {
+                                datagrams: &datagrams,
+                                peer: peer_addr,
+                                connect_timeout: options.mosh_connect_timeout,
+                                tracker: &mosh_tracker,
+                            };
+                            dispatch(command, host, &closing, &tracker, &mosh);
                         }
                     }
                 },
@@ -475,8 +573,17 @@ async fn drive<T: Transport>(
     let reason = outcome.unwrap_or_else(CloseReason::Failed);
     // Terminals and watches first: tell them why, then wait until each has said `Closed`.
     closing_sender.send_replace(Some(reason.clone()));
-    drop(tracker);
+    drop((tracker, mosh_tracker));
+    let closing_since = Instant::now();
     let _ = timeout(SESSIONS_CLOSE_GRACE, drained.recv()).await;
+    // Counted from the same moment: the mosh sessions have been closing meanwhile. A loss
+    // releases their trackers at once (they outlive the connection), so only a user disconnect
+    // waits here.
+    let _ = timeout_at(
+        closing_since + mosh_session::CLOSE_BUDGET,
+        mosh_drained.recv(),
+    )
+    .await;
     if reason == CloseReason::Disconnected && !network_ended {
         shutdown.send_replace(true);
         // Let the SSH disconnect flush, but never wait indefinitely for a peer.
@@ -491,18 +598,26 @@ async fn drive<T: Transport>(
 
 /// Starts the work a connected-host command asks for. Everything long-running is its own
 /// thread or task holding `tracker`, and ends when `closing` fires.
-fn dispatch(
+fn dispatch<D: DatagramTransport>(
     command: HostCommand,
     host: &Arc<SshHost>,
     closing: &Closing,
     tracker: &mpsc::Sender<()>,
+    mosh: &MoshContext<'_, D>,
 ) {
     match command {
         HostCommand::OpenTerminal {
             target,
+            transport: TerminalTransport::Ssh,
             size,
             driver,
         } => spawn_terminal(host, target, size, driver, closing, tracker),
+        HostCommand::OpenTerminal {
+            target,
+            transport: TerminalTransport::Mosh,
+            size,
+            driver,
+        } => spawn_mosh(host, target, size, driver, closing, mosh),
         HostCommand::Capabilities { reply } => {
             let host = Arc::clone(host);
             let (mut closing, tracker) = (closing.clone(), tracker.clone());
@@ -567,6 +682,40 @@ fn dispatch(
         | HostCommand::RejectHostKey
         | HostCommand::Disconnect => {}
     }
+}
+
+/// What a mosh terminal needs beyond what every command gets.
+struct MoshContext<'a, D> {
+    datagrams: &'a Arc<D>,
+    peer: Option<SocketAddr>,
+    connect_timeout: Duration,
+    /// Held by every mosh session until it has closed.
+    tracker: &'a mpsc::Sender<()>,
+}
+
+fn spawn_mosh<D: DatagramTransport>(
+    host: &Arc<SshHost>,
+    target: TerminalTarget,
+    size: TerminalSize,
+    session: SessionDriver,
+    closing: &Closing,
+    mosh: &MoshContext<'_, D>,
+) {
+    let open = mosh_session::Open {
+        host: Arc::clone(host),
+        datagrams: Arc::clone(mosh.datagrams),
+        peer: mosh.peer,
+        target,
+        size,
+        closing: closing.clone(),
+        tracker: mosh.tracker.clone(),
+        connect_timeout: mosh.connect_timeout,
+    };
+    // A failed spawn drops the closure and with it the driver, which closes the session with
+    // `Failed(Internal)`.
+    let _ = std::thread::Builder::new()
+        .name("or2-mosh-open".into())
+        .spawn(move || runtime().block_on(mosh_session::drive(open, session)));
 }
 
 fn spawn_terminal(
@@ -755,6 +904,7 @@ async fn hold(
         capabilities: OnceCell::new(),
         sessions: probe::SessionsCache::new(),
     });
+    register(&host);
     if events
         .send(HostEvent::Connected {
             address_index,

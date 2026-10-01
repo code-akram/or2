@@ -105,12 +105,13 @@ async fn stopped(mut stop: watch::Receiver<bool>) {
     let _ = stop.wait_for(|stopping| *stopping).await;
 }
 
-/// The command line that runs `target` on a PTY, or `None` for the login shell. A missing
-/// program is `NotInstalled`; a failed pane focus is `CommandFailed`.
-async fn program(
+/// The command that runs `target` on a PTY, or `None` for the login shell. A missing program
+/// is `NotInstalled`; a failed pane focus is `CommandFailed`. Shared with the mosh terminal,
+/// which runs the same command as mosh-server's.
+pub(super) async fn program(
     host: &SshHost,
     target: &TerminalTarget,
-) -> Result<Option<String>, SessionFailure> {
+) -> Result<Option<RemoteCommand>, SessionFailure> {
     let command = match target {
         TerminalTarget::Shell => return Ok(None),
         TerminalTarget::Tmux { session_name } => {
@@ -143,7 +144,7 @@ async fn program(
             }
         }
     };
-    command.render().map(Some).map_err(internal)
+    Ok(Some(command))
 }
 
 /// The server refusing a session channel (OpenSSH's `MaxSessions`, 10 per connection by
@@ -156,13 +157,13 @@ fn open_failure(error: russh::Error) -> SessionFailure {
     }
 }
 
-fn not_installed(program: &str) -> SessionFailure {
+pub(super) fn not_installed(program: &str) -> SessionFailure {
     SessionFailure::NotInstalled {
         program: program.into(),
     }
 }
 
-fn remote_failure(error: RemoteError) -> SessionFailure {
+pub(super) fn remote_failure(error: RemoteError) -> SessionFailure {
     match error {
         RemoteError::Closed => SessionFailure::ConnectionLost("the host connection closed".into()),
         RemoteError::TimedOut => SessionFailure::TimedOut,
@@ -194,6 +195,10 @@ async fn channel_task(
             Err(failure) => return CloseReason::Failed(failure),
         },
         () = stopped(stop.clone()) => return CloseReason::Disconnected,
+    };
+    let command = match command.map(|command| command.render()).transpose() {
+        Ok(line) => line,
+        Err(error) => return CloseReason::Failed(internal(error)),
     };
     // The server may never answer the channel open, `pty-req` or the program request, and
     // keepalives alone do not end that: bound the whole setup like an exec.

@@ -14,6 +14,7 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import io.github.code_akram.or2.ffi.TerminalTransport
 import org.junit.Assert.assertNull
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -74,6 +75,8 @@ class TerminalChromeDeviceTest {
         override fun requestFullFrame() = Unit
         override fun takeFrame(): TerminalFrame? = null
         override fun state(): SessionState = SessionState.Connected
+        override fun transport() = TerminalTransport.SSH
+        override fun roam() = Unit
         override fun approveHostKey(fingerprint: String) = Unit
         override fun rejectHostKey() = Unit
         override fun disconnect() = Unit

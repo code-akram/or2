@@ -8,6 +8,7 @@
 //! frames and input across the real FFI. App code must never call it.
 //!
 //! `contract_probe_host` does the same for a host connection (API 4): see its documentation.
+//! It also serves `TerminalTransport::Mosh` terminals (API 8) deterministically.
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -18,12 +19,14 @@ use or2_core::frame::{
 use or2_core::herdr::{
     Agent, AgentStatus, HerdrState, HerdrView, HerdrWatchDriver, Pane, Tab, Workspace,
 };
+use or2_core::host::TerminalTransport as CoreTransport;
 use or2_core::host::{
     self as core_host, HerdrSessionInfo, HostCapabilities, HostCommand, HostDriver, HostState,
     TmuxSession,
 };
 use or2_core::input::{ViewportScroll, text_bytes};
 use or2_core::keys::ClientKey;
+use or2_core::mosh::LinkHealth;
 use or2_core::session::{
     self as core, CloseReason, Command, HostKeyPrompt, SessionDriver, SessionFailure, SessionState,
 };
@@ -36,12 +39,30 @@ use tokio::task::JoinSet;
 use crate::host::{
     HostConnectError, HostConnectRequest, HostConnection, HostListener, HostListenerObserver,
 };
-use crate::session::{ConnectError, ConnectRequest, ListenerObserver, Session, SessionListener};
+use crate::session::{
+    ConnectError, ConnectRequest, ListenerObserver, Session, SessionListener, TerminalTransport,
+};
 
 const FOREGROUND: Rgb = Rgb::new(0xd0, 0xd0, 0xd0);
 const BACKGROUND: Rgb = Rgb::new(0x10, 0x10, 0x18);
 const HISTORY_ROWS: u64 = 100;
 const BANNER: &str = "or2 contract probe";
+/// What a probe mosh terminal reports through `on_link_health`, in order, right after its first
+/// frame: healthy, stale (past the app's 5 s grey-out threshold), recovered.
+const MOSH_HEALTH_SEQUENCE: [LinkHealth; 3] = [
+    LinkHealth {
+        since_heard_ms: 300,
+        since_ack_ms: 300,
+    },
+    LinkHealth {
+        since_heard_ms: 6_000,
+        since_ack_ms: 9_000,
+    },
+    LinkHealth {
+        since_heard_ms: 400,
+        since_ack_ms: 400,
+    },
+];
 
 /// Test fixture only; see the module documentation. Never connects to anything.
 #[uniffi::export]
@@ -54,7 +75,7 @@ pub fn contract_probe_session(
     spawn_probe_thread("or2-contract-probe", async move {
         run_session(&request.trusted_host_keys, request.size, driver).await;
     });
-    Ok(Session::new(handle))
+    Ok(Session::new(handle, TerminalTransport::Ssh))
 }
 
 /// Runs a probe script on its own thread with a single-threaded runtime, so every callback it
@@ -116,19 +137,27 @@ async fn run_session(trusted: &[HostKey], mut size: TerminalSize, mut driver: Se
         .expect("-> Connected");
     // Nothing but its own commands ever stops a standalone session.
     let (_keep_open, stop) = watch::channel(None);
-    serve_terminal(driver, size, BANNER.into(), stop).await;
+    serve_terminal(driver, size, BANNER.into(), false, stop).await;
 }
 
 /// Serves one connected terminal session: fixed cells plus echoes of the input it receives.
-/// Ends on `Disconnect`, or when `stop` carries the reason the host closed.
+/// A `mosh` terminal also reports the fixed link-health sequence after its first frame and
+/// counts `Roam` commands in the echo row. Ends on `Disconnect`, or when `stop` carries the
+/// reason the host closed.
 async fn serve_terminal(
     mut driver: SessionDriver,
     size: TerminalSize,
     title: String,
+    mosh: bool,
     mut stop: watch::Receiver<Option<CloseReason>>,
 ) {
     let mut screen = Screen::new(size, title);
     publish(&mut driver, screen.full());
+    if mosh {
+        for health in MOSH_HEALTH_SEQUENCE {
+            driver.publish_link_health(health);
+        }
+    }
     loop {
         let command = tokio::select! {
             command = driver.next_command() => command,
@@ -186,6 +215,12 @@ async fn serve_terminal(
                 publish(&mut driver, screen.delta_without_rows());
             }
             Command::FullFrame => publish(&mut driver, screen.full()),
+            Command::Roam => {
+                if mosh {
+                    screen.roams += 1;
+                    publish(&mut driver, screen.delta(2));
+                }
+            }
             Command::Disconnect => return driver.close(CloseReason::Disconnected),
             Command::ApproveHostKey { .. } | Command::RejectHostKey => {}
         }
@@ -207,11 +242,16 @@ fn publish(driver: &mut SessionDriver, frame: Frame) {
 ///
 /// The host uses the production trust check against the request's trusted keys with the same
 /// per-process host key as `contract_probe_session`, then reports `Connected { 0 }`.
-/// `capabilities` and `list_tmux_sessions` return fixed data. `focus_herdr_pane` succeeds for the
+/// `capabilities` (which reports a `mosh-server`) and `list_tmux_sessions` return fixed data. `focus_herdr_pane` succeeds for the
 /// probe view's panes (`w1:p1`, `w1:p2`, `w2:p1`) and is `PaneNotFound` for any other id; the
 /// focused pane then shows as `focused` in the views of watches started afterwards. `open_terminal` returns a
 /// session served by the M1 probe script without host-key states (`Connecting` to
-/// `Connected`; row 0 names the target). `watch_herdr` goes `Live`, updates once and closes on
+/// `Connected`; row 0 names the target). With `TerminalTransport::Mosh` the terminal behaves the
+/// same, plus: after its first frame `on_link_health` receives three values in order,
+/// (300, 300), (6000, 9000) and (400, 400) ms for (`since_heard_ms`, `since_ack_ms`); and each
+/// `Session.roam()` (or `network_changed()`) is counted in row 2, the echo row: `roams N`
+/// alone, or after the latest text echo as `text 61 | roams N`. SSH probe terminals never
+/// report health and ignore `roam()`. `watch_herdr` goes `Live`, updates once and closes on
 /// `stop()`. Closing the host closes its terminals and watches first.
 #[uniffi::export]
 pub fn contract_probe_host(
@@ -230,7 +270,7 @@ fn probe_capabilities() -> HostCapabilities {
     HostCapabilities {
         tmux: Some("/usr/bin/tmux".into()),
         herdr: Some("/home/probe/.local/bin/herdr".into()),
-        mosh_server: None,
+        mosh_server: Some("/usr/bin/mosh-server".into()),
         utf8_locale: "C.UTF-8".into(),
         herdr_sessions: vec![
             HerdrSessionInfo {
@@ -319,6 +359,7 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
             }
             HostCommand::OpenTerminal {
                 target,
+                transport,
                 size,
                 driver: session,
             } => {
@@ -326,6 +367,7 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                     session,
                     size,
                     target_title(&target),
+                    transport == CoreTransport::Mosh,
                     stop.clone(),
                 ));
             }
@@ -358,12 +400,13 @@ async fn run_terminal(
     mut driver: SessionDriver,
     size: TerminalSize,
     title: String,
+    mosh: bool,
     stop: watch::Receiver<Option<CloseReason>>,
 ) {
     driver
         .transition(SessionState::Connected)
         .expect("Connecting -> Connected");
-    serve_terminal(driver, size, title, stop).await;
+    serve_terminal(driver, size, title, mosh, stop).await;
 }
 
 async fn run_herdr_watch(
@@ -479,6 +522,8 @@ struct Screen {
     title: String,
     text_echo: String,
     key_echo: String,
+    /// `Roam` commands a mosh probe terminal has received; shown in the echo row.
+    roams: u32,
     history_offset: u64,
 }
 
@@ -489,7 +534,18 @@ impl Screen {
             title,
             text_echo: String::new(),
             key_echo: String::new(),
+            roams: 0,
             history_offset: HISTORY_ROWS,
+        }
+    }
+
+    /// Row 2: the latest text echo, followed by `roams N` once a mosh terminal has roamed
+    /// (`roams 1` alone when nothing was typed).
+    fn echo_row(&self) -> String {
+        match (self.text_echo.is_empty(), self.roams) {
+            (_, 0) => self.text_echo.clone(),
+            (true, roams) => format!("roams {roams}"),
+            (false, roams) => format!("{} | roams {roams}", self.text_echo),
         }
     }
 
@@ -520,7 +576,7 @@ impl Screen {
                 ("e\u{301}".into(), false, curly),
                 ("I".into(), false, inverse),
             ],
-            2 => ascii(&self.text_echo, plain),
+            2 => ascii(&self.echo_row(), plain),
             3 => ascii(&self.key_echo, plain),
             _ => Vec::new(),
         };

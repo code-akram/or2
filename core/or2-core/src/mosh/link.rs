@@ -81,6 +81,16 @@ fn reaches<S: DatagramSocket>(socket: &S, peer: SocketAddr) -> bool {
         .is_ok_and(|address| address.ip() == peer.ip() && address.port() == peer.port())
 }
 
+/// The IP literal a socket is opened from. A scoped IPv6 address keeps its scope id
+/// (`fe80::1%3`, which the resolver reads numerically): without it a link-local peer is
+/// unreachable, or reached through the wrong interface.
+fn host_literal(peer: SocketAddr) -> String {
+    match peer {
+        SocketAddr::V6(v6) if v6.scope_id() != 0 => format!("{}%{}", v6.ip(), v6.scope_id()),
+        peer => peer.ip().to_string(),
+    }
+}
+
 /// Errors a socket reports once and then recovers from: ICMP unreachable and its kin, and
 /// interruptions. Anything else on an old socket means the socket is finished.
 fn is_transient(error: &io::Error) -> bool {
@@ -101,7 +111,7 @@ impl<T: DatagramTransport> Link<T> {
     /// Opens the first socket to `peer`, which every later socket must reach too. The first
     /// socket is checked as well: a transport that connects somewhere else is an error.
     pub(super) async fn open(transport: Arc<T>, peer: SocketAddr) -> io::Result<Self> {
-        let endpoint = Endpoint::new(&peer.ip().to_string(), peer.port())
+        let endpoint = Endpoint::new(&host_literal(peer), peer.port())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let socket = transport.bind(&endpoint).await?;
         if !reaches(&socket, peer) {
@@ -551,6 +561,29 @@ mod tests {
 
     fn at(ip: &str, port: u16) -> SocketAddr {
         SocketAddr::new(ip.parse().unwrap(), port)
+    }
+
+    #[tokio::test]
+    async fn a_scoped_ipv6_peer_is_opened_with_its_scope_id() {
+        use std::net::{Ipv6Addr, SocketAddrV6};
+        let scoped = SocketAddr::V6(SocketAddrV6::new(
+            "fe80::1".parse::<Ipv6Addr>().unwrap(),
+            60001,
+            0,
+            3,
+        ));
+        assert_eq!(host_literal(scoped), "fe80::1%3");
+        // Without a scope, and for IPv4, the plain literal.
+        assert_eq!(host_literal(at("fe80::1", 9)), "fe80::1");
+        assert_eq!(host_literal(at("10.0.0.2", 9)), "10.0.0.2");
+        // What `DirectUdp` does with the literal: the resolver reads it numerically (no
+        // lookup) and the address keeps the scope.
+        let resolved = tokio::net::lookup_host((host_literal(scoped), 60001))
+            .await
+            .unwrap()
+            .next()
+            .unwrap();
+        assert_eq!(resolved, scoped);
     }
 
     #[tokio::test]

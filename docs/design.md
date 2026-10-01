@@ -374,7 +374,7 @@ service and mosh.
 
 Interfaces are in [contracts: M3](contracts.md#m3-stays-connected) (FFI API 8).
 
-- [ ] M3-A: mosh terminals on host connections (transport choice, peer pinning, bootstrap,
+- [x] M3-A: mosh terminals on host connections (transport choice, peer pinning, bootstrap,
   terminate on early failure), link health, `roam`/`network_changed`, mosh survives host loss.
 - [ ] M3-B: foreground service owning connections, notification, network callback, Room v3
   transport preference with AUTO fallback, grouped reconnect unlock, reattach to the last pane,

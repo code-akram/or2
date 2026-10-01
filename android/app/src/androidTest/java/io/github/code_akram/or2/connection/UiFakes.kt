@@ -42,6 +42,8 @@ class UiSession(private val initial: SessionState = SessionState.Connected) : Se
     override fun sendKey(input: KeyInput) = Unit
     override fun scroll(scroll: ViewportScroll) = Unit
     override fun state() = initial
+    override fun transport() = TerminalTransport.SSH
+    override fun roam() = Unit
     override fun approveHostKey(fingerprint: String) = Unit
     override fun rejectHostKey() = Unit
 }
@@ -70,7 +72,7 @@ class UiPort(
     override fun rejectHostKey() = Unit
     override fun disconnect() { hostListener?.onHostStateChanged(HostState.Closed(CloseReason.Disconnected)) }
     override fun close() = Unit
-    override fun openTerminal(target: TerminalTarget, columns: UShort, rows: UShort, listener: SessionListener): SessionInterface {
+    override fun openTerminal(target: TerminalTarget, transport: TerminalTransport, columns: UShort, rows: UShort, listener: SessionListener): SessionInterface {
         val session = sessionFor(target)
         session.listener = listener
         sessions += target to session

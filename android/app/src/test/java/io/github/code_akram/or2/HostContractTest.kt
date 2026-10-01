@@ -18,9 +18,11 @@ import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalFrame
 import io.github.code_akram.or2.ffi.TerminalTarget
+import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.ffi.connectHost
 import io.github.code_akram.or2.ffi.contractProbeHost
 import io.github.code_akram.or2.ffi.generateEd25519Key
+import io.github.code_akram.or2.ffi.networkChanged
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.util.concurrent.ConcurrentHashMap
@@ -119,7 +121,7 @@ class HostContractTest {
         columns: UShort = 60u,
     ): Pair<Session, RecordingListener> {
         val listener = RecordingListener()
-        return host.openTerminal(target, columns, 5u, listener) to listener
+        return host.openTerminal(target, TerminalTransport.SSH, columns, 5u, listener) to listener
     }
 
     @Test
@@ -174,7 +176,7 @@ class HostContractTest {
             assertEquals(closed, host.state())
             // A closed host refuses everything, quietly.
             assertThrows(HostException.Closed::class.java) {
-                host.openTerminal(TerminalTarget.Shell, 80u, 24u, RecordingListener())
+                host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 80u, 24u, RecordingListener())
             }
             assertThrows(HostException.Closed::class.java) { runBlocking { host.capabilities() } }
         }
@@ -198,7 +200,7 @@ class HostContractTest {
             assertThrows(HostException.NotConnected::class.java) { runBlocking { host.capabilities() } }
             assertThrows(HostException.NotConnected::class.java) { runBlocking { host.listTmuxSessions() } }
             assertThrows(HostException.NotConnected::class.java) {
-                host.openTerminal(TerminalTarget.Shell, 80u, 24u, RecordingListener())
+                host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 80u, 24u, RecordingListener())
             }
             assertThrows(HostException.NotConnected::class.java) { host.watchHerdr(null, HerdrRecorder()) }
             assertThrows(HostException.NotConnected::class.java) { runBlocking { host.focusHerdrPane(null, "w1:p1") } }
@@ -215,7 +217,7 @@ class HostContractTest {
             val capabilities = runBlocking { host.capabilities() }
             assertEquals("/usr/bin/tmux", capabilities.tmux)
             assertEquals("/home/probe/.local/bin/herdr", capabilities.herdr)
-            assertNull(capabilities.moshServer)
+            assertEquals("/usr/bin/mosh-server", capabilities.moshServer)
             assertEquals("C.UTF-8", capabilities.utf8Locale)
             assertEquals(listOf("default", "or2-probe"), capabilities.herdrSessions.map { it.name })
             assertEquals(listOf(true, false), capabilities.herdrSessions.map { it.running })
@@ -282,10 +284,46 @@ class HostContractTest {
     }
 
     @Test
+    fun moshProbeTerminalsReportHealthAndCountRoamsInTheEchoRow() {
+        val host = connectedHost()
+        val listener = RecordingListener()
+        val mosh = host.openTerminal(TerminalTarget.Tmux("work"), TerminalTransport.MOSH, 60u, 5u, listener)
+        val ssh = openShell(host)
+        assertEquals(TerminalTransport.MOSH, mosh.transport())
+        assertEquals(TerminalTransport.SSH, ssh.first.transport())
+        listener.awaitState<SessionState.Connected>()
+        assertEquals("or2 contract probe tmux work", listener.awaitFrame(mosh).rowText(0))
+        // The fixed sequence: healthy, stale (past the 5 s grey-out), recovered.
+        val sequence = List(3) { listener.awaitHealth() }
+        assertEquals(listOf(300uL, 6000uL, 400uL), sequence.map { it.sinceHeardMs })
+        assertEquals(listOf(300uL, 9000uL, 400uL), sequence.map { it.sinceAckMs })
+
+        mosh.roam()
+        assertEquals("roams 1", listener.awaitFrame(mosh).rowText(2))
+        mosh.sendText("x")
+        assertEquals("text 78 | roams 1", listener.awaitFrame(mosh).rowText(2))
+        // network_changed() roams every live mosh session and leaves SSH terminals alone.
+        networkChanged()
+        assertEquals("text 78 | roams 2", listener.awaitFrame(mosh).rowText(2))
+        ssh.first.roam()
+        ssh.first.sendText("y")
+        assertEquals("text 79", ssh.second.awaitFrame(ssh.first).rowText(2))
+        assertTrue(ssh.second.healths.isEmpty())
+
+        host.disconnect()
+        assertEquals(CloseReason.Disconnected, listener.awaitState<SessionState.Closed>().reason)
+        // A closed session ignores roam and network_changed.
+        mosh.roam()
+        networkChanged()
+        listener.assertNoMoreStates()
+        host.close()
+    }
+
+    @Test
     fun invalidNamesAndDimensionsAreRejectedBeforeAnythingOpens() {
         val host = connectedHost()
         val listener = RecordingListener()
-        fun open(target: TerminalTarget) = host.openTerminal(target, 80u, 24u, listener)
+        fun open(target: TerminalTarget) = host.openTerminal(target, TerminalTransport.SSH, 80u, 24u, listener)
         for (name in listOf("", "a:b", "a.b", "a\\b", "a\nb", "x".repeat(129))) {
             assertThrows(name, HostException.InvalidName::class.java) { open(TerminalTarget.Tmux(name)) }
         }
@@ -297,14 +335,14 @@ class HostContractTest {
             assertThrows(pane, HostException.InvalidName::class.java) { open(TerminalTarget.Herdr(null, pane)) }
         }
         assertThrows(HostException.EmptyDimension::class.java) {
-            host.openTerminal(TerminalTarget.Shell, 0u, 24u, listener)
+            host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 0u, 24u, listener)
         }
         assertThrows(HostException.EmptyDimension::class.java) {
-            host.openTerminal(TerminalTarget.Shell, 80u, 0u, listener)
+            host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 80u, 0u, listener)
         }
         // Edge-valid names open.
-        host.openTerminal(TerminalTarget.Tmux("x".repeat(128)), 80u, 24u, listener).disconnect()
-        host.openTerminal(TerminalTarget.Herdr("a_b-1".repeat(12), "w1:p_2-3".repeat(16)), 80u, 24u, listener).disconnect()
+        host.openTerminal(TerminalTarget.Tmux("x".repeat(128)), TerminalTransport.SSH, 80u, 24u, listener).disconnect()
+        host.openTerminal(TerminalTarget.Herdr("a_b-1".repeat(12), "w1:p_2-3".repeat(16)), TerminalTransport.SSH, 80u, 24u, listener).disconnect()
         listener.awaitState<SessionState.Connected>()
         host.disconnect()
         host.close()
@@ -412,7 +450,7 @@ class HostContractTest {
         assertThrows(HostException.Closed::class.java) { runBlocking { host.capabilities() } }
         assertThrows(HostException.Closed::class.java) { runBlocking { host.listTmuxSessions() } }
         assertThrows(HostException.Closed::class.java) {
-            host.openTerminal(TerminalTarget.Shell, 80u, 24u, RecordingListener())
+            host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 80u, 24u, RecordingListener())
         }
         assertThrows(HostException.Closed::class.java) { host.watchHerdr(null, HerdrRecorder()) }
         assertThrows(HostException.Closed::class.java) { runBlocking { host.focusHerdrPane(null, "w1:p1") } }

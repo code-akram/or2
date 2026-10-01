@@ -1,4 +1,4 @@
-//! Host connection contract for Kotlin (FFI API 6): request, state, errors, terminal targets,
+//! Host connection contract for Kotlin (FFI API 8): request, state, errors, terminal targets,
 //! queries, the `HostConnection` object and the `HostListener` callback. See
 //! docs/contracts.md for threading and ownership rules.
 
@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use crate::herdr::{HerdrListener, HerdrListenerObserver, HerdrWatch};
 use crate::keys::PublicKeyInfo;
-use crate::session::{CloseReason, Session, SessionListener};
+use crate::session::{CloseReason, Session, SessionListener, TerminalTransport};
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct HostAddress {
@@ -298,7 +298,9 @@ impl HostConnection {
 /// Validates synchronously; networking and all callbacks run on Rust-owned threads. The
 /// connection races the request's addresses, asks for a host-key decision when needed, and
 /// ends with exactly one `Closed`. Terminals and herdr watches on it close first (`Disconnected`
-/// for a user disconnect, else the host's failure), then the host reports `Closed`.
+/// for a user disconnect, else the host's failure), then the host reports `Closed`. The
+/// exception is a mosh terminal: it needs the SSH connection only to start, so a *lost*
+/// connection leaves it running, while a user disconnect closes it like the others.
 #[uniffi::export]
 pub fn connect_host(
     request: HostConnectRequest,
@@ -327,29 +329,32 @@ impl HostConnection {
         Ok(self.handle.reject_host_key()?)
     }
 
-    /// Idempotent. Closes every terminal and watch on the host; `Closed { Disconnected }`
-    /// follows through the listener.
+    /// Idempotent. Closes every terminal (mosh ones too) and watch on the host;
+    /// `Closed { Disconnected }` follows through the listener.
     pub fn disconnect(&self) {
         self.handle.disconnect();
     }
 
-    /// Opens a terminal session. It starts in `Connecting` and reaches `Connected` once the
-    /// channel is open; failures close it through its listener. Only allowed while the host
-    /// is `Connected`.
+    /// Opens a terminal session over `transport`. It starts in `Connecting` and reaches
+    /// `Connected` once the channel is open (SSH) or the first datagram from the server
+    /// authenticates (mosh); failures close it through its listener. Only allowed while the
+    /// host is `Connected`.
     pub fn open_terminal(
         &self,
         target: TerminalTarget,
+        transport: TerminalTransport,
         columns: u16,
         rows: u16,
         listener: Box<dyn SessionListener>,
     ) -> Result<Arc<Session>, HostError> {
         let size = TerminalSize::new(columns, rows).map_err(|_| HostError::EmptyDimension)?;
-        let handle = self.handle.open_terminal(
+        let handle = self.handle.open_terminal_with(
             target.into(),
+            transport.into(),
             size,
             Arc::new(crate::session::ListenerObserver(listener)),
         )?;
-        Ok(Session::new(handle))
+        Ok(Session::new(handle, transport))
     }
 
     /// Programs and locale are probed once per connection; `herdr_sessions` is read afresh
@@ -573,6 +578,12 @@ mod tests {
             fn on_frame_ready(&self) -> Result<(), crate::session::ListenerError> {
                 Ok(())
             }
+            fn on_link_health(
+                &self,
+                _: crate::session::LinkHealth,
+            ) -> Result<(), crate::session::ListenerError> {
+                Ok(())
+            }
         }
         struct Quiet;
         impl HostListener for Quiet {
@@ -586,8 +597,14 @@ mod tests {
         // A loopback address nothing listens on: the connection fails fast, offline.
         let host = connect_host(request(vec![address("127.0.0.1", 1)]), Box::new(Quiet)).unwrap();
         assert_eq!(
-            host.open_terminal(TerminalTarget::Shell, 0, 24, Box::new(Silent))
-                .err(),
+            host.open_terminal(
+                TerminalTarget::Shell,
+                TerminalTransport::Ssh,
+                0,
+                24,
+                Box::new(Silent)
+            )
+            .err(),
             Some(HostError::EmptyDimension)
         );
     }

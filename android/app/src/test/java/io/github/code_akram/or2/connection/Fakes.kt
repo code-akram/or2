@@ -46,6 +46,8 @@ class FakeSession(val events: MutableList<String> = mutableListOf()) : SessionIn
         listOf(TerminalRow(0u, false, listOf(TerminalCell("L", CellWidth.NARROW, 0u), TerminalCell("R", CellWidth.NARROW, 0u)))),
         null, 0u, Scrollback(1uL, 0uL))
     var pending: TerminalFrame? = lastFrame
+    override fun transport() = TerminalTransport.SSH
+    override fun roam() = Unit
     override fun approveHostKey(fingerprint: String) = Unit
     override fun rejectHostKey() = Unit
     override fun disconnect() {
@@ -103,7 +105,7 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         events += "disconnect"
     }
     override fun close() { destroyed = true; events += "close" }
-    override fun openTerminal(target: TerminalTarget, columns: UShort, rows: UShort, listener: SessionListener): SessionInterface {
+    override fun openTerminal(target: TerminalTarget, transport: TerminalTransport, columns: UShort, rows: UShort, listener: SessionListener): SessionInterface {
         check(!destroyed) { "Host connection object has already been destroyed" }
         openFailure?.let { throw it }
         return FakeSession().also { terminals += Triple(target, listener, it) }

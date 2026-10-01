@@ -10,15 +10,15 @@ use std::fmt::Debug;
 use std::fs;
 use std::future::Future;
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpListener};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use common::{Grid, Sshd, sshd_ready, tmux_ready};
+use common::{Grid, Proxy, Sshd, sshd_ready, tmux_ready};
 use or2_core::herdr::{HerdrObserver, HerdrState, HerdrUnavailable};
 use or2_core::host::{
     HerdrSessionInfo, HostConnectRequest, HostError, HostHandle, HostObserver, HostState,
@@ -899,62 +899,6 @@ fn user_disconnect_closes_terminals_and_watches_before_the_host_with_disconnecte
     );
 }
 
-/// A TCP relay the test can cut: loss without touching sshd.
-struct Proxy {
-    port: u16,
-    connections: Arc<Mutex<Vec<TcpStream>>>,
-    stop: Arc<AtomicBool>,
-}
-
-impl Proxy {
-    fn new(target: u16) -> Self {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let connections = Arc::new(Mutex::new(Vec::new()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let (kept, stopping) = (connections.clone(), stop.clone());
-        std::thread::spawn(move || {
-            while !stopping.load(Ordering::SeqCst) {
-                let Ok((client, _)) = listener.accept() else {
-                    std::thread::sleep(Duration::from_millis(10));
-                    continue;
-                };
-                client.set_nonblocking(false).unwrap();
-                let upstream = TcpStream::connect((Ipv4Addr::LOCALHOST, target)).unwrap();
-                for (mut from, mut to) in [
-                    (client.try_clone().unwrap(), upstream.try_clone().unwrap()),
-                    (upstream.try_clone().unwrap(), client.try_clone().unwrap()),
-                ] {
-                    std::thread::spawn(move || {
-                        let _ = std::io::copy(&mut from, &mut to);
-                        let _ = to.shutdown(Shutdown::Both);
-                    });
-                }
-                kept.lock().unwrap().extend([client, upstream]);
-            }
-        });
-        Self {
-            port,
-            connections,
-            stop,
-        }
-    }
-
-    fn cut(&self) {
-        for connection in self.connections.lock().unwrap().iter() {
-            let _ = connection.shutdown(Shutdown::Both);
-        }
-    }
-}
-
-impl Drop for Proxy {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        self.cut();
-    }
-}
-
 #[test]
 fn a_host_that_forbids_streamlocal_forwarding_makes_the_herdr_watch_failed_and_names_the_cause() {
     require_sshd!();
@@ -1101,6 +1045,66 @@ fn names_are_validated_before_anything_runs() {
         assert_eq!(result.err(), Some(HostError::InvalidName));
         assert!(states.recv_timeout(Duration::from_millis(50)).is_err());
     }
+    live.host.disconnect();
+}
+
+/// An idle connection through a counting relay: `network_changed` makes it send a keepalive
+/// (the server's reply comes back) long before its own 15 s tick, and the connection stays up.
+#[test]
+fn network_changed_sends_a_keepalive_at_once_and_the_connection_stays_up() {
+    require_sshd!();
+    let sshd = Sshd::new(false);
+    let key = ClientKey::generate_ed25519("");
+    sshd.authorize(&key);
+    let proxy = Proxy::new(sshd.port);
+    let (observer, states, _) = host_observer();
+    let host = connect_host(
+        request(
+            &key,
+            &[(lo(), proxy.port)],
+            std::slice::from_ref(&sshd.host),
+        ),
+        observer,
+    );
+    assert_eq!(next(&states), HostState::Authenticating);
+    assert_eq!(next(&states), HostState::Connected { address_index: 0 });
+    // Let the handshake's tail settle: an idle connection sends nothing for 15 s.
+    std::thread::sleep(Duration::from_millis(500));
+    let (up, down) = (
+        proxy.to_server.load(Ordering::SeqCst),
+        proxy.to_client.load(Ordering::SeqCst),
+    );
+    or2_core::ssh::network_changed();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while proxy.to_server.load(Ordering::SeqCst) == up
+        || proxy.to_client.load(Ordering::SeqCst) == down
+    {
+        assert!(
+            Instant::now() < deadline,
+            "no keepalive and reply crossed the connection"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(matches!(host.state(), HostState::Connected { .. }));
+    host.disconnect();
+}
+
+#[test]
+fn network_changed_keeps_a_healthy_connection_usable() {
+    require_sshd!();
+    let live = Live::new();
+    // The keepalive it sends is answered and ignored: the connection and its terminals carry
+    // on. (Mosh terminals on a host connection are in `host_mosh.rs`.)
+    let mut shell = live.open("sh", TerminalTarget::Shell, 80, 24);
+    shell.quiet();
+    or2_core::ssh::network_changed();
+    shell.send("echo roamed-$((20+22))\n");
+    shell.wait("roamed-42");
+    or2_core::ssh::network_changed();
+    let mut other = live.open("sh2", TerminalTarget::Shell, 80, 24);
+    other.quiet();
+    other.send("echo again-$((20+23))\n");
+    other.wait("again-43");
     live.host.disconnect();
 }
 

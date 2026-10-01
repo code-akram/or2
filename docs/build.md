@@ -92,6 +92,13 @@ is. The in-process russh server tests in `ssh/connection_tests.rs` (no sshd need
 refused channels, terminal setup timeout, cancelled execs, the connect timer around the
 host-key prompt and a dying connection task.
 
+`core/or2-core/tests/host_mosh.rs` runs mosh terminals through a host connection to the
+disposable sshd with a real `mosh-server` (bootstrap, roam, link health, host loss and disconnect,
+blocked UDP, cleanup of unreached servers); it needs `sshd`, `tmux` and `mosh-server`, skips
+with a message otherwise, and `OR2_REQUIRE_SSHD`, `OR2_REQUIRE_TMUX` and `OR2_REQUIRE_MOSH`
+make the skips failures. It finds the `mosh-server`s its sshd started by the fixture's private
+`TMUX_TMPDIR` in their environment and kills exactly those, however the test ends.
+
 `core/or2-core/tests/mosh_live.rs` starts a real
 `mosh-server` on loopback (through `mosh::bootstrap` over `LocalHost`) and checks the
 roaming, resize and disconnect interop; it needs `mosh-server`, `/bin/bash` and the `kill`

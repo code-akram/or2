@@ -2,9 +2,11 @@
 //! `SessionListener` callback. See docs/contracts.md for threading and ownership rules.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
+use or2_core::host::TerminalTransport as CoreTransport;
 use or2_core::input as core_input;
+use or2_core::mosh::LinkHealth as CoreLinkHealth;
 use or2_core::session as core;
 use or2_core::term::TerminalSize;
 use or2_core::transport::EndpointError;
@@ -317,6 +319,42 @@ impl From<ViewportScroll> for core_input::ViewportScroll {
     }
 }
 
+/// How a terminal reaches its host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TerminalTransport {
+    /// A PTY channel on the host's SSH connection.
+    Ssh,
+    /// A mosh session, bootstrapped over the host's SSH connection.
+    Mosh,
+}
+
+impl From<TerminalTransport> for CoreTransport {
+    fn from(transport: TerminalTransport) -> Self {
+        match transport {
+            TerminalTransport::Ssh => Self::Ssh,
+            TerminalTransport::Mosh => Self::Mosh,
+        }
+    }
+}
+
+/// How long a mosh server has been silent, as `on_link_health` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct LinkHealth {
+    /// Milliseconds since anything at all arrived from the server.
+    pub since_heard_ms: u64,
+    /// Milliseconds since the server acknowledged something the client sent.
+    pub since_ack_ms: u64,
+}
+
+impl From<CoreLinkHealth> for LinkHealth {
+    fn from(health: CoreLinkHealth) -> Self {
+        Self {
+            since_heard_ms: health.since_heard_ms,
+            since_ack_ms: health.since_ack_ms,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum ListenerError {
     #[error("listener failed: {reason}")]
@@ -340,6 +378,10 @@ pub trait SessionListener: Send + Sync {
     fn on_state_changed(&self, state: SessionState) -> Result<(), ListenerError>;
     /// A frame is ready for `Session.take_frame`. Not repeated until it is taken.
     fn on_frame_ready(&self) -> Result<(), ListenerError>;
+    /// mosh only, at most once a second and only when what the UI shows changes (the first
+    /// sample, the link turning stale past 5 s of silence, each further second while stale,
+    /// recovery); never called for SSH terminals. Delivered between `Connected` and `Closed`.
+    fn on_link_health(&self, health: LinkHealth) -> Result<(), ListenerError>;
 }
 
 pub(crate) struct ListenerObserver(pub(crate) Box<dyn SessionListener>);
@@ -352,25 +394,74 @@ impl core::SessionObserver for ListenerObserver {
     fn frame_ready(&self) {
         let _ = self.0.on_frame_ready();
     }
+
+    fn link_health(&self, health: CoreLinkHealth) {
+        let _ = self.0.on_link_health(health.into());
+    }
 }
 
-/// One SSH shell. Methods never block and may be called from any thread, including inside
+/// One terminal: an SSH shell channel or a mosh session. Methods never block and may be called from any thread, including inside
 /// listener callbacks. Kotlin owns it; `close()` without `disconnect()` also disconnects.
 #[derive(uniffi::Object)]
 pub struct Session {
     handle: core::SessionHandle,
+    transport: TerminalTransport,
 }
 
+/// Every mosh session not yet known to be closed, for [`network_changed`].
+static MOSH_SESSIONS: Mutex<Vec<Weak<Session>>> = Mutex::new(Vec::new());
+
 impl Session {
-    pub(crate) fn new(handle: core::SessionHandle) -> Arc<Self> {
-        Arc::new(Self { handle })
+    pub(crate) fn new(handle: core::SessionHandle, transport: TerminalTransport) -> Arc<Self> {
+        let session = Arc::new(Self { handle, transport });
+        if transport == TerminalTransport::Mosh {
+            let mut live = MOSH_SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
+            live.retain(|weak| weak.upgrade().is_some_and(|s| s.is_open()));
+            live.push(Arc::downgrade(&session));
+        }
+        session
     }
+
+    fn is_open(&self) -> bool {
+        !matches!(self.handle.state(), core::SessionState::Closed(_))
+    }
+}
+
+/// The device's network changed (Kotlin calls this from its default-network callback,
+/// debounced). Every live mosh session opens a new UDP socket now (`Session.roam`), and every
+/// established SSH host connection sends a keepalive at once so a connection the change
+/// broke is noticed promptly. Returns at once; callable from any thread.
+#[uniffi::export]
+pub fn network_changed() {
+    for session in live_mosh_sessions() {
+        session.roam();
+    }
+    or2_core::ssh::network_changed();
+}
+
+/// The registered mosh sessions that are not closed, forgetting the ones that are (or that
+/// Kotlin released).
+fn live_mosh_sessions() -> Vec<Arc<Session>> {
+    let mut live = MOSH_SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
+    live.retain(|weak| weak.upgrade().is_some_and(|s| s.is_open()));
+    live.iter().filter_map(Weak::upgrade).collect()
 }
 
 #[uniffi::export]
 impl Session {
     pub fn state(&self) -> SessionState {
         self.handle.state().into()
+    }
+
+    /// How this terminal reaches its host; fixed for the session's life.
+    pub fn transport(&self) -> TerminalTransport {
+        self.transport
+    }
+
+    /// mosh: open a new UDP socket now (the network changed), instead of noticing after
+    /// seconds without answers. SSH: a no-op. Never fails; a closed session ignores it.
+    pub fn roam(&self) {
+        self.handle.roam();
     }
 
     /// `fingerprint` must be the prompt's `presented.fingerprint`, binding the decision to the
@@ -425,5 +516,91 @@ impl Session {
     /// Idempotent; `Closed { Disconnected }` follows through the listener.
     pub fn disconnect(&self) {
         self.handle.disconnect();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use or2_core::session::{Command, SessionObserver, SessionState, channel};
+
+    struct Quiet;
+
+    impl SessionObserver for Quiet {
+        fn state_changed(&self, _: &SessionState) {}
+        fn frame_ready(&self) {}
+    }
+
+    fn open(transport: TerminalTransport) -> (Arc<Session>, or2_core::session::SessionDriver) {
+        let (handle, mut driver) = channel(Arc::new(Quiet));
+        driver.transition(SessionState::Connected).unwrap();
+        (Session::new(handle, transport), driver)
+    }
+
+    fn registered(session: &Arc<Session>) -> bool {
+        let weak = Arc::downgrade(session);
+        MOSH_SESSIONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|entry| Weak::ptr_eq(entry, &weak))
+    }
+
+    #[test]
+    fn network_changed_roams_live_mosh_sessions_only() {
+        let (mosh, mut mosh_driver) = open(TerminalTransport::Mosh);
+        let (ssh, mut ssh_driver) = open(TerminalTransport::Ssh);
+        assert!(registered(&mosh));
+        assert!(!registered(&ssh), "SSH sessions have nothing to roam");
+
+        network_changed();
+        assert_eq!(mosh_driver.blocking_next_command(), Command::Roam);
+        // Nothing was queued for the SSH session: the next command is the text sent now.
+        ssh.send_text("a".into()).unwrap();
+        assert_eq!(
+            ssh_driver.blocking_next_command(),
+            Command::Text("a".into())
+        );
+
+        // `Session.roam` is the same command, one session at a time.
+        mosh.roam();
+        assert_eq!(mosh_driver.blocking_next_command(), Command::Roam);
+        ssh.roam();
+        ssh.send_text("b".into()).unwrap();
+        assert_eq!(ssh_driver.blocking_next_command(), Command::Roam);
+        assert_eq!(
+            ssh_driver.blocking_next_command(),
+            Command::Text("b".into())
+        );
+    }
+
+    #[test]
+    fn closed_and_released_mosh_sessions_leave_the_registry() {
+        let (closed, mut closed_driver) = open(TerminalTransport::Mosh);
+        let (released, _released_driver) = open(TerminalTransport::Mosh);
+        let (kept, _kept_driver) = open(TerminalTransport::Mosh);
+        let released_weak = Arc::downgrade(&released);
+        assert!(registered(&closed) && registered(&released) && registered(&kept));
+
+        closed_driver.close(or2_core::session::CloseReason::Disconnected);
+        drop(released);
+        let live = live_mosh_sessions();
+        assert!(live.iter().any(|s| Arc::ptr_eq(s, &kept)));
+        assert!(!live.iter().any(|s| Arc::ptr_eq(s, &closed)));
+        assert!(!registered(&closed), "a closed session is forgotten");
+        assert!(released_weak.upgrade().is_none());
+        assert!(
+            !MOSH_SESSIONS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .any(|entry| Weak::ptr_eq(entry, &released_weak)),
+            "the registry holds no entry for a released session"
+        );
+        // The registry never keeps a session alive.
+        drop(live);
+        let weak = Arc::downgrade(&kept);
+        drop(kept);
+        assert!(weak.upgrade().is_none());
     }
 }
