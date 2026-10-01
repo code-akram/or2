@@ -151,8 +151,8 @@ older `or2-pair` or app (pairing protocol 1, before this check) is refused the s
 
 `or2-pair` reads `/etc/ssh/ssh_host_ed25519_key.pub`, then asks `ssh-keyscan localhost`. Only if
 the host has no ED25519 key at all does it fall back to ECDSA and then RSA. A host with only an
-RSA 4096 key may produce a code that is large; addresses are dropped from the end to keep it under
-1 KB, and `or2-pair` says so.
+RSA 4096 key may produce a code that is large; addresses are dropped from the end to keep it within the phone's limits (at most eight addresses and
+1 KB), and `or2-pair` says so.
 
 ## How it stays safe
 

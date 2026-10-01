@@ -2245,7 +2245,14 @@ or where the code differs from it, this section is the contract.
 `or2-pair:1?name=<label>&user=<u>&port=<p>&a=<addr>…&hk=<algo> <base64>&pair=<ip>:<port>…&otp=<base32>`
 
 - Values are percent-encoded (`A-Za-z0-9-._~` and `:` stay, everything else `%XX`; `+` is a plus, never a
-  space). At most 1024 bytes: the CLI drops the lowest-priority addresses (the last) to fit and says so.
+  space). At most 1024 bytes **and at most eight `a` addresses**: the CLI drops the lowest-priority addresses
+  (the last) until both limits hold and says so (the note and a `[left out: over the phone's limits]` mark
+  on each address). Before anything is drawn or printed the CLI also checks the whole code against the same
+  rules as the phone's parser (`Payload::validate`: labels of 1 to 64 characters without control characters,
+  address characters and length, no duplicates, one plain host key, one to four dialable `pair` addresses
+  that are not wildcard, multicast or broadcast, `pair` and `otp` together, total size) and refuses with a
+  message naming the field (`RunError::InvalidCode`) rather than print a code the phone would reject. The
+  tests hold the two parsers in step: everything `validate` refuses the real parser refuses too.
 - `a` is one to eight addresses (names or IP literals, no duplicates), each at the one SSH `port`, in the
   order the phone tries them. `hk` is one plain public key (`ssh-ed25519`, `ecdsa-sha2-nistp256/384/521`
   or `ssh-rsa`) with no comment. `name` and `user` are 1 to 64 characters without control characters.

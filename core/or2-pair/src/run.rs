@@ -85,6 +85,9 @@ pub enum RunError {
     Listen(io::Error),
     #[error("{0}")]
     TooLong(#[from] payload::TooLong),
+    /// The code would not pass the phone's strict parser: nothing was drawn or printed.
+    #[error("{0}")]
+    InvalidCode(#[from] payload::Invalid),
     #[error("cannot draw the QR code: {0}")]
     Qr(String),
     #[error("cannot write output: {0}")]
@@ -146,7 +149,7 @@ fn advertised(listening: &[SocketAddr], addresses: &[Address]) -> Vec<SocketAddr
         }
     }
     out.dedup();
-    out.truncate(4);
+    out.truncate(payload::MAX_PAIR_ADDRESSES);
     out
 }
 
@@ -273,6 +276,9 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
         otp,
     };
     let dropped = payload.fit()?;
+    // Whatever is printed from here on, the phone accepts: refuse here, before anything is
+    // drawn, rather than show a code it would turn away.
+    payload.validate()?;
 
     heading(out, "This host")?;
     writeln!(out, "  name       {name}")?;
@@ -296,15 +302,16 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
         let note = if used {
             ""
         } else {
-            "  [left out: the code would be too long]"
+            "  [left out: over the phone's limits]"
         };
         writeln!(out, "    {}. {:<18} {what}{note}", index + 1, address.text)?;
     }
     if !dropped.is_empty() {
         writeln!(
             out,
-            "  note: {} address(es) were left out to keep the code under {} bytes",
+            "  note: {} address(es) were left out, the last ones first: the phone takes at most {} addresses and a code of at most {} bytes",
             dropped.len(),
+            payload::MAX_ADDRESSES,
             payload::MAX_BYTES
         )?;
     }

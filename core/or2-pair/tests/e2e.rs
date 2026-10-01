@@ -581,6 +581,103 @@ fn the_code_and_the_confirmation_name_the_account_whose_file_is_written() {
     assert!(world.authorized_keys().unwrap().contains(&key));
 }
 
+fn code_line(output: &str) -> &str {
+    output
+        .lines()
+        .find(|line| line.starts_with("or2-pair:1?"))
+        .expect("a code was printed")
+}
+
+fn many_interfaces(count: usize) -> Vec<or2_pair::addresses::Iface> {
+    (1..=count)
+        .map(|i| or2_pair::addresses::Iface {
+            name: format!("eth{i}"),
+            ip: format!("192.168.{i}.20").parse().unwrap(),
+        })
+        .collect()
+}
+
+#[test]
+fn a_host_with_many_addresses_prints_a_code_the_phone_accepts() {
+    // Finding 9: nine or more short addresses stayed under 1 KB, so nothing trimmed them, and the
+    // phone's limit of eight refused the code.
+    let world = World::new();
+    let mut options = options();
+    options.bind.clear();
+    options.no_listen = true;
+    options.addresses = vec![
+        "dev.example.org".into(),
+        "backup.example.org".into(),
+        "192.168.3.20".into(),
+    ];
+    let mut out = Vec::new();
+    let exit = run_with_output(
+        &world,
+        &options,
+        &QueueingNet(Mutex::default()),
+        many_interfaces(12),
+        Duration::from_millis(100),
+        &mut out,
+    );
+    assert_eq!(exit.unwrap(), Exit::CodeOnly);
+    let output = String::from_utf8(out).unwrap();
+    let code = code_line(&output);
+    assert!(code.len() <= 1024);
+    let offer = PairOffer::parse(code).expect("the phone accepts every code the CLI prints");
+    assert_eq!(offer.addresses.len(), 8);
+    // The named ones come first and the ones that did not fit are reported, not hidden.
+    let hosts: Vec<_> = offer.addresses.iter().map(|a| a.host()).collect();
+    assert_eq!(
+        hosts[..3],
+        ["dev.example.org", "backup.example.org", "192.168.3.20"]
+    );
+    assert!(
+        output.contains("were left out") && output.contains("at most 8 addresses"),
+        "{output}"
+    );
+    assert!(output.contains("[left out"), "{output}");
+}
+
+#[test]
+fn a_code_the_phone_would_refuse_is_never_printed() {
+    let world = World::new();
+    let mut options = options();
+    options.bind.clear();
+    options.no_listen = true;
+    options.user = None;
+    let net = QueueingNet(Mutex::default());
+    // A login the phone would refuse (over 64 characters).
+    let mut out = Vec::new();
+    let result = run_as(
+        &world,
+        &"u".repeat(65),
+        &options,
+        &net,
+        interfaces(),
+        Duration::from_millis(100),
+        &mut out,
+    );
+    let error = result.unwrap_err();
+    assert!(matches!(error, RunError::InvalidCode(_)), "{error}");
+    assert!(error.to_string().contains("`user`"), "{error}");
+    let output = String::from_utf8(out).unwrap();
+    assert!(!output.contains("or2-pair:1?"), "{output}");
+    // An address the phone would refuse.
+    options.addresses = vec!["not a host".into()];
+    let mut out = Vec::new();
+    let error = run_with_output(
+        &world,
+        &options,
+        &net,
+        interfaces(),
+        Duration::from_millis(100),
+        &mut out,
+    )
+    .unwrap_err();
+    assert!(matches!(error, RunError::InvalidCode(_)), "{error}");
+    assert!(!String::from_utf8(out).unwrap().contains("or2-pair:1?"));
+}
+
 #[test]
 fn naming_a_detected_address_with_address_keeps_every_default_listener() {
     // Finding 8: `--address <the LAN address>` put it first and dropped it from the bind list.
@@ -661,6 +758,19 @@ fn run_with_output(
     window: Duration,
     out: &mut dyn std::io::Write,
 ) -> Result<Exit, RunError> {
+    run_as(world, "alice", options, net, interfaces, window, out)
+}
+
+/// [`run_with_output`] for an account of the given login name.
+fn run_as(
+    world: &World,
+    login: &str,
+    options: &or2_pair::args::Options,
+    net: &dyn Net,
+    interfaces: Vec<or2_pair::addresses::Iface>,
+    window: Duration,
+    out: &mut dyn std::io::Write,
+) -> Result<Exit, RunError> {
     use or2_pair::checks::Platform;
     use or2_pair::date::DateTime;
     use or2_pair::run::{Env, run};
@@ -669,7 +779,7 @@ fn run_with_output(
     let now = || DateTime::from_unix(0);
     let env = Env {
         version: "test",
-        account: Account::new("alice", world.home.path()),
+        account: Account::new(login, world.home.path()),
         hostname: Some("box".into()),
         etc_ssh: world.etc.path().to_path_buf(),
         program_dirs: vec![],
