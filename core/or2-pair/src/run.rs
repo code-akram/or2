@@ -17,7 +17,7 @@ use crate::authorized_keys::{self, Added};
 use crate::checks::{self, CheckInput, Level, Platform};
 use crate::confirm::Confirm;
 use crate::date::DateTime;
-use crate::exchange::{self, Outcome, Session};
+use crate::exchange::{self, Outcome, Session, Stats};
 use crate::hostkey::{self, Keyscan};
 use crate::net::Net;
 use crate::payload::{self, Payload};
@@ -362,12 +362,13 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
         random: env.random,
         now: env.now,
     };
-    let outcome = exchange::serve(listener.as_mut(), &session, Instant::now() + env.window);
-    report(&outcome, &user, &env.account.home, out)
+    let served = exchange::serve(listener.as_mut(), &session, Instant::now() + env.window);
+    report(&served.outcome, served.stats, &user, &env.account.home, out)
 }
 
 fn report(
     outcome: &Outcome,
+    stats: Stats,
     user: &str,
     home: &Path,
     out: &mut dyn Write,
@@ -417,20 +418,6 @@ fn report(
             );
             Exit::Declined
         }
-        Outcome::BadProof => {
-            let _ = writeln!(
-                text,
-                "The phone's proof did not verify (a wrong or already used code). Nothing was changed; run or2-pair again for a fresh code."
-            );
-            Exit::Refused
-        }
-        Outcome::BadRequest => {
-            let _ = writeln!(
-                text,
-                "A connection sent something that is not a pairing request. Nothing was changed; run or2-pair again."
-            );
-            Exit::Refused
-        }
         Outcome::KeyRejected => {
             let _ = writeln!(
                 text,
@@ -458,6 +445,13 @@ fn report(
             Exit::Failed
         }
     };
+    if stats.rejected > 0 || stats.dropped > 0 {
+        let _ = writeln!(
+            text,
+            "{} connection(s) were refused (not a pairing request, or a wrong or already used code) and {} more were closed without an answer; none of them could use up the attempt.",
+            stats.rejected, stats.dropped
+        );
+    }
     writeln!(out)?;
     out.write_all(text.as_bytes())?;
     Ok(exit)

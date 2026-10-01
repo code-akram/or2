@@ -2276,10 +2276,17 @@ the verdict is the host's own 120 s window plus a margin (125 s), because that w
 a flat 10 s there would make the confirmation impossible. The host's whole window is 120 s from the moment
 it starts listening, and it is also the deadline of the confirmation question.
 
-**One attempt.** The listener serves one *attempt*. An attempt starts when a connection has sent
-something after the hello; whatever happens from then on (bad MAC, bad key, `n`, timeout, success, a write
-error) ends the listener. A connection that sends nothing before it closes or times out (10 s) is not an
-attempt, so a port scan, or a connection the phone raced and dropped, cannot end the pairing.
+**One attempt.** The listener serves one *attempt*. An attempt is a request that is well formed, within the
+size limit **and whose HMAC verifies** (only the holder of the one-time password can make one); whatever
+happens from then on (bad key, `n`, timeout, success, a write error) ends the listener. Everything before a
+verified request is *not* an attempt and does not end the pairing: silence, a bare newline, junk, an
+unfinished or oversized line, a request of another version and a wrong proof are each answered
+(`{"ok":false,"reason":"request"|"authentication"}`) or ignored, and counted for the final report. This
+replaces the earlier "any bytes start an attempt" deviation, under which one probe of a port scanner burnt the
+code. Bounds on what an unauthenticated peer can cost: each greeted connection has 8 s in total (`PRE_AUTH`)
+to deliver its one request line (at most 2048 bytes), and a peer address whose requests were refused 5 times
+is no longer greeted (its connections are closed unanswered). The only way to end the listener without a
+verified request is its 120 s window.
 
 **The account.** The login in the code, the name in the prompt and the home whose `~/.ssh/authorized_keys`
 is written are one value (`or2_pair::account::Account`), resolved from the operating system's account

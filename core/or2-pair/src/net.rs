@@ -16,6 +16,10 @@ use std::time::{Duration, Instant};
 pub trait Connection: Read + Write {
     /// Who connected, for the screen (`192.168.1.50:51234`).
     fn peer(&self) -> String;
+    /// The peer's IP address, when it has one.
+    fn peer_ip(&self) -> Option<IpAddr> {
+        self.peer().parse::<SocketAddr>().ok().map(|peer| peer.ip())
+    }
     /// Both the read and the write timeout.
     fn set_timeout(&mut self, timeout: Duration) -> io::Result<()>;
 }

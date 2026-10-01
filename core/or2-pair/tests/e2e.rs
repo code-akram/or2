@@ -134,27 +134,38 @@ fn declining_on_the_host_refuses_the_phone_and_changes_nothing() {
 }
 
 #[test]
-fn a_wrong_password_is_refused_and_ends_the_listener() {
+fn a_wrong_password_is_refused_but_does_not_end_the_listener() {
     let world = World::new();
     let confirm = Auto::new(Answer::Yes);
     let key = phone_key();
     let result = pair(&world, &options(), &confirm, WINDOW, |ready| {
-        // A code that differs from the host's only in its password.
+        // A code that differs from the host's only in its password (an old code, say).
         let mut parts: Vec<String> = ready.payload.split('&').map(str::to_owned).collect();
         let last = parts.last_mut().unwrap();
         *last = "otp=AAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned();
-        phone_pairs(&parts.join("&"), &key, "phone")
+        let wrong = phone_pairs(&parts.join("&"), &key, "phone");
+        // Nothing was shown to the person for it, and the real code still works.
+        let asked_after_wrong = confirm.asked.lock().unwrap().len();
+        (
+            wrong,
+            asked_after_wrong,
+            phone_pairs(&ready.payload, &key, "phone"),
+        )
     });
+    let (wrong, asked_after_wrong, right) = result.phone.unwrap();
     assert_eq!(
-        result.phone,
-        Some(Err(PairError::Refused(Refusal::AuthenticationFailed)))
+        wrong,
+        Err(PairError::Refused(Refusal::AuthenticationFailed))
     );
-    assert_eq!(result.exit.unwrap(), Exit::Refused);
+    assert_eq!(asked_after_wrong, 0, "nothing was shown to the person");
+    assert_eq!(right, Ok(()));
+    assert_eq!(result.exit.unwrap(), Exit::Paired);
     assert!(
-        confirm.asked.lock().unwrap().is_empty(),
-        "nothing was shown to the person"
+        result.output.contains("1 connection(s) were refused"),
+        "{}",
+        result.output
     );
-    assert!(world.authorized_keys().is_none());
+    assert!(world.authorized_keys().unwrap().contains(&key));
 }
 
 #[test]
@@ -188,6 +199,39 @@ fn a_connection_that_never_speaks_does_not_use_up_the_attempt() {
     });
     assert_eq!(result.phone, Some(Ok(())));
     assert_eq!(result.exit.unwrap(), Exit::Paired);
+}
+
+#[test]
+fn one_unauthenticated_byte_does_not_use_up_the_attempt() {
+    // Finding 3: a scanner that sends a newline (or junk, or a wrong proof) used to end the
+    // listener for the phone that follows.
+    use std::io::{Read, Write};
+    let world = World::new();
+    let confirm = Auto::new(Answer::Yes);
+    let key = phone_key();
+    let result = pair(&world, &options(), &confirm, WINDOW, |ready| {
+        let mut replies = Vec::new();
+        for junk in [&b"\n"[..], b"GET / HTTP/1.1\r\n\r\n", b"{\"v\":1"] {
+            let mut probe = std::net::TcpStream::connect(ready.listening[0]).unwrap();
+            probe
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            probe.write_all(junk).unwrap();
+            let _ = probe.shutdown(std::net::Shutdown::Write);
+            let mut seen = String::new();
+            let _ = probe.read_to_string(&mut seen);
+            replies.push(seen);
+        }
+        (replies, phone_pairs(&ready.payload, &key, "phone"))
+    });
+    let (replies, paired) = result.phone.unwrap();
+    assert!(
+        replies.iter().all(|seen| seen.contains("\"ok\":false")),
+        "{replies:?}"
+    );
+    assert_eq!(paired, Ok(()));
+    assert_eq!(result.exit.unwrap(), Exit::Paired);
+    assert!(world.authorized_keys().unwrap().contains(&key));
 }
 
 #[test]

@@ -12,14 +12,19 @@
 //!
 //! # One attempt
 //!
-//! The listener serves exactly one *attempt*, then stops, whatever its result. An attempt starts
-//! when a connection has sent something after the hello. A connection that sends nothing before
-//! it closes or times out (10 s) is not an attempt: port scanners, and the connections the phone
-//! races and drops, must not end the pairing. The one-time password only ever authenticates a
-//! MAC over this connection's fresh nonce, so a recorded request is useless on another
-//! connection, and one guess is all anyone gets.
+//! The listener serves exactly one *attempt*, then stops, whatever its result. An attempt is a
+//! request that is well formed, within the size limit, **and whose HMAC verifies**: only the
+//! holder of the one-time password can make one. Everything else (a bare newline, junk, an
+//! unfinished or oversized line, a wrong proof, silence) is refused or ignored without ending the
+//! pairing, so a scanner that probes the port cannot burn the code. Each connection gets
+//! [`PRE_AUTH`] in total to deliver its request, and a peer address whose requests were refused
+//! [`MAX_FAILURES_PER_PEER`] times is no longer greeted. The one-time password only ever
+//! authenticates a MAC over this connection's fresh nonce, so a recorded request is useless on
+//! another connection.
 
+use std::collections::HashMap;
 use std::io;
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -41,6 +46,8 @@ pub const WINDOW: Duration = Duration::from_secs(120);
 pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest request line accepted.
 pub const REQUEST_LIMIT: usize = 2048;
+/// The whole time a connection has to deliver its request line once it was greeted.
+pub const PRE_AUTH: Duration = Duration::from_secs(8);
 
 /// `HMAC-SHA256(otp, nonce || key)`.
 fn mac_of(otp: &[u8; 16], nonce: &[u8], key: &str) -> Hmac<Sha256> {
@@ -73,10 +80,6 @@ pub enum Outcome {
     },
     /// The person at the host said no.
     Declined { device: String, fingerprint: String },
-    /// The MAC did not verify: a wrong or reused code, or someone guessing.
-    BadProof,
-    /// The request was unreadable, oversized or the wrong version.
-    BadRequest,
     /// The key was not one this tool authorizes (after the MAC verified).
     KeyRejected,
     /// The window passed with no attempt, or nobody answered the question.
@@ -87,16 +90,52 @@ pub enum Outcome {
     ListenFailed(io::Error),
 }
 
-/// Serves connections until one makes an attempt or `deadline` passes.
-pub fn serve(listener: &mut dyn PairListener, session: &Session<'_>, deadline: Instant) -> Outcome {
+/// How a connection that was not the attempt is counted.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Stats {
+    /// Connections that sent nothing.
+    pub silent: u32,
+    /// Connections refused for an unreadable request or a proof that did not verify.
+    pub rejected: u32,
+    /// Connections closed unanswered because their peer had already failed too often.
+    pub dropped: u32,
+}
+
+/// What `serve` came to.
+#[derive(Debug)]
+pub struct Served {
+    pub outcome: Outcome,
+    pub stats: Stats,
+}
+
+/// A peer address that has sent this many refused requests is not greeted again.
+pub const MAX_FAILURES_PER_PEER: u32 = 5;
+
+/// Serves connections until one makes the attempt or `deadline` passes.
+pub fn serve(listener: &mut dyn PairListener, session: &Session<'_>, deadline: Instant) -> Served {
+    let mut stats = Stats::default();
+    let mut failures: HashMap<IpAddr, u32> = HashMap::new();
+    let finish = |outcome, stats| Served { outcome, stats };
     loop {
         let mut connection = match listener.accept(deadline) {
             Ok(Some(connection)) => connection,
-            Ok(None) => return Outcome::TimedOut,
-            Err(error) => return Outcome::ListenFailed(error),
+            Ok(None) => return finish(Outcome::TimedOut, stats),
+            Err(error) => return finish(Outcome::ListenFailed(error), stats),
         };
-        if let Some(outcome) = attempt(connection.as_mut(), session, deadline) {
-            return outcome;
+        let peer = connection.peer_ip();
+        if peer.is_some_and(|ip| failures.get(&ip).copied().unwrap_or(0) >= MAX_FAILURES_PER_PEER) {
+            stats.dropped += 1;
+            continue;
+        }
+        match attempt(connection.as_mut(), session, deadline) {
+            Attempt::Over(outcome) => return finish(outcome, stats),
+            Attempt::Silent => stats.silent += 1,
+            Attempt::Rejected => {
+                stats.rejected += 1;
+                if let Some(ip) = peer {
+                    *failures.entry(ip).or_default() += 1;
+                }
+            }
         }
     }
 }
@@ -168,34 +207,51 @@ fn reply(connection: &mut dyn Connection, ok: bool, reason: &str) {
     let _ = connection.flush();
 }
 
-/// One connection. `None` when it was not an attempt (see the module docs).
+/// What one connection came to.
+#[derive(Debug)]
+pub enum Attempt {
+    /// It sent nothing (or hung up): not an attempt.
+    Silent,
+    /// It sent something that is not a verified request: a request that is unreadable, oversized
+    /// or of another version, or whose proof did not verify. Refused, and not an attempt.
+    Rejected,
+    /// A verified request: the one attempt, whatever came of it.
+    Over(Outcome),
+}
+
+/// One connection, as the module docs describe.
 pub fn attempt(
     connection: &mut dyn Connection,
     session: &Session<'_>,
     deadline: Instant,
-) -> Option<Outcome> {
+) -> Attempt {
     let mut nonce = [0u8; 32];
     (session.random)(&mut nonce);
     let hello = format!("{{\"v\":1,\"nonce\":\"{}\"}}\n", STANDARD.encode(nonce));
-    connection.set_timeout(IO_TIMEOUT).ok()?;
-    connection.write_all(hello.as_bytes()).ok()?;
-    connection.flush().ok()?;
+    let greeted = connection.set_timeout(IO_TIMEOUT).is_ok()
+        && connection.write_all(hello.as_bytes()).is_ok()
+        && connection.flush().is_ok();
+    if !greeted {
+        return Attempt::Silent;
+    }
 
-    let line = match read_line(connection, REQUEST_LIMIT, deadline) {
-        Line::Silent => return None,
+    // However long the peer takes, it only gets `PRE_AUTH` for the whole request.
+    let until = deadline.min(Instant::now() + PRE_AUTH);
+    let line = match read_line(connection, REQUEST_LIMIT, until) {
+        Line::Silent => return Attempt::Silent,
         Line::Broken => {
             reply(connection, false, "request");
-            return Some(Outcome::BadRequest);
+            return Attempt::Rejected;
         }
         Line::Complete(line) => line,
     };
     let Ok(request) = serde_json::from_slice::<Request>(&line) else {
         reply(connection, false, "request");
-        return Some(Outcome::BadRequest);
+        return Attempt::Rejected;
     };
     if request.v != 1 {
         reply(connection, false, "request");
-        return Some(Outcome::BadRequest);
+        return Attempt::Rejected;
     }
 
     // The proof comes first, before anything about the key is looked at or shown. `verify_slice`
@@ -210,12 +266,23 @@ pub fn attempt(
         });
     if !proven {
         reply(connection, false, "authentication");
-        return Some(Outcome::BadProof);
+        return Attempt::Rejected;
     }
 
+    // From here on the peer knows the one-time password: this is the attempt.
+    Attempt::Over(authorize(connection, session, deadline, &request))
+}
+
+/// The authorization of a request whose proof verified: parse the key, ask the person, write.
+fn authorize(
+    connection: &mut dyn Connection,
+    session: &Session<'_>,
+    deadline: Instant,
+    request: &Request,
+) -> Outcome {
     let Ok(key) = KeyLine::parse(&request.key) else {
         reply(connection, false, "key");
-        return Some(Outcome::KeyRejected);
+        return Outcome::KeyRejected;
     };
     let device =
         authorized_keys::sanitize_device(&request.device).unwrap_or_else(|| "phone".to_owned());
@@ -233,29 +300,29 @@ pub fn attempt(
         Answer::Yes => {}
         Answer::No => {
             reply(connection, false, "declined");
-            return Some(Outcome::Declined {
+            return Outcome::Declined {
                 device,
                 fingerprint,
-            });
+            };
         }
         Answer::TimedOut => {
             reply(connection, false, "timeout");
-            return Some(Outcome::TimedOut);
+            return Outcome::TimedOut;
         }
     }
 
     match authorized_keys::add(session.account, &key, &device, (session.now)()) {
         Ok(added) => {
             reply(connection, true, "");
-            Some(Outcome::Authorized {
+            Outcome::Authorized {
                 added,
                 device,
                 fingerprint,
-            })
+            }
         }
         Err(error) => {
             reply(connection, false, "failed");
-            Some(Outcome::WriteFailed(error))
+            Outcome::WriteFailed(error)
         }
     }
 }
@@ -377,7 +444,7 @@ mod tests {
             }
         }
 
-        fn run(&self, connection: &mut Script) -> Option<Outcome> {
+        fn run(&self, connection: &mut Script) -> Attempt {
             let random = |buf: &mut [u8]| buf.fill(self.nonce.get());
             let now = || DateTime::from_unix(1_782_867_661);
             let session = Session {
@@ -411,7 +478,9 @@ mod tests {
         let fixture = Fixture::new(Answer::Yes);
         let request = request_for(&OTP, &nonce_of(7), PHONE, "Pixel 8");
         let mut connection = Script::new(&[&request]);
-        let outcome = fixture.run(&mut connection).unwrap();
+        let Attempt::Over(outcome) = fixture.run(&mut connection) else {
+            panic!("not an attempt")
+        };
         let Outcome::Authorized {
             added,
             device,
@@ -450,10 +519,7 @@ mod tests {
         wrong[15] ^= 1;
         let request = request_for(&wrong, &nonce_of(7), PHONE, "phone");
         let mut connection = Script::new(&[&request]);
-        assert!(matches!(
-            fixture.run(&mut connection),
-            Some(Outcome::BadProof)
-        ));
+        assert!(matches!(fixture.run(&mut connection), Attempt::Rejected));
         assert_eq!(
             written(&connection)[1],
             "{\"ok\":false,\"reason\":\"authentication\"}"
@@ -469,10 +535,7 @@ mod tests {
         let recorded = request_for(&OTP, &nonce_of(1), PHONE, "phone");
         // ...replayed to a connection whose nonce is different.
         let mut connection = Script::new(&[&recorded]);
-        assert!(matches!(
-            fixture.run(&mut connection),
-            Some(Outcome::BadProof)
-        ));
+        assert!(matches!(fixture.run(&mut connection), Attempt::Rejected));
         assert!(fixture.authorized_keys().is_none());
     }
 
@@ -486,10 +549,7 @@ mod tests {
         value["key"] = other.into();
         let swapped = format!("{value}\n");
         let mut connection = Script::new(&[swapped.as_bytes()]);
-        assert!(matches!(
-            fixture.run(&mut connection),
-            Some(Outcome::BadProof)
-        ));
+        assert!(matches!(fixture.run(&mut connection), Attempt::Rejected));
     }
 
     #[test]
@@ -500,7 +560,7 @@ mod tests {
                 format!("{{\"v\":1,\"key\":\"{PHONE}\",\"device\":\"d\",\"mac\":\"{mac}\"}}\n");
             let mut connection = Script::new(&[line.as_bytes()]);
             assert!(
-                matches!(fixture.run(&mut connection), Some(Outcome::BadProof)),
+                matches!(fixture.run(&mut connection), Attempt::Rejected),
                 "{mac}"
             );
         }
@@ -513,7 +573,7 @@ mod tests {
         let mut connection = Script::new(&[&request]);
         assert!(matches!(
             fixture.run(&mut connection),
-            Some(Outcome::Declined { .. })
+            Attempt::Over(Outcome::Declined { .. })
         ));
         assert_eq!(
             written(&connection)[1],
@@ -529,7 +589,7 @@ mod tests {
         let mut connection = Script::new(&[&request]);
         assert!(matches!(
             fixture.run(&mut connection),
-            Some(Outcome::TimedOut)
+            Attempt::Over(Outcome::TimedOut)
         ));
         assert_eq!(
             written(&connection)[1],
@@ -545,7 +605,10 @@ mod tests {
             let request = request_for(&OTP, &nonce_of(7), key, "phone");
             let mut connection = Script::new(&[&request]);
             assert!(
-                matches!(fixture.run(&mut connection), Some(Outcome::KeyRejected)),
+                matches!(
+                    fixture.run(&mut connection),
+                    Attempt::Over(Outcome::KeyRejected)
+                ),
                 "{key}"
             );
             assert_eq!(written(&connection)[1], "{\"ok\":false,\"reason\":\"key\"}");
@@ -561,7 +624,7 @@ mod tests {
         let mut connection = Script::new(&[&request]);
         assert!(matches!(
             fixture.run(&mut connection),
-            Some(Outcome::Authorized { .. })
+            Attempt::Over(Outcome::Authorized { .. })
         ));
         let keys = fixture.authorized_keys().unwrap();
         assert_eq!(keys.lines().count(), 1);
@@ -571,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_requests_are_an_attempt_and_get_a_request_reply() {
+    fn malformed_requests_get_a_request_refusal_and_are_not_the_attempt() {
         let fixture = Fixture::new(Answer::Yes);
         let huge = vec![b'x'; REQUEST_LIMIT + 10];
         let wrong_version = b"{\"v\":2,\"key\":\"k\",\"device\":\"d\",\"mac\":\"m\"}\n".to_vec();
@@ -587,10 +650,7 @@ mod tests {
             [huge, b"\n".to_vec()].concat(),
         ] {
             let mut connection = Script::new(&[&input]);
-            assert!(matches!(
-                fixture.run(&mut connection),
-                Some(Outcome::BadRequest)
-            ));
+            assert!(matches!(fixture.run(&mut connection), Attempt::Rejected));
             assert_eq!(
                 written(&connection)[1],
                 "{\"ok\":false,\"reason\":\"request\"}"
@@ -608,7 +668,7 @@ mod tests {
         let mut connection = Script::new(&[a, b, c]);
         assert!(matches!(
             fixture.run(&mut connection),
-            Some(Outcome::Authorized { .. })
+            Attempt::Over(Outcome::Authorized { .. })
         ));
     }
 
@@ -616,10 +676,10 @@ mod tests {
     fn a_connection_that_sends_nothing_is_not_an_attempt() {
         let fixture = Fixture::new(Answer::Yes);
         let mut hangs_up = Script::new(&[]);
-        assert!(fixture.run(&mut hangs_up).is_none());
+        assert!(matches!(fixture.run(&mut hangs_up), Attempt::Silent));
         let mut stalls = Script::new(&[]);
         stalls.then_timeout = true;
-        assert!(fixture.run(&mut stalls).is_none());
+        assert!(matches!(fixture.run(&mut stalls), Attempt::Silent));
         // It was still greeted, so a phone that connects and waits is not left guessing.
         assert_eq!(written(&hangs_up).len(), 1);
     }
@@ -633,7 +693,7 @@ mod tests {
         let mut connection = Script::new(&[&request]);
         assert!(matches!(
             fixture.run(&mut connection),
-            Some(Outcome::WriteFailed(_))
+            Attempt::Over(Outcome::WriteFailed(_))
         ));
         assert_eq!(
             written(&connection)[1],
@@ -682,7 +742,8 @@ mod tests {
             &mut queue,
             &session,
             Instant::now() + Duration::from_secs(60),
-        );
+        )
+        .outcome;
         assert!(matches!(outcome, Outcome::Authorized { .. }));
         assert_eq!(queue.0.len(), 1, "the third connection was never accepted");
         assert_eq!(fixture.authorized_keys().unwrap().lines().count(), 1);
@@ -701,7 +762,70 @@ mod tests {
             random: &random,
             now: &now,
         };
-        let outcome = serve(&mut queue, &session, Instant::now());
+        let outcome = serve(&mut queue, &session, Instant::now()).outcome;
         assert!(matches!(outcome, Outcome::TimedOut));
+    }
+
+    /// Serves `scripts` in order and returns what `serve` decided and what was left unserved.
+    fn serve_scripts(fixture: &Fixture, scripts: Vec<Script>) -> (Outcome, usize) {
+        let mut queue = Queue(VecDeque::from(scripts));
+        let random = |buf: &mut [u8]| buf.fill(7);
+        let now = || DateTime::from_unix(1_782_867_661);
+        let session = Session {
+            account: &Account::new("alice", fixture.home.path()),
+            otp: OTP,
+            confirm: &fixture.confirm,
+            random: &random,
+            now: &now,
+        };
+        let outcome = serve(
+            &mut queue,
+            &session,
+            Instant::now() + Duration::from_secs(60),
+        )
+        .outcome;
+        (outcome, queue.0.len())
+    }
+
+    // --- Finding 3: only a verified request is the attempt ---------------------------------
+
+    #[test]
+    fn junk_and_wrong_proofs_before_the_phone_do_not_use_up_the_attempt() {
+        let fixture = Fixture::new(Answer::Yes);
+        let good = request_for(&OTP, &nonce_of(7), PHONE, "phone");
+        let mut wrong = OTP;
+        wrong[0] ^= 1;
+        let bad_mac = request_for(&wrong, &nonce_of(7), PHONE, "phone");
+        let (outcome, left) = serve_scripts(
+            &fixture,
+            vec![
+                // A scanner's probes: a bare newline, text, an unfinished request, a wrong proof.
+                Script::new(&[b"\n"]),
+                Script::new(&[b"GET / HTTP/1.1\r\n\r\n"]),
+                Script::new(&[b"{\"v\":1"]),
+                Script::new(&[&bad_mac]),
+                Script::new(&[&good]),
+                Script::new(&[]),
+            ],
+        );
+        assert!(matches!(outcome, Outcome::Authorized { .. }), "{outcome:?}");
+        assert_eq!(left, 1, "the listener stopped after the phone");
+        assert_eq!(fixture.authorized_keys().unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn a_peer_that_keeps_failing_is_dropped_after_a_few_tries() {
+        let fixture = Fixture::new(Answer::Yes);
+        let good = request_for(&OTP, &nonce_of(7), PHONE, "phone");
+        let junk = || Script::new(&[b"junk\n"]);
+        // Every script is from the same peer address (see `Script::peer`): after
+        // MAX_FAILURES_PER_PEER refusals its next connection is closed without a greeting, even
+        // a correct one.
+        let mut scripts: Vec<Script> = (0..MAX_FAILURES_PER_PEER).map(|_| junk()).collect();
+        scripts.push(Script::new(&[&good]));
+        let (outcome, left) = serve_scripts(&fixture, scripts);
+        assert!(matches!(outcome, Outcome::TimedOut), "{outcome:?}");
+        assert_eq!(left, 0);
+        assert!(fixture.authorized_keys().is_none());
     }
 }

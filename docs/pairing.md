@@ -155,9 +155,11 @@ RSA 4096 key may produce a code that is large; addresses are dropped from the en
   one-time password that never crosses the network. The phone proves it knows the password with
   an HMAC over the host's fresh nonce and its key; the host checks that in constant time and
   refuses a replay.
-- The listener serves one attempt, then closes (or after 120 seconds). A connection that sends
-  nothing is not an attempt, so a port scan cannot end your pairing, and only that one attempt can
-  guess the password.
+- The listener serves one attempt, then closes (or after 120 seconds). An attempt is a request
+  whose proof verifies, which only the phone that scanned the code can make. A port scan, a stray
+  byte or a wrong code is refused and does not end your pairing (`or2-pair` counts them in its
+  final message); each connection has 8 seconds to say its piece, and an address that is refused
+  five times is ignored.
 - The phone never writes to `authorized_keys` on its own: you confirm the key's fingerprint at the
   host's keyboard. Without a terminal to ask in (standard input is not a TTY), `or2-pair` refuses
   to listen.
