@@ -1,13 +1,24 @@
 package io.github.code_akram.or2.connection
 
 import io.github.code_akram.or2.app.PrefStore
+import io.github.code_akram.or2.data.Host
+import java.security.MessageDigest
 
 /**
- * The `mosh-server`s this app started and has not seen end, as `(host id, pid)` pairs in app-private
- * preferences (Rust has no storage). A pid is not a secret and no key is kept: the entry exists only
- * so that a server orphaned by the process's death (its key died with the process, and `mosh-server`
- * has no idle timeout) can be stopped over the next SSH connection to that host
+ * The `mosh-server`s this app started and has not seen end, as `(host id, pid, destination)` entries
+ * in app-private preferences (Rust has no storage). A pid is not a secret and no key is kept: the
+ * entry exists only so that a server orphaned by the process's death (its key died with the process,
+ * and `mosh-server` has no idle timeout) can be stopped over the next SSH connection to that host
  * (`HostConnection.stop_mosh_server`, which only signals a process the host names `mosh-server`).
+ *
+ * A pid only names a process on the machine and account that started it, and a stored host keeps its
+ * id when its address list or login is edited. Every entry therefore carries [moshIdentity]: a stable
+ * digest of the ordered address list, the ports and the username the server was started through.
+ * [pids] returns only the entries whose identity equals the host's current one, so a stop is never
+ * sent to a destination or account other than the one that created the record (where the same number
+ * may be somebody else's live `mosh-server`). An edit of either also purges the host's entries
+ * ([purge], see `HostConnections.hostEdited`). Entries written before identities existed carry none and
+ * are dropped: they cannot be tied to a destination.
  *
  * Recorded when a mosh session connects; cleared when it closes by the user's disconnect or the
  * remote's own exit, when the server was stopped at the next connection, or when its host is deleted.
@@ -15,41 +26,67 @@ import io.github.code_akram.or2.app.PrefStore
  * trying again is harmless.
  */
 class MoshServerLedger(private val store: PrefStore) {
-    private val entries: MutableSet<Pair<Long, UInt>> = decode(store.getString(KEY)).toMutableSet()
+    private data class Entry(val hostId: Long, val pid: UInt, val identity: String)
+
+    private val entries: MutableSet<Entry> = decode(store.getString(KEY)).toMutableSet()
 
     @Synchronized
-    fun record(hostId: Long, pid: UInt) {
-        if (entries.add(hostId to pid)) save()
+    fun record(host: Host, pid: UInt) {
+        if (entries.add(Entry(host.id, pid, host.moshIdentity()))) save()
     }
 
     @Synchronized
-    fun clear(hostId: Long, pid: UInt) {
-        if (entries.remove(hostId to pid)) save()
+    fun clear(host: Host, pid: UInt) {
+        if (entries.remove(Entry(host.id, pid, host.moshIdentity()))) save()
     }
 
-    /** Forgets every server of a host that no longer exists. */
+    /** Forgets every server of a host that no longer exists, or whose destination or login changed. */
     @Synchronized
     fun purge(hostId: Long) {
-        if (entries.removeAll { it.first == hostId }) save()
+        if (entries.removeAll { it.hostId == hostId }) save()
     }
 
-    /** The recorded pids of [hostId], oldest first. */
+    /** The recorded pids of [host] that were started through its current destination and login, oldest first. */
     @Synchronized
-    fun pids(hostId: Long): List<UInt> = entries.filter { it.first == hostId }.map { it.second }
+    fun pids(host: Host): List<UInt> {
+        val identity = host.moshIdentity()
+        return entries.filter { it.hostId == host.id && it.identity == identity }.map { it.pid }
+    }
 
-    private fun save() = store.putString(KEY, if (entries.isEmpty()) null else entries.joinToString(",") { "${it.first}:${it.second}" })
+    /** Every recorded pid of [hostId], whatever destination it was started through (diagnostics and tests). */
+    @Synchronized
+    fun allPids(hostId: Long): List<UInt> = entries.filter { it.hostId == hostId }.map { it.pid }
+
+    private fun save() = store.putString(KEY, if (entries.isEmpty()) null else entries.joinToString(",") { "${it.hostId}:${it.pid}:${it.identity}" })
 
     private companion object {
         const val KEY = "mosh_servers"
 
-        /** Entries this app did not write are dropped; a zero pid names no process. */
-        fun decode(text: String?): List<Pair<Long, UInt>> = text.orEmpty().split(",").mapNotNull { entry ->
+        /** Entries this app did not write are dropped; a zero pid names no process, and an entry needs its identity. */
+        fun decode(text: String?): List<Entry> = text.orEmpty().split(",").mapNotNull { entry ->
             val parts = entry.split(":")
             val host = parts.getOrNull(0)?.toLongOrNull()
             val pid = parts.getOrNull(1)?.toUIntOrNull()
-            if (parts.size == 2 && host != null && pid != null && pid != 0u) host to pid else null
+            val identity = parts.getOrNull(2)?.takeIf { it.isNotEmpty() && it.all { c -> c in '0'..'9' || c in 'a'..'f' } }
+            if (parts.size == 3 && host != null && pid != null && pid != 0u && identity != null) Entry(host, pid, identity) else null
         }
     }
+}
+
+/**
+ * Who a recorded server belongs to: a digest of the host's ordered address list (names and ports) and
+ * its username, the only things that decide which machine and account a pid refers to. The label, key,
+ * inbox flag and transport are not part of it (they do not move the server).
+ */
+fun Host.moshIdentity(): String {
+    val text = buildString {
+        append(username.length).append(':').append(username)
+        for (endpoint in addresses) {
+            append('|').append(endpoint.hostname.length).append(':').append(endpoint.hostname).append(':').append(endpoint.port)
+        }
+    }
+    val digest = MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
+    return digest.take(16).joinToString("") { "%02x".format(it) }
 }
 
 /**

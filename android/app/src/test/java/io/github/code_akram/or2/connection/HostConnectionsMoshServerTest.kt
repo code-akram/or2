@@ -75,7 +75,7 @@ class HostConnectionsMoshServerTest {
             scope.advanceUntilIdle()
         }
 
-        val recorded get() = MoshServerLedger(store).pids(host.id)
+        val recorded get() = MoshServerLedger(store).pids(host)
     }
 
     @Test
@@ -147,7 +147,7 @@ class HostConnectionsMoshServerTest {
     @Test
     fun aStopThatFailsKeepsTheRecordForTheNextConnection() = runTest {
         val store = MemoryPrefStore()
-        MoshServerLedger(store).record(host.id, 4242u)
+        MoshServerLedger(store).record(host, 4242u)
         val first = Proc(this, store, stopFailure = HostException.CommandFailed("the host did not answer in time"))
         first.connect()
         assertEquals(listOf(4242u), first.ports[0].stopped)
@@ -162,7 +162,7 @@ class HostConnectionsMoshServerTest {
     @Test
     fun aReconnectSparesTheServerOfASessionThisProcessStillRunsButStopsAnotherOne() = runTest {
         val store = MemoryPrefStore()
-        MoshServerLedger(store).record(host.id, 999u) // An orphan of a dead process on this host.
+        MoshServerLedger(store).record(host, 999u) // An orphan of a dead process on this host.
         val process = Proc(this, store)
         process.connect()
         assertEquals(listOf(999u), process.ports[0].stopped)
@@ -203,20 +203,107 @@ class HostConnectionsMoshServerTest {
         process.connect(a)
         process.open(a)
         process.sessionState(0, 0, SessionState.Connected) // A's live session runs pid 4242 on host A.
-        process.ledger.record(b.id, 4242u) // B's orphan has the same number, on another machine.
+        process.ledger.record(b, 4242u) // B's orphan has the same number, on another machine.
         process.connect(b)
         assertEquals("a pid only identifies a process within its host", listOf(4242u), process.ports[1].stopped)
-        assertEquals(emptyList<UInt>(), process.ledger.pids(b.id))
-        assertEquals(listOf(4242u), process.ledger.pids(a.id)) // A's own live server is untouched.
+        assertEquals(emptyList<UInt>(), process.ledger.pids(b))
+        assertEquals(listOf(4242u), process.ledger.pids(a)) // A's own live server is untouched.
+    }
+
+    @Test
+    fun changingTheHostDestinationDoesNotSendOldPidsToTheNewHost() = runTest {
+        val process = Proc(this, MemoryPrefStore())
+        process.ledger.record(host, 4242u)
+        process.holder.release(host.id, closeTerminals = false) // What an edit of the destination does to the connection.
+        val edited = host.copy(addresses = listOf(HostEndpoint("different.invalid", 22)))
+        process.connect(edited)
+        assertTrue("an old server id was sent to an unrelated destination", process.ports[0].stopped.isEmpty())
+    }
+
+    @Test
+    fun aProcessThatDiedBeforeTheEditNeverSendsItsPidsToTheEditedDestination() = runTest {
+        val store = MemoryPrefStore()
+        // The old process recorded a server for the old destination and died without any cleanup.
+        val old = Proc(this, store)
+        old.connect()
+        old.open()
+        old.sessionState(0, 0, SessionState.Connected)
+        assertEquals(listOf(4242u), old.recorded)
+
+        // In the new process the stored host now has another address (same id), and the user connects it.
+        // Whatever runs at that address (here: pid 4242 is a live mosh-server of somebody else) is not ours.
+        val edited = host.copy(addresses = listOf(HostEndpoint("other.invalid", 2222)))
+        val fresh = Proc(this, store)
+        fresh.connect(edited)
+        assertTrue("an old server id was sent to the edited destination", fresh.ports[0].stopped.isEmpty())
+        // The same applies to another login on the same machine.
+        val otherUser = host.copy(record = host.record.copy(username = "someone-else"))
+        val account = Proc(this, store)
+        account.connect(otherUser)
+        assertTrue("an old server id was sent to another account", account.ports[0].stopped.isEmpty())
+        // The record is kept for the destination it belongs to.
+        val same = Proc(this, store)
+        same.connect(host)
+        assertEquals(listOf(4242u), same.ports[0].stopped)
+    }
+
+    @Test
+    fun editingTheDestinationOrLoginPurgesTheRecordsAndTheRememberedTerminalButOtherEditsKeepThem() = runTest {
+        val store = MemoryPrefStore()
+        val memory = io.github.code_akram.or2.app.ReattachMemory(store)
+        val remembered = io.github.code_akram.or2.app.LastTerminal(host.id, shell, TerminalTransport.MOSH)
+        val process = Proc(this, store)
+        process.holder.userClose = memory
+        process.connect()
+        process.open()
+        process.sessionState(0, 0, SessionState.Connected)
+        memory.remember(remembered)
+        assertEquals(listOf(4242u), process.recorded)
+
+        // Label, key, inbox and transport edits move nothing.
+        process.holder.hostEdited(host, host.copy(record = host.record.copy(label = "Renamed", keyId = "another", showInInbox = false)))
+        assertEquals(listOf(4242u), process.ledger.allPids(host.id))
+        assertEquals(remembered, memory.last.value)
+
+        // A new address list invalidates both, and reverting the edit does not bring them back.
+        val moved = host.copy(addresses = listOf(HostEndpoint("other.invalid", 2222)))
+        process.holder.hostEdited(host, moved)
+        assertEquals(emptyList<UInt>(), process.ledger.allPids(host.id))
+        assertNull(memory.last.value)
+        process.holder.hostEdited(moved, host)
+        assertEquals(emptyList<UInt>(), process.ledger.pids(host))
+
+        // So does another login.
+        process.ledger.record(host, 777u)
+        memory.remember(remembered)
+        process.holder.hostEdited(host, host.copy(record = host.record.copy(username = "someone-else")))
+        assertEquals(emptyList<UInt>(), process.ledger.allPids(host.id))
+        assertNull(memory.last.value)
+    }
+
+    @Test
+    fun theIdentityOfAHostIsItsOrderedDestinationsAndLoginOnly() {
+        val base = testHost(addresses = listOf(HostEndpoint("a.example", 22), HostEndpoint("b.example", 2222)))
+        assertEquals(base.moshIdentity(), base.copy(record = base.record.copy(label = "x", keyId = "k2", showInInbox = false)).moshIdentity())
+        assertEquals(base.moshIdentity(), testHost(id = 99, addresses = base.addresses).moshIdentity()) // The id is not part of it.
+        assertTrue(base.moshIdentity() != base.copy(addresses = base.addresses.reversed()).moshIdentity())
+        assertTrue(base.moshIdentity() != base.copy(addresses = listOf(HostEndpoint("a.example", 22), HostEndpoint("b.example", 2223))).moshIdentity())
+        assertTrue(base.moshIdentity() != base.copy(addresses = base.addresses.take(1)).moshIdentity())
+        assertTrue(base.moshIdentity() != base.copy(record = base.record.copy(username = "other")).moshIdentity())
+        // Concatenation cannot fake another list.
+        assertTrue(
+            testHost(addresses = listOf(HostEndpoint("ab", 1))).moshIdentity() !=
+                testHost(addresses = listOf(HostEndpoint("a", 1), HostEndpoint("b", 1))).moshIdentity(),
+        )
     }
 
     @Test
     fun theServersOfOtherHostsAreNotStoppedOverThisConnection() = runTest {
         val store = MemoryPrefStore()
-        MoshServerLedger(store).record(99, 777u)
+        MoshServerLedger(store).record(testHost(id = 99), 777u)
         val process = Proc(this, store)
         process.connect()
         assertTrue(process.ports[0].stopped.isEmpty())
-        assertEquals(listOf(777u), MoshServerLedger(store).pids(99))
+        assertEquals(listOf(777u), MoshServerLedger(store).pids(testHost(id = 99)))
     }
 }

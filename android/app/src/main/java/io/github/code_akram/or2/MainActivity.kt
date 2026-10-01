@@ -34,7 +34,6 @@ import io.github.code_akram.or2.ffi.HostConnectException
 import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.KeyException
 import io.github.code_akram.or2.ffi.generateEd25519Key
-import io.github.code_akram.or2.hosts.connectionAffectedBy
 import io.github.code_akram.or2.keys.VaultException
 import io.github.code_akram.or2.keys.authenticateCipher
 import io.github.code_akram.or2.keys.encryptKey
@@ -172,11 +171,7 @@ class MainActivity : FragmentActivity() {
     private fun saveHost(host: Host, previous: Host?) {
         model.saveHost(host, previous) {
             if (previous == null) return@saveHost
-            if (connectionAffectedBy(previous, host)) app.connections.release(host.id, closeTerminals = false)
-            else {
-                app.connections.setWatching(host.id, host.showInInbox)
-                app.connections.setTransport(host.id, host.transport)
-            }
+            app.connections.hostEdited(previous, host)
         }
     }
 

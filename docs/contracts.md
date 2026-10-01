@@ -1842,8 +1842,18 @@ The app records its pid and stops it over the next SSH connection to that host.
   (`CommandFailed`: no free SSH channel, a slow host, a failed stop; `Closed`: the connection ended;
   `InvalidName` for pid 0) means it may still run. Not-connected hosts answer `NotConnected`. The stop is a plain exec: it does not go through
   the host's `ServerDebt`, because the caller (the app) is the one that keeps the record and retries.
-- **Record (`MoshServerLedger`, Kotlin).** `(host id, pid)` pairs in the app's private preferences
-  (`mosh_servers`, `1:4242,7:555`; no key, nothing secret). `HostConnections` records the pid when a mosh
+- **Record (`MoshServerLedger`, Kotlin).** `(host id, pid, identity)` entries in the app's private preferences
+  (`mosh_servers`, `1:4242:9f2c...,7:555:41ab...`; no key, nothing secret). **The identity binds a record to the
+  destination and login that created it:** `Host.moshIdentity()`, the first 128 bits of a SHA-256 over the
+  username and the *ordered* address list with ports (the id, label, key, inbox flag and transport are not part
+  of it). A pid only names a process on the machine and account that started it, and an edited host keeps its id,
+  so `pids(host)` returns only entries whose identity equals the host's current one: a stop is never sent to an
+  edited destination or another login, where the same number may be somebody else's live `mosh-server`.
+  `HostConnections.hostEdited(previous, updated)` (the host form's save) also **invalidates**: when the address
+  list or the username changed it purges the host's entries and forgets the remembered terminal (it named a pane
+  of the old destination), and reverting the edit does not bring them back; a label, key, inbox or transport
+  edit keeps both. Entries without an identity (written before it existed) are dropped on read: they cannot be
+  tied to a destination. `HostConnections` records the pid when a mosh
   session reaches `Connected` (the process can die at any moment after), and clears it when the session
   closes `Disconnected` (Rust stopped the server before reporting the close, or the peer confirmed) or
   `RemoteExited` (the server announced its own end). A session that closes `Failed` stays recorded: its
@@ -1865,10 +1875,12 @@ The app records its pid and stops it over the next SSH connection to that host.
   `sleep` the test owns) is not signalled, a server already gone and a pid nothing has are `Ok`, pid 0 is
   `InvalidName`, a closed host answers `Closed`. Core unit tests (`host`: the command carries the pid and is
   answered through its reply; `session`: the pid reads before and after the close). JVM: `MoshServerLedgerTest`
-  (per host, durable, tolerant of foreign text, purge), `HostConnectionsMoshServerTest` (recorded at
+  (per host and destination, durable, tolerant of foreign text, purge), `HostConnectionsMoshServerTest` (recorded at
   `Connected`, cleared on `Disconnected` and `RemoteExited`, kept on `Failed`, a new process stops the old
   process's server and forgets it, a failed stop is retried on the next connection, a live session's server
-  is spared on a reconnect, other hosts' servers are untouched, deleting a host forgets its servers) and the
+  is spared on a reconnect but only on its own host, other hosts' servers are untouched, deleting a host forgets
+  its servers, a record is never sent to an edited destination or another login, also after a process death,
+  and a destination or login edit purges the records and the remembered terminal) and the
   real FFI through the probe (`HostConnectionsProbeTest`).
 - **Limits, accepted.** The record is written only for a session that reached `Connected`: a start that failed
   with a pid the stop could not reach (host lost during the bootstrap) is not recorded. A user disconnect

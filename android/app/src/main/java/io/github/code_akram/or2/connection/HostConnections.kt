@@ -26,6 +26,7 @@ import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.ffi.TmuxSession
 import io.github.code_akram.or2.ffi.connectHost
+import io.github.code_akram.or2.hosts.connectionAffectedBy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
@@ -410,6 +411,27 @@ class HostConnections(
         }
     }
 
+    /**
+     * The user saved [updated] over [previous]. An edit of the destination, login or key ends the
+     * connection ([release], terminals kept); the inbox flag and transport preference follow a live
+     * connection. An edit of the destination (the ordered address list) or the login also
+     * **invalidates what was learned about the old one**: the recorded orphan servers (a pid means
+     * nothing on another machine or account, see [MoshServerLedger]) and the remembered terminal
+     * (it named a pane of the old destination). A label, key, inbox or transport edit keeps both.
+     */
+    fun hostEdited(previous: Host, updated: Host) {
+        if (connectionAffectedBy(previous, updated)) {
+            release(updated.id, closeTerminals = false)
+        } else {
+            setWatching(updated.id, updated.showInInbox)
+            setTransport(updated.id, updated.transport)
+        }
+        if (previous.moshIdentity() != updated.moshIdentity()) {
+            moshServers?.purge(updated.id)
+            userClose?.hostClosed(updated.id)
+        }
+    }
+
     private fun retireHost(current: ActiveHost) {
         if (current.destroyed) return
         current.retired = true
@@ -632,7 +654,7 @@ class HostConnections(
             null
         } ?: return
         terminal.moshServerPid = pid
-        ledger.record(terminal.host.id, pid)
+        ledger.record(terminal.host, pid)
     }
 
     /**
@@ -643,7 +665,7 @@ class HostConnections(
     private fun forgetMoshServer(terminal: ActiveTerminal, reason: CloseReason) {
         val ledger = moshServers ?: return
         val pid = terminal.moshServerPid ?: return
-        if (reason is CloseReason.Disconnected || reason is CloseReason.RemoteExited) ledger.clear(terminal.host.id, pid)
+        if (reason is CloseReason.Disconnected || reason is CloseReason.RemoteExited) ledger.clear(terminal.host, pid)
     }
 
     /**
@@ -659,13 +681,13 @@ class HostConnections(
         val live = mutableTerminals.value
             .filter { it.host.id == current.host.id && it.state.value !is SessionState.Closed }
             .mapNotNull { it.moshServerPid }.toSet()
-        val orphans = orphanedServers(ledger.pids(current.host.id), live)
+        val orphans = orphanedServers(ledger.pids(current.host), live)
         if (orphans.isEmpty()) return
         scope.launch {
             for (pid in orphans) {
                 try {
                     current.ready.await().stopMoshServer(pid)
-                    ledger.clear(current.host.id, pid)
+                    ledger.clear(current.host, pid)
                 } catch (error: CancellationException) {
                     throw error
                 } catch (_: Exception) {
