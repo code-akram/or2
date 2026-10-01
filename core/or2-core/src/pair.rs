@@ -494,6 +494,17 @@ pub async fn submit_key<T: Transport>(
     timing: PairTiming,
 ) -> Result<(), PairError> {
     let exchange = offer.exchange.as_ref().ok_or(PairError::NoExchange)?;
+    submit_exchange(transport, exchange, public_key_line, device, timing).await
+}
+
+/// [`submit_key`] for the exchange part of an offer alone (the FFI keeps no whole offers).
+pub async fn submit_exchange<T: Transport>(
+    transport: &Arc<T>,
+    exchange: &PairExchange,
+    public_key_line: &str,
+    device: &str,
+    timing: PairTiming,
+) -> Result<(), PairError> {
     let key = clean_key(public_key_line)?;
     let device = label(device.to_owned()).ok_or(PairError::InvalidDevice)?;
     let raced = race_with(

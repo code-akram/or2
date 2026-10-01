@@ -6,6 +6,7 @@ pub mod frame;
 pub mod herdr;
 pub mod host;
 pub mod keys;
+pub mod pair;
 pub mod probe;
 pub mod session;
 
@@ -36,7 +37,7 @@ pub enum TerminalError {
 }
 
 /// Bumped whenever an exported signature or record changes shape.
-pub const API_VERSION: u32 = 10;
+pub const API_VERSION: u32 = 11;
 
 #[uniffi::export]
 pub fn build_info() -> BuildInfo {
