@@ -20,7 +20,7 @@ Touch targets: visible sizes are small, hit areas are not. Every clickable's tou
 by the platform to at least 48 dp (hit testing; `touchBoundsInRoot`), and primary controls are
 drawn at least 40 dp tall (44 dp rows, fields and primary buttons, 40 dp arrow-pad keys and
 toolbar touch boxes). Only secondary controls are drawn below 40 dp (segmented 32, chips 28,
-pad extras 36, header discs 14 in a 36 dp box) and rely on the platform growth.
+pad extras 36, header discs 18 in a 48 x 36 dp box) and rely on the platform growth.
 
 ## Palette
 
@@ -37,6 +37,7 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 | `scrim` | `#101019` at ~70 % | behind sheets and dialogs |
 | `text` | `#CDD6F4` | titles, row labels, input text |
 | `textMuted` | `#9399B2` (overlay2) | section headers, subtitles, values, hints, placeholders: every piece of secondary *text*. At least 4.5:1 on `background`, `surface`, `surfaceRaised`, the terminal card and `crust` (`ThemeTest` checks it) |
+| `placeholder` | `#A6ADC8` (subtext0) | field placeholders: one step above `textMuted` (6.7:1 on `surface`) because the light weight at 12-13 sp reads dimmer than its contrast; still dimmer than typed `text` |
 | `subtle` | `#6C7086` (overlay0) | icons, chevrons, drag handles, idle dots: dim by design, never used for text |
 | `crust` | `#11111B` | the composer card: darker than the terminal and the key pills around it |
 | `accent` | `#89B4FA` | primary buttons, FAB, toggles, selection, links, checkmarks; text on accent is `background` |
@@ -61,9 +62,10 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 - Scale (sp, compact): screen/sheet title 20 light; **top-bar title of a pushed screen 16 light**
   (form, keys, host); card title 15; row label 14; body 13; secondary 12; button 14;
   section header 10.5 UPPERCASE with +0.08 em tracking in `textMuted`; mono 12, mono small 10.5;
-  kicker 10 UPPERCASE mono with +0.15 em tracking in `accent` at ~70 %; toolbar and pad keys 12
+  kicker 11 UPPERCASE mono with +0.15 em tracking in full `accent` (the key algorithm in a host-key
+  dialog is security information; a 70 % accent was 4.1:1); toolbar and pad keys 12
   mono; composer text 13 mono; overlay pills on thumbnails and the terminal header's transport
-  badge 10 mono; badge 11; chip 12.
+  badge 11 mono; badge 11; chip 12. Small mono lines (10.5) sit on a 16 sp line grid.
 
 ## Layout
 
@@ -82,14 +84,14 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 - Glow: a wide, flat ellipse behind the top bar (gone before lists start, so sticky headers on a
   plain `background` have no visible edge) and a modest radial in the bottom-right corner.
 - Primary action: full-width pill button (`accent`, 44 dp tall; the disabled label is
-  `textMuted` on `accentMuted`) at the end of a form, with a one-line muted footnote below. Top-bar
+  `text` at 80 % (`#AEB7D4`, 5.5:1) on `accentMuted`; `textMuted` there was 3.9:1) at the end of a form, with a one-line muted footnote below. Top-bar
   check mark mirrors it.
 - Scrolling content runs edge to edge and scrolls *under* the gesture bar: screens apply only the
   side and top insets at the root and end their scrolling content with `BottomInsetSpacer` (the
   navigation-bar inset, minus the keyboard when it is up), so lists are never cut flat above the
   gesture pill. The FAB and the notices sit above the bar.
 - Touch targets: see "Compact scale". Small drawn controls keep a layout box of 36-44 dp and the
-  platform grows the hit area to 48 dp: terminal header buttons are 14 dp discs in 36 dp boxes,
+  platform grows the hit area to 48 dp: terminal header buttons are 18 dp discs in 48 x 36 dp boxes (neighbouring discs 48 dp apart, so their targets never overlap),
   status chips that are buttons are 28 dp, the composer's bare icon actions are 40 dp boxes (the
   send button is a 36 dp disc in a 40 dp box). The toolbar and arrow-pad-extras keys are 30 x 40 dp
   touch boxes (30 dp drawn) and 28-38 x 36 dp, shoulder to shoulder, so a tap lands on the nearest
@@ -101,17 +103,18 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 - Empty states: centred 72 dp `surface` circle with a 32 dp outline icon, a 20 sp title and a
   muted two-line explanation, then an optional call-to-action card.
 - Bottom sheets: `surfaceRaised`, 24 dp top radius, drag handle; option and detail sheets have a title
-  left and "Done" right. The session picker has neither, like Moshi's, and a minimum height of 55 % of
-  the screen so the segmented control stays put when the tab (and so the list) changes.
+  left and "Done" right. The session picker has neither, like Moshi's, and a minimum height of 40 % of
+  the screen (a sheet for three rows is not mostly empty) so the segmented control stays put when the tab (and so the list) changes
+  unless a list grows past it.
 
 ## Components
 
-- **Host card:** `surface` card, leading 24 dp server icon (no tile fill; Moshi draws it bare) with
+- **Host card:** `surface` card, leading 20 dp server icon (no tile fill; Moshi draws it bare) with
   a status dot (attention when an agent is blocked or a host-key decision waits, accent while
   connecting, green when connected, danger on failure), name (15 sp) and mono
   `user@host:port` subtitle, trailing chevron. Connection progress replaces the subtitle in
   place (`Checking server...`, `Unlocking key...`, `Authenticating...`) with an accent spinner in
-  the icon's own 24 dp slot, on a faint `surfaceTrack` ring, so the glyph never jumps sideways; no
+  the icon's own 20 dp slot (the spinner is exactly the icon's size, so the leading column lines up), on a faint `surfaceTrack` ring, so the glyph never jumps sideways; no
   modal progress dialogs. The card's semantics carry the state ("Connected", "Needs attention", ...)
   as well as the dot colour.
 - **Status chip:** pill in `surface` with an 8 dp coloured dot and muted label, e.g.
@@ -121,17 +124,22 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   `host · workspace / tab`, trailing relative time; blocked rows first and tinted with
   `attentionSurface`. Sticky muted section headers per status.
 - **Grouped settings list:** rows inside one `surface` card separated by inset hairlines.
+- **Dialogs:** a `surfaceRaised` card with 12 dp screen gutters, 16 dp inside, the title, the body and the
+  buttons right-aligned beneath (wrapping when they do not fit): the same gutter as the rest of the UI,
+  not Material's 24 dp padding and 280 dp minimum width. The host-key dialogs use it too.
+- **Inbox host rows:** the connect action (`Retry`, `Unlock`) is a chip-scale pill (28 dp, 12 sp), so it does not
+  crowd the status text; herdr's note is mono 10.5 on the 16 sp line grid.
 - **Segmented control:** 32 dp `surfaceTrack` pill, selected segment `surface` with `text`, others
   `textMuted`.
-- **Toggle:** `accent` track with a `background` knob when on; `surfaceTrack` when off.
+- **Toggle:** `accent` track with a `text` knob when on (a `background` knob read as a hole); `surfaceTrack` with a muted knob when off.
 - **Stepper:** pill `− value +` in `surfaceTrack`.
 - **Text field:** filled `surface`, 44 dp tall, 12 dp radius, no outline; label above in `text`;
-  placeholder in mono `textMuted`.
+  placeholder in mono `placeholder`.
 - **Home:** the start destination, with trailing icon buttons only (agents inbox, keys). The agents
   inbox is its sibling top-level screen: sticky status headers, blocked rows tinted, an empty
   state, and each host's connection status with its connect action (herdr's own explanation of
   an unavailable session in muted mono). Sections in order: SESSIONS
-  (open sessions as live terminal thumbnail cards, ~45 % width, rounded 16 dp, the terminal inset
+  (open sessions as live terminal thumbnail cards, ~38 % width, rounded 16 dp, the terminal inset
   8 dp so corners never slice glyphs, with a compact host pill and a transport pill — `SSH`/`Mosh`
   — overlaid, 13 sp title and mono path below; tap resumes), CONNECTIONS (host cards, "Long press for options." hint right-aligned in the
   section header), then status chips. A FAB adds a host.
@@ -143,12 +151,15 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 - **Session picker sheet:** opens after a host connects (and from the host screen): a
   segmented control (`herdr` / `tmux` / `Recent`) with a trailing "Skip" pill that opens a
   plain shell; below, one grouped list of herdr sessions (`● Running`), tmux sessions (`●
-  Attached`, with a "new session" field) or, under Recent, the open terminals of the host.
+  Attached`, with a "new session" field) or, under Recent, the open terminals of the host. A herdr
+  row is title-only (44 dp) with its state at the right (`● Running`, or a dim `● Not running` and a
+  muted title for a stopped one), never as a second caption line as well. The "Refresh" row's icon
+  starts at the rows' text inset.
 - **Terminal screen:** the terminal sits in a full-height card with a 24 dp top radius and a
   drag handle (drag down to minimise to the SESSIONS thumbnail). Header row inside the card, 36 dp:
-  a small round "minimise" button (14 dp disc, `attention`) and sidebar toggle (14 dp, green) in
-  36 dp boxes (48 dp touch targets), the mono title (`host: target`) in `textMuted`, and a trailing transport badge
-  (`Mosh` in a saturated teal pill with dark text, `SSH` in a `surfaceTrack` pill with 70 % text).
+  a small round "minimise" button (18 dp disc with a 12 dp glyph, `attention`) and sidebar toggle (18 dp, green) in
+  48 x 36 dp boxes (48 dp touch targets that do not overlap), the mono title (`host: target`) in `textMuted`, and a trailing transport badge
+  (`Mosh` in a saturated teal pill with dark text, `SSH` in a `surfaceTrack` pill with full `text`).
   The drag handle overlaps the top of the 36 dp header row, so the header costs no extra height.
   The card follows the terminal's own background (the remote can change it with OSC 11). The sidebar toggle opens the sessions sheet
   (switch session, disconnect). The terminal is edge to edge below it with a thin `accent`
@@ -162,15 +173,17 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   one key; `Alt` lives in the arrow pad's extras row. While text is selected `Copy` and `Clear`
   join the row. Horizontally scrollable when it overflows.
 - **Arrow pad:** the arrow key expands a floating 3×3 cluster above the toolbar: Backspace,
-  Up, Clear-line / Left, Enter, Right / Down; keys are 40 dp `surface` squares with 12 dp
-  radius and 6 dp gaps, a grab handle above collapses it. Keys auto-repeat on hold (after 400 ms, every 60 ms).
+  Up, Clear-line / Left, Enter, Right / Down; keys are 40 dp `surface` squares (Enter `surfaceTrack`) with 12 dp
+  radius and 6 dp gaps, on an opaque `crust` backing (16 dp radius, 6 dp padding) so scrolled terminal text
+  never shows between the keys; the grab handle that collapses it is inside the backing, at its top. Keys auto-repeat on hold (after 400 ms, every 60 ms).
   Clear-line is an eraser outline. Below the cluster a 36 dp scrolling pill keeps `Alt`, `Home`,
   `End`, `PgUp`, `PgDn` and the shell symbols (28 dp keys, label-wide navigation keys) one tap away,
   with an edge fade on each side that has more keys behind it.
 - **Composer (chat input):** a rounded 20 dp `crust` card docked above the IME and above the key
-  toolbar (which stays, so `Esc`, `Ctrl` and `Tab` remain reachable), with a 13 sp mono placeholder
-  (`Message <host>...`), a row of icon actions (paste, panes, close; 40 dp boxes) and, right-aligned, a
-  36 dp circular send button (`surfaceTrack` until there is text and the session is connected, then
+  toolbar (which stays, so `Esc`, `Ctrl` and `Tab` remain reachable), in one row (about 40 dp for a single line, growing to five): a 13 sp mono
+  placeholder (`Message <host>...`) or the text, a close action (40 dp box) and a
+  36 dp circular send button at the right. Paste and the panes sheet are not repeated in the card: the toolbar
+  directly below has both, and the keyboard pastes into the text. The send button (`surfaceTrack` until there is text and the session is connected, then
   `accent`). Sending calls the session's `submit_text`: Rust writes the text (one bracketed paste
   when the program enabled it) and then Enter as a separate write after a short pause, so agent
   TUIs with paste-burst detection submit instead of inserting a newline; this is the quick-reply

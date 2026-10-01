@@ -249,7 +249,7 @@ fun SessionPickerSheet(
     var chosen by remember { mutableStateOf(initialTab) }
     val tab = chosen ?: if (caps != null && caps.herdr == null && caps.tmux != null) PickerTab.TMUX else PickerTab.HERDR
     // A fixed minimum height keeps the segmented control where the thumb left it when the tab changes.
-    val minHeight = (LocalConfiguration.current.screenHeightDp * 0.55f).dp
+    val minHeight = (LocalConfiguration.current.screenHeightDp * 0.4f).dp
     Or2Sheet(dismiss, title = null, done = null) {
         Column(Modifier.imePadding().heightIn(min = minHeight).testTag("session-picker")) {
             Row(Modifier.fillMaxWidth().padding(horizontal = Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
@@ -272,7 +272,9 @@ fun SessionPickerSheet(
                 }
                 if (tab != PickerTab.RECENT) {
                     Row(
-                        Modifier.clickable(role = Role.Button, onClick = refresh).padding(vertical = 8.dp).testTag("host-refresh"),
+                        // The icon starts at the rows' text inset (their 12 dp padding inside the card, less the glyph's own margin).
+                        Modifier.clickable(role = Role.Button, onClick = refresh)
+                            .padding(start = Or2Dimens.Gutter - 2.dp, end = Or2Dimens.Gutter, top = 8.dp, bottom = 8.dp).testTag("host-refresh"),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(Or2Icons.Refresh, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.TextMuted)
@@ -324,10 +326,11 @@ private fun HerdrList(caps: HostCapabilities?, capsError: String?, open: (String
                 if (index > 0) GroupDivider()
                 SheetRow(
                     "herdr:${session.name}", session.name + if (session.isDefault) " (default)" else "",
-                    if (session.running) "running" else "not running",
+                    // The state is the marker at the right, never a second caption line as well.
+                    null,
                     // The default session is opened without a name, never by its listed name.
                     { open(if (session.isDefault) null else session.name) }, "herdr-open:${session.name}", enabled = session.running,
-                    marker = if (session.running) ({ Marker(Or2Colors.Done, "Running") }) else null,
+                    marker = { if (session.running) Marker(Or2Colors.Done, "Running") else Marker(Or2Colors.Subtle, "Not running") },
                 )
             }
         }

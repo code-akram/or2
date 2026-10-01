@@ -12,6 +12,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import org.junit.Assert.assertNull
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -141,6 +142,21 @@ class TerminalChromeDeviceTest {
     }
 
     @Test
+    fun theArrowPadKeysAndItsGripSitOnOneOpaqueBacking() {
+        show(pad = true)
+        val backing = compose.onNodeWithTag("pad-backing").fetchSemanticsNode().boundsInRoot
+        val density = compose.activity.resources.displayMetrics.density
+        val inside = listOf("pad:Backspace", "pad:Clear", "pad:Left", "pad:Right", "pad:Down").map {
+            it to compose.onNodeWithTag(it).fetchSemanticsNode().boundsInRoot
+        } + ("grip" to compose.onNodeWithContentDescription("Collapse arrow pad").fetchSemanticsNode().boundsInRoot)
+        inside.forEach { (name, bounds) ->
+            // Every key and the grip lie within the backing, with the 6 dp padding around them.
+            assertTrue("$name $bounds in $backing", bounds.left >= backing.left + 5 * density && bounds.right <= backing.right - 5 * density)
+            assertTrue("$name $bounds in $backing", bounds.top >= backing.top + 5 * density && bounds.bottom <= backing.bottom - 5 * density)
+        }
+    }
+
+    @Test
     fun padKeysRepeatWhileHeldAndStopOnRelease() {
         show(pad = true)
         compose.waitForIdle()
@@ -186,8 +202,6 @@ class TerminalChromeDeviceTest {
         compose.onNodeWithTag("key:Esc").assertIsDisplayed() // The toolbar stays: Esc, Ctrl and Tab are one tap away.
         compose.onNodeWithTag("key:Esc").performClick()
         compose.runOnIdle { assertEquals(TerminalKey.Escape, session.keys.last().key) }
-        compose.onNodeWithTag("composer-panes").performClick()
-        compose.runOnIdle { assertEquals(1, panes) }
         compose.onNodeWithTag("composer-close").performClick()
         compose.onNodeWithTag("composer-input").assertDoesNotExist()
         compose.onNodeWithTag("key:Esc").assertIsDisplayed()
@@ -239,9 +253,23 @@ class TerminalChromeDeviceTest {
     }
 
     @Test
+    fun theComposerIsOneCompactRowWithoutTheToolbarsDuplicateActions() {
+        show(composer = true)
+        compose.onNodeWithTag("composer-paste").assertDoesNotExist()
+        compose.onNodeWithTag("composer-panes").assertDoesNotExist()
+        val density = compose.activity.resources.displayMetrics.density
+        val composer = compose.onNodeWithTag("composer").fetchSemanticsNode().boundsInRoot
+        // One line of text and the actions share one row: about 40 dp (the old two-row card was 83 dp).
+        assertTrue("composer is ${composer.height / density} dp tall", composer.height <= 52 * density)
+        val input = compose.onNodeWithTag("composer-input").fetchSemanticsNode().boundsInRoot
+        val send = compose.onNodeWithTag("composer-send").fetchSemanticsNode().boundsInRoot
+        assertTrue("send sits right of the text on the same row", send.left >= input.right - 1 && send.bottom <= composer.bottom + 1 && send.top >= composer.top - 1)
+    }
+
+    @Test
     fun theComposerActionsHaveFullSizeTouchTargets() {
         show(composer = true)
-        listOf("composer-paste", "composer-panes", "composer-close", "composer-send").forEach {
+        listOf("composer-close", "composer-send").forEach {
             compose.onNodeWithTag(it).assertTouchTargetAtLeast(48)
         }
     }

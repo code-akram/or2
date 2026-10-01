@@ -42,6 +42,12 @@ object Or2Colors {
 
     /** Icons, chevrons, handles and idle dots: Catppuccin overlay0. Too dim for text. */
     val Subtle = Color(0xFF6C7086)
+
+    /** Field placeholders: Catppuccin subtext0, one step above `textMuted` so a hint reads at the light weight (6.7:1 on `surface`). */
+    val Placeholder = Color(0xFFA6ADC8)
+
+    /** The label of a disabled primary button on `accentMuted`: `text` at 80 % composited (5.5:1; `textMuted` there was 3.9:1). */
+    val OnAccentDisabled = Color(0xFFAEB7D4)
     val Accent = Color(0xFF89B4FA)
     val AccentMuted = Color(0xFF343B53)
     val Attention = Color(0xFFFAB387)
@@ -100,9 +106,12 @@ object Or2Dimens {
 
     /** The terminal header row and its buttons: a small visible disc in a 36 dp target (the platform grows it to 48). */
     val HeaderRow = 36.dp
-    val HeaderButtonDisc = 14.dp
-    val HeaderButtonGlyph = 9.dp
+    val HeaderButtonDisc = 18.dp
+    val HeaderButtonGlyph = 12.dp
     val HeaderButtonTouch = 36.dp
+
+    /** The header buttons' boxes are 48 dp wide, so neighbouring discs are 48 dp apart centre to centre and their touch targets never overlap. */
+    val HeaderButtonTouchWidth = 48.dp
     val TerminalInset = 4.dp
 
     /** The arrow pad's extras pill: 36 dp tall, symbol keys 28 dp wide, navigation keys as wide as their label. */
@@ -114,7 +123,8 @@ object Or2Dimens {
     /** The composer's actions are 36 dp circles (the send button's fill); icon-only actions have a 40 dp touch box. */
     val ComposerAction = 36.dp
     val ComposerTouch = 40.dp
-    val Spinner = 24.dp
+    /** The connecting spinner sits in the server icon's own slot, so it is exactly the icon's size. */
+    val Spinner = Icon
 }
 
 object Or2Shapes {
@@ -124,6 +134,7 @@ object Or2Shapes {
     val Thumbnail = RoundedCornerShape(12.dp)
     val Key = RoundedCornerShape(12.dp)
     val Composer = RoundedCornerShape(20.dp)
+    val PadBacking = RoundedCornerShape(16.dp)
     val Pill = RoundedCornerShape(percent = 50)
     val Circle = CircleShape
     val Sheet = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
@@ -149,15 +160,15 @@ object Or2Type {
         fontFamily = sans, fontWeight = FontWeight.Normal, fontSize = 10.5.sp, lineHeight = 14.sp, letterSpacing = 0.08.em,
     )
     val Kicker = TextStyle(
-        fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 10.sp, lineHeight = 13.sp, letterSpacing = 0.15.em,
+        fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 11.sp, lineHeight = 14.sp, letterSpacing = 0.15.em,
     )
     val Mono = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 12.sp, lineHeight = 16.sp)
-    val MonoSmall = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 10.5.sp, lineHeight = 14.sp)
+    val MonoSmall = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 10.5.sp, lineHeight = 16.sp)
     val MonoLarge = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 14.sp, lineHeight = 19.sp)
     val Badge = TextStyle(fontFamily = sans, fontWeight = FontWeight.Normal, fontSize = 11.sp, lineHeight = 14.sp)
 
     /** Overlay pills on thumbnails and the terminal header's transport badge: small, they sit on the terminal. */
-    val Pill = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 10.sp, lineHeight = 13.sp)
+    val Pill = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 11.sp, lineHeight = 14.sp)
     val Chip = TextStyle(fontFamily = sans, fontWeight = FontWeight.Light, fontSize = 12.sp, lineHeight = 16.sp)
 
     /** Toolbar and pad keys (`Ctrl`, `Esc`, `Tab`). */

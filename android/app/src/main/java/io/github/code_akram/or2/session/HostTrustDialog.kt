@@ -67,7 +67,7 @@ fun HostTrustDialog(
             }
             Text(
                 (if (changed) "NEW KEY · " else "") + prompt.presented.algorithm, style = Or2Type.Kicker,
-                color = accent.copy(alpha = 0.8f),
+                color = accent,
             )
             MonoBlock(prompt.presented.fingerprint, color = if (changed) Or2Colors.Danger else Or2Colors.Text,
                 modifier = Modifier.testTag("hostkey-presented"))

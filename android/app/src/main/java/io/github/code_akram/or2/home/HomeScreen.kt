@@ -267,11 +267,11 @@ private fun dotColor(dot: HostDot): Color? = when (dot) {
     HostDot.FAILED -> Or2Colors.Danger
 }
 
-/** Thumbnails about 45 % of the width each, scrolling sideways. */
+/** Thumbnails about 38 % of the width each, scrolling sideways. */
 @Composable
 private fun SessionRow(sessions: List<HomeSession>, open: (HomeSession) -> Unit) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val cardWidth = maxWidth * 0.45f
+        val cardWidth = maxWidth * 0.38f
         Row(Modifier.horizontalScroll(rememberScrollState()).testTag("sessions-row"), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             sessions.forEach { SessionCard(it, cardWidth) { open(it) } }
         }

@@ -173,9 +173,10 @@ fun TerminalCard(
 
 @Composable
 private fun RoundHeaderButton(icon: ImageVector, description: String, color: Color, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    // A small round disc (14 dp) in a 36 dp target; the platform grows the touch target to 48 dp.
+    // A small round disc (18 dp) in a 48 x 36 dp box; the platform grows the height of the touch target to 48 dp,
+    // and neighbouring boxes do not overlap, so a tap between two discs goes to the nearer one.
     Box(
-        modifier.size(Or2Dimens.HeaderButtonTouch).clip(Or2Shapes.Circle).clickable(role = Role.Button, onClick = onClick)
+        modifier.size(Or2Dimens.HeaderButtonTouchWidth, Or2Dimens.HeaderButtonTouch).clip(Or2Shapes.Pill).clickable(role = Role.Button, onClick = onClick)
             .semantics { contentDescription = description },
         contentAlignment = Alignment.Center,
     ) {
@@ -185,11 +186,11 @@ private fun RoundHeaderButton(icon: ImageVector, description: String, color: Col
     }
 }
 
-/** `SSH` in a `surfaceTrack` pill with 70 % text (it sits on the terminal), `Mosh` in a saturated teal one. */
+/** `SSH` in a `surfaceTrack` pill with full `text` (it sits on the terminal), `Mosh` in a saturated teal one. */
 @Composable
 fun TransportBadge(transport: Transport, modifier: Modifier = Modifier, small: Boolean = false) {
     when (transport) {
-        Transport.SSH -> Badge(transport.label, modifier, container = Or2Colors.SurfaceTrack, content = Or2Colors.Text.copy(alpha = 0.7f), small = small)
+        Transport.SSH -> Badge(transport.label, modifier, container = Or2Colors.SurfaceTrack, content = Or2Colors.Text, small = small)
         Transport.MOSH -> Badge(transport.label, modifier, container = Or2Colors.Teal, content = Or2Colors.Background, small = small)
     }
 }

@@ -186,7 +186,7 @@ private fun HostStatusRow(row: InboxHostRow, busy: Boolean, connect: () -> Unit,
             row.herdrNote?.let { Text(it, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.testTag("inbox-herdr-note:${row.host.id}")) }
         }
         if (row.link == LinkStatus.NOT_CONNECTED || failed) {
-            PillButton(if (failed) "Retry" else "Unlock", connect, Modifier.testTag("inbox-connect:${row.host.id}"),
+            PillButton(if (failed) "Retry" else "Unlock", connect, Modifier.testTag("inbox-connect:${row.host.id}"), compact = true,
                 enabled = !busy && row.host.keyId != null)
         }
     }

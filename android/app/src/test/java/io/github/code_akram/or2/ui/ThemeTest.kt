@@ -25,6 +25,8 @@ class ThemeTest {
         assertEquals("#CDD6F4", hex(Or2Colors.Text))
         assertEquals("#9399B2", hex(Or2Colors.TextMuted))
         assertEquals("#6C7086", hex(Or2Colors.Subtle))
+        assertEquals("#A6ADC8", hex(Or2Colors.Placeholder))
+        assertEquals("#AEB7D4", hex(Or2Colors.OnAccentDisabled))
         assertEquals("#0FA89A", hex(Or2Colors.Teal))
         assertEquals("#11111B", hex(Or2Colors.Crust))
         assertEquals("#89B4FA", hex(Or2Colors.Accent))
@@ -51,10 +53,12 @@ class ThemeTest {
         assertEquals(13f, Or2Type.Body.fontSize.value, 0f)
         assertEquals(12f, Or2Type.Secondary.fontSize.value, 0f)
         assertEquals(10.5f, Or2Type.SectionHeader.fontSize.value, 0f)
-        assertEquals(10f, Or2Type.Kicker.fontSize.value, 0f)
+        assertEquals(11f, Or2Type.Kicker.fontSize.value, 0f)
         assertEquals(12f, Or2Type.Mono.fontSize.value, 0f)
         assertEquals(10.5f, Or2Type.MonoSmall.fontSize.value, 0f)
-        assertEquals(10f, Or2Type.Pill.fontSize.value, 0f)
+        assertEquals(11f, Or2Type.Pill.fontSize.value, 0f)
+        // Mono lines sit on a 16 sp grid, so stacked notes (title, status, herdr note) keep an even rhythm.
+        assertEquals(16f, Or2Type.MonoSmall.lineHeight.value, 0f)
         assertEquals(13f, Or2Type.Composer.fontSize.value, 0f)
         assertEquals(0.08f, Or2Type.SectionHeader.letterSpacing.value, 0f)
         assertEquals(0.15f, Or2Type.Kicker.letterSpacing.value, 0f)
@@ -101,6 +105,32 @@ class ThemeTest {
     }
 
     @Test
+    fun placeholdersAndDisabledPrimaryLabelsAreLegible() {
+        // The placeholder is one step brighter than muted text on every field and sheet fill ...
+        listOf(Or2Colors.Surface, Or2Colors.SurfaceRaisedRow, Or2Colors.SurfaceTrack).forEach {
+            assertTrue("placeholder on ${hex(it)}", contrast(Or2Colors.Placeholder, it) >= 4.5)
+            assertTrue(contrast(Or2Colors.Placeholder, it) > contrast(Or2Colors.TextMuted, it))
+        }
+        // ... but stays dimmer than typed text, so a hint never reads as a value.
+        assertTrue(contrast(Or2Colors.Placeholder, Or2Colors.Surface) < contrast(Or2Colors.Text, Or2Colors.Surface))
+        // A disabled primary button's label on its accentMuted fill (muted text there was 3.9:1) is the text colour at 80 %.
+        assertTrue(contrast(Or2Colors.OnAccentDisabled, Or2Colors.AccentMuted) >= 4.5)
+        assertEquals(hex(Or2Colors.Text.copy(alpha = 0.8f).compositeOver(Or2Colors.AccentMuted)), hex(Or2Colors.OnAccentDisabled))
+        // Kicker lines (key algorithms in the host-key dialogs) are full accent, not a dimmed one.
+        assertTrue(contrast(Or2Colors.Accent, Or2Colors.SurfaceRaised) >= 4.5)
+    }
+
+    @Test
+    fun theHeaderButtonsDoNotOverlapEachOther() {
+        // Visible discs 18 dp with a 12 dp glyph; 48 dp wide boxes put neighbouring centres 48 dp apart.
+        assertEquals(18.dp, Or2Dimens.HeaderButtonDisc)
+        assertEquals(12.dp, Or2Dimens.HeaderButtonGlyph)
+        assertEquals(48.dp, Or2Dimens.HeaderButtonTouchWidth)
+        // The connecting spinner takes the server icon's slot exactly.
+        assertEquals(Or2Dimens.Icon, Or2Dimens.Spinner)
+    }
+
+    @Test
     fun layoutConstantsFollowTheDocument() {
         // The compact scale (docs/ui.md): dense by default, small drawn sizes, 40 dp or more for primary controls.
         assertEquals(12.dp, Or2Dimens.Gutter)
@@ -115,7 +145,6 @@ class ThemeTest {
         assertEquals(28.dp, Or2Dimens.Chip)
         assertEquals(20.dp, Or2Dimens.Icon)
         assertEquals(36.dp, Or2Dimens.HeaderRow)
-        assertEquals(14.dp, Or2Dimens.HeaderButtonDisc)
         assertEquals(30.dp, Or2Dimens.Key)
         assertEquals(40.dp, Or2Dimens.KeyTouch)
         assertEquals(40.dp, Or2Dimens.PadKey)

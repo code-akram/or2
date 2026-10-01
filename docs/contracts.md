@@ -1232,6 +1232,19 @@ and `Or2Type` in `ui/Theme.kt` carry the compact scale, which is the only scale 
 usable because the platform grows every clickable's touch target to 48 dp; primary controls are
 drawn at least 40 dp tall. The terminal's 12 dp default cell size is unchanged.
 
+Review follow-up (UI-C, deviations from the first compact pass, all recorded in `docs/ui.md`): the
+arrow pad's keys and grip sit on an opaque `crust` backing; the terminal header discs are 18 dp (12 dp
+glyph) in 48 x 36 dp boxes so neighbouring touch targets do not overlap, and the `SSH` pill uses full
+`text` at 11 sp; dialogs are an `Or2Dialog` card with the 12 dp gutter (not Material's `AlertDialog`
+padding); kickers are 11 sp in full `accent`; the connecting spinner is the server icon's 20 dp; the
+session-picker minimum height is 40 % of the screen and herdr rows are title-only with the state at the
+right; `Retry` / `Unlock` are chip-scale; the thumbnails are 38 % of the width; the composer is one row
+(text, close, send), and its paste and panes actions, which duplicated the toolbar's, are removed
+(`Composer` loses its `paste` and `panes` parameters); disabled primary labels and field placeholders
+get their own tokens (`OnAccentDisabled`, `Placeholder`; `ThemeTest` checks the contrast); the toggle
+knob is `text` when on. Not taken as proposed: "disabled content at 0.5 of Text", which computes to 3.2:1
+on `accentMuted` (worse than the 3.9:1 it replaced), so 80 % is used (5.5:1).
+
 M3-A lands its FFI surface and probe support first (a small commit), so M3-B builds against
 real generated bindings; the implementation follows on the same branch.
 

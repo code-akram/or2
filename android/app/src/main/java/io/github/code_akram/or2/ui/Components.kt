@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -32,6 +34,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -40,15 +43,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,6 +74,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 
 // --- top bar -------------------------------------------------------------------------------
 
@@ -324,7 +331,7 @@ fun Or2Field(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Box(Modifier.weight(1f)) {
-                            if (value.isEmpty()) Text(placeholder, style = style, color = Or2Colors.TextMuted, maxLines = 1)
+                            if (value.isEmpty()) Text(placeholder, style = style, color = Or2Colors.Placeholder, maxLines = 1)
                             inner()
                         }
                         trailing?.let {
@@ -373,11 +380,11 @@ fun Segmented(
     }
 }
 
-/** `accent` track with a `background` knob when on; `surfaceTrack` when off. */
+/** `accent` track with a `text` knob when on (a dark knob read as a hole in the track); `surfaceTrack` with a muted knob when off. */
 @Composable
 fun Or2Toggle(checked: Boolean, onCheckedChange: (Boolean) -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
     val track by animateColorAsState(if (checked) Or2Colors.Accent else Or2Colors.SurfaceTrack, label = "toggle-track")
-    val knob by animateColorAsState(if (checked) Or2Colors.Background else Or2Colors.TextMuted, label = "toggle-knob")
+    val knob by animateColorAsState(if (checked) Or2Colors.Text else Or2Colors.TextMuted, label = "toggle-knob")
     val offset by animateDpAsState(if (checked) 18.dp else 0.dp, label = "toggle-offset")
     Box(
         modifier.size(width = 42.dp, height = 26.dp).clip(Or2Shapes.Pill).background(track)
@@ -390,7 +397,7 @@ fun Or2Toggle(checked: Boolean, onCheckedChange: (Boolean) -> Unit, modifier: Mo
 
 // --- buttons ---------------------------------------------------------------------------------
 
-/** The full-width pill at the end of a form: `accent`, 44 dp, text in `background`. */
+/** The full-width pill at the end of a form: `accent`, 44 dp, text in `background`; disabled it is `accentMuted` with a light label. */
 @Composable
 fun PrimaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
     Box(
@@ -399,22 +406,26 @@ fun PrimaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifi
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text, style = Or2Type.Button, color = if (enabled) Or2Colors.Background else Or2Colors.TextMuted, maxLines = 1)
+        Text(text, style = Or2Type.Button, color = if (enabled) Or2Colors.Background else Or2Colors.OnAccentDisabled, maxLines = 1)
     }
 }
 
-/** A secondary pill: `surfaceTrack` with text, optional trailing icon (e.g. "Skip"). */
+/**
+ * A secondary pill: `surfaceTrack` with text, optional trailing icon (e.g. "Skip"). [compact] is the
+ * chip scale (28 dp, 12 sp) for an action that sits inside a list row (Retry, Unlock).
+ */
 @Composable
 fun PillButton(
     text: String, onClick: () -> Unit, modifier: Modifier = Modifier, icon: ImageVector? = null,
     enabled: Boolean = true, container: Color = Or2Colors.SurfaceTrack, content: Color = Or2Colors.Text,
+    compact: Boolean = false,
 ) {
     Row(
-        modifier.heightIn(min = Or2Dimens.Segmented + 4.dp).clip(Or2Shapes.Pill).background(container)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick).padding(horizontal = 18.dp),
+        modifier.heightIn(min = if (compact) Or2Dimens.Chip else Or2Dimens.Segmented + 4.dp).clip(Or2Shapes.Pill).background(container)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick).padding(horizontal = if (compact) 12.dp else 18.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center,
     ) {
-        Text(text, style = Or2Type.Body, color = if (enabled) content else Or2Colors.TextMuted, maxLines = 1)
+        Text(text, style = if (compact) Or2Type.Chip else Or2Type.Body, color = if (enabled) content else Or2Colors.TextMuted, maxLines = 1)
         if (icon != null) {
             Spacer(Modifier.width(6.dp))
             Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = if (enabled) content else Or2Colors.TextMuted)
@@ -519,20 +530,38 @@ fun Or2Sheet(
     }
 }
 
-/** An alert dialog in the app's own style; the caller supplies its buttons with [TextAction]. */
+/**
+ * An alert dialog in the app's own style: a `surfaceRaised` card with the 12 dp gutter on the screen
+ * sides and 16 dp inside (Material's AlertDialog keeps 24 dp everywhere and a 280 dp minimum width,
+ * which looked like another design system), the title, the content and the buttons right-aligned
+ * under it (wrapping onto a second line when they do not fit). The caller supplies the buttons with
+ * [TextAction].
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun Or2Dialog(
     onDismiss: () -> Unit, title: String, confirm: @Composable () -> Unit, modifier: Modifier = Modifier,
     dismiss: @Composable (() -> Unit)? = null, titleColor: Color = Or2Colors.Text,
     titleStyle: TextStyle = Or2Type.CardTitle, content: @Composable () -> Unit,
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss, modifier = modifier,
-        title = { Text(title, style = titleStyle, color = titleColor) },
-        text = content, confirmButton = confirm, dismissButton = dismiss,
-        shape = Or2Shapes.Card, containerColor = Or2Colors.SurfaceRaised, titleContentColor = titleColor,
-        textContentColor = Or2Colors.Text,
-    )
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            modifier.padding(horizontal = Or2Dimens.Gutter).widthIn(max = 480.dp).fillMaxWidth()
+                .clip(Or2Shapes.Card).background(Or2Colors.SurfaceRaised).padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp),
+        ) {
+            Text(title, style = titleStyle, color = titleColor, modifier = Modifier.semantics { heading() })
+            Spacer(Modifier.height(12.dp))
+            // Dialog content is body text in `text` by default, as the Material dialog's text slot was.
+            CompositionLocalProvider(LocalContentColor provides Or2Colors.Text, LocalTextStyle provides Or2Type.Body) {
+                Box(Modifier.weight(1f, fill = false)) { content() }
+            }
+            Spacer(Modifier.height(4.dp))
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End)) {
+                dismiss?.invoke()
+                confirm()
+            }
+        }
+    }
 }
 
 /** A line of mono machine text in a `surfaceRaisedRow` block (fingerprints, public keys). */
@@ -563,7 +592,7 @@ fun ActionCard(
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(kicker.uppercase(), style = Or2Type.Kicker, color = Or2Colors.Accent.copy(alpha = 0.7f))
+                Text(kicker.uppercase(), style = Or2Type.Kicker, color = Or2Colors.Accent)
                 Text(title, style = Or2Type.CardTitle, color = Or2Colors.Text)
                 Text(body, style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.padding(top = 2.dp))
                 if (meta != null) Text(meta, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.padding(top = 6.dp))
