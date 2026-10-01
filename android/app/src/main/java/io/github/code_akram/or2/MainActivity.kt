@@ -198,6 +198,9 @@ class MainActivity : FragmentActivity() {
         super.onStart()
         // Connections without a service (it was stopped from outside, or a start was refused in the background): back to the foreground is the moment it may start.
         app.reviveService()
+        // Whatever the network did while the app was away is settled by one roam (debounced with any
+        // callback event that arrives with it).
+        app.networkChanges.foregrounded()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {

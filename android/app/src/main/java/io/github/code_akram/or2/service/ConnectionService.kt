@@ -9,14 +9,15 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
 import io.github.code_akram.or2.MainActivity
 import io.github.code_akram.or2.R
 import io.github.code_akram.or2.app.Or2Application
-import io.github.code_akram.or2.ffi.networkChanged
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -27,7 +28,7 @@ import kotlinx.coroutines.cancel
  * open (type `specialUse`: there is no category for an interactive SSH/mosh client). The process
  * holds the one `HostConnections` ([Or2Application.connections]); this service keeps the process
  * foreground, shows the ongoing notification (hosts, sessions, "Disconnect all"), forwards
- * default-network changes to `network_changed()` and stops itself when the last host or session
+ * default-network changes (see [NetworkWatch]) to `network_changed()` and stops itself when the last host or session
  * closes ([ServiceController]).
  */
 class ConnectionService : Service() {
@@ -52,7 +53,7 @@ class ConnectionService : Service() {
         val app = application as Or2Application
         createChannel()
         controller = ServiceController(scope, app.connections.serviceSnapshots(), host)
-        network = NetworkWatch(this, scope).also { it.start() }
+        network = NetworkWatch(this, app.networkChanges).also { it.start() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -128,21 +129,26 @@ class ConnectionService : Service() {
 }
 
 /**
- * Registers for default-network changes while the service runs and reports each one, debounced by
- * 500 ms ([NetworkChanges]), as `network_changed()`: live mosh sessions open a new socket and every
- * SSH connection sends a keepalive at once.
+ * Registers for default-network events while the service runs and feeds them to [changes], which
+ * reports each real change, debounced by 500 ms, as `network_changed()`: live mosh sessions open a
+ * new socket and every SSH connection sends a keepalive at once. Three callbacks matter: the
+ * default network changing (`onAvailable`, `onLost`), its transport set changing
+ * (`onCapabilitiesChanged`, which is how a VPN-carried connection sees Wi-Fi give way to cellular
+ * under an unchanged default network) and its interface changing (`onLinkPropertiesChanged`).
  */
-class NetworkWatch(private val context: Context, private val scope: CoroutineScope) {
+class NetworkWatch(context: Context, private val changes: NetworkChanges) {
     private val manager = context.getSystemService(ConnectivityManager::class.java)
-    private var changes: NetworkChanges? = null
     private var callback: ConnectivityManager.NetworkCallback? = null
 
     fun start() {
-        val tracker = NetworkChanges(scope, manager.activeNetwork?.networkHandle) { networkChanged() }
-        changes = tracker
+        changes.seed(manager.activeNetwork?.networkHandle)
         val registered = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) = tracker.available(network.networkHandle)
-            override fun onLost(network: Network) = tracker.lost(network.networkHandle)
+            override fun onAvailable(network: Network) = changes.available(network.networkHandle)
+            override fun onLost(network: Network) = changes.lost(network.networkHandle)
+            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) =
+                changes.capabilitiesChanged(network.networkHandle, transportSignature(capabilities))
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) =
+                changes.linkChanged(network.networkHandle, linkProperties.interfaceName)
         }
         callback = registered
         // On the main looper: the tracker and its debounce job are main-thread state.
@@ -152,6 +158,17 @@ class NetworkWatch(private val context: Context, private val scope: CoroutineSco
     fun stop() {
         callback?.let { runCatching { manager.unregisterNetworkCallback(it) } }
         callback = null
-        changes = null
+    }
+
+    private companion object {
+        val TRANSPORTS = listOf(
+            NetworkCapabilities.TRANSPORT_CELLULAR to "CELLULAR", NetworkCapabilities.TRANSPORT_WIFI to "WIFI",
+            NetworkCapabilities.TRANSPORT_BLUETOOTH to "BLUETOOTH", NetworkCapabilities.TRANSPORT_ETHERNET to "ETHERNET",
+            NetworkCapabilities.TRANSPORT_VPN to "VPN", NetworkCapabilities.TRANSPORT_WIFI_AWARE to "WIFI_AWARE",
+            NetworkCapabilities.TRANSPORT_LOWPAN to "LOWPAN", NetworkCapabilities.TRANSPORT_USB to "USB",
+        )
+
+        fun transportSignature(capabilities: NetworkCapabilities) =
+            TRANSPORTS.filter { (transport, _) -> capabilities.hasTransport(transport) }.joinToString(",") { it.second }
     }
 }

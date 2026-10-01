@@ -256,4 +256,108 @@ class ServiceTest {
         runCurrent()
         assertEquals(1, notified)
     }
+
+    // --- the follow-up: transport and interface changes, and the return to the foreground --------
+
+    @Test
+    fun aTransportSetChangeOnTheSameDefaultNetworkRoams() = runTest {
+        // A VPN-carried connection: the default network (the VPN) never changes, only what it rides on.
+        var notified = 0
+        val changes = NetworkChanges(this, initial = 1L) { notified++ }
+        changes.capabilitiesChanged(1L, "VPN,WIFI") // The first report is the baseline.
+        advanceTimeBy(1_000)
+        assertEquals(0, notified)
+        changes.capabilitiesChanged(1L, "VPN,CELLULAR")
+        advanceTimeBy(499)
+        assertEquals(0, notified)
+        advanceTimeBy(2)
+        assertEquals(1, notified)
+        changes.capabilitiesChanged(1L, "VPN,WIFI") // And back again.
+        advanceTimeBy(1_000)
+        assertEquals(2, notified)
+    }
+
+    @Test
+    fun bandwidthAndSignalUpdatesDoNothing() = runTest {
+        var notified = 0
+        val changes = NetworkChanges(this, initial = 1L) { notified++ }
+        changes.capabilitiesChanged(1L, "WIFI")
+        changes.linkChanged(1L, "wlan0")
+        // The same callbacks fire again and again with the same transports and interface (a new
+        // bandwidth estimate, a signal-strength tick): not a change.
+        repeat(20) {
+            changes.capabilitiesChanged(1L, "WIFI")
+            changes.linkChanged(1L, "wlan0")
+            advanceTimeBy(300)
+        }
+        advanceTimeBy(5_000)
+        assertEquals(0, notified)
+    }
+
+    @Test
+    fun anInterfaceChangeRoamsAndAnInterfaceThatAppearsOrVanishesCounts() = runTest {
+        var notified = 0
+        val changes = NetworkChanges(this, initial = 1L) { notified++ }
+        changes.linkChanged(1L, "wlan0")
+        changes.linkChanged(1L, "wlan1")
+        advanceTimeBy(1_000)
+        assertEquals(1, notified)
+        changes.linkChanged(1L, null) // No interface name any more.
+        advanceTimeBy(1_000)
+        assertEquals(2, notified)
+        changes.linkChanged(1L, null)
+        advanceTimeBy(1_000)
+        assertEquals(2, notified)
+    }
+
+    @Test
+    fun aNewDefaultNetworkStartsFromANewBaseline() = runTest {
+        var notified = 0
+        val changes = NetworkChanges(this, initial = 1L) { notified++ }
+        changes.capabilitiesChanged(1L, "WIFI")
+        changes.linkChanged(1L, "wlan0")
+        changes.available(2L) // Mobile data takes over: one roam for the switch.
+        changes.capabilitiesChanged(2L, "CELLULAR") // Its first reports are baselines, not further changes.
+        changes.linkChanged(2L, "rmnet_data1")
+        advanceTimeBy(1_000)
+        assertEquals(1, notified)
+        // A report that arrives for a network we have not seen yet counts as it becoming the default.
+        changes.capabilitiesChanged(3L, "WIFI")
+        advanceTimeBy(1_000)
+        assertEquals(2, notified)
+    }
+
+    @Test
+    fun theReturnToTheForegroundRoamsOnceThroughTheSameDebounce() = runTest {
+        var notified = 0
+        val changes = NetworkChanges(this, initial = 1L) { notified++ }
+        changes.foregrounded()
+        advanceTimeBy(499)
+        assertEquals(0, notified)
+        advanceTimeBy(2)
+        assertEquals(1, notified)
+
+        // A handover callback arriving with the return is one roam, not two.
+        changes.available(2L)
+        advanceTimeBy(200)
+        changes.foregrounded()
+        advanceTimeBy(1_000)
+        assertEquals(2, notified)
+        changes.foregrounded() // Every return counts, even with nothing else going on.
+        advanceTimeBy(1_000)
+        assertEquals(3, notified)
+    }
+
+    @Test
+    fun seedingTracksTheCurrentNetworkWithoutCountingIt() = runTest {
+        var notified = 0
+        val changes = NetworkChanges(this, initial = null) { notified++ }
+        changes.seed(4L)
+        changes.available(4L)
+        advanceTimeBy(1_000)
+        assertEquals(0, notified)
+        changes.available(5L)
+        advanceTimeBy(1_000)
+        assertEquals(1, notified)
+    }
 }
