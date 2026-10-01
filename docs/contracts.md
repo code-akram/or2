@@ -495,6 +495,11 @@ Connecting ──▶ AwaitingHostKey ──▶ Authenticating ──▶ Connecte
   and dropping the `HerdrWatchDriver` delivers `Closed`, once, last. That is what ends a watch
   parked at a final `Unavailable` (no call is pending that could see the host go) and one
   that is `Live` mid-wait; tests cover both states against user disconnect and loss.
+  The capability probe a watch needs first is raced against the watch's own stop too: stopping
+  a watch while the probe runs (it can take the exec timeout plus the herdr listing) closes it
+  at once, delivering `Closed` with no `Unavailable` on the way, and the abandoned probe is
+  not cached (the next caller probes afresh); a host that closes mid-probe drops the whole
+  watch task as above.
 - **A network task that ends without reporting** (it panicked; a buggy `Transport` is
   re-raised by `race`) closes the host with `Failed(Internal)` instead of leaving it in its
   last state, so terminals and watches are told and exactly one `Closed` is reported.

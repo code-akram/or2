@@ -594,10 +594,21 @@ async fn list_tmux(host: &SshHost) -> Result<Vec<TmuxSession>, HostError> {
 
 /// Runs a watch: herdr's client when the probe found herdr, else `Unavailable { NotInstalled }`
 /// until stopped. A probe that fails is retried every [`WATCH_RETRY`], as the client retries
-/// its own failures.
+/// its own failures. Stopping interrupts the probe too (the watch closes at once, with no
+/// `Unavailable` on the way).
 async fn watch_herdr(host: Arc<SshHost>, session: Option<String>, mut driver: HerdrWatchDriver) {
     loop {
-        match host.capabilities().await {
+        // A stop (or the host closing, which drops this future) must not wait for the probe:
+        // it can take as long as the exec timeout plus the herdr listing.
+        let probed = tokio::select! {
+            biased;
+            () = driver.stopped() => {
+                driver.close();
+                return;
+            }
+            probed = host.capabilities() => probed,
+        };
+        match probed {
             Ok(capabilities) => {
                 let Some(herdr) = capabilities.herdr.clone() else {
                     let _ = driver.transition(HerdrState::Unavailable {

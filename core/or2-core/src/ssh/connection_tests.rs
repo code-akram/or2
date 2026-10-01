@@ -202,6 +202,8 @@ struct Shared {
     probes: AtomicUsize,
     /// What the capability probe prints.
     probe: Mutex<&'static str>,
+    /// The capability probe starts (and is counted) but never finishes.
+    probe_hangs: AtomicBool,
     /// Refuse session channels like an sshd at `MaxSessions`.
     refuse_channels: AtomicBool,
     /// Never answer public key authentication.
@@ -313,6 +315,9 @@ impl server::Handler for Server {
         if command.starts_with("sh -c") {
             self.shared.probes.fetch_add(1, Ordering::SeqCst);
             session.channel_success(channel)?;
+            if self.shared.probe_hangs.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             let output = *self.shared.probe.lock().unwrap();
             session.data(channel, output.as_bytes().to_vec())?;
             return finish(session, channel, 0);
@@ -451,6 +456,7 @@ impl Fixture {
             listing: Mutex::new(Listing::Sessions),
             probes: AtomicUsize::new(0),
             probe: Mutex::new(probe),
+            probe_hangs: AtomicBool::new(false),
             refuse_channels: AtomicBool::new(false),
             stall_auth: AtomicBool::new(false),
             closes: AtomicUsize::new(0),
@@ -1291,4 +1297,43 @@ fn a_stalled_outbound_path_cannot_hold_an_exec_or_the_probe_past_the_exec_timeou
     assert_eq!(caps.tmux.as_deref(), Some("/fake/tmux"));
     assert_eq!(fixture.shared.probes.load(Ordering::SeqCst), 1);
     fixture.handle.disconnect();
+}
+
+#[test]
+fn stopping_a_watch_during_the_capability_probe_closes_it_at_once_without_unavailable() {
+    // The exec timeout is long: only the stop can end the probe in time.
+    let fixture = Fixture::connected(Duration::from_secs(30));
+    fixture.shared.probe_hangs.store(true, Ordering::SeqCst);
+    let (tx, watch_states) = sync::channel();
+    let watch = fixture
+        .handle
+        .watch_herdr(None, Arc::new(WatchRecorder(tx)))
+        .unwrap();
+    wait_for(|| fixture.shared.probes.load(Ordering::SeqCst) == 1);
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        watch_states.try_recv().is_err(),
+        "nothing is reported while the probe runs"
+    );
+    let stopped = std::time::Instant::now();
+    watch.stop();
+    assert_eq!(
+        watch_states.recv_timeout(Duration::from_secs(2)).unwrap(),
+        HerdrState::Closed,
+        "Closed, with no Unavailable before it"
+    );
+    assert!(stopped.elapsed() < Duration::from_secs(2));
+    assert!(
+        watch_states
+            .recv_timeout(Duration::from_millis(200))
+            .is_err(),
+        "Closed is delivered once, last"
+    );
+    assert_eq!(watch.state(), HerdrState::Closed);
+    // The host is unaffected: a later probe still runs (and is not cached from the stop).
+    fixture.shared.probe_hangs.store(false, Ordering::SeqCst);
+    let caps = runtime().block_on(fixture.handle.capabilities()).unwrap();
+    assert_eq!(caps.tmux.as_deref(), Some("/fake/tmux"));
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
 }
