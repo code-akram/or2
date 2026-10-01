@@ -305,6 +305,8 @@ struct Shared {
     /// asked: a duplicate descriptor would keep the connection open after the server ends.
     socket: Mutex<Option<std::net::TcpStream>>,
     keep_socket: bool,
+    channel_events: Mutex<Option<sync::Sender<(&'static str, russh::ChannelId)>>>,
+    focus_hangs: AtomicBool,
 }
 
 struct Server {
@@ -336,6 +338,7 @@ impl server::Handler for Server {
         reply: server::ChannelOpenHandle,
         _: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        let channel_id = channel.id();
         drop(channel);
         if self.shared.refuse_channels.load(Ordering::SeqCst) {
             reply
@@ -343,6 +346,9 @@ impl server::Handler for Server {
                 .await;
         } else {
             reply.accept().await;
+            if let Some(tx) = self.shared.channel_events.lock().unwrap().as_ref() {
+                let _ = tx.send(("session", channel_id));
+            }
         }
         Ok(())
     }
@@ -386,6 +392,12 @@ impl server::Handler for Server {
                 "{\"id\":\"or2_focus\",\"result\":{\"type\":\"ok\"}}\n"
             };
             self.shared.focused.lock().unwrap().push(pane);
+            if let Some(tx) = self.shared.channel_events.lock().unwrap().as_ref() {
+                let _ = tx.send(("focus", channel));
+            }
+            if self.shared.focus_hangs.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             session.data(channel, reply.as_bytes().to_vec())?;
         } else if request.contains("session.snapshot") {
             session.data(
@@ -398,9 +410,12 @@ impl server::Handler for Server {
 
     async fn channel_close(
         &mut self,
-        _: russh::ChannelId,
+        channel_id: russh::ChannelId,
         _: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        if let Some(tx) = self.shared.channel_events.lock().unwrap().as_ref() {
+            let _ = tx.send(("close", channel_id));
+        }
         self.shared.closes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -608,6 +623,8 @@ impl Fixture {
             closes: AtomicUsize::new(0),
             socket: Mutex::new(None),
             keep_socket,
+            channel_events: Mutex::new(None),
+            focus_hangs: AtomicBool::new(false),
         });
         let (listener, port) = runtime().block_on(async {
             let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -1635,5 +1652,50 @@ fn focusing_a_herdr_pane_needs_herdr() {
         })
     );
     assert!(fixture.shared.focused.lock().unwrap().is_empty());
+    fixture.handle.disconnect();
+}
+
+/// The session channel opened beside a pane focus that is still pending is closed, exactly once,
+/// when the terminal is given up: the join holding it must not drop it unclosed.
+#[test]
+fn a_terminal_given_up_while_its_focus_waits_closes_the_channel_opened_beside_it() {
+    let fixture = Fixture::connected_with(Duration::from_secs(5), PROBE_WITH_HERDR);
+    runtime().block_on(fixture.handle.capabilities()).unwrap();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    fixture.shared.focus_hangs.store(true, Ordering::SeqCst);
+    let (tx, states) = sync::channel();
+    let terminal = fixture
+        .handle
+        .open_terminal_with(
+            TerminalTarget::Herdr {
+                session: None,
+                pane_id: Some("w2:p1".into()),
+            },
+            TerminalTransport::Ssh,
+            TerminalSize::new(80, 24).unwrap(),
+            Arc::new(SessionRecorder(tx)),
+        )
+        .unwrap();
+    // The session channel is accepted and the focus request has arrived (and is held).
+    let mut session = None;
+    let mut focused = false;
+    while session.is_none() || !focused {
+        match events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            ("session", id) => session = Some(id),
+            ("focus", _) => focused = true,
+            _ => {}
+        }
+    }
+    let session = session.unwrap();
+    terminal.disconnect();
+    assert_eq!(session_closed(&states), CloseReason::Disconnected);
+    let mut closes = 0;
+    while let Ok(event) = events.recv_timeout(Duration::from_millis(500)) {
+        if event == ("close", session) {
+            closes += 1;
+        }
+    }
+    assert_eq!(closes, 1, "the session channel must be closed exactly once");
     fixture.handle.disconnect();
 }

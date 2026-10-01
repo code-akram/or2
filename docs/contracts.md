@@ -639,6 +639,10 @@ lives on. The program's own exit is `RemoteExited { exit_status }`. Channel setu
 timeout (10 s): a server that never answers closes the session with `TimedOut`, after
 closing the channel. A refused channel open (`MaxSessions`, see above) is `ShellRejected`,
 never `ConnectionLost`.
+A user disconnect that arrives while the focus is still pending closes a channel that was accepted
+meanwhile (the open's result is kept outside the join of the two, which a raw russh channel would
+otherwise leave unclosed: it holds a `MaxSessions` slot), exactly once; test
+`a_terminal_given_up_while_its_focus_waits_closes_the_channel_opened_beside_it`.
 
 ### tmux
 

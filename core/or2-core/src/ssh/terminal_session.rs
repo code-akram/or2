@@ -239,14 +239,31 @@ async fn channel_task(
             None => Ok(()),
         }
     };
-    let (focused, opened) = tokio::select! {
-        both = async { tokio::join!(focus_step, timeout(limit, host.open_channel())) } => both,
-        () = stopped(stop.clone()) => return CloseReason::Disconnected,
+    // The open's result is kept outside the join: a stop that drops the join while the focus is
+    // still pending must still close a channel that was accepted meanwhile (a raw channel does
+    // not close itself when dropped, and a leaked one counts against the server's `MaxSessions`).
+    let mut opening = None;
+    let open_step = async {
+        opening = Some(timeout(limit, host.open_channel()).await);
+    };
+    let joined = tokio::select! {
+        (focused, ()) = async { tokio::join!(focus_step, open_step) } => Some(focused),
+        () = stopped(stop.clone()) => None,
+    };
+    let opened = opening.take();
+    let focused = match joined {
+        Some(focused) => focused,
+        None => {
+            if let Some(Ok(Ok(channel))) = opened {
+                let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
+            }
+            return CloseReason::Disconnected;
+        }
     };
     let mut channel = match opened {
-        Ok(Ok(channel)) => channel,
-        Ok(Err(error)) => return CloseReason::Failed(open_failure(error)),
-        Err(_) => return CloseReason::Failed(SessionFailure::TimedOut),
+        Some(Ok(Ok(channel))) => channel,
+        Some(Ok(Err(error))) => return CloseReason::Failed(open_failure(error)),
+        Some(Err(_)) | None => return CloseReason::Failed(SessionFailure::TimedOut),
     };
     if let Err(failure) = focused {
         let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
