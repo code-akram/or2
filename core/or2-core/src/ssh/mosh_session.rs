@@ -126,7 +126,11 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
     let mut size = size;
     // Set once the user has gone: `prepare` then starts nothing it has not started yet.
     let cancelled = AtomicBool::new(false);
-    let mut prepare: Prepare<'_> = Box::pin(prepare(&host, &target, size, &cancelled));
+    // The server a finished bootstrap started, until `prepare` has handed it on or stopped it
+    // itself: the pane focus beside the bootstrap can still be pending when the start is given
+    // up, and the dropped `prepare` takes the bootstrap's result with it.
+    let started = Started::default();
+    let mut prepare: Prepare<'_> = Box::pin(prepare(&host, &target, size, &cancelled, &started));
     let mut abandoned = false;
     let mut expired = false;
     // Never fires without a budget.
@@ -164,6 +168,12 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
             }
         }
     };
+    // A preparation cut short (the grace ran out) while its bootstrap had finished: the server
+    // exists and its pid is only here.
+    drop(prepare);
+    if let Some(pid) = started.take() {
+        stop_server(&host, Some(pid), DEBT_PACING).await;
+    }
     // Why a start that is given up ends: the user's disconnect, or the spent budget.
     let given_up = if abandoned {
         CloseReason::Disconnected
@@ -252,6 +262,7 @@ async fn prepare(
     target: &TerminalTarget,
     size: TerminalSize,
     cancelled: &AtomicBool,
+    started: &Started,
 ) -> Result<Option<MoshParams>, SessionFailure> {
     let host: &SshHost = shared;
     let capabilities = host.capabilities().await.map_err(remote_failure)?;
@@ -279,25 +290,49 @@ async fn prepare(
         return Ok(None);
     }
     let bootstrap = async {
-        mosh::bootstrap(host, capabilities, size, &argv)
+        let params = mosh::bootstrap(host, capabilities, size, &argv)
             .await
-            .map_err(mosh::BootstrapError::into_failure)
+            .map_err(mosh::BootstrapError::into_failure)?;
+        started.record(params.server_pid);
+        Ok(params)
     };
     let Some(focus) = focus else {
-        return bootstrap.await.map(Some);
+        return bootstrap.await.map(|params| {
+            started.take();
+            Some(params)
+        });
     };
     // The pane focus and the server's start do not depend on each other (the herdr client
     // `mosh-server` runs follows herdr's focus), so they share their round trips. A focus that
     // fails (the pane is gone) leaves a server nobody will use: it is stopped before the
     // failure is reported.
-    let (focused, started) = tokio::join!(focus.run(host), bootstrap);
-    match (focused, started) {
-        (Ok(()), started) => started.map(Some),
+    let (focused, bootstrapped) = tokio::join!(focus.run(host), bootstrap);
+    let result = match (focused, bootstrapped) {
+        (Ok(()), bootstrapped) => bootstrapped.map(Some),
         (Err(failure), Ok(params)) => {
+            // Still recorded in `started` while the stop runs: a cancellation in the middle of
+            // it leaves the pid to the caller, which stops it again (a stop is idempotent).
             stop_server(shared, params.server_pid, DEBT_PACING).await;
             Err(failure)
         }
         (Err(failure), Err(_)) => Err(failure),
+    };
+    // Handed on (the caller owns the params' pid) or stopped: nothing is left for the caller.
+    started.take();
+    result
+}
+
+/// The pid of a server whose start finished inside a `prepare` that may still be cancelled.
+#[derive(Default)]
+struct Started(Mutex<Option<u32>>);
+
+impl Started {
+    fn record(&self, pid: Option<u32>) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = pid;
+    }
+
+    fn take(&self) -> Option<u32> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
     }
 }
 

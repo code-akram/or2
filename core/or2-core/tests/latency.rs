@@ -55,7 +55,7 @@ type Served = Arc<Mutex<Vec<String>>>;
 /// A herdr socket server speaking the wire format: `events.subscribe` is acknowledged and the
 /// stream held open, `session.snapshot` answers the checked-in two-pane snapshot, `pane.focus`
 /// succeeds (or `pane_not_found` for the pane `w9:p9`).
-fn serve_herdr(socket: &Path) -> Served {
+fn serve_herdr(socket: &Path, focus_delay: Duration) -> Served {
     let listener = UnixListener::bind(socket).unwrap();
     let served = Served::default();
     let log = served.clone();
@@ -80,6 +80,9 @@ fn serve_herdr(socket: &Path) -> Served {
                     let id = request["id"].clone();
                     let method = request["method"].as_str().unwrap_or("").to_owned();
                     log.lock().unwrap().push(method.clone());
+                    if method == "pane.focus" && !focus_delay.is_zero() {
+                        std::thread::sleep(focus_delay);
+                    }
                     let reply = match method.as_str() {
                         "events.subscribe" => {
                             serde_json::json!({"id": id, "result": {"type": "subscription_started"}})
@@ -180,12 +183,16 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
+        Self::with_focus_delay(Duration::ZERO)
+    }
+
+    fn with_focus_delay(focus_delay: Duration) -> Self {
         let sshd = Sshd::new(false);
         let reaper = MoshReaper::new(&sshd);
         let key = ClientKey::generate_ed25519("");
         sshd.authorize(&key);
         let socket = sshd.home().join("herdr.sock");
-        let served = serve_herdr(&socket);
+        let served = serve_herdr(&socket, focus_delay);
         install_herdr(&sshd, &socket);
         let proxy = Proxy::new(sshd.port);
         proxy.slow(ONE_WAY);
@@ -536,5 +543,79 @@ fn an_ssh_terminal_on_a_pane_connects_once_the_focus_and_the_channel_are_both_do
     // and the focus overlaps the first.
     assert!(connected < RTT * 5, "{connected:?}");
     terminal.disconnect();
+    host.disconnect();
+}
+
+/// The bootstrap has returned its server's pid while the pane focus is still pending (the
+/// herdr server answers it only after eight seconds): giving the start up must still stop
+/// that server, not lose the pid with the dropped focus.
+fn focus_pending_rig() -> (Rig, HostHandle) {
+    let rig = Rig::with_focus_delay(Duration::from_secs(8));
+    let (host, _, _) = rig.connect();
+    run(host.capabilities()).unwrap();
+    (rig, host)
+}
+
+fn open_pending(
+    host: &HostHandle,
+    budget: Option<Duration>,
+) -> (
+    or2_core::session::SessionHandle,
+    mpsc::Receiver<(SessionState, Instant)>,
+) {
+    let (tx, states) = mpsc::channel();
+    let terminal = host
+        .open_terminal_within(
+            TerminalTarget::Herdr {
+                session: None,
+                pane_id: Some("w2:p1".into()),
+            },
+            TerminalTransport::Mosh,
+            TerminalSize::new(80, 24).unwrap(),
+            budget,
+            Arc::new(TermObs(tx)),
+        )
+        .unwrap();
+    (terminal, states)
+}
+
+#[test]
+fn a_spent_budget_stops_a_finished_bootstrap_while_the_focus_is_pending() {
+    require!();
+    let (rig, host) = focus_pending_rig();
+    let (_terminal, states) = open_pending(&host, Some(Duration::from_secs(1)));
+    let (state, _) = states.recv_timeout(WAIT).unwrap();
+    assert_eq!(
+        state,
+        SessionState::Closed(CloseReason::Failed(SessionFailure::TimedOut))
+    );
+    assert_eq!(rig.requests("pane.focus"), 1);
+    let servers = common::fixture_processes(&rig.sshd, "mosh-server");
+    assert!(
+        servers.is_empty(),
+        "the finished bootstrap's server was lost while the focus waited: {servers:?}"
+    );
+    host.disconnect();
+}
+
+#[test]
+fn a_dismissed_start_stops_a_finished_bootstrap_while_the_focus_is_pending() {
+    require!();
+    let (rig, host) = focus_pending_rig();
+    let (terminal, states) = open_pending(&host, None);
+    // The bootstrap takes a few round trips; the focus holds for eight seconds.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        !common::fixture_processes(&rig.sshd, "mosh-server").is_empty(),
+        "the bootstrap has not started its server yet"
+    );
+    terminal.disconnect();
+    let (state, _) = states.recv_timeout(WAIT).unwrap();
+    assert_eq!(state, SessionState::Closed(CloseReason::Disconnected));
+    let servers = common::fixture_processes(&rig.sshd, "mosh-server");
+    assert!(
+        servers.is_empty(),
+        "the finished bootstrap's server was lost while the focus waited: {servers:?}"
+    );
     host.disconnect();
 }

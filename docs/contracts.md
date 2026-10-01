@@ -1438,7 +1438,13 @@ session `Failed { Internal { "mosh terminals land with M3-A" } }` is gone.
    `mosh_session::CLOSE_BUDGET` (8 s). A disconnect (session or user host disconnect) while the
    bootstrap exec is still running lets it finish for up to `ABANDON_GRACE` more so the server
    it started can be stopped; cutting the exec shorter loses the pid and the server stays (the
-   limitation documented under `mosh::terminate`). **A disconnect starts nothing new:**
+   limitation documented under `mosh::terminate`). A bootstrap that has **already returned**
+   its pid never loses it: `prepare` runs the herdr pane focus beside the bootstrap, and the
+   pid is recorded (`mosh_session::Started`) the moment the bootstrap finishes, outside that
+   join, so a budget, dismissal or host disconnect that gives the start up while the focus is
+   still pending (the grace then runs out on the focus) still stops the server (or owes the
+   stop, see "Cleanup debt"). A stop cut short in the middle (the failed-focus cleanup itself)
+   leaves the pid recorded, and the caller stops it again. **A disconnect starts nothing new:**
    `prepare` carries a cancellation flag the abandon sets, checked after the capability probe
    (before the pane focus and the exec, which start together), so a disconnect during the probe
    focuses no pane and starts no server; only an exec already running is waited for.
@@ -1470,7 +1476,7 @@ session `Failed { Internal { "mosh terminals land with M3-A" } }` is gone.
    `mosh_connect_timeout` and closing `Failed { TimedOut }` with a server nobody can stop from
    inside the app: the pid is known, but or2 keeps no key to reconnect with and Rust keeps no
    storage, so there is nobody to retry. Likewise a session that ends `Failed` after the host
-   is lost, and a pid lost by a cut bootstrap. Accepted for M3: the server's shell is the one
+   is lost, and a pid lost by a bootstrap cut off before it returned. Accepted for M3: the server's shell is the one
    the user would have been given anyway, and Android's reconnect (M3-B) uses a new server.
    **M3-B hand-off:** a `Failed { TimedOut }` close does not promise the server was stopped
    (a stop may still be waiting for a channel, see "Cleanup debt"); a
