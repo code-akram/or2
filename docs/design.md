@@ -424,6 +424,13 @@ the orphan cleanup).
 - [ ] Integration, external review and phone acceptance, including v0 step 3 (background
   10 minutes over mobile data, return to the same pane without re-typing).
 
+### Easy pair checklist
+
+- [ ] `or2-pair` CLI (macOS/Linux/Windows): checks, address gathering, terminal QR, one-shot
+  HMAC-authenticated key listener with on-host confirmation ([contracts](contracts.md#easy-pair-qr-onboarding)).
+- [ ] Phone: scan or paste, Rust parser and exchange, review screen, pinned host key, connect.
+- [ ] Docs: a "Pair a host" guide (one command + scan) and the manual setup guide.
+
 ## Decisions
 
 | Decision | Choice | Why |

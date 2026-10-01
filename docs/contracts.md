@@ -1952,3 +1952,64 @@ standby setting, mobile data only, screen off while waiting, target the always-o
    connection (`resume_mosh`, resuming the dead client's session from a stored ticket, was rejected and is
    not implemented). Record the time to the first frame, the prompts, and that the orphan is gone. Three
    runs each, report p50 and max.
+
+# Easy pair (QR onboarding)
+
+Pairing a new host should take one command on the host and one scan on the phone, without
+weakening M1's trust model. Manual host entry stays available.
+
+## Host side: `or2-pair` CLI
+
+A small Rust binary in a new workspace crate `core/or2-pair` (the one justified new crate: it is
+a separate host-side tool, not part of the app library). Builds for macOS, Linux and Windows
+(OpenSSH for Windows). Installed with `cargo install`, a Homebrew formula building from source,
+or release binaries later. GPL-3.0-or-later; dependencies exactly pinned (e.g. `qrcode` for
+terminal QR rendering).
+
+1. **Checks** and reports, without changing anything: sshd reachable on the chosen port
+   (macOS: Remote Login; Linux: sshd running), the user's `~/.ssh/authorized_keys` writable,
+   tmux/herdr/mosh-server presence, and a firewall hint for mosh UDP 60000–61000.
+2. **Gathers** username, SSH port, the host's ED25519 public key (from `/etc/ssh` or via
+   `ssh-keyscan` of localhost; RSA/ECDSA only if no ED25519 exists), and every address: LAN IPs,
+   the mDNS name (`<name>.local`), overlay IPs (ZeroTier `zt*`, Tailscale `tailscale*`/100.64/10),
+   ordered with addresses that work on every network first (overlay, then LAN, then `.local`).
+3. **Prints a QR code** (UTF-8 half blocks; `--ascii` fallback) and the same payload as text for
+   manual entry. Payload (URI, ≤ 1 KB):
+   `or2-pair:1?name=<label>&user=<u>&port=<p>&a=<addr1>&a=<addr2>…&hk=<algo> <base64>&pair=<ip>:<port>&otp=<base32 128-bit>`.
+   `hk` is the host's full public key, so the phone can trust it from the scan.
+4. **Listens once** on `pair` (a random port, bound only to the LAN/overlay addresses listed,
+   never 0.0.0.0 on a public interface) for at most 120 s. Exchange (newline-delimited JSON):
+   server → `{"v":1,"nonce":<base64 32B>}`; phone → `{"v":1,"key":"<openssh public key line>",
+   "device":"<label>","mac":<base64 HMAC-SHA256(otp, nonce || key)>}`; server verifies the HMAC
+   in constant time, prints the key's SHA-256 fingerprint and the device label, and asks
+   `Authorize this key for <user>? [y/N]`. On `y` it appends
+   `no-agent-forwarding,no-X11-forwarding <key> or2-<device>-<date>` to `authorized_keys`
+   (creating `~/.ssh` 0700 / file 0600 if needed, backing up the file first, skipping
+   duplicates) and replies `{"ok":true}`; otherwise `{"ok":false,"reason":…}`. One attempt;
+   any failure or timeout ends the listener. The OTP never crosses the network.
+   `--no-listen` prints the QR without a listener (the phone then shows its public key line for
+   the user to install by hand).
+
+## Phone side
+
+- **Scan:** "Add host → Scan QR" uses CameraX (AndroidX) + ZXing core (Apache-2.0); no Google
+  Play Services. "Paste pairing code" accepts the text payload.
+- **Parsing and the exchange are Rust** (`or2_core::pair`, FFI `parse_pair_payload(text)` and
+  async `pair_submit_key(payload, public_key_line, device_label)` through `Transport`): strict
+  validation of every field (addresses as `Endpoint`s, `hk` as an OpenSSH public key, OTP
+  length, URI version), bounded reads, 10 s timeout.
+- **Flow:** scan → review screen (name, user, addresses, the host key's fingerprint, which key
+  will be authorized; the user may pick an existing key or generate a new one) → submit →
+  "Confirm on the host: fingerprint SHA256:…" → on `ok`, the host is saved with its addresses and
+  **`hk` is persisted as a trusted host key** before the first connection (so no first-use
+  prompt; a different presented key is the M1 changed-key path, never auto-accepted) → connect.
+- Never log the payload or OTP; wipe the OTP after use.
+
+## Tests
+
+CLI: payload round trip, address ordering, HMAC verification (good/bad/replayed nonce),
+`authorized_keys` append semantics (create, permissions, backup, duplicate) in a temp HOME,
+listener timeout and one-shot behaviour, bind-address policy. Rust core: parser fuzz-ish table
+tests, exchange against the real CLI listener in-process (loopback). Kotlin: review-screen and
+persistence logic with fakes; JVM end-to-end against a CLI listener on loopback; device test
+compiles (camera needs the phone).
