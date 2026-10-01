@@ -1,0 +1,3 @@
+# `cargo xtask <task>` runs repository tooling (see core/xtask and docs/build.md).
+[alias]
+xtask = "run --quiet --locked --package xtask --"

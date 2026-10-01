@@ -1,5 +1,5 @@
 [workspace]
-members = ["or2-core", "or2-ffi", "or2-pair"]
+members = ["or2-core", "or2-ffi", "or2-pair", "xtask"]
 resolver = "3"
 
 [workspace.package]
