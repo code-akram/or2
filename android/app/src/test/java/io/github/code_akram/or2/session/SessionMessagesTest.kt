@@ -1,8 +1,6 @@
 package io.github.code_akram.or2.session
 
 import io.github.code_akram.or2.ffi.*
-import io.github.code_akram.or2.hosts.hostFieldError
-import io.github.code_akram.or2.hosts.validHost
 import io.github.code_akram.or2.keys.keyErrorMessage
 import org.junit.Assert.*
 import org.junit.Test
@@ -31,10 +29,11 @@ class SessionMessagesTest {
 
     @Test
     fun synchronousAndImportErrorsAreNotBlankOrMatchedByDiagnosticText() {
-        val errors = listOf(ConnectException.InvalidHost(), ConnectException.InvalidPort(), ConnectException.InvalidUsername(),
-            ConnectException.InvalidPrivateKey(), ConnectException.InvalidTrustedHostKey(2u), ConnectException.EmptyDimension())
-        assertEquals(6, errors.map(::connectErrorMessage).toSet().size)
-        assertTrue(connectErrorMessage(errors[3]).contains("Import"))
+        val errors = listOf(HostConnectException.NoAddresses(), HostConnectException.TooManyAddresses(), HostConnectException.InvalidAddress(2u),
+            HostConnectException.InvalidUsername(), HostConnectException.InvalidPrivateKey(), HostConnectException.InvalidTrustedHostKey(2u))
+        assertEquals(6, errors.map(::hostConnectErrorMessage).toSet().size)
+        assertTrue(hostConnectErrorMessage(errors[2]).contains("Address 3")) // Indexes are shown 1-based.
+        assertTrue(hostConnectErrorMessage(errors[4]).contains("Import"))
         assertTrue(keyErrorMessage(KeyException.PassphraseRequired()).contains("Enter"))
         assertTrue(keyErrorMessage(KeyException.WrongPassphrase()).contains("Incorrect"))
         assertTrue(keyErrorMessage(KeyException.UnsupportedFormat()).contains("ssh-keygen"))
@@ -43,15 +42,22 @@ class SessionMessagesTest {
     }
 
     @Test
-    fun hostValidationChecksBothPortBoundariesAndAddressControlCharacters() {
-        assertTrue(validHost("Label", "fixture.invalid", "1", "fixture"))
-        assertTrue(validHost("Label", "fixture.invalid", "65535", "fixture"))
-        for (port in listOf("0", "65536", "", "-1", "22x")) assertFalse(validHost("Label", "fixture.invalid", port, "fixture"))
-        assertTrue(validHost("Label", " fixture.invalid ", "22", " fixture "))
-        assertFalse(validHost("Label", "bad address", "22", "fixture"))
-        assertFalse(validHost("Label", "fixture.invalid", "22", "bad name"))
-        assertFalse(validHost("Label", "fixture.invalid", "22", "bad\nname"))
-        assertEquals("Remove internal whitespace or control characters.", hostFieldError("bad name"))
-        assertEquals("Enter a value.", hostFieldError(" \t"))
+    fun hostErrorsAndStatesAreDistinctAndFreeOfDiagnostics() {
+        val errors = listOf(HostException.NotConnected(), HostException.Closed(), HostException.NoHostKeyPrompt(), HostException.HostKeyMismatch(),
+            HostException.EmptyDimension(), HostException.InvalidName(), HostException.NotInstalled("tmux"), HostException.CommandFailed("diagnostic"))
+        val messages = errors.map(::hostErrorMessage)
+        assertEquals(8, messages.toSet().size)
+        assertTrue(messages.none { "diagnostic" in it })
+        assertEquals("tmux is not installed on the host.", messages[6])
+        assertEquals("Connecting\u2026", hostStateMessage(HostState.Connecting))
+        assertEquals("Connected", hostStateMessage(HostState.Connected(0u)))
+        assertEquals("Disconnected", hostStateMessage(HostState.Closed(CloseReason.Disconnected)))
+        // A closed host explains itself exactly as a closed session does.
+        assertTrue(hostStateMessage(HostState.Closed(CloseReason.Failed(SessionFailure.AuthenticationRejected))).contains("username"))
+        val herdr = listOf(HerdrState.Starting, HerdrState.Closed, HerdrState.Unavailable(HerdrUnavailable.NotInstalled, "diagnostic"),
+            HerdrState.Unavailable(HerdrUnavailable.NotRunning, "diagnostic"), HerdrState.Unavailable(HerdrUnavailable.IncompatibleProtocol(9u), "diagnostic"),
+            HerdrState.Unavailable(HerdrUnavailable.Failed, "diagnostic"))
+        assertEquals(6, herdr.map(::herdrStateMessage).toSet().size)
+        assertTrue(herdr.map(::herdrStateMessage).none { "diagnostic" in it })
     }
 }

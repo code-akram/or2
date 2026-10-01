@@ -3,7 +3,8 @@ package io.github.code_akram.or2.app
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.code_akram.or2.data.AppDao
-import io.github.code_akram.or2.data.HostRecord
+import io.github.code_akram.or2.data.Host
+import io.github.code_akram.or2.hosts.AddressDraft
 import io.github.code_akram.or2.hosts.validHost
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,16 +20,23 @@ class AppViewModel(private val dao: AppDao, private val deleteVaultKey: (String)
     val message = mutableMessage.asStateFlow()
     fun message(text: String?) { mutableMessage.value = text }
 
-    fun saveHost(host: HostRecord, previous: HostRecord?) {
-        val normalized = host.copy(hostname = host.hostname.trim(), username = host.username.trim())
-        if (!validHost(normalized.label, normalized.hostname, normalized.port.toString(), normalized.username)) {
-            message("Host not saved. Enter a label, a valid port, and a hostname and username without internal whitespace or control characters.")
+    /** [beforeSave] runs once the host is valid, before it is written (e.g. to end a stale connection). */
+    fun saveHost(host: Host, previous: Host?, beforeSave: () -> Unit = {}) {
+        val normalized = host.copy(
+            record = host.record.copy(username = host.username.trim()),
+            addresses = host.addresses.map { it.copy(hostname = it.hostname.trim()) },
+        )
+        if (!validHost(normalized.label, normalized.addresses.map(AddressDraft::of), normalized.username)) {
+            message("Host not saved. Enter a label, 1 to ${Host.MAX_ADDRESSES} addresses with valid ports, and a hostname and username without internal whitespace or control characters.")
             return
         }
-        action { dao.saveHost(normalized, previous) }
+        action {
+            beforeSave()
+            dao.saveHost(normalized, previous)
+        }
     }
 
-    fun deleteHost(host: HostRecord) = action { dao.deleteHost(host.id) }
+    fun deleteHost(host: Host) = action { dao.deleteHost(host.id) }
     fun deleteKey(id: String) = action {
         dao.deleteKey(id) // Clear host references transactionally before destroying the vault entry.
         deleteVaultKey(id)
