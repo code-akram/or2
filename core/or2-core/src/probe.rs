@@ -250,8 +250,8 @@ mod tests {
     fn output(status: u32, stdout: &str) -> ExecOutput {
         ExecOutput {
             status: Some(status),
-            stdout: stdout.as_bytes().to_vec(),
-            stderr: Vec::new(),
+            stdout: stdout.as_bytes().into(),
+            stderr: Default::default(),
         }
     }
 

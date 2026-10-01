@@ -6,10 +6,13 @@
 //! login shell (bash, zsh or fish), so [`RemoteCommand::render`] single-quotes every token in
 //! the one form all three read identically.
 
+use std::fmt;
 use std::future::Future;
+use std::ops::Deref;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
+use zeroize::Zeroize;
 
 /// Each of stdout and stderr is capped; excess fails the exec.
 pub const OUTPUT_CAP: usize = 1024 * 1024;
@@ -33,13 +36,134 @@ pub enum RemoteError {
     Io(String),
 }
 
+/// Command output that is wiped when dropped. Any exec can carry a secret (`mosh-server new`
+/// prints its session key on stdout), and the collector must wipe on every path: success
+/// (when the caller drops the output), error, timeout, output cap and a cancelled future,
+/// which all simply drop what was collected so far. Growth is done by hand
+/// ([`SecretBytes::extend_capped`]) because a `Vec` reallocation would free the old block
+/// without wiping it. `Debug` shows the length only.
+///
+/// This covers or2's own buffers. russh hands each packet's payload over in its own
+/// zeroizing `CryptoVec`; the SSH transport's internal buffers are outside this type.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct SecretBytes(Vec<u8>);
+
+impl SecretBytes {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Appends `data` unless the total would pass `cap` (`OutputTooLarge`, with nothing
+    /// appended).
+    pub fn extend_capped(&mut self, data: &[u8], cap: usize) -> Result<(), RemoteError> {
+        let needed = self.0.len() + data.len();
+        if needed > cap {
+            return Err(RemoteError::OutputTooLarge);
+        }
+        if self.0.capacity() < needed {
+            let capacity = needed.max(self.0.capacity() * 2).max(256).min(cap);
+            let mut bigger = Self(Vec::with_capacity(capacity));
+            bigger.0.extend_from_slice(&self.0);
+            // `bigger` now holds the old block; dropping it wipes it.
+            std::mem::swap(self, &mut bigger);
+        }
+        self.0.extend_from_slice(data);
+        Ok(())
+    }
+}
+
+impl From<Vec<u8>> for SecretBytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl From<&[u8]> for SecretBytes {
+    fn from(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
+    }
+}
+
+impl Deref for SecretBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for SecretBytes {
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.0 == other.as_slice()
+    }
+}
+
+impl PartialEq<&[u8]> for SecretBytes {
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.0 == *other
+    }
+}
+
+impl fmt::Debug for SecretBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SecretBytes(<{} bytes>)", self.0.len())
+    }
+}
+
+impl Zeroize for SecretBytes {
+    fn zeroize(&mut self) {
+        #[cfg(test)]
+        wipe_log::record(&self.0);
+        self.0.zeroize();
+    }
+}
+
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+/// Test hook: remembers which buffers were wiped, so a test can check that a secret it fed
+/// through an exec path was wiped on that path (only buffers holding [`MARKER_PREFIX`] are
+/// kept).
+#[cfg(test)]
+pub(crate) mod wipe_log {
+    use std::sync::Mutex;
+
+    pub(crate) const MARKER_PREFIX: &[u8] = b"or2-secret-";
+    static WIPED: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+    pub(super) fn record(bytes: &[u8]) {
+        if bytes
+            .windows(MARKER_PREFIX.len())
+            .any(|window| window == MARKER_PREFIX)
+        {
+            WIPED
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(bytes.to_vec());
+        }
+    }
+
+    /// How many wiped buffers contained `marker`.
+    pub(crate) fn wiped(marker: &[u8]) -> usize {
+        WIPED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|bytes| bytes.windows(marker.len()).any(|window| window == marker))
+            .count()
+    }
+}
+
 /// A finished command. `status` is `None` when the process ended without an exit status
-/// (killed by a signal).
+/// (killed by a signal). The streams are [`SecretBytes`]: wiped when dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecOutput {
     pub status: Option<u32>,
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
+    pub stdout: SecretBytes,
+    pub stderr: SecretBytes,
 }
 
 impl ExecOutput {
@@ -277,8 +401,8 @@ mod local {
                     },)?;
                 Ok(ExecOutput {
                     status: status.code().and_then(|code| u32::try_from(code).ok()),
-                    stdout,
-                    stderr,
+                    stdout: stdout.into(),
+                    stderr: stderr.into(),
                 })
             };
             tokio::time::timeout(self.timeout, run)
@@ -423,6 +547,56 @@ mod tests {
     }
 
     #[test]
+    fn secret_bytes_cap_grow_compare_and_hide_their_content() {
+        let mut bytes = SecretBytes::new();
+        assert!(bytes.is_empty());
+        for chunk in [&b"abc"[..], &[b'x'; 600], b"end"] {
+            bytes.extend_capped(chunk, 700).unwrap();
+        }
+        assert_eq!(bytes.len(), 606);
+        assert_eq!(&bytes[..3], b"abc");
+        assert_eq!(&bytes[603..], b"end");
+        // Over the cap: refused and nothing appended.
+        assert_eq!(
+            bytes.extend_capped(&[0; 95], 700),
+            Err(RemoteError::OutputTooLarge)
+        );
+        assert_eq!(bytes.len(), 606);
+        bytes.extend_capped(&[0; 94], 700).unwrap();
+        assert_eq!(bytes.len(), 700);
+        assert_eq!(SecretBytes::from(&b"ab"[..]), b"ab");
+        assert_eq!(SecretBytes::from(b"ab".to_vec()), &b"ab"[..]);
+        let debug = format!("{:?}", SecretBytes::from(&b"or2-secret-debug"[..]));
+        assert!(!debug.contains("or2-secret"), "{debug}");
+        assert!(debug.contains("16 bytes"), "{debug}");
+    }
+
+    #[test]
+    fn secret_bytes_are_wiped_when_dropped_even_through_clones_and_growth() {
+        use super::wipe_log::wiped;
+        let secret = b"or2-secret-drop";
+        drop(SecretBytes::from(&secret[..]));
+        assert_eq!(wiped(secret), 1);
+        let original = SecretBytes::from(&secret[..]);
+        let copy = original.clone();
+        drop(original);
+        assert_eq!(wiped(secret), 2);
+        drop(copy);
+        assert_eq!(wiped(secret), 3);
+        // Growing past the capacity wipes the block that is given up, not just the last one.
+        let mut grown = SecretBytes::new();
+        grown.extend_capped(b"or2-secret-grow", 4096).unwrap();
+        grown.extend_capped(&[b'.'; 1000], 4096).unwrap();
+        assert_eq!(
+            wiped(b"or2-secret-grow"),
+            1,
+            "the first block, wiped on growth"
+        );
+        drop(grown);
+        assert_eq!(wiped(b"or2-secret-grow"), 2, "and the final one on drop");
+    }
+
+    #[test]
     fn rendered_commands_round_trip_argv_through_every_available_shell() {
         let expected: String = NASTY.iter().map(|arg| format!("[{arg}]")).collect();
         let rendered = printf(NASTY).render().unwrap();
@@ -471,7 +645,7 @@ mod tests {
         let host = LocalHost::new();
         let out = host.exec(&printf(NASTY)).await.unwrap();
         let expected: String = NASTY.iter().map(|arg| format!("[{arg}]")).collect();
-        assert_eq!(String::from_utf8(out.stdout.clone()).unwrap(), expected);
+        assert_eq!(String::from_utf8(out.stdout.to_vec()).unwrap(), expected);
         assert!(out.success() && out.stderr.is_empty());
 
         let failing = RemoteCommand::new("sh")

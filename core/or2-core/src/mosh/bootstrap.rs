@@ -141,6 +141,8 @@ pub async fn bootstrap(
         .mosh_server
         .as_deref()
         .ok_or(BootstrapError::NotInstalled)?;
+    // `ExecOutput` wipes its streams whenever it is dropped, so every way out of this function
+    // (and every way out of the exec, see `ssh::connection`) leaves no copy of the key.
     let mut output = host
         .exec(&command(server, &caps.utf8_locale, target))
         .await?;
@@ -176,9 +178,15 @@ pub async fn terminate(host: &impl RemoteHost, pid: u32) -> Result<(), RemoteErr
     host.exec_script(&script).await.map(drop)
 }
 
+/// stdout as text in memory that is wiped on drop: a lossy conversion of invalid UTF-8 would
+/// otherwise leave an unwiped copy of the key.
+fn secret_text(bytes: &[u8]) -> Zeroizing<String> {
+    Zeroizing::new(String::from_utf8_lossy(bytes).into_owned())
+}
+
 /// The pid from `[mosh-server detached, pid = N]` on either stream.
 fn detached_pid(output: &ExecOutput) -> Option<u32> {
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = secret_text(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     stdout
         .lines()
@@ -189,7 +197,7 @@ fn detached_pid(output: &ExecOutput) -> Option<u32> {
 /// Reads `MOSH CONNECT <port> <key>` (stdout) and `[mosh-server detached, pid = N]` (stderr, but
 /// either stream is accepted) from a finished `mosh-server new`.
 pub fn parse_output(output: &ExecOutput, size: TerminalSize) -> Result<MoshParams, BootstrapError> {
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = secret_text(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let mut connect = None;
     let mut server_pid = None;
@@ -272,8 +280,8 @@ mod tests {
     fn output(status: Option<u32>, stdout: &str, stderr: &str) -> ExecOutput {
         ExecOutput {
             status,
-            stdout: stdout.as_bytes().to_vec(),
-            stderr: stderr.as_bytes().to_vec(),
+            stdout: stdout.as_bytes().into(),
+            stderr: stderr.as_bytes().into(),
         }
     }
 

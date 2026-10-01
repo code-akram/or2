@@ -169,6 +169,12 @@ enum Listing {
     Hang,
     Refuse,
     Lose,
+    /// Prints the marker (a secret, as `mosh-server new` would), then: the command finishes.
+    SecretThenFinish(&'static str),
+    /// Prints the marker, then never finishes.
+    SecretThenHang(&'static str),
+    /// Prints the marker, then more than the output cap.
+    SecretThenHuge(&'static str),
 }
 
 const PROBE_WITH_TMUX: &str = "or2:tmux:/fake/tmux\nor2:locale:C.UTF-8\nor2:end\n";
@@ -341,6 +347,24 @@ impl server::Handler for Server {
                 Ok(())
             }
             Listing::Lose => Err(russh::Error::Disconnect),
+            Listing::SecretThenFinish(secret) => {
+                session.channel_success(channel)?;
+                session.data(channel, secret.as_bytes().to_vec())?;
+                finish(session, channel, 0)
+            }
+            Listing::SecretThenHang(secret) => {
+                session.channel_success(channel)?;
+                session.data(channel, secret.as_bytes().to_vec())?;
+                Ok(())
+            }
+            Listing::SecretThenHuge(secret) => {
+                session.channel_success(channel)?;
+                session.data(channel, secret.as_bytes().to_vec())?;
+                for _ in 0..65 {
+                    session.data(channel, vec![b'x'; 16 * 1024])?;
+                }
+                finish(session, channel, 0)
+            }
         }
     }
 }
@@ -1007,5 +1031,73 @@ fn the_capability_probe_reads_herdr_sessions_through_the_herdr_client() {
             ("idle", false, false)
         ]
     );
+    fixture.handle.disconnect();
+}
+
+// ---------------------------------------------------------------------------------------
+// Secret-bearing exec output is wiped on every path (`remote::SecretBytes`).
+
+/// Waits until the collector has wiped a buffer holding `marker` (bounded).
+fn wiped(marker: &str) -> usize {
+    crate::remote::wipe_log::wiped(marker.as_bytes())
+}
+
+#[test]
+fn exec_output_is_wiped_when_the_exec_succeeds_fails_times_out_or_is_cancelled() {
+    let mut fixture = Fixture::connected(Duration::from_millis(500));
+    let ssh = fixture.ssh();
+    let set = |listing| *fixture.shared.listing.lock().unwrap() = listing;
+    let exec = || runtime().block_on(ssh.exec_rendered("tmux list-sessions"));
+
+    // Success: the caller owns the output and wipes it by dropping it.
+    set(Listing::SecretThenFinish("or2-secret-success"));
+    let output = exec().unwrap();
+    assert_eq!(&output.stdout[..], b"or2-secret-success");
+    assert_eq!(wiped("or2-secret-success"), 0, "still held by the caller");
+    drop(output);
+    assert_eq!(wiped("or2-secret-success"), 1);
+
+    // The command never finishes: the timeout drops the partial collection.
+    set(Listing::SecretThenHang("or2-secret-timeout"));
+    assert_eq!(exec().unwrap_err(), RemoteError::TimedOut);
+    assert_eq!(wiped("or2-secret-timeout"), 1);
+
+    // Output over the cap.
+    set(Listing::SecretThenHuge("or2-secret-cap"));
+    assert_eq!(exec().unwrap_err(), RemoteError::OutputTooLarge);
+    // Every block given up on growth was wiped too, so more than one holds the marker.
+    assert!(wiped("or2-secret-cap") >= 1);
+}
+
+#[test]
+fn exec_output_is_wiped_when_the_connection_dies_mid_command() {
+    let mut fixture = Fixture::connected_keeping(Duration::from_secs(10), PROBE_WITH_TMUX, true);
+    let ssh = fixture.ssh();
+    *fixture.shared.listing.lock().unwrap() = Listing::SecretThenHang("or2-secret-lost");
+    let result = runtime().block_on(async {
+        let cut = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            fixture.hang_up();
+        };
+        tokio::join!(ssh.exec_rendered("tmux list-sessions"), cut).0
+    });
+    assert!(result.is_err());
+    assert_eq!(wiped("or2-secret-lost"), 1);
+}
+
+#[test]
+fn a_cancelled_exec_wipes_what_it_had_collected() {
+    let mut fixture = Fixture::connected(Duration::from_secs(30));
+    let ssh = fixture.ssh();
+    *fixture.shared.listing.lock().unwrap() = Listing::SecretThenHang("or2-secret-cancelled");
+    let outcome = runtime().block_on(async {
+        timeout(
+            Duration::from_millis(300),
+            ssh.exec_rendered("tmux list-sessions"),
+        )
+        .await
+    });
+    assert!(outcome.is_err(), "the caller gave up first");
+    assert_eq!(wiped("or2-secret-cancelled"), 1);
     fixture.handle.disconnect();
 }

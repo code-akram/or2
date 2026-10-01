@@ -180,8 +180,8 @@ impl FakeHost {
 fn output(status: u32, stdout: &str, stderr: &str) -> ExecOutput {
     ExecOutput {
         status: Some(status),
-        stdout: stdout.as_bytes().to_vec(),
-        stderr: stderr.as_bytes().to_vec(),
+        stdout: stdout.as_bytes().into(),
+        stderr: stderr.as_bytes().into(),
     }
 }
 

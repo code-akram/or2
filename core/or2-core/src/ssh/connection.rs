@@ -40,7 +40,7 @@ use crate::host::{
     HostObserver, HostState, TerminalTarget, TmuxSession,
 };
 use crate::probe;
-use crate::remote::{ExecOutput, OUTPUT_CAP, RemoteError, RemoteHost};
+use crate::remote::{ExecOutput, OUTPUT_CAP, RemoteError, RemoteHost, SecretBytes};
 use crate::session::{CloseReason, HostKeyPrompt, SessionDriver, SessionFailure};
 use crate::term::TerminalSize;
 use crate::tmux::{self, TmuxError};
@@ -139,8 +139,8 @@ impl SshHost {
         let _ = channel.eof().await;
         let mut output = ExecOutput {
             status: None,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
+            stdout: SecretBytes::new(),
+            stderr: SecretBytes::new(),
         };
         let mut signalled = false;
         loop {
@@ -148,9 +148,11 @@ impl SshHost {
                 .await
                 .map_err(|_| RemoteError::TimedOut)?;
             match message {
-                Some(russh::ChannelMsg::Data { data }) => append_capped(&mut output.stdout, &data)?,
+                Some(russh::ChannelMsg::Data { data }) => {
+                    output.stdout.extend_capped(&data, OUTPUT_CAP)?
+                }
                 Some(russh::ChannelMsg::ExtendedData { data, ext: 1 }) => {
-                    append_capped(&mut output.stderr, &data)?
+                    output.stderr.extend_capped(&data, OUTPUT_CAP)?
                 }
                 Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
                     output.status = Some(exit_status)
@@ -209,14 +211,6 @@ impl Drop for ExecChannel {
             });
         }
     }
-}
-
-fn append_capped(into: &mut Vec<u8>, data: &[u8]) -> Result<(), RemoteError> {
-    if into.len() + data.len() > OUTPUT_CAP {
-        return Err(RemoteError::OutputTooLarge);
-    }
-    into.extend_from_slice(data);
-    Ok(())
 }
 
 fn remote_error(error: russh::Error) -> RemoteError {

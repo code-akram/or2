@@ -522,7 +522,10 @@ mod tests {
         let diff = incompressible(8192);
         let first = with_chaff(inst(9, &diff), 0);
         let again = with_chaff(inst(9, &diff), 16);
-        assert_ne!(first.to_compressed().unwrap(), again.to_compressed().unwrap());
+        assert_ne!(
+            first.to_compressed().unwrap(),
+            again.to_compressed().unwrap()
+        );
 
         let mut f = Fragmenter::default();
         let one = f.fragment(&first, 500).unwrap();
@@ -564,9 +567,6 @@ mod tests {
             complete = asm.add(frag);
         }
         assert!(complete);
-        assert_eq!(
-            asm.take().unwrap().unwrap(),
-            with_chaff(inst(10, &diff), 3)
-        );
+        assert_eq!(asm.take().unwrap().unwrap(), with_chaff(inst(10, &diff), 3));
     }
 }

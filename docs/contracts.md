@@ -317,9 +317,18 @@ pub trait RemoteHost: Send + Sync + 'static {
   the connection is gone. `open_unix` is `direct-streamlocal@openssh.com`; a refusal is `Io` when
   the channel-open failure reason is `CONNECT_FAILED` and `Rejected` otherwise (mapping below).
   The exec timeout also bounds `open_unix`.
-- `ExecOutput { status: Option<u32>, stdout: Vec<u8>, stderr: Vec<u8> }`; output is capped at
-  1 MiB per stream (excess fails with `RemoteError::OutputTooLarge`); each exec has a 10 s
-  timeout (`RemoteError::TimedOut`).
+- `ExecOutput { status: Option<u32>, stdout: SecretBytes, stderr: SecretBytes }`; output is
+  capped at 1 MiB per stream (excess fails with `RemoteError::OutputTooLarge`); each exec has a
+  10 s timeout (`RemoteError::TimedOut`). **Output is secret-bearing** (`mosh-server new` prints
+  its session key on stdout), so the streams are `remote::SecretBytes`: a byte buffer that
+  derefs to `[u8]`, shows only its length in `Debug`, and wipes itself when dropped. The SSH
+  collector appends through `SecretBytes::extend_capped`, which wipes the block it gives up
+  when it grows (a `Vec` reallocation would free it unwiped) and refuses an append past the
+  cap. Every way out of an exec drops what was collected, so it is wiped on success (when the
+  caller drops the output), refusal, timeout, output cap, connection loss and a cancelled
+  future alike (tests drive each path against the in-process server with a marker secret).
+  This covers or2's own buffers; russh's packet payloads arrive in its own zeroizing
+  `CryptoVec`, and the SSH transport's internal buffers are outside it.
 - `RemoteError`: `Closed`, `TimedOut`, `OutputTooLarge`, `Unquotable`, `Rejected(String)` (channel refused,
   e.g. streamlocal forwarding disabled), `Io(String)`.
   **`open_unix` error mapping** (the herdr watch depends on it: for a session its listing calls
@@ -852,7 +861,9 @@ option (it starts at 80x24 and learns the real size from the client's first data
 driver sends). `MOSH CONNECT <port> <key>` is read from stdout and `[mosh-server detached, pid
 = N]` from either stream. `MoshParams { port, key: MoshKey, size, server_pid: Option<u32> }`:
 `MoshKey` is `Zeroizing`, validated as a canonical 128-bit key, has a redacted `Debug` and no
-`Display`; stdout is zeroized after parsing and is never quoted in an error. The vendored
+`Display`; stdout is never quoted in an error. The output (`ExecOutput`) wipes itself on drop,
+including when the exec fails or is cancelled before `bootstrap` sees it (see *Remote commands*),
+and the text copies made while parsing are `Zeroizing`. The vendored
 `Base64Key` also zeroizes its bytes and printable forms; the AES key schedule inside `ocb3`
 0.1 is not zeroized on drop (the crate has no such support).
 `BootstrapError`: `NotInstalled`, `Remote(RemoteError)`, `Failed { status, detail }` (detail is
