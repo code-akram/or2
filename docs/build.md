@@ -174,6 +174,12 @@ interface changes, no reaction to bandwidth ticks, the foreground return, one de
 and `ManifestTest` the permission list. `HostConnectionsProbeTest` drives the whole holder
 over the real FFI with `contract_probe_host` (host-key relay and persistence, capabilities,
 agents into the inbox, terminals and frames, disconnect ordering).
+`TimingTest` covers the `or2.timing` markers (connect, capabilities and first herdr view per host, the
+unreachable host's `failed`); `TerminalActivationsTest` the tap, reuse and reopen paths including the
+terminal that starts beside its focus and is dismissed when the pane vanished; `ReattachTest` the
+battery prompt (asked once, up front; the card) and the cold-launch marker and decision.
+Timing markers are read on a debug build with `adb logcat -v time -s or2.timing:D` (one tag; one line per
+marker; host and pane ids only); see [contracts](contracts.md) "Timing markers".
 Tests that wait on those callbacks wait for the specific thing (a frame whose row shows the echo, the
 recovered link health) with a bounded timeout, never for a fixed sleep or for `frameReady.first()`,
 which replays its last signal; `linkHealth` is a StateFlow that conflates, so only the lossless

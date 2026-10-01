@@ -1,5 +1,6 @@
 package io.github.code_akram.or2.session
 
+import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HerdrState
 import io.github.code_akram.or2.ffi.HerdrUnavailable
@@ -62,6 +63,29 @@ fun hostStateMessage(state: HostState): String = when (state) {
     HostState.Authenticating -> "Authenticating\u2026"
     is HostState.Connected -> "Connected"
     is HostState.Closed -> sessionMessage(SessionState.Closed(state.reason))
+}
+
+private val ADDRESS_OUTCOME = Regex("""address (\d+): (.+?)(?:; (?=address \d+: )|$)""")
+
+/**
+ * What each address of an unreachable host did, one line per address, in the words of the core
+ * (`blackstark.local:22 · name not resolved (mDNS) after 3 tries`). The core names addresses by their
+ * position only (no host names in diagnostics); the app knows the list and puts the names back, for its
+ * own screen. Null when [message] says nothing per address, or names an address this host does not have.
+ */
+fun unreachableDetail(message: String, addresses: List<HostEndpoint>): String? {
+    val lines = mutableListOf<String>()
+    for (match in ADDRESS_OUTCOME.findAll(message)) {
+        val address = addresses.getOrNull(match.groupValues[1].toInt()) ?: return null
+        lines += "${address.hostname}:${address.port} \u00b7 ${match.groupValues[2].trim()}"
+    }
+    return lines.takeIf { it.isNotEmpty() }?.joinToString("\n")
+}
+
+/** The per-address explanation of a connection that closed `Unreachable`, else null. */
+fun hostFailureDetail(state: HostState?, addresses: List<HostEndpoint>): String? {
+    val failure = ((state as? HostState.Closed)?.reason as? CloseReason.Failed)?.failure as? SessionFailure.Unreachable ?: return null
+    return unreachableDetail(failure.message, addresses)
 }
 
 fun herdrStateMessage(state: HerdrState): String = when (state) {

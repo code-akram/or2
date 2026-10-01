@@ -60,4 +60,43 @@ class SessionMessagesTest {
         assertEquals(6, herdr.map(::herdrStateMessage).toSet().size)
         assertTrue(herdr.map(::herdrStateMessage).none { "diagnostic" in it })
     }
+
+    private val addresses = listOf(io.github.code_akram.or2.data.HostEndpoint("mac.local", 22), io.github.code_akram.or2.data.HostEndpoint("10.0.0.5", 2222))
+
+    @Test
+    fun theCoresPositionsBecomeTheHostsAddressesOneLineEach() {
+        assertEquals(
+            "mac.local:22 \u00b7 connection refused\n10.0.0.5:2222 \u00b7 no answer within 6 s",
+            unreachableDetail("TCP connection failed: address 0: connection refused; address 1: no answer within 6 s", addresses),
+        )
+        // A race still running when the connect timeout fired.
+        assertEquals(
+            "mac.local:22 \u00b7 still trying after 20 s\n10.0.0.5:2222 \u00b7 not tried yet",
+            unreachableDetail("no address answered within 20 s: address 0: still trying after 20 s; address 1: not tried yet", addresses),
+        )
+        // One endpoint that tried several resolved addresses says so in its own line.
+        assertEquals(
+            "mac.local:22 \u00b7 2 addresses: connection refused, no answer within 5 s",
+            unreachableDetail("address 0: 2 addresses: connection refused, no answer within 5 s", addresses),
+        )
+    }
+
+    @Test
+    fun aMessageWithoutPositionsOrWithAnUnknownAddressHasNoDetail() {
+        assertNull(unreachableDetail("diagnostic", addresses))
+        assertNull(unreachableDetail("", addresses))
+        assertNull(unreachableDetail("address 5: connection refused", addresses))
+        assertNull(unreachableDetail("address 0: connection refused", emptyList()))
+    }
+
+    @Test
+    fun onlyAnUnreachableCloseHasADetail() {
+        fun closed(failure: SessionFailure) = HostState.Closed(CloseReason.Failed(failure))
+        assertNotNull(hostFailureDetail(closed(SessionFailure.Unreachable("address 0: connection refused")), addresses))
+        assertNull(hostFailureDetail(closed(SessionFailure.TimedOut), addresses))
+        assertNull(hostFailureDetail(closed(SessionFailure.ConnectionLost("address 0: x")), addresses))
+        assertNull(hostFailureDetail(HostState.Closed(CloseReason.Disconnected), addresses))
+        assertNull(hostFailureDetail(HostState.Connected(0u), addresses))
+        assertNull(hostFailureDetail(null, addresses))
+    }
 }

@@ -1,6 +1,7 @@
 package io.github.code_akram.or2.app
 
 import io.github.code_akram.or2.connection.FakePort
+import io.github.code_akram.or2.connection.Timing
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.ffi.HostListener
@@ -43,13 +44,14 @@ class TerminalActivationsTest {
     }
 
     /** A connected host. [pending] leaves the capability probe unanswered until `port.capsGate` completes. */
-    private suspend fun TestScope.setup(target: Host = host, pending: Boolean = false): Setup {
+    private suspend fun TestScope.setup(target: Host = host, pending: Boolean = false, timing: Timing = Timing()): Setup {
         val events = mutableListOf<String>()
         val port = FakePort(events)
         port.caps = port.caps.copy(moshServer = "/usr/bin/mosh-server")
         if (pending) port.capsGate = CompletableDeferred()
         var listener: HostListener? = null
-        val holder = HostConnections({ _, l -> listener = l; port }, FakeTrust(), StandardTestDispatcher(testScheduler), UnconfinedTestDispatcher(testScheduler))
+        val holder = HostConnections({ _, l -> listener = l; port }, FakeTrust(), StandardTestDispatcher(testScheduler), UnconfinedTestDispatcher(testScheduler),
+            timing = timing)
         holder.connect(target, byteArrayOf(1))
         port.nativeState = HostState.Connected(0u)
         listener!!.onHostStateChanged(HostState.Connected(0u))
@@ -99,7 +101,8 @@ class TerminalActivationsTest {
         runCurrent()
         assertEquals("Focusing Fixture: herdr w1:p1", s.activations.pending.value)
         assertNull(result)
-        assertTrue(s.port.terminals.isEmpty()) // Not even opened before the focus succeeded.
+        // The terminal starts while the focus is in flight (they share their round trips); nothing is shown yet.
+        assertEquals(1, s.port.terminals.size)
         s.port.focusGate!!.complete(Unit)
         advanceUntilIdle()
         assertTrue(result is Activation.Ready)
@@ -117,13 +120,15 @@ class TerminalActivationsTest {
         // A new agent whose pane is gone: no terminal is opened.
         val failed = openAgent(s, "w9:p9") as Activation.Failed
         assertTrue(failed.message, failed.message.contains("pane no longer exists"))
-        assertEquals(1, s.port.terminals.size)
+        // The terminal that was started beside the focus is dismissed: no terminal is left for a vanished pane.
+        assertEquals(2, s.port.terminals.size)
+        assertTrue(s.port.terminals[1].third.destroyed)
         assertEquals(listOf(kept), s.holder.terminals.value)
 
         // The reused terminal would now show another pane: tapping the row does not navigate to it.
         val reused = openAgent(s, "w1:p1") as Activation.Failed
         assertEquals(failed.message, reused.message)
-        assertEquals(1, s.port.terminals.size)
+        assertEquals(2, s.port.terminals.size)
         s.holder.dismissHost(7)
     }
 
@@ -133,7 +138,7 @@ class TerminalActivationsTest {
         s.port.focusFailures["w1:p1"] = HostException.CommandFailed("herdr session is not running")
         val failed = openAgent(s, "w1:p1") as Activation.Failed
         assertEquals("Could not focus the agent's pane: herdr session is not running", failed.message)
-        assertTrue(s.port.terminals.isEmpty())
+        assertTrue(s.holder.terminals.value.isEmpty())
 
         s.port.focusFailures["w1:p1"] = HostException.NotInstalled("herdr")
         assertEquals("herdr is not installed on the host.", (openAgent(s, "w1:p1") as Activation.Failed).message)
@@ -141,7 +146,7 @@ class TerminalActivationsTest {
         assertEquals("The connection has closed. Reconnect to continue.", (openAgent(s, "w1:p1") as Activation.Failed).message)
         s.port.focusFailures["w1:p1"] = IllegalStateException("boom")
         assertEquals("Could not focus the agent's pane: boom", (openAgent(s, "w1:p1") as Activation.Failed).message)
-        assertTrue(s.port.terminals.isEmpty())
+        assertTrue(s.holder.terminals.value.isEmpty()) // Whatever was started beside the focus is gone.
         s.holder.dismissHost(7)
     }
 
@@ -306,7 +311,7 @@ class TerminalActivationsTest {
         s.port.focusGate!!.complete(Unit)
         advanceUntilIdle()
         assertTrue(done.isEmpty())
-        assertTrue(s.port.terminals.isEmpty())
+        assertTrue(s.holder.terminals.value.isEmpty()) // A terminal started beside the focus is dismissed with the wait.
 
         s.port.focusGate = CompletableDeferred()
         s.activations.launchOpenAgent(7, host.label, null, "w1:p1") { done += "older" }
@@ -317,8 +322,103 @@ class TerminalActivationsTest {
         s.port.focusGate!!.complete(Unit)
         advanceUntilIdle()
         assertEquals(listOf("newer"), done)
-        assertEquals(listOf<TerminalTarget>(b), s.port.terminals.map { it.first })
+        assertEquals(listOf<TerminalTarget>(b), s.holder.terminals.value.map { it.target })
         assertNull(s.activations.pending.value)
+        s.holder.dismissHost(7)
+    }
+
+    @Test
+    fun aNewAgentTerminalIsOpenedWhileItsPaneIsBeingFocusedAndOnlyShownOnceBothAreDone() = runTest {
+        val s = setup()
+        s.port.focusGate = CompletableDeferred()
+        val shown = mutableListOf<Activation>()
+        s.activations.launchOpenAgent(7, host.label, null, "w1:p1") { shown += it }
+        runCurrent()
+        // The focus is in flight and so is the terminal (mosh over AUTO): the wait is the longer of the two.
+        assertEquals(listOf("focus:null:w1:p1"), s.events)
+        assertEquals(1, s.port.terminals.size)
+        assertEquals(TerminalTransport.MOSH, s.port.transports.single())
+        assertTrue(shown.isEmpty())
+        s.port.focusGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(s.holder.terminals.value.single(), (shown.single() as Activation.Ready).terminal)
+        s.holder.dismissHost(7)
+    }
+
+    @Test
+    fun anOpenTerminalIsOnlyRefocusedNeverOpenedAgainOrAlongsideANewOne() = runTest {
+        val s = setup()
+        val first = (openAgent(s, "w1:p1") as Activation.Ready).terminal
+        s.events.clear()
+        s.port.focusGate = CompletableDeferred()
+        var shown: Activation? = null
+        s.activations.launchOpenAgent(7, host.label, null, "w1:p1") { shown = it }
+        runCurrent()
+        assertEquals(listOf("focus:null:w1:p1"), s.events)
+        assertEquals(1, s.port.terminals.size) // Nothing new was opened.
+        s.port.focusGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertSame(first, (shown as Activation.Ready).terminal)
+        s.holder.dismissHost(7)
+    }
+
+    @Test
+    fun theTapPathMarksFocusTerminalAndFrameInOrderWithItsMilliseconds() = runTest {
+        val lines = mutableListOf<String>()
+        var clock = 1_000L
+        val s = setup(timing = Timing(lines::add) { clock })
+        lines.clear() // The connect's own markers are not what this is about.
+        s.port.focusGate = CompletableDeferred()
+        var shown: Activation? = null
+        s.activations.launchOpenAgent(7, host.label, null, "w1:p1") { shown = it }
+        runCurrent()
+        clock += 300 // herdr acknowledges the focus
+        s.port.focusGate!!.complete(Unit)
+        runCurrent()
+        val terminal = s.holder.terminals.value.single()
+        clock += 200 // the mosh terminal connects
+        s.port.terminals[0].second.onStateChanged(SessionState.Connected)
+        advanceUntilIdle()
+        clock += 150 // the first frame is drawn
+        s.holder.timing.terminalFrame(terminal.id)
+        assertTrue(shown is Activation.Ready)
+        assertEquals(
+            listOf(
+                "tap host=7 pane=w1:p1 begin ms=0",
+                "tap host=7 pane=w1:p1 focused ms=300",
+                "tap host=7 pane=w1:p1 terminal-connected ms=500",
+                "tap host=7 pane=w1:p1 frame ms=650",
+            ),
+            lines,
+        )
+        // The path is over: a later frame (or a second view) adds nothing.
+        s.holder.timing.terminalFrame(terminal.id)
+        assertEquals(4, lines.size)
+        s.holder.dismissHost(7)
+    }
+
+    @Test
+    fun aReuseMarksFocusAndFrameAndNeverNamesAHost() = runTest {
+        val lines = mutableListOf<String>()
+        var clock = 0L
+        val s = setup(timing = Timing(lines::add) { clock })
+        lines.clear()
+        val terminal = s.open(a)
+        s.events.clear()
+        s.port.focusGate = CompletableDeferred()
+        s.activations.launchReuse(terminal) {}
+        runCurrent()
+        clock += 250
+        s.port.focusGate!!.complete(Unit)
+        advanceUntilIdle()
+        clock += 80
+        s.holder.timing.terminalFrame(terminal.id)
+        assertEquals(
+            listOf("reuse host=7 pane=w1:p1 begin ms=0", "reuse host=7 pane=w1:p1 focused ms=250", "reuse host=7 pane=w1:p1 frame ms=330"),
+            lines,
+        )
+        // Host ids and herdr pane ids only: no label, address or user name in a marker.
+        assertTrue(lines.none { "Fixture" in it || "fixture" in it })
         s.holder.dismissHost(7)
     }
 

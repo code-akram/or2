@@ -1153,7 +1153,10 @@ impl HostConnection {                     // all non-blocking unless async
   await its success every time an agent-target terminal is activated or reused**: tapping an
   inbox row whose terminal is already open, choosing it in the switcher, or navigating back to
   it. Only then show the terminal and enable input for it. For a first open the target's
-  `pane_id` already focuses before `herdr` starts (`open_terminal` unchanged).
+  `pane_id` focuses the pane as part of `open_terminal` (beside the start of the program, see
+  "Terminal sessions on a host"); the app's own focus of the same pane and the terminal's are
+  **one request** (the connection's `FocusGate` joins a focus in flight, and a terminal's own focus
+  accepts one the app finished within 2 s), so the app may start the focus and the open together.
   `focus_herdr_pane` validates names like `TerminalTarget` (`InvalidName`; session
   `[A-Za-z0-9_-]{1,64}`, pane `[A-Za-z0-9:_-]{1,128}`), needs a connected host
   (`NotConnected`/`Closed`), uses the probed herdr path (`NotInstalled { "herdr" }` without
@@ -1165,7 +1168,8 @@ impl HostConnection {                     // all non-blocking unless async
   deterministically: the probe view's panes `w1:p1`, `w1:p2` and `w2:p1` succeed (and become the
   focused pane of watches started afterwards), any other id is `PaneNotFound`.
   The app side is `TerminalActivations` (`app/`, reached as `HostConnections.activations`): the
-  inbox row (a first open too, so a vanished pane never opens a terminal), the session switcher, a
+  inbox row (a first open too: the terminal is started beside the focus and dismissed when the pane
+  turns out to be gone, so a vanished pane leaves no terminal), the session switcher, a
   Home thumbnail and the host screen's recent list all go through it. It awaits the focus, then
   yields `Activation.Ready(terminal)` or `Activation.Failed(message)`; `PaneNotFound` says the
   agent's pane is gone, any other error is shown, and neither navigates. Terminals that are not for
@@ -1399,7 +1403,7 @@ session `Failed { Internal { "mosh terminals land with M3-A" } }` is gone.
    focus and no exec channel, whatever the target is (AUTO then falls back to SSH, which reports
    a missing tmux or herdr itself).
 3. The target's command as `RemoteCommand::argv()`, built by the code the SSH path uses
-   (`terminal_session::program`): `<tmux> -u new-session -A -s <name>`, `<herdr>` or `<herdr>
+   (`terminal_session::plan`, which also returns the pane focus a herdr pane owes): `<tmux> -u new-session -A -s <name>`, `<herdr>` or `<herdr>
    --session <name>`, nothing for `Shell` (the login shell). `argv()` returns `None` for a
    command that carries environment assignments (an argument vector cannot), and the session
    closes `Failed { Internal }` rather than run the command without them; none do today. A
@@ -1587,7 +1591,8 @@ FFI unit tests: the registry (roams live mosh sessions only, forgets closed and 
   all". Request `POST_NOTIFICATIONS` (Android 13+) the first time a connection starts; the
   service still runs if it is denied.
 - **Battery optimisation:** a one-time explanation and `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`
-  the first time a session is open while the app goes to the background; never nag again.
+  **up front**, the first time the user starts a connection, in the foreground and before the
+  first unlock (see "M3 polish"); never nag again.
 - **Network callback:** `ConnectivityManager.registerDefaultNetworkCallback` → `network_changed()`
   on every default-network change; debounce 500 ms.
 - **Transport preference** per host in Room v3 (`transport`: `AUTO` default, `SSH`, `MOSH`), real
@@ -1651,12 +1656,10 @@ mosh session. Where the text above left a choice open, this is what the code doe
   answer arrives. `busy` is set from the tap until the connect starts: a second Connect tap does
   nothing meanwhile, and a Resume or reconnect that is waiting on the connect sees `busy` and not
   an idle host, so it is not abandoned (`resumeStep` gives up only when nothing is in flight).
-- **Battery optimisation:** `onStop` with a session open marks the explanation due (persisted;
-  never when the app is already exempt, and a configuration change is not "going to the
-  background"); the next time the app returns, a dialog explains and offers "Allow"
-  (`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) or "Not now". It is recorded as asked when shown,
-  whatever the answer, so it never nags again. A system dialog cannot be shown while the app is
-  leaving, which is why it waits for the return.
+- **Battery optimisation:** *superseded by "M3 polish" below.* The first M3-B text marked the
+  explanation due on `onStop` and showed it on the next return, which put a modal dialog over the
+  terminal; it is now asked up front, before the first unlock, and a declined exemption leaves a
+  small non-blocking card on Home.
 - **Network callback:** registered with the service on the main looper and removed with it.
   `NetworkChanges` tracks the default network's handle: a different network, or the same one
   after it was lost, is a change; the callback's first report of the network that was already the
@@ -1773,7 +1776,7 @@ mosh session. Where the text above left a choice open, this is what the code doe
       process died, a saved terminal destination that is not open any more is replaced by Home.
     - **Return state survives recreation.** The service keeps the process alive, so the system can
       destroy and recreate the activity while it is in the background. `returning` and
-      `stoppedOnTerminal` are saved state, and the return work (battery explanation, reconnect
+      `stoppedOnTerminal` are saved state, and the return work (reconnect
       offer, show/reopen) runs once the stored hosts have been read (a recreated activity starts
       with none), not at the `ON_START` itself.
   - Home shows a **Resume** card (`Alpha: herdr w1:p2`, `Mosh`) whenever the decision is reopen or
@@ -1832,8 +1835,10 @@ to fail v0 step 3. These changes landed after lanes M3-A and M3-B and are integr
   `connectGrouped`), then the host connects, the remembered target reopens (a herdr pane is focused
   first, the capability probe awaited briefly so AUTO can still choose mosh) and the terminal is
   shown. `shouldAutoResume` decides: a remembered terminal whose host still exists, has a key and
-  is not connected. A cold start from the launcher has no saved destination and shows Home's Resume
-  card as before (one tap and the fingerprint). Cancelling the prompt leaves the Resume card. SSH keys
+  is not connected. *A cold start from the launcher has no saved destination; OxygenOS removes a
+  killed app from recents, so that is the usual way back, and "M3 polish" resumes there too (a
+  "sessions open" marker tells a process that died with sessions from one that ended in order).*
+  Cancelling the prompt leaves the Resume card. SSH keys
   stay per-use; no mosh key is ever stored. After process death the old `mosh-server` is orphaned (its
   key died with the process; `mosh-server` has no idle timeout), and the reopened terminal starts a new
   one; the orphan is stopped by pid over the new SSH connection (see "Orphan cleanup"). The pane's tmux
@@ -1871,7 +1876,7 @@ to fail v0 step 3. These changes landed after lanes M3-A and M3-B and are integr
   row, the host screen) instead of a failure, and the reconnect offer never includes it. It still
   reads asleep only when the host went quiet (connection lost, unreachable, timed out): a rejected
   key or host key is a failure whatever the flag says. A tap on the host, or `Unlock` in the inbox,
-  still connects it. The one-time battery explanation is still a dialog (asked once, ever).
+  still connects it. The one-time battery explanation is asked up front, once (see "M3 polish").
 - **Multi-address mosh.** Mosh pins to the address SSH actually reached. The host form says so under
   the address list: `In order of preference. All are tried; the first to answer wins. Mosh stays on
   the address SSH reached, so list the one that works on every network first.`
@@ -2016,7 +2021,8 @@ standby setting, mobile data only, screen off while waiting, target the always-o
    (verified through herdr).
 5. Variants: Wi-Fi→mobile mid-wait; airplane mode 2 min; process killed (`am kill`/force) → the
    implemented recovery: a fresh SSH reconnect (one grouped unlock) and the Resume path (auto-resume
-   through the recents list, or Home's Resume card after a cold start), which reopens the remembered
+   through the recents list or, with sessions open when it died, from a cold launcher start; Home's
+   Resume card when the fingerprint is cancelled), which reopens the remembered
    target over a new mosh session, with the old `mosh-server` stopped by its recorded pid over the new
    connection (`resume_mosh`, resuming the dead client's session from a stored ticket, was rejected and is
    not implemented). Record the time to the first frame, the prompts, and that the orphan is gone. Three
@@ -2057,3 +2063,92 @@ two streams open together; the app's focus and the terminal's own focus are one 
 before it. The unreachable-host test connects a second, healthy host while a first one accepts TCP
 and never answers the handshake (20 s timeout) and checks the healthy host's connect and inbox are
 unaffected: each host is its own driver thread, and the Android flows are per host.
+
+### Battery exemption up front
+
+OxygenOS lets the SSH connections die within about ten minutes in the background unless the app is
+exempt from battery optimisation (mosh survives; with the exemption SSH does too). The explanation
+used to appear as a modal dialog over the terminal on the first return from the background. Now:
+
+- **When.** The first time the user starts a connection (any Connect, Resume, reconnect chip or
+  automatic resume), after the `POST_NOTIFICATIONS` request and **before the first unlock**, in the
+  foreground: `MainActivity.connectAfterNotifications`, while `busy` is set. If `BatteryPrompt.shouldExplain()`
+  (never explained, and not already exempt) it shows the explanation ("Keep sessions connected",
+  Allow / Not now) and holds the connect (the host ids are saved state, like the notification
+  request's, so a recreated activity still connects them). "Allow" opens
+  `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` through an activity-result launcher and the connect
+  (and its fingerprint prompt) goes on when the system dialog closes; "Not now" (or back, or a device
+  with no such screen) goes straight on. The explanation is recorded as asked when it is answered, **once,
+  ever**, whatever the answer; an already exempt app is never asked.
+- **Never on return.** `onStop`/`onStart` no longer touch the battery prompt: nothing modal appears
+  over a terminal.
+- **If it was not granted.** `BatteryPrompt.card` is true when the exemption was declined (or the
+  system dialog was refused) and is not in place: Home shows a small card above SESSIONS, "Background
+  connections may drop", with **Allow** (the system request again, as a plain `startActivity`) and a
+  close glyph that dismisses it for good. It blocks nothing, and goes away by itself once the
+  exemption is in place (re-read on every `onStart`). Tests: `ReattachTest` (the prompt's states and
+  persistence), `HomeUiDeviceTest` (the card, compile-checked here).
+
+### Cold-launch auto-resume
+
+After the process is killed OxygenOS removes or2 from recents, so the user comes back from the launcher,
+which has no saved destination, and used to get Home's Resume card (a tap, then the fingerprint). Now
+a cold launcher start resumes at once, exactly as the recents path does:
+
+- **The marker.** `SessionMarker` (app-private preference `sessions_open`) is written by `Or2Application`
+  from the service's snapshots: set while any terminal is open (`ServiceSnapshot.sessions > 0`) and
+  cleared the moment none is (Disconnect all, the last close, a remote exit, loss of every session).
+  A killed process leaves it set. The next process reads it **once, when it is created**
+  (`diedWithSessions`, before it writes anything) and hands it to the first activity that asks
+  (`takeColdResume`, one-shot per process, so rotation or a recreated activity never resumes twice).
+- **The decision.** `shouldAutoResumeOnLaunch(diedWithSessions, last, hosts, connectedHosts)` is
+  `diedWithSessions && shouldAutoResume(...)`: a remembered terminal whose host exists, has a key and is
+  not connected. A target the user closed on purpose is not remembered (`ReattachMemory` forgets it),
+  so it never resumes, and an orderly end cleared the marker. `Or2App` evaluates it once the stored
+  hosts are read (the same effect as the recents path, which still handles a saved terminal
+  destination), starts `resumeLast()` (one grouped biometric, connect, reopen the remembered target)
+  and leaves Home's Resume card as the fallback when the fingerprint is cancelled.
+- Tests: `ReattachTest` (marker lifecycle across "processes", the one-shot, the decision, a closed
+  target never resumed).
+
+### Timing markers (`or2.timing`)
+
+One logcat tag, **`or2.timing`**, debug builds only (`Or2Application` passes a sink to `Timing` only when
+the app is debuggable; a release build records nothing). Read it with:
+
+```sh
+adb logcat -v time -s or2.timing:D
+```
+
+One line per marker, `<path> <event> ms=<since the path began>`, naming hosts by id and herdr panes by
+pane id only (no label, address, user name, key or output):
+
+| Path | Events |
+|---|---|
+| `connect host=N` | `unlocked` (the biometric is done; ms=0), `authenticating`, `connected`, `capabilities` (the probe answered), `live` (the first herdr view of the host), or `failed` (closed before it connected, e.g. 20 s for an unreachable host) |
+| `tap host=N pane=P` (inbox tap) | `begin`, `focused` (herdr acknowledged the pane focus), `terminal-connected`, `frame` (the first frame was drawn) |
+| `reuse host=N pane=P` (an open terminal) | `begin`, `focused`, `frame` |
+| `reopen host=N` (return to the foreground) | as `tap` |
+| `resume host=N` (Resume card or automatic resume) | `begin`, `host-connected`, then the reopen's `focused`, `terminal-connected`, `frame` |
+
+For a new agent terminal the focus and the terminal start together, so `focused` and
+`terminal-connected` may come in either order. `connect` shows how long each host took from the
+fingerprint (an unreachable host's 20 s never delays the others: they are separate paths). No FFI change:
+the markers use the existing callbacks. Tests: `TimingTest`, `TerminalActivationsTest`.
+
+### Agent taps start the terminal beside the focus
+
+`TerminalActivations.openAgent` and `reopen` (`openOrReuse`): a terminal that is already open is reused
+after its pane is focused again; a new one is **opened while the pane is being focused** (Rust joins the
+two, see the herdr focus gate), and the wait ends when both are done. A pane that cannot be focused (it
+vanished) leaves no terminal: the one that was opened is dismissed, as is one whose wait was cancelled.
+
+### Unreachable hosts explain themselves
+
+The host card (Home) and the host page show, under the failure and in muted mono, what **each address**
+did: `blackstark.local:22 \u00b7 name not resolved (mDNS) after 3 tries` and `10.255.255.1:22 \u00b7 no answer
+within 6 s`. The core names addresses by position only; `unreachableDetail` puts the host's own names
+back (an `Unreachable` message of the form `address N: <outcome>; address M: ...`, see "Address
+racing"). A host with the **sleeps** flag whose connection ended `Unreachable`, `TimedOut` or lost reads
+as muted `Asleep` rather than an error (the detail still shows underneath); a rejected key or host key
+is a failure whatever the flag says. Tests: `SessionMessagesTest`, `HomeModelTest`.
