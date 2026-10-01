@@ -8,8 +8,14 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
+aes = "=0.8.4"
+base64 = "=0.22.1"
+flate2 = "=1.1.10"
+hex = "=0.4.3"
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "8953a740bc378cec3e07e1f6ca949f0595eab19b", default-features = false }
+ocb3 = "=0.1.0"
 or2-core = { path = "or2-core" }
+prost = { version = "=0.14.4", features = ["derive"] }
 rand = { version = "=0.10.3", features = ["thread_rng"] }
 russh = "=0.63.3"
 thiserror = "=2.0.21"
