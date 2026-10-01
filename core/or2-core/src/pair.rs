@@ -15,17 +15,19 @@
 //! The exchange (newline-delimited JSON over [`Transport`], every line bounded):
 //!
 //! ```text
-//! host  -> {"v":2,"nonce":"<base64 of 32 bytes>"}
-//! phone -> {"v":2,"key":"<openssh public key>","device":"<label>","mac":"<base64 request MAC>"}
+//! host  -> {"v":3,"nonce":"<base64 of 32 bytes>"}
+//! phone -> {"v":3,"key":"<openssh public key>","device":"<label>","mac":"<base64 request MAC>"}
 //! host  -> {"ok":true,"mac":"<base64 verdict MAC>"}  |  {"ok":false,"reason":"<code>","mac":"…"}
 //! ```
 //!
 //! The one-time password never crosses the network: only MACs do. The request MAC is
-//! `HMAC-SHA256(otp, "or2-pair/2 request" 0x00 || nonce || key)`; the host's answer carries
-//! `HMAC-SHA256(otp, "or2-pair/2 verdict" 0x00 || nonce || verdict 0x00 || fingerprint)`, which
-//! the phone verifies in constant time **before** it believes a success or a refusal (so a party
-//! that does not know the password cannot make the phone save a host or spend its code). The
-//! password is held in [`Otp`] (zeroized on drop, redacted in `Debug`).
+//! `HMAC-SHA256(otp, "or2-pair/3 request" 0x00 || nonce || key)`; the host's answer carries
+//! `HMAC-SHA256(otp, "or2-pair/3 verdict" 0x00 || ok || lp(reason) || lp(nonce) || lp(fingerprint))`
+//! (`ok` one byte, 1 or 0; `lp` a big-endian u16 length and the bytes: no two outcomes share an
+//! encoding), which the phone verifies in constant time **before** it believes a success or a
+//! refusal (so a party that does not know the password cannot make the phone save a host or spend
+//! its code), and whose fields (`ok`, `reason`) must be exactly what was MAC'd. The password is
+//! held in [`Otp`] (zeroized on drop, redacted in `Debug`).
 
 use std::fmt;
 use std::net::IpAddr;
@@ -62,11 +64,12 @@ pub const MAX_LABEL_CHARS: usize = 64;
 /// The longest line the phone accepts from the host, and the host from the phone.
 pub const HELLO_LIMIT: usize = 256;
 pub const REPLY_LIMIT: usize = 512;
-/// The version of the exchange (not of the pairing code): 2 authenticates the host's verdict.
-pub const EXCHANGE_VERSION: u32 = 2;
+/// The version of the exchange (not of the pairing code): 2 authenticated the host's verdict,
+/// 3 authenticates it with an unambiguous encoding (`ok` and the reason are separate fields).
+pub const EXCHANGE_VERSION: u32 = 3;
 /// The MAC domains: distinct, so a MAC for one purpose is never valid for the other.
-const REQUEST_DOMAIN: &[u8] = b"or2-pair/2 request\0";
-const VERDICT_DOMAIN: &[u8] = b"or2-pair/2 verdict\0";
+const REQUEST_DOMAIN: &[u8] = b"or2-pair/3 request\0";
+const VERDICT_DOMAIN: &[u8] = b"or2-pair/3 verdict\0";
 
 /// Why a pairing code was refused. The field names are the payload's own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -121,7 +124,7 @@ impl Otp {
         mac
     }
 
-    /// `HMAC-SHA256(otp, "or2-pair/2 request" 0x00 || nonce || key)`: what the phone proves it
+    /// `HMAC-SHA256(otp, "or2-pair/3 request" 0x00 || nonce || key)`: what the phone proves it
     /// knows without sending the password. `key` is the exact text sent in the request's `key`
     /// field.
     pub fn request_mac(&self, nonce: &[u8], key: &str) -> [u8; 32] {
@@ -131,24 +134,38 @@ impl Otp {
         mac.finalize().into_bytes().into()
     }
 
-    /// `HMAC-SHA256(otp, "or2-pair/2 verdict" 0x00 || nonce || verdict 0x00 || fingerprint)`:
-    /// what the host proves in its answer. `verdict` is `ok` or the refusal reason, `fingerprint`
-    /// the `SHA256:` fingerprint of the key the phone sent. The two domains differ, so a request
-    /// MAC can never be replayed as a verdict, nor a verdict from another exchange (other nonce)
-    /// or about another key.
-    pub fn verdict_mac(&self, nonce: &[u8], verdict: &str, fingerprint: &str) -> [u8; 32] {
-        self.verdict_hmac(nonce, verdict, fingerprint)
+    /// `HMAC-SHA256(otp, "or2-pair/3 verdict" 0x00 || ok || lp(reason) || lp(nonce) ||
+    /// lp(fingerprint))`: what the host proves in its answer. `ok` is one byte (1 for success, 0
+    /// for a refusal), `reason` the refusal reason (empty for a success and for a refusal without
+    /// one), `fingerprint` the `SHA256:` fingerprint of the key the phone sent, and `lp` a
+    /// big-endian `u16` length followed by the bytes. The encoding is injective: a success and a
+    /// refusal never share a MAC, whatever the reason. The two domains differ, so a request MAC
+    /// can never be replayed as a verdict, nor a verdict from another exchange (other nonce) or
+    /// about another key.
+    pub fn verdict_mac(&self, nonce: &[u8], ok: bool, reason: &str, fingerprint: &str) -> [u8; 32] {
+        self.verdict_hmac(nonce, ok, reason, fingerprint)
             .finalize()
             .into_bytes()
             .into()
     }
 
-    fn verdict_hmac(&self, nonce: &[u8], verdict: &str, fingerprint: &str) -> Hmac<Sha256> {
+    fn verdict_hmac(
+        &self,
+        nonce: &[u8],
+        ok: bool,
+        reason: &str,
+        fingerprint: &str,
+    ) -> Hmac<Sha256> {
+        fn field(mac: &mut Hmac<Sha256>, bytes: &[u8]) {
+            let length = u16::try_from(bytes.len()).unwrap_or(u16::MAX) /* bounded by the line limits */;
+            mac.update(&length.to_be_bytes());
+            mac.update(bytes);
+        }
         let mut mac = self.hmac(VERDICT_DOMAIN);
-        mac.update(nonce);
-        mac.update(verdict.as_bytes());
-        mac.update(&[0]);
-        mac.update(fingerprint.as_bytes());
+        mac.update(&[u8::from(ok)]);
+        field(&mut mac, reason.as_bytes());
+        field(&mut mac, nonce);
+        field(&mut mac, fingerprint.as_bytes());
         mac
     }
 
@@ -156,11 +173,12 @@ impl Otp {
     pub fn verify_verdict(
         &self,
         nonce: &[u8],
-        verdict: &str,
+        ok: bool,
+        reason: &str,
         fingerprint: &str,
         claimed: &[u8],
     ) -> bool {
-        self.verdict_hmac(nonce, verdict, fingerprint)
+        self.verdict_hmac(nonce, ok, reason, fingerprint)
             .verify_slice(claimed)
             .is_ok()
     }
@@ -520,6 +538,7 @@ struct Request<'a> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Reply {
     ok: bool,
     reason: Option<String>,
@@ -637,18 +656,19 @@ pub async fn converse<S: AsyncRead + AsyncWrite + Unpin>(
     let reply: Reply = serde_json::from_slice(&reply).map_err(|_| PairError::Protocol)?;
 
     // Nothing in the reply is believed, success or refusal, until it proves the host knows the
-    // one-time password: the MAC covers this exchange's nonce, the verdict and the fingerprint
-    // of the key that was sent. Constant-time comparison.
-    let verdict = if reply.ok {
-        "ok"
-    } else {
-        reply.reason.as_deref().unwrap_or_default()
-    };
+    // one-time password: the MAC covers this exchange's nonce, whether it is a success, the
+    // reason and the fingerprint of the key that was sent, in an encoding no two outcomes share.
+    // A success that carries a reason is contradictory and as good as forged. Constant-time
+    // comparison.
+    if reply.ok && reply.reason.is_some() {
+        return Err(PairError::HostNotAuthenticated);
+    }
+    let reason = reply.reason.as_deref().unwrap_or_default();
     let authentic = reply
         .mac
         .as_deref()
         .and_then(|mac| STANDARD.decode(mac.as_bytes()).ok())
-        .is_some_and(|mac| otp.verify_verdict(&nonce, verdict, &fingerprint, &mac));
+        .is_some_and(|mac| otp.verify_verdict(&nonce, reply.ok, reason, &fingerprint, &mac));
     if !authentic {
         return Err(PairError::HostNotAuthenticated);
     }

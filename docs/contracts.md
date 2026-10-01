@@ -2303,7 +2303,7 @@ terminal QR rendering).
    never 0.0.0.0 on a public interface) for at most 120 s. Exchange (newline-delimited JSON):
    server → `{"v":1,"nonce":<base64 32B>}`; phone → `{"v":1,"key":"<openssh public key line>",
    "device":"<label>","mac":<base64 HMAC-SHA256(otp, nonce || key)>}` (superseded: see "The exchange" below,
-   version 2 with domain-separated MACs and an authenticated verdict); server verifies the HMAC
+   version 3 with domain-separated MACs and an authenticated, unambiguously encoded verdict); server verifies the HMAC
    in constant time, prints the key's SHA-256 fingerprint and the device label, and asks
    `Authorize this key for <user>? [y/N]`. On `y` it appends
    `no-agent-forwarding,no-X11-forwarding <key> or2-<device>-<date>` to `authorized_keys`
@@ -2373,25 +2373,35 @@ or where the code differs from it, this section is the contract.
 ### The exchange
 
 ```text
-host  -> {"v":2,"nonce":"<base64, 32 bytes>"}
-phone -> {"v":2,"key":"<algo> <base64>","device":"<label>","mac":"<base64 request MAC>"}
+host  -> {"v":3,"nonce":"<base64, 32 bytes>"}
+phone -> {"v":3,"key":"<algo> <base64>","device":"<label>","mac":"<base64 request MAC>"}
 host  -> {"ok":true,"mac":"<base64 verdict MAC>"}
        | {"ok":false,"reason":"key|declined|timeout|failed|busy","mac":"<base64 verdict MAC>"}
        | {"ok":false,"reason":"request|authentication"}            (unsigned, see below)
 
-request MAC = HMAC-SHA256(otp, "or2-pair/2 request" 0x00 || nonce || key)
-verdict MAC = HMAC-SHA256(otp, "or2-pair/2 verdict" 0x00 || nonce || verdict 0x00 || fingerprint)
+request MAC = HMAC-SHA256(otp, "or2-pair/3 request" 0x00 || nonce || key)
+verdict MAC = HMAC-SHA256(otp, "or2-pair/3 verdict" 0x00 || ok || lp(reason) || lp(nonce) || lp(fingerprint))
+    ok = one byte, 1 for success, 0 for a refusal;  lp(x) = big-endian u16 length || x
 ```
 
-**Protocol version 2 (this section supersedes version 1, which had no host proof).** The exchange version
-(`v`, not the URI's `or2-pair:1`; the code format did not change) is 2 in all three messages: a phone that
-meets a `v` other than 2 in the hello reports `Protocol` ("the host does not speak this pairing protocol"),
-and a host refuses a request whose `v` is not 2 as `request`. An older phone or host therefore fails
-cleanly; update both.
+**Protocol version 3 (this section supersedes versions 1 and 2).** Version 1 had no host proof. Version 2
+authenticated the verdict but encoded it as `verdict 0x00 || fingerprint` with `verdict` being `ok` or the
+reason, so `ok:true` and `ok:false,reason:"ok"` shared one MAC and a path attacker, knowing no password, could
+turn a signed success into a "refusal" (the phone then reported a refused, spent code although the key had been
+installed). Version 3 MACs a canonical tuple: the success flag as its own byte, then the reason, the nonce and
+the fingerprint each length-prefixed, so no two outcomes share an encoding. The phone also rejects a reply
+whose fields are not exactly what was MAC'd: a success that carries a `reason`, a refusal whose `reason` is
+anything but what was signed (an absent reason is the empty one), any unknown field (`Protocol`), and any
+that fails the MAC (`HostNotAuthenticated`). The exchange version (`v`, not the URI's `or2-pair:1`; the code
+format did not change) is 3 in all three messages: a phone that meets a `v` other than 3 in the hello reports
+`Protocol` ("the host does not speak this pairing protocol"), and a host refuses a request whose `v` is not 3
+as `request`. An older phone or host therefore fails cleanly; update both. The test vectors in
+`or2_core::pair` and `or2_pair::exchange` were computed with an independent implementation (Python's `hmac` and
+`struct`).
 
 `otp` here is the 16 decoded bytes; `key` is the exact text of the field, as sent (the phone sends
 `<algorithm> <base64>` and drops the key's comment); `device` is not under the MAC (the host's person sees
-and confirms the key's fingerprint, which is). `verdict` is `ok` or the refusal reason; `fingerprint` is the
+and confirms the key's fingerprint, which is). `reason` is the refusal reason (empty for a success); `fingerprint` is the
 `SHA256:…` fingerprint of the key the phone sent (empty when the host could not parse it). The domain tags
 differ, so a request MAC can never be replayed as a verdict, nor a verdict from another exchange (other
 nonce) or about another key. Lines are bounded (256 bytes for the hello, 512 for the reply, 2048 for the

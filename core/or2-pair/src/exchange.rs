@@ -1,8 +1,8 @@
 //! The host's side of the one-shot exchange. The phone's side is `or2_core::pair`.
 //!
 //! ```text
-//! host  -> {"v":1,"nonce":"<base64 of 32 random bytes>"}
-//! phone -> {"v":1,"key":"<openssh public key>","device":"<label>","mac":"<base64 HMAC-SHA256(otp, nonce || key)>"}
+//! host  -> {"v":3,"nonce":"<base64 of 32 random bytes>"}
+//! phone -> {"v":3,"key":"<openssh public key>","device":"<label>","mac":"<base64 request MAC>"}
 //! host  -> {"ok":true}  |  {"ok":false,"reason":"<code>"}
 //! ```
 //!
@@ -90,11 +90,12 @@ impl Default for Limits {
 /// How long a thread waits in one read before it looks at the clock and the stop flag.
 const SLICE: Duration = Duration::from_millis(50);
 
-/// The version of the exchange (not of the pairing code): 2 authenticates the host's verdict.
-pub const EXCHANGE_VERSION: u32 = 2;
+/// The version of the exchange (not of the pairing code): 2 authenticated the host's verdict,
+/// 3 authenticates it with an unambiguous encoding (`ok` and the reason are separate fields).
+pub const EXCHANGE_VERSION: u32 = 3;
 /// The MAC domains: distinct, so a MAC made for one purpose is never valid for the other.
-const REQUEST_DOMAIN: &[u8] = b"or2-pair/2 request\0";
-const VERDICT_DOMAIN: &[u8] = b"or2-pair/2 verdict\0";
+const REQUEST_DOMAIN: &[u8] = b"or2-pair/3 request\0";
+const VERDICT_DOMAIN: &[u8] = b"or2-pair/3 verdict\0";
 
 fn hmac(otp: &[u8; 16], domain: &[u8]) -> Hmac<Sha256> {
     let mut mac =
@@ -103,7 +104,7 @@ fn hmac(otp: &[u8; 16], domain: &[u8]) -> Hmac<Sha256> {
     mac
 }
 
-/// `HMAC-SHA256(otp, "or2-pair/2 request" 0x00 || nonce || key)`.
+/// `HMAC-SHA256(otp, "or2-pair/3 request" 0x00 || nonce || key)`.
 fn mac_of(otp: &[u8; 16], nonce: &[u8], key: &str) -> Hmac<Sha256> {
     let mut mac = hmac(otp, REQUEST_DOMAIN);
     mac.update(nonce);
@@ -111,15 +112,28 @@ fn mac_of(otp: &[u8; 16], nonce: &[u8], key: &str) -> Hmac<Sha256> {
     mac
 }
 
-/// `HMAC-SHA256(otp, "or2-pair/2 verdict" 0x00 || nonce || verdict 0x00 || fingerprint)`: the
-/// host's proof, in its answer, that it knows the one-time password. `verdict` is `ok` or the
-/// refusal reason; `fingerprint` is that of the key the phone sent.
-fn verdict_mac(otp: &[u8; 16], nonce: &[u8], verdict: &str, fingerprint: &str) -> [u8; 32] {
+/// `HMAC-SHA256(otp, "or2-pair/3 verdict" 0x00 || ok || lp(reason) || lp(nonce) ||
+/// lp(fingerprint))`: the host's proof, in its answer, that it knows the one-time password. `ok` is
+/// one byte (1 success, 0 refusal), `reason` the refusal reason (empty for a success), `fingerprint`
+/// that of the key the phone sent, and `lp` a big-endian `u16` length followed by the bytes. No
+/// two outcomes share an encoding: a success is never a refusal with the reason `ok`.
+fn verdict_mac(
+    otp: &[u8; 16],
+    nonce: &[u8],
+    ok: bool,
+    reason: &str,
+    fingerprint: &str,
+) -> [u8; 32] {
+    fn field(mac: &mut Hmac<Sha256>, bytes: &[u8]) {
+        let length = u16::try_from(bytes.len()).unwrap_or(u16::MAX);
+        mac.update(&length.to_be_bytes());
+        mac.update(bytes);
+    }
     let mut mac = hmac(otp, VERDICT_DOMAIN);
-    mac.update(nonce);
-    mac.update(verdict.as_bytes());
-    mac.update(&[0]);
-    mac.update(fingerprint.as_bytes());
+    mac.update(&[u8::from(ok)]);
+    field(&mut mac, reason.as_bytes());
+    field(&mut mac, nonce);
+    field(&mut mac, fingerprint.as_bytes());
     mac.finalize().into_bytes().into()
 }
 
@@ -267,7 +281,13 @@ fn answer(
     reason: Option<&str>,
     fingerprint: &str,
 ) {
-    let mac = STANDARD.encode(verdict_mac(otp, nonce, reason.unwrap_or("ok"), fingerprint));
+    let mac = STANDARD.encode(verdict_mac(
+        otp,
+        nonce,
+        reason.is_none(),
+        reason.unwrap_or_default(),
+        fingerprint,
+    ));
     let text = match reason {
         None => format!("{{\"ok\":true,\"mac\":\"{mac}\"}}\n"),
         Some(reason) => format!("{{\"ok\":false,\"reason\":\"{reason}\",\"mac\":\"{mac}\"}}\n"),
@@ -674,7 +694,8 @@ mod tests {
         let mac = STANDARD.encode(verdict_mac(
             &OTP,
             &nonce_of(7),
-            reason.unwrap_or("ok"),
+            reason.is_none(),
+            reason.unwrap_or_default(),
             fingerprint,
         ));
         match reason {
@@ -687,37 +708,78 @@ mod tests {
 
     #[test]
     fn the_macs_match_an_independent_implementation() {
-        // Computed with Python's hmac module: key 00..0f, nonce 32 x 0x07,
-        //   request: b"or2-pair/2 request\0" + nonce + key line
-        //   verdict: b"or2-pair/2 verdict\0" + nonce + verdict + b"\0" + fingerprint
+        // Computed with Python's hmac and struct modules: key 00..0f, nonce 32 x 0x07,
+        //   request: b"or2-pair/3 request\0" + nonce + key line
+        //   verdict: b"or2-pair/3 verdict\0" + bytes([ok]) + lp(reason) + lp(nonce) + lp(fingerprint)
+        //   with lp(x) = struct.pack(">H", len(x)) + x
         let fingerprint = "SHA256:kY2vpQbIHmUhbgG5ANuAICLEcGLAYOduVWjw0y23ZPo";
         assert_eq!(fingerprint_of(PHONE), fingerprint);
         let request = mac_of(&OTP, &nonce_of(7), PHONE).finalize().into_bytes();
         assert_eq!(
             STANDARD.encode(request),
-            "PAaLIftH99RZ4M9f4XYmuaNXZaaXLbn9L5onzCzD/uA="
+            "IaQrPktpglepSd+cXDW2xdG3ZNB15ACWQtpY9LGeCsM="
         );
-        for (verdict, expected) in [
-            ("ok", "pnjPCUiNgflvbFCdB52UgxklAPfsYSTYKafVtqi4wJ0="),
-            ("declined", "XGj3vyEPqhMIuIpTumQM5/HZDX9kXLQHm35L/VLtx8I="),
-            ("timeout", "7rvvjU4QtylEpSZgjX8nuJ8RF33t53B3JHuDg0WSjX0="),
-            ("key", "UXvICon8g7Tm3oN6QqiFJJeIkDkoE/pR3KEYRmm53CI="),
-            ("failed", "m3RXXcSy0Te3yym/VQOEASlbGFHu/Kq8VEjJjD3BUIc="),
-            ("busy", "gWUCwkCLWARDtf5ephAmoG4Uy8IBxz0baGx8240/ZgU="),
+        for (ok, reason, expected) in [
+            (true, "", "XfkMzPaperzr9KSnBfpqM88loqS6/QbCgi5UjxYi3Ks="),
+            (
+                false,
+                "declined",
+                "Ayc24BzPg2Uiu8v96Wlg2QwuGJQp3Es2L4aR+oZblgY=",
+            ),
+            (
+                false,
+                "timeout",
+                "ebRDmZwUoHlfCEeJxv5DF8WmKWbLivVW1M7KSXMLudE=",
+            ),
+            (false, "key", "w+oe9bZjll8GHf2UBC5ncK2QfXLBt4viLRP47CAJwHk="),
+            (
+                false,
+                "failed",
+                "eVvw5gIScIcS7hYzhp9lvlbcDWka+feuYC2hDRsjn+M=",
+            ),
+            (
+                false,
+                "busy",
+                "XjM73yIy48N/PNDrYlmTOrUs3tDzdQgxv5dBIxKWYbs=",
+            ),
         ] {
             assert_eq!(
-                STANDARD.encode(verdict_mac(&OTP, &nonce_of(7), verdict, fingerprint)),
+                STANDARD.encode(verdict_mac(&OTP, &nonce_of(7), ok, reason, fingerprint)),
                 expected,
-                "{verdict}"
+                "{ok} {reason}"
             );
         }
     }
 
     #[test]
+    fn a_success_and_a_refusal_never_share_a_mac() {
+        // Review of 6afa42e: v2 signed `ok:true` and `ok:false,reason:"ok"` identically.
+        let nonce = nonce_of(7);
+        let success = verdict_mac(&OTP, &nonce, true, "", "SHA256:x");
+        for reason in ["ok", "", "declined", "ok\0SHA256:x"] {
+            assert_ne!(
+                success,
+                verdict_mac(&OTP, &nonce, false, reason, "SHA256:x"),
+                "{reason:?}"
+            );
+        }
+        assert_ne!(
+            verdict_mac(&OTP, &nonce, false, "declined", "SHA256:x"),
+            verdict_mac(&OTP, &nonce, false, "declined\0", "SHA256:x")
+        );
+        assert_ne!(
+            verdict_mac(&OTP, &nonce, false, "ab", "c"),
+            verdict_mac(&OTP, &nonce, false, "a", "bc")
+        );
+    }
+
+    #[test]
     fn the_request_and_verdict_domains_are_distinct() {
         let nonce = nonce_of(7);
-        let verdict = verdict_mac(&OTP, &nonce, "ok", "SHA256:x");
-        let request = mac_of(&OTP, &nonce, "ok\0SHA256:x").finalize().into_bytes();
+        let verdict = verdict_mac(&OTP, &nonce, true, "", "SHA256:x");
+        let request = mac_of(&OTP, &nonce, "\x01\0\0\0\x20SHA256:x")
+            .finalize()
+            .into_bytes();
         assert_ne!(verdict[..], request[..]);
     }
 
@@ -725,7 +787,7 @@ mod tests {
     fn request_for(otp: &[u8; 16], nonce: &[u8; 32], key: &str, device: &str) -> Vec<u8> {
         let mac = mac_of(otp, nonce, key).finalize().into_bytes();
         let mut line = serde_json::json!({
-            "v": 2, "key": key, "device": device, "mac": STANDARD.encode(mac),
+            "v": 3, "key": key, "device": device, "mac": STANDARD.encode(mac),
         })
         .to_string()
         .into_bytes();
@@ -800,7 +862,7 @@ mod tests {
         let lines = written(&connection);
         assert_eq!(
             lines[0],
-            format!("{{\"v\":2,\"nonce\":\"{}\"}}", STANDARD.encode(nonce_of(7)))
+            format!("{{\"v\":3,\"nonce\":\"{}\"}}", STANDARD.encode(nonce_of(7)))
         );
         assert_eq!(lines[1], verdict_json(None, &fingerprint_of(PHONE)));
         let keys = fixture.authorized_keys().unwrap();
@@ -862,7 +924,7 @@ mod tests {
         let fixture = Fixture::new(Answer::Yes);
         for mac in ["", "!!!", "AAAA", "short"] {
             let line =
-                format!("{{\"v\":2,\"key\":\"{PHONE}\",\"device\":\"d\",\"mac\":\"{mac}\"}}\n");
+                format!("{{\"v\":3,\"key\":\"{PHONE}\",\"device\":\"d\",\"mac\":\"{mac}\"}}\n");
             let mut connection = Script::new(&[line.as_bytes()]);
             assert!(
                 matches!(fixture.run(&mut connection), Attempt::Rejected),
@@ -942,7 +1004,7 @@ mod tests {
     fn malformed_requests_get_a_request_refusal_and_are_not_the_attempt() {
         let fixture = Fixture::new(Answer::Yes);
         let huge = vec![b'x'; REQUEST_LIMIT + 10];
-        let wrong_version = b"{\"v\":1,\"key\":\"k\",\"device\":\"d\",\"mac\":\"m\"}\n".to_vec();
+        let wrong_version = b"{\"v\":2,\"key\":\"k\",\"device\":\"d\",\"mac\":\"m\"}\n".to_vec();
         for input in [
             b"not json\n".to_vec(),
             b"{}\n".to_vec(),
@@ -1393,16 +1455,20 @@ mod tests {
             written(&bad_proof)[1],
             "{\"ok\":false,\"reason\":\"authentication\"}"
         );
-        // An old phone (exchange version 1, MAC without the domain) is refused as a bad request.
-        let old = format!(
-            "{{\"v\":1,\"key\":\"{PHONE}\",\"device\":\"d\",\"mac\":\"{}\"}}\n",
-            STANDARD.encode(OTP)
-        );
-        let mut old_phone = Script::new(&[old.as_bytes()]);
-        assert!(matches!(fixture.run(&mut old_phone), Attempt::Rejected));
-        assert_eq!(
-            written(&old_phone)[1],
-            "{\"ok\":false,\"reason\":\"request\"}"
-        );
+        // Old phones (exchange versions 1 and 2) are refused as a bad request, even with a request
+        // MAC that would otherwise verify.
+        for version in [1, 2] {
+            let mut old = request_for(&OTP, &nonce_of(7), PHONE, "phone");
+            let text = String::from_utf8(old.clone()).unwrap();
+            old = text
+                .replace("\"v\":3", &format!("\"v\":{version}"))
+                .into_bytes();
+            let mut old_phone = Script::new(&[&old]);
+            assert!(matches!(fixture.run(&mut old_phone), Attempt::Rejected));
+            assert_eq!(
+                written(&old_phone)[1],
+                "{\"ok\":false,\"reason\":\"request\"}"
+            );
+        }
     }
 }
