@@ -2419,8 +2419,8 @@ that fails the MAC (`HostNotAuthenticated`). The exchange version (`v`, not the 
 format did not change) is 3 in all three messages: a phone that meets a `v` other than 3 in the hello reports
 `Protocol` ("the host does not speak this pairing protocol"), and a host refuses a request whose `v` is not 3
 as `request`. An older phone or host therefore fails cleanly; update both. The test vectors in
-`or2_core::pair` and `or2_pair::exchange` were computed with an independent implementation (Python's `hmac` and
-`struct`).
+`or2_core::pair` and `or2_pair::exchange` were computed with an independent HMAC-SHA256
+implementation, not with or2's own code.
 
 `otp` here is the 16 decoded bytes; `key` is the exact text of the field, as sent (the phone sends
 `<algorithm> <base64>` and drops the key's comment); `device` is not under the MAC (the host's person sees
