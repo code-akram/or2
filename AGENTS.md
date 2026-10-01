@@ -21,6 +21,12 @@ Rules for humans and agents working in this repo. Read `docs/design.md` first.
 - Kotlin follows the official Kotlin style; Compose for all UI.
 - Tests next to the code for Rust (`#[cfg(test)]`) and in `core/*/tests/` for integration tests.
 
+## Tooling
+
+- Repository tooling is Rust (the `xtask` crate, run as `cargo xtask <task>`) or POSIX `sh` for
+  trivial glue. No Python, Node or other runtimes in the repo or the build; generated files are
+  checked in and every generator has a `--check` mode.
+
 ## Dependencies
 
 - Commit `Cargo.lock` and the Gradle lockfile. Git dependencies are pinned to a commit.
