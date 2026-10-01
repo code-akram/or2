@@ -80,7 +80,7 @@ class AppViewModelTest {
     }
 
     @Test
-    fun theBeforeSaveHookRunsOnlyForAValidHostAndBeforeTheWrite() {
+    fun theAfterSaveHookRunsOnlyForAValidHostOnceItIsWritten() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
         try {
             val dao = FakeDao()
@@ -88,9 +88,33 @@ class AppViewModelTest {
             var calls = 0
             model.saveHost(draft(hostname = "bad host"), null) { calls++ }
             assertEquals(0, calls)
-            model.saveHost(draft(id = 0), null) { calls++; assertTrue(dao.records.value.isEmpty()) }
+            model.saveHost(draft(id = 0), null) { calls++; assertEquals(1, dao.records.value.size) }
             assertEquals(1, calls)
             assertEquals(1, dao.records.value.size)
+        } finally { Dispatchers.resetMain() }
+    }
+
+    @Test
+    fun aFailedWriteLeavesTheConnectionAloneAndSaysSo() {
+        Dispatchers.setMain(UnconfinedTestDispatcher())
+        try {
+            val dao = FakeDao()
+            val model = AppViewModel(dao) {}
+            model.saveHost(draft(id = 0), null)
+            val stored = Host(dao.records.value.single(), listOf(HostEndpoint("fixture.invalid", 2222)))
+            var calls = 0
+            dao.failSave = true
+            model.saveHost(stored.copy(addresses = listOf(HostEndpoint("other.invalid", 22))), stored) { calls++ }
+            assertEquals(0, calls)
+            assertTrue(model.message.value!!.contains("Storage"))
+            dao.failDelete = true
+            model.deleteHost(stored) { calls++ }
+            assertEquals(0, calls)
+            assertEquals(1, dao.records.value.size)
+            dao.failDelete = false
+            model.deleteHost(stored) { calls++ }
+            assertEquals(1, calls)
+            assertTrue(dao.records.value.isEmpty())
         } finally { Dispatchers.resetMain() }
     }
 

@@ -63,10 +63,8 @@ class MainActivity : FragmentActivity() {
         })[AppViewModel::class.java]
         val actions = AppActions(
             saveHost = ::saveHost,
-            deleteHost = { host ->
-                app.connections.release(host.id, closeTerminals = true)
-                model.deleteHost(host)
-            },
+            // The connection ends only once the host is really gone from storage.
+            deleteHost = { host -> model.deleteHost(host) { app.connections.release(host.id, closeTerminals = true) } },
             generateKey = { label, comment -> saveKey(label) { generateEd25519Key(comment) } },
             importKey = ::importKey,
             deleteKey = model::deleteKey,
@@ -131,10 +129,15 @@ class MainActivity : FragmentActivity() {
         model.message("Key saved. Copy or share its public key for manual installation.")
     }
 
-    /** Edits that change a live connection's destination, login or key end it; others leave it alone. */
+    /**
+     * Edits that change a live connection's destination, login or key end it, after they are
+     * saved; the inbox flag starts or stops its herdr watches; others leave it alone.
+     */
     private fun saveHost(host: Host, previous: Host?) {
         model.saveHost(host, previous) {
-            if (previous != null && connectionAffectedBy(previous, host)) app.connections.release(host.id, closeTerminals = false)
+            if (previous == null) return@saveHost
+            if (connectionAffectedBy(previous, host)) app.connections.release(host.id, closeTerminals = false)
+            else app.connections.setWatching(host.id, host.showInInbox)
         }
     }
 

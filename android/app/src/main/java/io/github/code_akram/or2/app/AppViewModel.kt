@@ -20,8 +20,11 @@ class AppViewModel(private val dao: AppDao, private val deleteVaultKey: (String)
     val message = mutableMessage.asStateFlow()
     fun message(text: String?) { mutableMessage.value = text }
 
-    /** [beforeSave] runs once the host is valid, before it is written (e.g. to end a stale connection). */
-    fun saveHost(host: Host, previous: Host?, beforeSave: () -> Unit = {}) {
+    /**
+     * [afterSave] runs once the host is written, never when the write fails (e.g. to end a
+     * connection the edit made stale: a failed edit changed nothing, so the connection stays).
+     */
+    fun saveHost(host: Host, previous: Host?, afterSave: () -> Unit = {}) {
         val normalized = host.copy(
             record = host.record.copy(username = host.username.trim()),
             addresses = host.addresses.map { it.copy(hostname = it.hostname.trim()) },
@@ -31,12 +34,16 @@ class AppViewModel(private val dao: AppDao, private val deleteVaultKey: (String)
             return
         }
         action {
-            beforeSave()
             dao.saveHost(normalized, previous)
+            afterSave()
         }
     }
 
-    fun deleteHost(host: Host) = action { dao.deleteHost(host.id) }
+    /** [afterDelete] runs only once the host is gone from storage. */
+    fun deleteHost(host: Host, afterDelete: () -> Unit = {}) = action {
+        dao.deleteHost(host.id)
+        afterDelete()
+    }
     fun deleteKey(id: String) = action {
         dao.deleteKey(id) // Clear host references transactionally before destroying the vault entry.
         deleteVaultKey(id)
