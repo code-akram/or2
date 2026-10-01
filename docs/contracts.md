@@ -819,7 +819,12 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
   focus and the terminal's own from both reaching herdr: a focus for a pane whose focus is already
   in flight **joins it** and shares its answer (a failure included, and a cancelled leader leaves
   its followers to focus for themselves), and a terminal's focus (`from_terminal`) is satisfied by
-  an acknowledgement younger than `focus::RECENT` (2 s) for the same pane; the app's own request
+  an acknowledgement younger than `focus::RECENT` (2 s) for the same pane **that is still the
+  session's latest focus**: a herdr session has one focused pane, so the start of a focus of
+  another pane (each focus takes a per-session generation) invalidates every older acknowledgement
+  of that session, and an acknowledgement is remembered only if no later focus of the session
+  started meanwhile (overlapping A and B leave only B recent). Focus A, focus B, open a terminal on
+  A therefore sends a focus of A. The app's own request
   (`HostHandle::focus_herdr_pane`) is never answered from memory, because the user's desktop may
   have moved the focus meanwhile. It changes what the user's
   herdr clients show; tests use isolated named sessions only. An error response with the code

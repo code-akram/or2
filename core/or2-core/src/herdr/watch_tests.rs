@@ -1305,3 +1305,78 @@ async fn a_cancelled_focus_leaves_its_followers_to_focus_for_themselves() {
     follower.await.unwrap();
     assert!(focuses(&host) >= 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_recent_focus_of_a_pane_does_not_satisfy_a_terminal_after_another_pane_was_focused() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    focus_once(&gate, &host, &directory, "w2:p1", false)
+        .await
+        .unwrap();
+    focus_once(&gate, &host, &directory, "w2:p2", false)
+        .await
+        .unwrap();
+    // Pane 2 is the focused one: a terminal on pane 1 must focus it again, inside RECENT.
+    focus_once(&gate, &host, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        host.served().last(),
+        Some(&Served::Focus("w2:p1".into())),
+        "opening A after B must restore A"
+    );
+    // That focus is now the latest: the next terminal on the same pane accepts it.
+    let before = focuses(&host);
+    focus_once(&gate, &host, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(focuses(&host), before);
+}
+
+#[tokio::test(start_paused = true)]
+async fn overlapping_focuses_of_two_panes_leave_only_the_later_one_recent() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    // A is asked first and B while A is in flight: B is the pane herdr ends on.
+    let (a, b) = tokio::join!(
+        focus_once(&gate, &host, &directory, "w2:p1", false),
+        focus_once(&gate, &host, &directory, "w2:p2", false),
+    );
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(focuses(&host), 2);
+    focus_once(&gate, &host, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        host.served().last(),
+        Some(&Served::Focus("w2:p1".into())),
+        "A's acknowledgement is not authoritative once B was asked"
+    );
+    // B is not recent any more either, after A was focused again.
+    focus_once(&gate, &host, &directory, "w2:p2", true)
+        .await
+        .unwrap();
+    assert_eq!(host.served().last(), Some(&Served::Focus("w2:p2".into())));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_focus_in_another_herdr_session_does_not_invalidate_a_recent_one() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    focus_once(&gate, &host, &directory, "w2:p1", false)
+        .await
+        .unwrap();
+    // The other session's focus fails (nothing is listed for it): it must not touch session None.
+    let _ = gate
+        .focus(&host, HERDR, &directory, Some("other"), "w2:p2", false)
+        .await;
+    let before = focuses(&host);
+    focus_once(&gate, &host, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(focuses(&host), before);
+}

@@ -9,6 +9,12 @@
 //! was acknowledged within [`RECENT`] satisfies a terminal's own, which only wants the pane to
 //! be the focused one before it starts). An explicit request from the app is never answered
 //! from memory, only joined.
+//!
+//! A herdr session has one focused pane, so what the gate remembers is **per session**: the
+//! moment a focus of another pane starts, every older acknowledgement of that session stops
+//! counting (each focus takes a generation number; an acknowledgement is remembered only if no
+//! later focus of the session started meanwhile). Otherwise a terminal on A would accept A's
+//! old acknowledgement after B was focused and show B.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -40,7 +46,15 @@ enum Slot {
 /// Per host connection. See the module documentation.
 #[derive(Default)]
 pub struct FocusGate {
-    slots: Mutex<HashMap<Key, Slot>>,
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
+    slots: HashMap<Key, Slot>,
+    /// The generation of the latest focus started in each herdr session.
+    latest: HashMap<Option<String>, u64>,
+    counter: u64,
 }
 
 /// Removes a leader's in-flight slot if it is dropped before it finished (a cancelled query):
@@ -54,7 +68,7 @@ struct Leading<'a> {
 impl Drop for Leading<'_> {
     fn drop(&mut self) {
         if self.armed {
-            self.gate.lock().remove(&self.key);
+            self.gate.lock().slots.remove(&self.key);
         }
     }
 }
@@ -64,8 +78,8 @@ impl FocusGate {
         Self::default()
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<Key, Slot>> {
-        self.slots.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Focuses `pane_id` of `session`. A request for the same pane that is already in flight is
@@ -86,17 +100,25 @@ impl FocusGate {
             enum Role {
                 Recent,
                 Follow(watch::Receiver<Outcome>),
-                Lead(watch::Sender<Outcome>),
+                Lead(watch::Sender<Outcome>, u64),
             }
             let role = {
-                let mut slots = self.lock();
-                match slots.get(&key) {
+                let mut state = self.lock();
+                match state.slots.get(&key) {
                     Some(Slot::Done(at)) if accept_recent && at.elapsed() < RECENT => Role::Recent,
                     Some(Slot::InFlight(receiver)) => Role::Follow(receiver.clone()),
                     _ => {
                         let (sender, receiver) = watch::channel(None);
-                        slots.insert(key.clone(), Slot::InFlight(receiver));
-                        Role::Lead(sender)
+                        // A new focus makes every older one of this herdr session history:
+                        // the session's focused pane is about to change.
+                        state.counter += 1;
+                        let generation = state.counter;
+                        state.latest.insert(key.0.clone(), generation);
+                        state.slots.retain(|other, slot| {
+                            other.0 != key.0 || matches!(slot, Slot::InFlight(_))
+                        });
+                        state.slots.insert(key.clone(), Slot::InFlight(receiver));
+                        Role::Lead(sender, generation)
                     }
                 }
             };
@@ -112,7 +134,7 @@ impl FocusGate {
                         Err(_) => continue,
                     }
                 }
-                Role::Lead(sender) => {
+                Role::Lead(sender, generation) => {
                     let mut leading = Leading {
                         gate: self,
                         key: key.clone(),
@@ -121,10 +143,15 @@ impl FocusGate {
                     let result = focus_pane_in(host, herdr, directory, session, pane_id).await;
                     leading.armed = false;
                     {
-                        let mut slots = self.lock();
+                        let mut state = self.lock();
+                        // Remembered only while no later focus of the session has started: that
+                        // one decides which pane is focused, and this answer is history.
+                        let current = state.latest.get(&key.0) == Some(&generation);
                         match &result {
-                            Ok(()) => slots.insert(key.clone(), Slot::Done(Instant::now())),
-                            Err(_) => slots.remove(&key),
+                            Ok(()) if current => {
+                                state.slots.insert(key.clone(), Slot::Done(Instant::now()))
+                            }
+                            _ => state.slots.remove(&key),
                         };
                     }
                     let _ = sender.send(Some(result.clone()));
