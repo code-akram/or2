@@ -223,6 +223,20 @@ abstract class AppDao : TrustStore, MoshFailureStore {
         }
     }
 
+    /**
+     * A new host together with its trusted host key, in one transaction (Easy pair): the key came from a
+     * pairing code the user scanned, so the first connection must find it already trusted. A different key
+     * presented later is the changed-key path, as for any trusted host.
+     */
+    @Transaction
+    open suspend fun saveHostWithTrust(host: Host, trusted: PublicKeyInfo): Long {
+        require(host.addresses.size in 1..Host.MAX_ADDRESSES) { "A host needs 1 to ${Host.MAX_ADDRESSES} addresses." }
+        val id = insertHost(host.record.copy(id = 0))
+        insertAddresses(addressRows(id, host.addresses))
+        insertTrust(TrustedHostKey(id, trusted.openssh, trusted.fingerprint, trusted.algorithm))
+        return id
+    }
+
     private fun addressRows(hostId: Long, addresses: List<HostEndpoint>) =
         addresses.mapIndexed { position, address -> HostAddressRecord(hostId, position, address.hostname, address.port) }
 }

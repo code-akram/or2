@@ -74,6 +74,10 @@ import io.github.code_akram.or2.inbox.inbox
 import io.github.code_akram.or2.inbox.linkStatus
 import io.github.code_akram.or2.inbox.pendingHostKeys
 import io.github.code_akram.or2.keys.KeysScreen
+import io.github.code_akram.or2.pair.AddHostSheet
+import io.github.code_akram.or2.pair.PairDestination
+import io.github.code_akram.or2.pair.PairFlow
+import io.github.code_akram.or2.pair.PairState
 import io.github.code_akram.or2.session.HostTrustDialog
 import io.github.code_akram.or2.session.SessionScreen
 import io.github.code_akram.or2.session.hostErrorMessage
@@ -119,6 +123,10 @@ class AppActions(
     val answerBatteryExplanation: (allow: Boolean) -> Unit = {},
     /** True once per process when the previous one died with sessions open ([SessionMarker]): the launcher resumes. */
     val takeColdResume: () -> Boolean = { false },
+    /** Easy pair: the flow (its state outlives the activity), the phone's name for the host, and key generation. */
+    val pair: PairFlow? = null,
+    val deviceLabel: String = "phone",
+    val generatePairKey: suspend (label: String, comment: String) -> KeyRecord = { _, _ -> error("pairing is not available") },
 )
 
 /**
@@ -137,7 +145,12 @@ fun Or2App(
     val activations = connections.activations
     val focusing by activations.pending.collectAsStateWithLifecycle()
     // Any navigation of the user's own ends a wait for a pane focus; its terminal is not shown after all.
-    fun navigate(next: NavStack) { activations.cancel(); saved = next.encode() }
+    fun navigate(next: NavStack) {
+        activations.cancel()
+        // Leaving the pairing screens ends the pairing (and wipes its code).
+        if (nav.current is Destination.EasyPair && next.current !is Destination.EasyPair) actions.pair?.cancel()
+        saved = next.encode()
+    }
     fun pop() { nav.backOrHome()?.let(::navigate) }
     val terminals by connections.terminals.collectAsStateWithLifecycle()
     DisposableEffect(activations) { onDispose { activations.cancel() } }
@@ -157,6 +170,13 @@ fun Or2App(
     val last by actions.reattach.last.collectAsStateWithLifecycle()
     val batteryExplaining by actions.battery.explaining.collectAsStateWithLifecycle()
     val batteryCard by actions.battery.card.collectAsStateWithLifecycle()
+
+    // "Add host" opens the two-card sheet: Easy pair (scan) or the manual form, which is unchanged.
+    var addSheet by rememberSaveable { mutableStateOf(false) }
+    fun addHost() { addSheet = true }
+    val pairFlow = actions.pair
+    val pairState by (pairFlow?.state ?: remember { kotlinx.coroutines.flow.MutableStateFlow<PairState>(PairState.Scanning()) })
+        .collectAsStateWithLifecycle()
 
     // Hosts between the tap and the key being unlocked: their card says "Unlocking key...".
     var unlocking by remember { mutableStateOf(emptySet<Long>()) }
@@ -383,7 +403,7 @@ fun Or2App(
                             if (!busy && host.keyId != null && link.canConnect) connect(listOf(host))
                             openHostPage(host.id)
                         },
-                        addHost = { navigate(nav.push(Destination.HostForm(0))) },
+                        addHost = ::addHost,
                         editHost = { navigate(nav.push(Destination.HostForm(it.id))) },
                         connectHost = { host ->
                             connect(listOf(host))
@@ -410,9 +430,15 @@ fun Or2App(
                     },
                     openHome = { navigate(nav.top(Destination.Home)) },
                     openKeys = { navigate(nav.push(Destination.Keys)) },
-                    addHost = { navigate(nav.push(Destination.HostForm(0))) },
+                    addHost = ::addHost,
                 )
                 Destination.Keys -> KeysScreen(keys, busy, actions.generateKey, actions.importKey, actions.deleteKey, back = ::pop)
+                Destination.EasyPair -> if (pairFlow == null) Column { TopBar(back = ::pop) } else PairDestination(
+                    pairState, keys, pairFlow, actions.deviceLabel, actions.generatePairKey,
+                    close = ::pop,
+                    // A code without a listener ends on the key to install: Done returns Home with the host saved.
+                    done = { pairFlow.consume(); navigate(NavStack()) },
+                )
                 is Destination.HostForm -> {
                     val previous = hosts.find { it.id == current.hostId }
                     HostFormScreen(previous, keys, busy, save = { host -> actions.saveHost(host, previous); pop() }, close = ::pop,
@@ -445,6 +471,24 @@ fun Or2App(
                         .padding(bottom = if (current == Destination.Home) Or2Dimens.Fab + 24.dp else 8.dp))
             }
         }
+    }
+    if (addSheet) {
+        AddHostSheet(
+            easyPair = { addSheet = false; pairFlow?.start(); navigate(nav.push(Destination.EasyPair)) },
+            manual = { addSheet = false; navigate(nav.push(Destination.HostForm(0))) },
+            dismiss = { addSheet = false },
+        )
+    }
+    // Paired: the host and its trusted key are saved. Once the stored list shows it, go to its page and connect
+    // (the unlock is the usual one; the host key is already trusted, so no first-use prompt).
+    val paired = (pairState as? PairState.Paired)?.host
+    LaunchedEffect(paired, hosts, busy) {
+        val host = paired ?: return@LaunchedEffect
+        if (hosts.none { it.id == host.id } || busy) return@LaunchedEffect
+        pairFlow?.consume()
+        offered = offered - host.id
+        navigate(NavStack().push(Destination.HostPage(host.id)))
+        connect(listOf(host))
     }
     // A prompt for a host whose screen is not showing still needs an answer, one dialog at a time:
     // the shown host's own screen already has its dialog.

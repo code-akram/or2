@@ -11,12 +11,24 @@ val generatedLibraries = layout.buildDirectory.dir("generated/uniffi/jniLibs")
 val rustInputs = fileTree(rustRoot) {
     include("Cargo.toml", "Cargo.lock", "or2-core/**", "or2-ffi/**")
 }
+val pairInputs = fileTree(rustRoot) {
+    include("Cargo.toml", "Cargo.lock", "or2-core/**", "or2-pair/**")
+}
 
 val buildRustHost by tasks.registering(Exec::class) {
     workingDir(rustRoot)
     commandLine("cargo", "build", "--locked", "-p", "or2-ffi", "--lib")
     inputs.files(rustInputs)
     outputs.file(rustRoot.resolve("target/debug/libor2_ffi.so"))
+}
+
+// The host CLI with its test-only auto-confirming host: the JVM end-to-end test of Easy pair talks to
+// it over loopback. It is never part of the app or of `cargo install or2-pair`.
+val buildPairTesthost by tasks.registering(Exec::class) {
+    workingDir(rustRoot)
+    commandLine("cargo", "build", "--locked", "-p", "or2-pair", "--features", "test-support", "--bin", "or2-pair-testhost")
+    inputs.files(pairInputs)
+    outputs.file(rustRoot.resolve("target/debug/or2-pair-testhost"))
 }
 
 val generateRustBindings by tasks.registering(Exec::class) {
@@ -96,8 +108,9 @@ tasks.named("preBuild") {
 }
 
 tasks.withType<Test>().configureEach {
-    dependsOn(buildRustHost)
+    dependsOn(buildRustHost, buildPairTesthost)
     systemProperty("jna.library.path", rustRoot.resolve("target/debug").absolutePath)
+    systemProperty("or2.pair.testhost", rustRoot.resolve("target/debug/or2-pair-testhost").absolutePath)
 }
 
 dependencies {
@@ -118,6 +131,13 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
     implementation("net.java.dev.jna:jna:5.17.0@aar")
+    // Easy pair: the camera preview and frames (AndroidX, Apache-2.0) and the QR decoder (ZXing core,
+    // Apache-2.0, pure Java). No Google Play Services: CameraX's camera2 backend and ZXing instead of ML Kit.
+    implementation("androidx.camera:camera-core:1.5.3")
+    implementation("androidx.camera:camera-camera2:1.5.3")
+    implementation("androidx.camera:camera-lifecycle:1.5.3")
+    implementation("androidx.camera:camera-view:1.5.3")
+    implementation("com.google.zxing:core:3.5.4")
 
     testImplementation("junit:junit:4.13.2")
     // Runs the Room migration SQL on real SQLite (Apache-2.0; test-only).
