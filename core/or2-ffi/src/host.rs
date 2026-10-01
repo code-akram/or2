@@ -156,9 +156,10 @@ pub enum HostError {
     InvalidName,
     #[error("{program} is not installed on the host")]
     NotInstalled { program: String },
-    /// `message` is a diagnostic without secrets; do not match on it.
-    #[error("command failed: {message}")]
-    CommandFailed { message: String },
+    /// `reason` is a diagnostic without secrets; do not match on it. (Not `message`: that
+    /// would clash with `Throwable.message` in the generated Kotlin exception.)
+    #[error("command failed: {reason}")]
+    CommandFailed { reason: String },
 }
 
 impl From<core::HostError> for HostError {
@@ -170,7 +171,7 @@ impl From<core::HostError> for HostError {
             core::HostError::HostKeyMismatch => Self::HostKeyMismatch,
             core::HostError::InvalidName => Self::InvalidName,
             core::HostError::NotInstalled { program } => Self::NotInstalled { program },
-            core::HostError::CommandFailed { message } => Self::CommandFailed { message },
+            core::HostError::CommandFailed { message } => Self::CommandFailed { reason: message },
         }
     }
 }
