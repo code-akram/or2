@@ -480,6 +480,49 @@ class HostConnectionsTransportTest {
     }
 
     @Test
+    fun aTimeoutIsRememberedEvenIfTheSshRetryCannotStart() = runTest {
+        val store = Failures()
+        val rig = rig(store = store)
+        val terminal = rig.holder.openTerminal(rig.active, shell)
+        // Coupled SSH and UDP loss: the connection is gone just before the fallback's own open.
+        rig.port.openFailure = HostException.Closed()
+        timedOut(rig)
+        assertEquals(NOW + MOSH_PAUSE_MS, rig.active.moshPausedUntil)
+        assertEquals(listOf(rig.host.id to NOW + MOSH_PAUSE_MS), store.marks)
+        // The mosh failure is shown as it was, and the retry is not claimed.
+        assertEquals(SessionState.Closed(CloseReason.Failed(SessionFailure.TimedOut)), terminal.state.value)
+        assertEquals(TerminalTransport.MOSH, terminal.transport.value)
+        assertNull(terminal.note.value)
+        assertNull(rig.active.moshFallbackNote)
+        // The next AUTO terminal on a connection that works goes straight to SSH.
+        rig.port.openFailure = null
+        val next = rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("later"))
+        assertEquals(TerminalTransport.SSH, rig.port.transports.last())
+        assertEquals(MOSH_PAUSED_NOTE, next.note.value)
+    }
+
+    @Test
+    fun aTimeoutOfATerminalThatIsNoLongerOwnedIsNotRemembered() = runTest {
+        val store = Failures()
+        val ended = rig(store = store)
+        val terminal = ended.holder.openTerminal(ended.active, shell)
+        ended.holder.disconnectTerminal(terminal) // The user ended it: not mosh's failure.
+        timedOut(ended)
+        assertTrue(store.marks.isEmpty())
+        assertEquals(0L, ended.active.moshPausedUntil)
+
+        // A destination edit released the connection: whatever its terminals say, the memory is
+        // about a destination that no longer exists.
+        val edited = rig(store = store)
+        edited.holder.openTerminal(edited.active, shell)
+        val old = edited.active
+        edited.holder.release(edited.host.id, closeTerminals = false)
+        timedOut(edited)
+        assertTrue(store.marks.isEmpty())
+        assertEquals(0L, old.moshPausedUntil)
+    }
+
+    @Test
     fun aFallbackWithoutAStoreStillWorks() = runTest {
         val rig = rig() // No store: nothing is persisted, the connection still remembers.
         rig.holder.openTerminal(rig.active, shell)

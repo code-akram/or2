@@ -1633,7 +1633,9 @@ mosh session. Where the text above left a choice open, this is what the code doe
   follow-up")*. Any other failure, a
   failure after the terminal connected, a user disconnect, and an explicit `Mosh` preference never
   fall back. If the SSH retry cannot even be started (the host closed meanwhile) the mosh failure
-  is shown as it was.
+  is shown as it was, but an observed `TimedOut` is still remembered (in memory and in Room, see the
+  follow-up): the memory records what UDP did, independent of whether the fallback could start, as long as the
+  terminal is still its connection's, was not ended by the user and the host was not edited since.
 - **Badge and link health:** `ActiveTerminal.transport` is what the session object reports; the
   header badge and the Home thumbnail's pill follow it (so they change on a fallback).
   `ActiveTerminal.linkHealth` holds the latest `on_link_health`; when `since_heard_ms > 5000`

@@ -676,6 +676,11 @@ class HostConnections(
         val failure = (state.reason as? CloseReason.Failed)?.failure ?: return false
         if (!terminal.fallbackEligible || !isMoshFallback(failure) || terminal.mutableHasConnected.value) return false
         if (terminal.disconnectRequested || terminal.retired || !owns(current) || current.retired) return false
+        // The timeout is what mosh did on this host's destination, whatever happens to the SSH retry:
+        // a connection lost together with UDP (the retry throws `Closed`) must not make the next
+        // connection repeat the same blocked attempt. Remembered only while this connection is still
+        // the host's (the guard above), so an edited destination never gets the old one's memory.
+        if (failure is SessionFailure.TimedOut) rememberMoshFailure(current)
         val port = current.mutablePort.value ?: return false
         val previous = terminal.mutableHandle.value
         val previousAttempt = terminal.attempt
@@ -687,7 +692,6 @@ class HostConnections(
             val session = port.openTerminal(terminal.target, TerminalTransport.SSH, 80u, 24u, null,
                 sessionListener(terminal, current, terminal.attempt))
             current.moshFallbackNote = note
-            if (failure is SessionFailure.TimedOut) rememberMoshFailure(current)
             terminal.mutableNote.value = note
             terminal.mutableLinkHealth.value = null
             terminal.mutableTransport.value = session.transport()
