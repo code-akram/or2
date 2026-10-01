@@ -59,6 +59,12 @@ pub struct Sshd {
 
 impl Sshd {
     pub fn new(certificate_only: bool) -> Self {
+        Self::with_config(certificate_only, "")
+    }
+
+    /// [`Sshd::new`] with extra `sshd_config` lines appended (for example
+    /// `AllowStreamLocalForwarding no`).
+    pub fn with_config(certificate_only: bool, extra: &str) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path();
         let host = ClientKey::generate_ed25519("");
@@ -102,6 +108,8 @@ impl Sshd {
                 path.join("host-cert.pub").display()
             ));
         }
+        config.push_str(extra);
+        config.push('\n');
         fs::write(path.join("config"), config).unwrap();
         let log = fs::File::create(path.join("log")).unwrap();
         let child = Command::new("/usr/bin/sshd")

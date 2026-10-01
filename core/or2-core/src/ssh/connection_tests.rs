@@ -172,9 +172,26 @@ enum Listing {
 }
 
 const PROBE_WITH_TMUX: &str = "or2:tmux:/fake/tmux\nor2:locale:C.UTF-8\nor2:end\n";
+const PROBE_WITH_HERDR: &str =
+    "or2:tmux:/fake/tmux\nor2:herdr:/fake/herdr\nor2:locale:C.UTF-8\nor2:end\n";
 const PROBE_WITHOUT_PROGRAMS: &str = "or2:tmux:\nor2:herdr:\nor2:locale:C.UTF-8\nor2:end\n";
 
+/// What the server does with a `direct-streamlocal@openssh.com` open.
+#[derive(Clone, Debug)]
+enum Streamlocal {
+    /// Accepts and plays a herdr server: acknowledges `events.subscribe` and keeps the stream
+    /// open, answers `session.snapshot`.
+    Herdr,
+    Refuse(russh::ChannelOpenFailure),
+}
+
+/// herdr's answers, from the sanitized captures the herdr client's own tests use.
+const HERDR_LISTING: &str = include_str!("../herdr/fixtures/session_list.json");
+const HERDR_ACK: &str = include_str!("../herdr/fixtures/ack.json");
+const HERDR_SNAPSHOT: &str = include_str!("../herdr/fixtures/snapshot_two_panes.json");
+
 struct Shared {
+    streamlocal: Mutex<Streamlocal>,
     listing: Mutex<Listing>,
     probes: AtomicUsize,
     /// What the capability probe prints.
@@ -231,6 +248,41 @@ impl server::Handler for Server {
         Ok(())
     }
 
+    async fn channel_open_direct_streamlocal(
+        &mut self,
+        channel: russh::Channel<server::Msg>,
+        _: &str,
+        reply: server::ChannelOpenHandle,
+        _: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        drop(channel);
+        let behaviour = self.shared.streamlocal.lock().unwrap().clone();
+        match behaviour {
+            Streamlocal::Herdr => reply.accept().await,
+            Streamlocal::Refuse(reason) => reply.reject(reason).await,
+        }
+        Ok(())
+    }
+
+    /// A herdr server for the streamlocal channels: one request per line.
+    async fn data(
+        &mut self,
+        channel: russh::ChannelId,
+        data: &[u8],
+        session: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        let request = String::from_utf8_lossy(data);
+        if request.contains("events.subscribe") {
+            session.data(channel, HERDR_ACK.as_bytes().to_vec())?;
+        } else if request.contains("session.snapshot") {
+            session.data(
+                channel,
+                format!("{}\n", HERDR_SNAPSHOT.trim_end()).into_bytes(),
+            )?;
+        }
+        Ok(())
+    }
+
     async fn channel_close(
         &mut self,
         _: russh::ChannelId,
@@ -247,6 +299,11 @@ impl server::Handler for Server {
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(command).into_owned();
+        if command.contains("'session' 'list' '--json'") {
+            session.channel_success(channel)?;
+            session.data(channel, HERDR_LISTING.as_bytes().to_vec())?;
+            return finish(session, channel, 0);
+        }
         if command.starts_with("sh -c") {
             self.shared.probes.fetch_add(1, Ordering::SeqCst);
             session.channel_success(channel)?;
@@ -314,13 +371,20 @@ impl Fixture {
     }
 
     fn connected_with(exec_timeout: Duration, probe: &'static str) -> Self {
-        let fixture = Self::start(
+        Self::connected_keeping(exec_timeout, probe, false)
+    }
+
+    /// [`Self::connected_with`], optionally keeping a handle on the server's socket so the
+    /// test can hang up on the client (`hang_up`).
+    fn connected_keeping(exec_timeout: Duration, probe: &'static str, keep_socket: bool) -> Self {
+        let fixture = Self::start_keeping(
             HostOptions {
                 exec_timeout,
                 ..HostOptions::default()
             },
             probe,
             true,
+            keep_socket,
         );
         assert_eq!(next(&fixture.states), HostState::Authenticating);
         assert_eq!(
@@ -333,11 +397,22 @@ impl Fixture {
     /// Connects without waiting for any state. With `trusted` false the first state is the
     /// host-key prompt.
     fn start(options: HostOptions, probe: &'static str, trusted: bool) -> Self {
+        // The prompt tests hang up on the client; the others let the server end it.
+        Self::start_keeping(options, probe, trusted, !trusted)
+    }
+
+    fn start_keeping(
+        options: HostOptions,
+        probe: &'static str,
+        trusted: bool,
+        keep_socket: bool,
+    ) -> Self {
         let host = ClientKey::generate_ed25519("");
         let host_openssh = host.public_key().openssh;
         let key = ClientKey::generate_ed25519("");
         let client_key = key.private_key().public_key().clone();
         let shared = Arc::new(Shared {
+            streamlocal: Mutex::new(Streamlocal::Herdr),
             listing: Mutex::new(Listing::Sessions),
             probes: AtomicUsize::new(0),
             probe: Mutex::new(probe),
@@ -345,8 +420,7 @@ impl Fixture {
             stall_auth: AtomicBool::new(false),
             closes: AtomicUsize::new(0),
             socket: Mutex::new(None),
-            // The prompt tests hang up on the client; the others let the server end it.
-            keep_socket: !trusted,
+            keep_socket,
         });
         let (listener, port) = runtime().block_on(async {
             let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -400,6 +474,18 @@ impl Fixture {
     fn ssh(&mut self) -> Arc<SshHost> {
         let tapped = self.tapped.take().expect("asked once");
         runtime().block_on(tapped).expect("the host connected")
+    }
+
+    /// Cuts the TCP connection under the client (needs `keep_socket`).
+    fn hang_up(&self) {
+        let socket = self
+            .shared
+            .socket
+            .lock()
+            .unwrap()
+            .take()
+            .expect("kept socket");
+        socket.shutdown(std::net::Shutdown::Both).unwrap();
     }
 
     fn list(&self, listing: Listing) -> Result<Vec<TmuxSession>, HostError> {
@@ -763,4 +849,163 @@ fn a_connection_task_that_dies_without_reporting_closes_the_host_with_internal()
         panic!("expected Internal")
     };
     assert!(matches!(handle.state(), HostState::Closed(_)));
+}
+
+// ---------------------------------------------------------------------------------------
+// Streamlocal refusals and herdr watches against the host's lifetime.
+
+#[test]
+fn a_streamlocal_refusal_is_io_when_the_connect_failed_and_rejected_for_every_other_reason() {
+    use russh::ChannelOpenFailure as Failure;
+    let mut fixture = Fixture::connected(Duration::from_secs(5));
+    let host = fixture.ssh();
+    let open = |behaviour| {
+        *fixture.shared.streamlocal.lock().unwrap() = behaviour;
+        runtime().block_on(async { host.open_unix("/run/herdr.sock").await.map(drop) })
+    };
+    // The socket is missing, or nothing listens on it: herdr reports NotRunning and retries.
+    assert!(matches!(
+        open(Streamlocal::Refuse(Failure::ConnectFailed)),
+        Err(RemoteError::Io(_))
+    ));
+    // Forwarding is forbidden, or the server is out of resources: not a missing socket.
+    for reason in [
+        Failure::AdministrativelyProhibited,
+        Failure::UnknownChannelType,
+        Failure::ResourceShortage,
+        Failure::Other {
+            code: 99,
+            reason: "odd".into(),
+        },
+    ] {
+        let result = open(Streamlocal::Refuse(reason.clone()));
+        assert!(
+            matches!(result, Err(RemoteError::Rejected(_))),
+            "{reason:?}: {:?}",
+            result
+        );
+    }
+    // The refusals left the connection healthy.
+    assert!(open(Streamlocal::Herdr).is_ok());
+    fixture.handle.disconnect();
+}
+
+/// How a watch test ends the host.
+#[derive(Clone, Copy, Debug)]
+enum End {
+    Disconnect,
+    /// The TCP connection is cut under the client.
+    Loss,
+}
+
+/// Starts a watch on a connected fixture host, waits until `parked` accepts its state, ends
+/// the host and checks the watch got exactly one `Closed`, last and before the host's.
+fn watch_ends_with_the_host(probe: &'static str, parked: fn(&HerdrState) -> bool, end: End) {
+    let fixture = Fixture::connected_keeping(Duration::from_secs(5), probe, true);
+    let (tx, watch_states) = sync::channel();
+    let watch = fixture
+        .handle
+        .watch_herdr(None, Arc::new(WatchRecorder(tx)))
+        .unwrap();
+    let state = loop {
+        let state = watch_states.recv_timeout(Duration::from_secs(5)).unwrap();
+        if parked(&state) {
+            break state;
+        }
+        assert!(
+            !matches!(state, HerdrState::Closed),
+            "closed before parking: {state:?}"
+        );
+    };
+    // Parked: no call is pending that could notice the host going away.
+    assert!(
+        watch_states
+            .recv_timeout(Duration::from_millis(300))
+            .is_err(),
+        "still parked in {state:?}"
+    );
+    match end {
+        End::Disconnect => {
+            fixture.handle.disconnect();
+            assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+        }
+        End::Loss => {
+            fixture.hang_up();
+            assert!(matches!(
+                closed(&fixture.states),
+                CloseReason::Failed(SessionFailure::ConnectionLost(_))
+            ));
+        }
+    }
+    // The host closes last, so the watch's `Closed` is already delivered.
+    assert_eq!(
+        watch_states.try_recv().ok(),
+        Some(HerdrState::Closed),
+        "{end:?}"
+    );
+    assert!(
+        watch_states
+            .recv_timeout(Duration::from_millis(200))
+            .is_err(),
+        "Closed is delivered once, last"
+    );
+    assert_eq!(watch.state(), HerdrState::Closed);
+    // Stopping a closed watch is quiet.
+    watch.stop();
+    assert!(
+        watch_states
+            .recv_timeout(Duration::from_millis(100))
+            .is_err()
+    );
+}
+
+#[test]
+fn a_watch_parked_in_not_installed_gets_closed_once_when_the_host_ends() {
+    for end in [End::Disconnect, End::Loss] {
+        watch_ends_with_the_host(
+            PROBE_WITH_TMUX,
+            |state| {
+                matches!(
+                    state,
+                    HerdrState::Unavailable {
+                        reason: HerdrUnavailable::NotInstalled,
+                        ..
+                    }
+                )
+            },
+            end,
+        );
+    }
+}
+
+#[test]
+fn a_live_watch_gets_closed_once_when_the_host_ends() {
+    for end in [End::Disconnect, End::Loss] {
+        watch_ends_with_the_host(
+            PROBE_WITH_HERDR,
+            |state| matches!(state, HerdrState::Live { .. }),
+            end,
+        );
+    }
+}
+
+#[test]
+fn the_capability_probe_reads_herdr_sessions_through_the_herdr_client() {
+    let fixture = Fixture::connected_with(Duration::from_secs(5), PROBE_WITH_HERDR);
+    let caps = runtime().block_on(fixture.handle.capabilities()).unwrap();
+    assert_eq!(caps.herdr.as_deref(), Some("/fake/herdr"));
+    let summary: Vec<_> = caps
+        .herdr_sessions
+        .iter()
+        .map(|session| (session.name.as_str(), session.is_default, session.running))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("default", true, true),
+            ("work", false, true),
+            ("idle", false, false)
+        ]
+    );
+    fixture.handle.disconnect();
 }

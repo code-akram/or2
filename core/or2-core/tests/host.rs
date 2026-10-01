@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use common::{Grid, Sshd, sshd_ready, tmux_ready};
-use or2_core::herdr::{HerdrObserver, HerdrState};
+use or2_core::herdr::{HerdrObserver, HerdrState, HerdrUnavailable};
 use or2_core::host::{
     HerdrSessionInfo, HostConnectRequest, HostError, HostHandle, HostObserver, HostState,
     TerminalTarget,
@@ -470,7 +470,7 @@ fn capability_probe_finds_programs_locale_and_herdr_sessions_once_per_connection
     // connecting shows up (`running` is not a connect-time snapshot).
     install_fake_herdr_listing(
         &live.sshd,
-        r#"{"sessions":[{"default":true,"name":"default","running":false},{"default":false,"name":"or2-test-y","running":true}]}"#,
+        r#"{"sessions":[{"default":true,"name":"default","running":false,"socket_path":"/nonexistent/herdr.sock"},{"default":false,"name":"or2-test-y","running":true,"socket_path":"/nonexistent/y.sock"}]}"#,
     );
     let later = block_on(live.host.capabilities()).unwrap();
     assert_eq!(later.herdr, first.herdr);
@@ -567,7 +567,7 @@ fn exec_collects_streams_status_quotes_for_the_login_shell_and_enforces_its_caps
 }
 
 #[test]
-fn open_unix_reaches_a_unix_socket_on_the_host_and_reports_refusals() {
+fn open_unix_reaches_a_unix_socket_on_the_host_and_maps_a_missing_one_to_io() {
     require_sshd!();
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let sshd = Sshd::new(false);
@@ -591,13 +591,50 @@ fn open_unix_reaches_a_unix_socket_on_the_host_and_reports_refusals() {
         stream.read_exact(&mut reply).await.unwrap();
         assert_eq!(&reply, b"PING");
         drop(stream);
+        // OpenSSH answers CONNECT_FAILED for a socket that is not there (and for one nothing
+        // listens on): `Io`, which herdr reports as `NotRunning` and retries.
         let missing = sshd.home().join("missing.sock");
         assert!(matches!(
             remote.open_unix(missing.to_str().unwrap()).await,
-            Err(RemoteError::Rejected(_))
+            Err(RemoteError::Io(_))
         ));
+        let stale = sshd.home().join("stale.sock");
+        drop(UnixListener::bind(&stale).unwrap());
+        assert!(
+            matches!(
+                remote.open_unix(stale.to_str().unwrap()).await,
+                Err(RemoteError::Io(_))
+            ),
+            "a socket file with no listener is refused the same way"
+        );
+        // The refusal leaves the connection usable.
+        assert!(remote.exec_script("true").await.unwrap().success());
     });
     server.join().unwrap();
+    host.disconnect();
+}
+
+#[test]
+fn open_unix_with_streamlocal_forwarding_forbidden_is_refused_and_the_connection_survives() {
+    require_sshd!();
+    let sshd = Sshd::with_config(false, "AllowStreamLocalForwarding no");
+    let (host, remote) = remote_with(&sshd, HostOptions::default());
+    // The socket is real and listening: only the server's policy can be what refuses.
+    let path = sshd.home().join("policy.sock");
+    let _listener = UnixListener::bind(&path).unwrap();
+    block_on(async {
+        // OpenSSH (checked with 10.5) answers this refusal with CONNECT_FAILED, not with
+        // ADMINISTRATIVELY_PROHIBITED, so on the wire it is indistinguishable from a missing
+        // socket and maps to `Io`. The mapping itself (`Rejected` for any other reason) is
+        // covered against the in-process server in `ssh/connection_tests.rs`.
+        let result = remote.open_unix(path.to_str().unwrap()).await;
+        assert!(
+            matches!(result, Err(RemoteError::Io(_) | RemoteError::Rejected(_))),
+            "{:?}",
+            result.map(|_| ())
+        );
+        assert!(remote.exec_script("true").await.unwrap().success());
+    });
     host.disconnect();
 }
 
@@ -723,10 +760,19 @@ fn user_disconnect_closes_terminals_and_watches_before_the_host_with_disconnecte
             }),
         )
         .unwrap();
-    // The watch reaches a state before the close (Unavailable until herdr is integrated,
-    // Live afterwards: either way not Closed).
+    // The fake herdr lists a default session whose socket does not exist: the real client
+    // reads the listing, finds nothing at the socket and reports NotRunning (and retries).
     let first = watch_states.recv_timeout(WAIT).unwrap();
-    assert_ne!(first, HerdrState::Closed);
+    assert!(
+        matches!(
+            first,
+            HerdrState::Unavailable {
+                reason: HerdrUnavailable::NotRunning,
+                ..
+            }
+        ),
+        "{first:?}"
+    );
     live.host.disconnect();
     assert_eq!(a.closed(), CloseReason::Disconnected);
     assert_eq!(b.closed(), CloseReason::Disconnected);
@@ -1144,12 +1190,12 @@ fn herdr_terminals_run_the_probed_herdr_with_the_session_and_report_a_failed_foc
     let SessionState::Closed(reason) = focus.next() else {
         panic!("a failed focus closes the terminal before it connects")
     };
+    let CloseReason::Failed(SessionFailure::CommandFailed(message)) = reason else {
+        panic!("{reason:?}")
+    };
     assert!(
-        matches!(
-            reason,
-            CloseReason::Failed(SessionFailure::CommandFailed(_))
-        ),
-        "{reason:?}"
+        message.contains("not running") || message.contains("socket"),
+        "{message}"
     );
     let _ = herdr;
     host.disconnect();

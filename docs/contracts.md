@@ -12,7 +12,8 @@ All M1 contracts below are implemented and tested. M2 changes are specified in
 [M2: hosts, multiplexers and mosh](#m2-hosts-multiplexers-and-mosh); lane 0 has landed the
 M2 contract types and the FFI API 4 surface (`API_VERSION = 4`), and lane A1 has landed the
 host driver behind `connect_host` (address racing, host connection, probe, tmux, terminal
-targets); the lane A2 and B behaviour is still to come.
+targets), integrated with lane A2's herdr client; the lane B behaviour (the app) and mosh are
+still to come.
 
 | Contract | Implemented and tested | Open |
 |---|---|---|
@@ -320,9 +321,9 @@ pub trait RemoteHost: Send + Sync + 'static {
   sends EOF at once, so a command that reads stdin ends. Output over the cap, a refused
   command and the timeout close that channel before failing (`OutputTooLarge`, `Rejected`,
   `TimedOut`). A channel that ends with neither an exit status nor a signal is `Closed` when
-  the connection is gone. `open_unix` is `direct-streamlocal@openssh.com`; a refusal (the
-  target does not exist, streamlocal forwarding is disabled) is `Rejected`. The exec timeout
-  also bounds `open_unix`.
+  the connection is gone. `open_unix` is `direct-streamlocal@openssh.com`; a refusal is `Io` when
+  the channel-open failure reason is `CONNECT_FAILED` and `Rejected` otherwise (mapping below).
+  The exec timeout also bounds `open_unix`.
 - `ExecOutput { status: Option<u32>, stdout: Vec<u8>, stderr: Vec<u8> }`; output is capped at
   1 MiB per stream (excess fails with `RemoteError::OutputTooLarge`); each exec has a 10 s
   timeout (`RemoteError::TimedOut`).
@@ -333,8 +334,16 @@ pub trait RemoteHost: Send + Sync + 'static {
   `Io`; `Rejected` is a refusal by the host's policy. Over SSH both arrive as a channel-open
   failure, told apart by its reason code: `SSH_OPEN_ADMINISTRATIVELY_PROHIBITED` is
   `Rejected`; `SSH_OPEN_CONNECT_FAILED` (nothing listens, no such file) is `Io`; any other
-  reason is `Rejected`. Lane A1's OpenSSH interop test covers a stale socket path (must be
-  `Io`) next to a host with streamlocal forwarding disabled (must be `Rejected`).
+  reason (`UNKNOWN_CHANNEL_TYPE`, `RESOURCE_SHORTAGE`, an unknown code) is `Rejected`
+  (`ssh::connection::streamlocal_error`; unit-tested for every reason against the in-process
+  server). **OpenSSH caveat, found by the interop test:** OpenSSH (checked with 10.5) answers
+  *every* refused direct-streamlocal open with `CONNECT_FAILED`, including one refused by
+  `AllowStreamLocalForwarding no` or `DisableForwarding yes` (the sshd log says "refused
+  streamlocal port forward"). Over OpenSSH a host that forbids streamlocal forwarding therefore
+  reads as `Io` (herdr `NotRunning`, retried) and cannot be told from a missing socket; the
+  `Rejected` path is for servers that do send `ADMINISTRATIVELY_PROHIBITED`. The interop tests
+  in `tests/host.rs` cover a missing socket and a stale socket file (both `Io`) and a host with
+  `AllowStreamLocalForwarding no` (refused, connection stays usable).
 - `LocalHost` (feature `test-support`, enabled for or2-core's own tests through a dev-dependency
   on itself; used by integration tests) implements `RemoteHost` with local processes and
   `UnixStream`. `exec_rendered` runs the *rendered* line through `/bin/sh -c`, so quoting is
@@ -366,12 +375,14 @@ rejects them). A probe that fails to run is not cached, so the next query or wat
 it again.
 
 Lane A1 decisions, both from review: (1) herdr's session list is **not** part of the script.
-When herdr was found, `probe::herdr_sessions` runs `<herdr> session list --json` as a second
-exec bounded by `probe::HERDR_LIST_TIMEOUT` (5 s), so a wedged herdr costs only
+When herdr was found, `probe::herdr_sessions` lists the sessions with `herdr::list_sessions`
+(lane A2's one parser of `<herdr> session list --json`; the probe has no parser of its own) as
+a second exec bounded by `probe::HERDR_LIST_TIMEOUT` (5 s), so a wedged herdr costs only
 `herdr_sessions` (empty), never tmux, mosh-server or the locale, and never makes the probe
 fail and be retried at full cost on every terminal open. Only a connection that closes
-mid-probe fails it. JSON is read for each session's `name`, `running` and `default`, unknown
-fields ignored. (2) The cache holds programs and locale; **`capabilities()` reads herdr's
+mid-probe fails it. `name`, `running` and `default` are carried over; an unreadable listing
+(including one with an entry that has no `socket_path`) is a failed listing, not a partial
+one. (2) The cache holds programs and locale; **`capabilities()` reads herdr's
 session list afresh on every call** (`probe::with_fresh_sessions`), so `running` and sessions
 started or stopped after connecting show on the host screen. A listing that fails (herdr
 gone, hung, garbage) keeps the last list rather than emptying it. Live per-pane state is
@@ -467,6 +478,11 @@ Connecting ──▶ AwaitingHostKey ──▶ Authenticating ──▶ Connecte
   observer callback, cannot hold the host open forever: past the bound the host's `Closed`
   can arrive **before** that session's. The order is therefore guaranteed unless a session
   is wedged; Kotlin callbacks are documented to return quickly, so it should not happen.
+  Each watch is one task racing `herdr::run` (or the no-herdr `Unavailable { NotInstalled }`
+  wait) against the host's closing signal; when the signal wins the task's future is dropped,
+  and dropping the `HerdrWatchDriver` delivers `Closed`, once, last. That is what ends a watch
+  parked at a final `Unavailable` (no call is pending that could see the host go) and one
+  that is `Live` mid-wait; tests cover both states against user disconnect and loss.
 - **A network task that ends without reporting** (it panicked; a buggy `Transport` is
   re-raised by `race`) closes the host with `Failed(Internal)` instead of leaving it in its
   last state, so terminals and watches are told and exactly one `Closed` is reported.

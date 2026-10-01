@@ -12,8 +12,9 @@
 
 use std::time::Duration;
 
+use crate::herdr::{self, DiscoveryError};
 use crate::host::{HerdrSessionInfo, HostCapabilities};
-use crate::remote::{RemoteCommand, RemoteError, RemoteHost};
+use crate::remote::{RemoteError, RemoteHost};
 
 /// How long herdr's session listing may take before it counts as failed.
 pub const HERDR_LIST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -86,9 +87,10 @@ async fn probe_within<H: RemoteHost>(
     Ok(caps)
 }
 
-/// Lists herdr's sessions (`<herdr> session list --json`), giving up after
-/// [`HERDR_LIST_TIMEOUT`] (`TimedOut`). A failing herdr, or output that is not herdr's session
-/// list, is `Io`.
+/// Lists herdr's sessions through [`herdr::list_sessions`] (the one parser of
+/// `<herdr> session list --json`), giving up after [`HERDR_LIST_TIMEOUT`] (`TimedOut`). A failing
+/// herdr, or output that is not herdr's session list, is `Io`; a closed connection stays
+/// `Closed`.
 pub async fn herdr_sessions<H: RemoteHost>(
     host: &H,
     herdr: &str,
@@ -101,18 +103,21 @@ async fn list_within<H: RemoteHost>(
     herdr: &str,
     limit: Duration,
 ) -> Result<Vec<HerdrSessionInfo>, RemoteError> {
-    let command = RemoteCommand::new(herdr).args(["session", "list", "--json"]);
-    let output = tokio::time::timeout(limit, host.exec(&command))
+    let entries = tokio::time::timeout(limit, herdr::list_sessions(host, herdr))
         .await
-        .map_err(|_| RemoteError::TimedOut)??;
-    if !output.success() {
-        return Err(RemoteError::Io(format!(
-            "herdr session list exited with status {:?}",
-            output.status
-        )));
+        .map_err(|_| RemoteError::TimedOut)?;
+    match entries {
+        Ok(entries) => Ok(entries
+            .into_iter()
+            .map(|entry| HerdrSessionInfo {
+                name: entry.name,
+                running: entry.running,
+                is_default: entry.default,
+            })
+            .collect()),
+        Err(DiscoveryError::Remote(error)) => Err(error),
+        Err(other) => Err(RemoteError::Io(other.to_string())),
     }
-    parse_herdr_sessions(&String::from_utf8_lossy(&output.stdout))
-        .ok_or_else(|| RemoteError::Io("herdr session list printed no session list".into()))
 }
 
 /// `cached` with herdr's session list read again, so `running` and new or stopped sessions
@@ -174,26 +179,6 @@ fn is_locale(locale: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '@'))
 }
 
-/// `{"sessions":[{"name":..,"running":..,"default":..,..}]}`. Anything else is `None`; an
-/// entry without a string name is skipped; unknown fields are ignored.
-fn parse_herdr_sessions(json: &str) -> Option<Vec<HerdrSessionInfo>> {
-    let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
-    let sessions = value.get("sessions")?.as_array()?;
-    Some(
-        sessions
-            .iter()
-            .filter_map(|session| {
-                let flag = |key| session.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
-                Some(HerdrSessionInfo {
-                    name: session.get("name")?.as_str()?.to_owned(),
-                    running: flag("running"),
-                    is_default: flag("default"),
-                })
-            })
-            .collect(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,34 +234,6 @@ mod tests {
         assert_eq!(parse("").utf8_locale, "en_US.UTF-8");
     }
 
-    #[test]
-    fn herdr_session_json_is_read_for_the_fields_or2_needs() {
-        let sessions = parse_herdr_sessions(
-            "{\"sessions\":[{\"default\":true,\"name\":\"default\",\"running\":true,\"future\":{\"x\":1}},\n\
-             {\"name\":\"or2-spike\",\"running\":false,\"default\":false},{\"running\":true}]}\n",
-        )
-        .unwrap();
-        assert_eq!(
-            sessions,
-            [
-                HerdrSessionInfo {
-                    name: "default".into(),
-                    running: true,
-                    is_default: true
-                },
-                HerdrSessionInfo {
-                    name: "or2-spike".into(),
-                    running: false,
-                    is_default: false
-                },
-            ],
-            "an entry without a name is skipped"
-        );
-        for garbage in ["", "not json", "{\"sessions\":7}", "[]", "{\"sessions\":["] {
-            assert_eq!(parse_herdr_sessions(garbage), None, "{garbage:?}");
-        }
-    }
-
     /// A host that answers the probe script, then lets herdr's listing do `herdr`.
     struct Stub {
         herdr: Herdr,
@@ -322,7 +279,7 @@ mod tests {
         }
     }
 
-    const ONE: &str = r#"{"sessions":[{"name":"default","running":true,"default":true}]}"#;
+    const ONE: &str = r#"{"sessions":[{"name":"default","running":true,"default":true,"socket_path":"/s/default.sock","future":1}]}"#;
 
     #[tokio::test(start_paused = true)]
     async fn a_hung_herdr_costs_the_session_list_not_the_other_capabilities() {
@@ -359,7 +316,35 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(caps.herdr_sessions.len(), 1);
+        assert_eq!(
+            caps.herdr_sessions,
+            [HerdrSessionInfo {
+                name: "default".into(),
+                running: true,
+                is_default: true
+            }],
+            "name, running and default come from herdr::list_sessions; the rest is dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_listing_failure_is_io_and_a_closed_connection_stays_closed() {
+        for herdr in [Herdr::Fails, Herdr::Sessions("{\"sessions\":7}")] {
+            assert!(matches!(
+                herdr_sessions(&Stub { herdr }, "/fake/herdr").await,
+                Err(RemoteError::Io(_))
+            ));
+        }
+        assert_eq!(
+            herdr_sessions(
+                &Stub {
+                    herdr: Herdr::ConnectionGone
+                },
+                "/fake/herdr"
+            )
+            .await,
+            Err(RemoteError::Closed)
+        );
     }
 
     #[tokio::test]
@@ -380,7 +365,7 @@ mod tests {
         .unwrap();
         let fresh = with_fresh_sessions(
             &Stub {
-                herdr: Herdr::Sessions(r#"{"sessions":[{"name":"other","running":false}]}"#),
+                herdr: Herdr::Sessions(r#"{"sessions":[{"name":"other","running":false,"socket_path":"/s/other.sock"}]}"#),
             },
             &cached,
         )

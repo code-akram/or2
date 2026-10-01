@@ -231,6 +231,21 @@ fn remote_error(error: russh::Error) -> RemoteError {
     }
 }
 
+/// [`remote_error`] for a `direct-streamlocal@openssh.com` open, where the refusal reason
+/// carries the distinction `RemoteHost::open_unix` documents: OpenSSH answers `CONNECT_FAILED`
+/// when connecting to the socket failed (missing, refused, no permission on it) and
+/// `ADMINISTRATIVELY_PROHIBITED` when streamlocal forwarding is off (`AllowStreamLocalForwarding`,
+/// `DisableForwarding`, `PermitOpen`). The first is [`RemoteError::Io`]; every other refusal is
+/// a policy or resource decision of the server: [`RemoteError::Rejected`].
+fn streamlocal_error(error: russh::Error) -> RemoteError {
+    match error {
+        russh::Error::ChannelOpenFailure(russh::ChannelOpenFailure::ConnectFailed) => {
+            RemoteError::Io("the socket could not be connected to on the host".into())
+        }
+        error => remote_error(error),
+    }
+}
+
 impl RemoteHost for SshHost {
     type Stream = russh::ChannelStream<russh_client::Msg>;
 
@@ -253,8 +268,9 @@ impl RemoteHost for SshHost {
         result
     }
 
-    /// OpenSSH `direct-streamlocal@openssh.com`. A server with streamlocal forwarding
-    /// disabled refuses: `Rejected`.
+    /// OpenSSH `direct-streamlocal@openssh.com`. A socket that is missing or refuses the
+    /// connection fails the open with `CONNECT_FAILED`: `Io`. A server with streamlocal
+    /// forwarding disabled (or any other refusal) is `Rejected` ([`streamlocal_error`]).
     async fn open_unix(&self, path: &str) -> Result<Self::Stream, RemoteError> {
         let channel = timeout(
             self.exec_timeout,
@@ -262,7 +278,7 @@ impl RemoteHost for SshHost {
         )
         .await
         .map_err(|_| RemoteError::TimedOut)?
-        .map_err(remote_error)?;
+        .map_err(streamlocal_error)?;
         Ok(channel.into_stream())
     }
 }

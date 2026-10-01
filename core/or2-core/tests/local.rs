@@ -77,7 +77,7 @@ async fn probe_searches_the_standard_directories_in_order_when_path_has_nothing(
     script(
         &bin(".local/bin", "herdr"),
         r#"if [ "$1 $2 $3" = "session list --json" ]; then
-  echo '{"sessions":[{"name":"default","running":true,"default":true,"socket_path":"/x","new_field":[1,2]},{"name":"other","running":false}]}'
+  echo '{"sessions":[{"name":"default","running":true,"default":true,"socket_path":"/x","new_field":[1,2]},{"name":"other","running":false,"socket_path":"/y"}]}'
 fi"#,
     );
     let caps = probe(&host).await.unwrap();
@@ -178,6 +178,7 @@ async fn a_herdr_that_fails_or_prints_garbage_is_found_with_no_sessions() {
         "exit 1",
         "echo not json",
         "echo '{\"sessions\":7}'",
+        "echo '{\"sessions\":[{\"name\":\"no-socket\"}]}'",
         "sleep 0",
     ] {
         script(&herdr, body);
