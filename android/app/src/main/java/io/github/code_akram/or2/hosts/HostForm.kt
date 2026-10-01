@@ -2,6 +2,7 @@ package io.github.code_akram.or2.hosts
 
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
+import io.github.code_akram.or2.data.TransportPref
 
 /** An address as typed in the form: both fields are text until validated. */
 data class AddressDraft(val hostname: String, val port: String) {
@@ -37,3 +38,19 @@ fun <T> List<T>.moved(index: Int, delta: Int): List<T> {
  */
 fun connectionAffectedBy(previous: Host, updated: Host): Boolean =
     previous.addresses != updated.addresses || previous.username != updated.username || previous.keyId != updated.keyId
+
+/** The transport choices in the form's segmented control, in order. */
+val TransportChoices = listOf(TransportPref.AUTO, TransportPref.SSH, TransportPref.MOSH)
+
+fun transportLabel(pref: TransportPref) = when (pref) {
+    TransportPref.AUTO -> "Auto"
+    TransportPref.SSH -> "SSH"
+    TransportPref.MOSH -> "Mosh"
+}
+
+/** One muted sentence under the control. */
+fun transportExplanation(pref: TransportPref) = when (pref) {
+    TransportPref.AUTO -> "Mosh when the host has mosh-server; SSH if mosh cannot connect."
+    TransportPref.SSH -> "Terminals always use SSH and end when the connection drops."
+    TransportPref.MOSH -> "Terminals always use mosh and survive network changes. Needs mosh-server and UDP."
+}

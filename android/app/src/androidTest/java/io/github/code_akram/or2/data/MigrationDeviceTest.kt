@@ -4,6 +4,7 @@ import androidx.room.testing.MigrationTestHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.flow.first
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -93,12 +94,73 @@ class MigrationDeviceTest {
             db.execSQL("INSERT INTO hosts (id, label, hostname, port, username, keyId) VALUES (1, 'Alpha', 'alpha.invalid', 22, 'u1', NULL)")
         }
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val database = androidx.room.Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(MIGRATION_1_2).build()
+        val database = androidx.room.Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
         try {
             kotlinx.coroutines.runBlocking {
                 val host = database.dao().host(1)!!
                 assertEquals(listOf(HostEndpoint("alpha.invalid", 22)), host.addresses)
                 assertTrue(host.showInInbox)
+                assertEquals(TransportPref.AUTO, host.transport) // v1 -> v2 -> v3 in one open.
+            }
+        } finally {
+            database.close()
+            context.deleteDatabase(name)
+        }
+    }
+
+    /** v2 -> v3: Room validates the result against 3.json and every host keeps its data and gets AUTO. */
+    @Test
+    fun populatedVersion2MigratesToVersion3WithAutoTransportAndNoLoss() {
+        helper.createDatabase(name, 2).use { db ->
+            db.execSQL("INSERT INTO keys VALUES ('key-1', 'Phone key', 'ssh-ed25519', 'ssh-ed25519 AAAA', 'SHA256:fp', 'c', x'0a0b0c', x'0102')")
+            db.execSQL("INSERT INTO hosts (id, label, username, keyId, showInInbox) VALUES (1, 'Alpha', 'u1', 'key-1', 1)")
+            db.execSQL("INSERT INTO hosts (id, label, username, keyId, showInInbox) VALUES (5, 'Beta', 'u2', NULL, 0)")
+            db.execSQL("INSERT INTO host_addresses VALUES (1, 0, 'alpha.invalid', 22)")
+            db.execSQL("INSERT INTO host_addresses VALUES (1, 1, 'alpha2.invalid', 2222)")
+            db.execSQL("INSERT INTO host_addresses VALUES (5, 0, 'beta.invalid', 22)")
+            db.execSQL("INSERT INTO trusted_host_keys VALUES (1, 'ssh-ed25519 H1', 'SHA256:h1', 'ssh-ed25519')")
+        }
+        helper.runMigrationsAndValidate(name, 3, true, MIGRATION_2_3).use { db ->
+            db.query("SELECT id, label, username, keyId, showInInbox, transport FROM hosts ORDER BY id").use { cursor ->
+                assertEquals(2, cursor.count)
+                cursor.moveToFirst()
+                assertEquals("Alpha", cursor.getString(1))
+                assertEquals("key-1", cursor.getString(3))
+                assertEquals(1, cursor.getInt(4))
+                assertEquals("AUTO", cursor.getString(5))
+                cursor.moveToLast()
+                assertTrue(cursor.isNull(3))
+                assertEquals(0, cursor.getInt(4)) // The inbox flag of a hidden host survives.
+                assertEquals("AUTO", cursor.getString(5))
+            }
+            db.query("SELECT * FROM host_addresses").use { assertEquals(3, it.count) }
+            db.query("SELECT * FROM trusted_host_keys").use { assertEquals(1, it.count) }
+            db.query("SELECT ciphertext, iv FROM keys").use { cursor ->
+                cursor.moveToFirst()
+                assertArrayEquals(byteArrayOf(0x0a, 0x0b, 0x0c), cursor.getBlob(0))
+                assertArrayEquals(byteArrayOf(1, 2), cursor.getBlob(1))
+            }
+        }
+    }
+
+    /** The full chain on a shipped-M1 database, then the real DAO reads and writes the new column. */
+    @Test
+    fun aVersion1DatabaseReachesVersion3AndTheDaoPersistsTheTransport() {
+        helper.createDatabase(name, 1).use { db ->
+            db.execSQL("INSERT INTO hosts (id, label, hostname, port, username, keyId) VALUES (1, 'Alpha', 'alpha.invalid', 22, 'u1', NULL)")
+        }
+        helper.runMigrationsAndValidate(name, 3, true, MIGRATION_1_2, MIGRATION_2_3).close()
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val database = androidx.room.Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
+        try {
+            kotlinx.coroutines.runBlocking {
+                val dao = database.dao()
+                val migrated = dao.host(1)!!
+                assertEquals(TransportPref.AUTO, migrated.transport)
+                dao.saveHost(migrated.copy(record = migrated.record.copy(transport = TransportPref.MOSH)), migrated)
+                assertEquals(TransportPref.MOSH, dao.host(1)!!.transport)
+                dao.saveHost(Host(HostRecord(0, "Beta", "u", null, true, TransportPref.SSH), listOf(HostEndpoint("beta.invalid", 22))), null)
+                assertEquals(listOf(TransportPref.MOSH, TransportPref.SSH), dao.hosts().first().sortedBy { it.label }.map { it.transport })
             }
         } finally {
             database.close()

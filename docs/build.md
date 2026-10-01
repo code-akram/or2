@@ -2,7 +2,7 @@
 
 The Compose app loads `or2-ffi` through generated UniFFI Kotlin/JNA bindings. Host settings
 (with their ordered address lists), encrypted key records and trusted host keys live in Room
-(schema version 2, exported to `android/app/schemas/`). `or2-core` remains free of Android,
+(schema version 3, exported to `android/app/schemas/`). `or2-core` remains free of Android,
 UniFFI and persistence dependencies. The production connector calls `connect_host` and opens
 terminals with `HostConnection.open_terminal`; the contract probes (`contract_probe_session`,
 `contract_probe_host`) are used only by tests. The terminal screen embeds the Canvas terminal
@@ -151,6 +151,10 @@ DAO's primitives), and `MigrationSqlTest` runs the real v1 to v2 SQL with foreig
 compares the result with a fresh v2 database. `HostConnectionsProbeTest` drives the whole holder
 over the real FFI with `contract_probe_host` (host-key relay and persistence, capabilities,
 agents into the inbox, terminals and frames, disconnect ordering).
+Tests that wait on those callbacks wait for the specific thing (a frame whose row shows the echo, the
+recovered link health) with a bounded timeout, never for a fixed sleep or for `frameReady.first()`,
+which replays its last signal; `linkHealth` is a StateFlow that conflates, so only the lossless
+listener in `HostContractTest` asserts the whole health sequence.
 `HostConnectionsNativeTest` (the holder over the production connector: first-use trust persisted
 before approval, trusted reconnect, changed-key reject, retained closed handles) and
 `HostConnectNativeTest` (the FFI itself: address racing past a dead first address, trust,
@@ -235,7 +239,14 @@ Arch with `assembleDebugAndroidTest` while the phone is unavailable.
 stale-destination rejection, and foreign-key cleanup. `MigrationDeviceTest` migrates a populated
 v1 database (keys, hosts, trusted keys) through Room's `MigrationTestHelper`, validating against
 `2.json`, opens it with the production database builder, and checks that the phone's SQLite is
-at least 3.35 (the migration uses `DROP COLUMN`; no JVM test can check the platform's version). `VaultDeviceTest` creates and
+at least 3.35 (the migration uses `DROP COLUMN`; no JVM test can check the platform's version); it
+also migrates populated v2 and v1 databases to v3 (`hosts.transport`, validated against `3.json`) and
+round-trips the transport through the DAO. `ConnectionServiceDeviceTest` runs the foreground service
+over a scripted connection (`Or2Application.connectorOverride`, never set in production): it starts
+with a host, posts the ongoing notification with "Disconnect all", counts a session, and stops once
+everything is closed (it grants `POST_NOTIFICATIONS` to the app through `UiAutomation` first).
+`TransportChromeDeviceTest` covers the header badge, the "Last heard N s ago" text past five seconds
+and the AUTO-fallback note. `VaultDeviceTest` creates and
 deletes a disposable Keystore alias: it verifies hardware security level, per-use strong
 biometric policy, non-exportability and rejection without authentication (skips if strong
 biometrics are not enrolled). `EntryUiDeviceTest` displays first-use/changed-key dialogs using
@@ -308,8 +319,9 @@ requires BIOMETRIC_STRONG per operation and invalidates on new enrollment. No so
 device-credential fallback is allowed. Invalidated records remain for explanation/deletion;
 re-import or generate a new SSH key to recover. Private keys are never exported or backed up:
 `allowBackup=false` and cloud/device-transfer extraction rules exclude all app data.
-Connection and terminal ownership are application-scoped (`HostConnections`), not a foreground
-service; process death ends them. There is at most one connection per host and any number of
+Connection and terminal ownership are application-scoped (`HostConnections`, held by
+`Or2Application`); `ConnectionService`, a foreground service, keeps the process alive while anything
+is open (it does not own the connections); process death ends them. There is at most one connection per host and any number of
 terminals per connection. A disconnect leaves a terminal's handle and final frame readable under
 `Closed` until "Close" retires it; reconnecting a closed host replaces its connection object but
 leaves its terminals alone. A terminal-screen display lease delays native `close()` until the

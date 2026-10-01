@@ -1,0 +1,127 @@
+package io.github.code_akram.or2.app
+
+import io.github.code_akram.or2.connection.UserCloseListener
+import io.github.code_akram.or2.ffi.HostState
+import io.github.code_akram.or2.ffi.TerminalTarget
+import io.github.code_akram.or2.ffi.TerminalTransport
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.net.URLDecoder
+import java.net.URLEncoder
+
+/** The terminal the user last had in front of them: which host, which target, over which transport. */
+data class LastTerminal(val hostId: Long, val target: TerminalTarget, val transport: TerminalTransport) {
+    /** `7|MOSH|herdr|-|=w1%3Ap1`: URL-encoded parts joined by `|`; `-` is null, `=` marks a value. */
+    fun encode(): String {
+        fun opt(value: String?) = if (value == null) "-" else "=" + URLEncoder.encode(value, "UTF-8")
+        val targetParts = when (target) {
+            TerminalTarget.Shell -> listOf("shell")
+            is TerminalTarget.Tmux -> listOf("tmux", opt(target.sessionName))
+            is TerminalTarget.Herdr -> listOf("herdr", opt(target.session), opt(target.paneId))
+        }
+        return (listOf(hostId.toString(), transport.name) + targetParts).joinToString("|")
+    }
+
+    companion object {
+        /** Null for anything that is not an encoding this app wrote. */
+        fun decode(text: String?): LastTerminal? {
+            if (text == null) return null
+            val parts = text.split("|")
+            if (parts.size < 3) return null
+            fun opt(value: String): String? = if (value == "-") null else value.removePrefix("=").let { URLDecoder.decode(it, "UTF-8") }
+            return try {
+                val hostId = parts[0].toLong()
+                val transport = TerminalTransport.valueOf(parts[1])
+                val target = when (parts[2]) {
+                    "shell" -> if (parts.size == 3) TerminalTarget.Shell else return null
+                    "tmux" -> if (parts.size == 4 && parts[3] != "-") TerminalTarget.Tmux(opt(parts[3])!!) else return null
+                    "herdr" -> if (parts.size == 5) TerminalTarget.Herdr(opt(parts[3]), opt(parts[4])) else return null
+                    else -> return null
+                }
+                LastTerminal(hostId, target, transport)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
+    }
+}
+
+/**
+ * The last focused terminal, in app-private preferences (Rust has no storage). The user closing a
+ * host or terminal (or the remote shell exiting) forgets it: reattach never resurrects what was
+ * ended on purpose, only what the network took.
+ */
+class ReattachMemory(private val store: PrefStore) : UserCloseListener {
+    private val mutableLast = MutableStateFlow(LastTerminal.decode(store.getString(KEY)))
+
+    val last: StateFlow<LastTerminal?> = mutableLast.asStateFlow()
+
+    fun remember(terminal: LastTerminal) {
+        if (mutableLast.value == terminal) return
+        mutableLast.value = terminal
+        store.putString(KEY, terminal.encode())
+    }
+
+    override fun terminalClosed(hostId: Long, target: TerminalTarget) {
+        val last = mutableLast.value ?: return
+        if (last.hostId == hostId && last.target == target) forget()
+    }
+
+    override fun hostClosed(hostId: Long) {
+        if (mutableLast.value?.hostId == hostId) forget()
+    }
+
+    fun forget() {
+        mutableLast.value = null
+        store.putString(KEY, null)
+    }
+
+    private companion object {
+        const val KEY = "last_terminal"
+    }
+}
+
+/** A terminal the app holds, as the reattach decision sees it. [alive] is false once it closed. */
+data class OpenSession(val id: Long, val hostId: Long, val target: TerminalTarget, val alive: Boolean)
+
+/** What to do about the last terminal when the app is back. */
+sealed interface Reattach {
+    data object None : Reattach
+
+    /** Its session is alive: show it (`request_full_frame`). */
+    data class Show(val terminalId: Long) : Reattach
+
+    /** Only its host connection is up: reopen the same target there (herdr pane focused first). */
+    data class Reopen(val last: LastTerminal) : Reattach
+
+    /** The host is not connected: Home offers "Resume", which unlocks and then reopens. */
+    data class Resume(val last: LastTerminal) : Reattach
+}
+
+/**
+ * Decides, in order: nothing remembered or its host is gone; a live session for the same host and
+ * target; a connected host; otherwise resume after unlocking. [liveHosts] are hosts whose SSH
+ * connection is open, [knownHosts] every stored host.
+ */
+fun decideReattach(last: LastTerminal?, sessions: List<OpenSession>, liveHosts: Set<Long>, knownHosts: Set<Long>): Reattach {
+    if (last == null || last.hostId !in knownHosts) return Reattach.None
+    sessions.firstOrNull { it.alive && it.hostId == last.hostId && it.target == last.target }?.let { return Reattach.Show(it.id) }
+    return if (last.hostId in liveHosts) Reattach.Reopen(last) else Reattach.Resume(last)
+}
+
+/** The next step of a Resume once the user tapped it and the host is being unlocked and connected. */
+enum class ResumeStep { WAIT, OPEN, ABORT }
+
+/**
+ * [state] is the host's connection state (null: no connection yet; a lost connection's old
+ * `Closed` is still listed until the new attempt replaces it), [busy] whether an unlock or connect
+ * operation is in flight. Connected opens the terminal; once the operation ended without a
+ * connection (biometric cancelled, connect failed) it gives up.
+ */
+fun resumeStep(state: HostState?, busy: Boolean): ResumeStep = when {
+    state is HostState.Connected -> ResumeStep.OPEN
+    busy -> ResumeStep.WAIT
+    state == null || state is HostState.Closed -> ResumeStep.ABORT
+    else -> ResumeStep.WAIT // Connecting or authenticating: the connect call returned, the host is on its way.
+}

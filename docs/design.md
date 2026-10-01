@@ -376,9 +376,15 @@ Interfaces are in [contracts: M3](contracts.md#m3-stays-connected) (FFI API 8).
 
 - [x] M3-A: mosh terminals on host connections (transport choice, peer pinning, bootstrap,
   terminate on early failure), link health, `roam`/`network_changed`, mosh survives host loss.
-- [ ] M3-B: foreground service owning connections, notification, network callback, Room v3
+- [x] M3-B: foreground service owning connections, notification, network callback, Room v3
   transport preference with AUTO fallback, grouped reconnect unlock, reattach to the last pane,
-  battery-optimisation prompt.
+  battery-optimisation prompt. Integrated on `m3/integrate` with M3-A and the compact UI scale; its
+  JVM, real-FFI and fake-backed tests and the Rust suite with real `sshd`, `tmux`, herdr and
+  `mosh-server` pass, and the device tests compile. Ticked on those checks only: the notification,
+  the service starting from the foreground, the permission and battery dialogs, the network
+  callback and reattach after 10 minutes in the background are device-only behaviour that nothing
+  here has observed, so they stay in the acceptance item below. Decisions and deviations are in
+  [contracts: M3-B](contracts.md#m3-b-android-status-and-decisions-integrated-on-m3integrate).
 - [x] UI-C: compact default scale everywhere (type, controls, popups, arrow pad).
 - [ ] M3 follow-up: `resume_mosh` with Keystore-protected tickets, broader roaming triggers,
   5 s Auto fallback remembered per host, non-blocking return, manifest permissions

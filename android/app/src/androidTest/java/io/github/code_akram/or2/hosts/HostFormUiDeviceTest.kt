@@ -11,6 +11,7 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -25,6 +26,7 @@ import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.HostRecord
 import io.github.code_akram.or2.data.KeyRecord
+import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.ui.Or2Theme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -174,5 +176,31 @@ class HostFormUiDeviceTest {
             assertEquals(1, closed)
             assertEquals(0, saved)
         }
+    }
+
+    @Test
+    fun theTransportControlDefaultsToAutoExplainsEachChoiceAndSavesIt() {
+        var saved: Host? = null
+        show(null, save = { saved = it })
+        fillHostFields()
+        compose.onNodeWithTag("host-transport").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("host-transport:0").assertIsSelected()
+        compose.onNodeWithTag("host-transport-note").assertTextContains("Mosh when the host has mosh-server", substring = true)
+        compose.onNodeWithTag("host-transport:2").performScrollTo().performClick()
+        compose.onNodeWithTag("host-transport:2").assertIsSelected()
+        compose.onNodeWithTag("host-transport:0").assertIsNotSelected()
+        compose.onNodeWithTag("host-transport-note").assertTextContains("always use mosh", substring = true)
+        compose.onNodeWithTag("host-transport:1").performClick()
+        compose.onNodeWithTag("host-transport-note").assertTextContains("always use SSH", substring = true)
+        compose.onNodeWithTag("host-transport:2").performClick()
+        compose.onNodeWithTag("host-form-primary").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(TransportPref.MOSH, saved!!.transport) }
+    }
+
+    @Test
+    fun editingAHostStartsFromItsStoredTransport() {
+        val previous = uiHost().let { it.copy(record = it.record.copy(transport = TransportPref.SSH)) }
+        show(previous)
+        compose.onNodeWithTag("host-transport:1").performScrollTo().assertIsSelected()
     }
 }

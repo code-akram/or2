@@ -293,6 +293,11 @@ class HostContractTest {
         assertEquals(TerminalTransport.SSH, ssh.first.transport())
         listener.awaitState<SessionState.Connected>()
         assertEquals("or2 contract probe tmux work", listener.awaitFrame(mosh).rowText(0))
+        // The SSH terminal's own first frame is signalled too; take it now, or the wait for its echo
+        // below would find that old signal, take whatever has been published so far (on a loaded
+        // machine, still only the first frame) and compare the wrong row.
+        ssh.second.awaitState<SessionState.Connected>()
+        assertEquals("or2 contract probe shell", ssh.second.awaitFrame(ssh.first).rowText(0))
         // The fixed sequence: healthy, stale (past the 5 s grey-out), recovered.
         val sequence = List(3) { listener.awaitHealth() }
         assertEquals(listOf(300uL, 6000uL, 400uL), sequence.map { it.sinceHeardMs })

@@ -29,3 +29,18 @@ val MIGRATION_1_2 = object : Migration(1, 2) {
         MIGRATION_1_2_STATEMENTS.forEach(db::execSQL)
     }
 }
+
+/**
+ * v2 -> v3: each host gains `transport` (`AUTO`, `SSH` or `MOSH`; existing hosts get `AUTO`).
+ * One additive `ALTER TABLE ... ADD COLUMN`: nothing is dropped, recreated or rewritten, so keys,
+ * trust and addresses are untouched.
+ */
+val MIGRATION_2_3_STATEMENTS = listOf(
+    "ALTER TABLE `hosts` ADD COLUMN `transport` TEXT NOT NULL DEFAULT 'AUTO'",
+)
+
+val MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        MIGRATION_2_3_STATEMENTS.forEach(db::execSQL)
+    }
+}

@@ -23,6 +23,7 @@ import io.github.code_akram.or2.connection.ActiveTerminal
 import io.github.code_akram.or2.connection.HostConnections
 import io.github.code_akram.or2.ffi.CellWidth
 import io.github.code_akram.or2.ffi.SessionState
+import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Type
 import kotlinx.coroutines.delay
@@ -31,14 +32,14 @@ import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.max
 
-/**
- * The transport a terminal runs over, shown as a pill. The Kotlin app opens every terminal over
- * SSH today; `Mosh` is drawn in the teal pill the moment a terminal reports it.
- */
+/** The transport a terminal runs over, shown as a pill (`SSH`, or `Mosh` in the teal one). */
 enum class Transport(val label: String) { SSH("SSH"), MOSH("Mosh") }
 
-@Suppress("UnusedReceiverParameter")
-fun ActiveTerminal.transport(): Transport = Transport.SSH
+/** The pill for what the session really runs over ([ActiveTerminal.transport]). */
+fun TerminalTransport.display(): Transport = when (this) {
+    TerminalTransport.SSH -> Transport.SSH
+    TerminalTransport.MOSH -> Transport.MOSH
+}
 
 /**
  * A live, scaled-down picture of a terminal for the SESSIONS section on Home. It takes the

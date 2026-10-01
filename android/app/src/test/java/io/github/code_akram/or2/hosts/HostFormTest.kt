@@ -3,6 +3,7 @@ package io.github.code_akram.or2.hosts
 import io.github.code_akram.or2.connection.testHost
 import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.HostRecord
+import io.github.code_akram.or2.data.TransportPref
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -50,5 +51,20 @@ class HostFormTest {
         assertTrue(connectionAffectedBy(previous, previous.copy(addresses = listOf(HostEndpoint("a", 2222), HostEndpoint("b", 22)))))
         assertTrue(connectionAffectedBy(previous, previous.copy(record = previous.record.copy(username = "other"))))
         assertTrue(connectionAffectedBy(previous, previous.copy(record = HostRecord(previous.id, "Fixture", "fixture", "another-key"))))
+    }
+
+    @Test
+    fun theTransportControlOffersAutoSshMoshInThatOrderWithAnExplanationForEach() {
+        assertEquals(listOf("Auto", "SSH", "Mosh"), TransportChoices.map(::transportLabel))
+        assertEquals(TransportPref.entries, TransportChoices) // Nothing the form cannot express.
+        val notes = TransportChoices.map(::transportExplanation)
+        assertEquals(3, notes.toSet().size)
+        assertTrue(notes[0].contains("SSH if mosh cannot connect"))
+    }
+
+    @Test
+    fun aTransportChangeDoesNotEndALiveConnection() {
+        val previous = testHost()
+        assertFalse(connectionAffectedBy(previous, previous.copy(record = previous.record.copy(transport = TransportPref.MOSH))))
     }
 }

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status-bar icon of the connections notification: a terminal prompt (>_). White on transparent, as the status bar requires. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4.7,6.3 L3.3,7.7 L7.6,12 L3.3,16.3 L4.7,17.7 L10.4,12 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,16 L20,16 L20,18 L12,18 Z" />
+</vector>
