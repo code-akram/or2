@@ -818,15 +818,22 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
   connection-less `herdr::focus_pane`, which uses a directory of its own) takes the socket from the
   directory and sends one `pane.focus` request on a short-lived stream (10 s bound): two round
   trips (open, request) and no listing. **`herdr::FocusGate`** (one per connection) keeps the app's
-  focus and the terminal's own from both reaching herdr: a focus for a pane whose focus is already
-  in flight **joins it** and shares its answer (a failure included, and a cancelled leader leaves
-  its followers to focus for themselves), and a terminal's focus (`from_terminal`) is satisfied by
-  an acknowledgement younger than `focus::RECENT` (2 s) for the same pane **that is still the
-  session's latest focus**: a herdr session has one focused pane, so the start of a focus of
-  another pane (each focus takes a per-session generation) invalidates every older acknowledgement
-  of that session, and an acknowledgement is remembered only if no later focus of the session
-  started meanwhile (overlapping A and B leave only B recent). Focus A, focus B, open a terminal on
-  A therefore sends a focus of A. The app's own request
+  focus and the terminal's own from both reaching herdr, and **serializes a session's focuses**: a
+  herdr session ends on the pane whose request it received last, so each focus queues behind the
+  session's earlier ones (a per-session async mutex, first in, first out) and is sent only after
+  they were answered; the order requests reach herdr is the order they were asked, whatever the
+  socket-open latencies. A focus for the same pane as the session's **latest queued or running**
+  focus **joins it** and shares its answer (a failure included); if a focus of another pane was
+  asked since it is a request of its own, queued after it (A, B, A sends A, B, A). A cancelled
+  leader (queued or running) leaves the queue without blocking it, and its followers ask for
+  themselves. A terminal's focus (`from_terminal`) is satisfied by an acknowledgement younger than
+  `focus::RECENT` (2 s) for the same pane only if that was **the last focus completed in the
+  session and nothing newer is queued or running there**: asking for a focus clears the session's
+  remembered acknowledgement, a completed one is remembered only by the focus that finished last,
+  and a failed or cancelled one leaves none (herdr may have acted on it). Focus A, focus B, open a
+  terminal on A therefore sends a focus of A; with A's request held open while B starts, B is sent
+  after A, and a terminal on B is then satisfied from memory but one on A is not. Sessions are
+  independent (a held focus in one does not delay another). The app's own request
   (`HostHandle::focus_herdr_pane`) is never answered from memory, because the user's desktop may
   have moved the focus meanwhile. It changes what the user's
   herdr clients show; tests use isolated named sessions only. An error response with the code
@@ -2079,7 +2086,9 @@ What was cut: the probe's herdr listing runs beside the probe script (not after 
 connection's directory; `capabilities()` right after it does not list a third time; a watch and a
 focus take their socket from the directory (no `session list`, no discovery per call); a watch's
 two streams open together; the app's focus and the terminal's own focus are one request (the
-`FocusGate`); the pane focus runs beside the mosh bootstrap or the SSH channel open instead of
+`FocusGate`, which also sends a session's focuses one at a time so herdr receives them in the order
+they were asked and an acknowledgement is trusted only as the session's last; see "Focus" under the
+herdr client); the pane focus runs beside the mosh bootstrap or the SSH channel open instead of
 before it. The unreachable-host test connects a second, healthy host while a first one accepts TCP
 and never answers the handshake (20 s timeout) and checks the healthy host's connect and inbox are
 unaffected: each host is its own driver thread, and the Android flows are per host.

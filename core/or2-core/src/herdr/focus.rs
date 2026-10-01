@@ -10,14 +10,25 @@
 //! be the focused one before it starts). An explicit request from the app is never answered
 //! from memory, only joined.
 //!
-//! A herdr session has one focused pane, so what the gate remembers is **per session**: the
-//! moment a focus of another pane starts, every older acknowledgement of that session stops
-//! counting (each focus takes a generation number; an acknowledgement is remembered only if no
-//! later focus of the session started meanwhile). Otherwise a terminal on A would accept A's
-//! old acknowledgement after B was focused and show B.
+//! A herdr session has one focused pane, and the pane it ends on is the one whose request
+//! herdr received **last**. So the gate **serializes the focuses of a session**: each one
+//! queues behind the previous one (a per-session async mutex, which is first in, first out) and
+//! is sent only once that one has been answered, so the order in which requests reach herdr is
+//! the order in which they were asked. What the gate remembers follows from that, per session:
+//!
+//! - A request joins the **latest queued or running** focus of its session when that one is for
+//!   the same pane (the answer is shared). If a focus of another pane was asked since, it is a
+//!   request of its own, queued after it (A, B, A sends A, B, A).
+//! - An acknowledgement is remembered only as the **last focus completed** in the session, and
+//!   only while nothing newer is queued or running there. A failed or cancelled focus (herdr may
+//!   or may not have acted on it) makes the session forget it.
+//!
+//! Sessions do not wait for each other. A focus that is cancelled while it waits or runs leaves
+//! the queue (its place in the mutex is released), and followers that were sharing its answer
+//! ask for themselves.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -33,15 +44,8 @@ use crate::remote::RemoteHost;
 /// How long an acknowledged focus counts for a terminal that opens on the same pane.
 pub const RECENT: Duration = Duration::from_secs(2);
 
-type Key = (Option<String>, String);
+type Session = Option<String>;
 type Outcome = Option<Result<(), HerdrError>>;
-
-enum Slot {
-    /// A focus is on its way; followers wait for its outcome.
-    InFlight(watch::Receiver<Outcome>),
-    /// Acknowledged at this moment.
-    Done(Instant),
-}
 
 /// Per host connection. See the module documentation.
 #[derive(Default)]
@@ -51,26 +55,48 @@ pub struct FocusGate {
 
 #[derive(Default)]
 struct State {
-    slots: HashMap<Key, Slot>,
-    /// The generation of the latest focus started in each herdr session.
-    latest: HashMap<Option<String>, u64>,
+    sessions: HashMap<Session, SessionGate>,
     counter: u64,
 }
 
-/// Removes a leader's in-flight slot if it is dropped before it finished (a cancelled query):
-/// followers then see the sender gone and focus for themselves.
+#[derive(Default)]
+struct SessionGate {
+    /// Sends one focus at a time; tokio's mutex hands the lock out in the order it was asked.
+    queue: Arc<tokio::sync::Mutex<()>>,
+    /// The latest focus asked for and not yet answered (queued or running).
+    latest: Option<Pending>,
+    /// The last focus herdr acknowledged, if nothing has happened to the session since.
+    done: Option<(String, Instant)>,
+}
+
+struct Pending {
+    id: u64,
+    pane_id: String,
+    outcome: watch::Receiver<Outcome>,
+}
+
+/// Ends a leader's turn if it is dropped before it finished (a cancelled query): followers then
+/// see the sender gone and focus for themselves, and the session forgets its last
+/// acknowledgement because herdr may have acted on this request.
 struct Leading<'a> {
     gate: &'a FocusGate,
-    key: Key,
+    session: Session,
+    id: u64,
     armed: bool,
 }
 
 impl Drop for Leading<'_> {
     fn drop(&mut self) {
         if self.armed {
-            self.gate.lock().slots.remove(&self.key);
+            self.gate.finish(&self.session, self.id, None);
         }
     }
+}
+
+enum Role {
+    Recent,
+    Follow(watch::Receiver<Outcome>),
+    Lead(watch::Sender<Outcome>, u64, Arc<tokio::sync::Mutex<()>>),
 }
 
 impl FocusGate {
@@ -82,10 +108,55 @@ impl FocusGate {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Focuses `pane_id` of `session`. A request for the same pane that is already in flight is
-    /// joined; with `accept_recent` an acknowledgement younger than [`RECENT`] is the answer
-    /// (a terminal's focus: the app's own request passes `false` and is never answered from
-    /// memory). Everything else is one request, with the socket from `directory`.
+    /// Ends focus `id` of `session`: it is no longer the latest, and the session's acknowledged
+    /// pane is `acknowledged` (as of now), none if the focus failed or was cancelled.
+    fn finish(&self, session: &Session, id: u64, acknowledged: Option<&str>) {
+        let mut state = self.lock();
+        let Some(gate) = state.sessions.get_mut(session) else {
+            return;
+        };
+        gate.done = acknowledged.map(|pane| (pane.to_owned(), Instant::now()));
+        if gate.latest.as_ref().is_some_and(|latest| latest.id == id) {
+            gate.latest = None;
+        }
+    }
+
+    /// Decides, in one synchronous step, what a request does. A leader takes its place in the
+    /// session's queue in the same poll (see [`Self::focus`]), so the queue's order is the order
+    /// of these decisions.
+    fn decide(&self, session: &Session, pane_id: &str, accept_recent: bool) -> Role {
+        let mut state = self.lock();
+        state.counter += 1;
+        let id = state.counter;
+        let gate = state.sessions.entry(session.clone()).or_default();
+        if let Some(latest) = &gate.latest {
+            if latest.pane_id == pane_id {
+                return Role::Follow(latest.outcome.clone());
+            }
+        } else if let Some((done, at)) = &gate.done
+            && accept_recent
+            && done == pane_id
+            && at.elapsed() < RECENT
+        {
+            return Role::Recent;
+        }
+        let (sender, receiver) = watch::channel(None);
+        gate.latest = Some(Pending {
+            id,
+            pane_id: pane_id.to_owned(),
+            outcome: receiver,
+        });
+        // The session's focused pane is about to change: what was acknowledged before no
+        // longer says which pane it is.
+        gate.done = None;
+        Role::Lead(sender, id, Arc::clone(&gate.queue))
+    }
+
+    /// Focuses `pane_id` of `session`. A request for the same pane as the session's latest is
+    /// joined; with `accept_recent` an acknowledgement younger than [`RECENT`] that is still the
+    /// session's last is the answer (a terminal's focus: the app's own request passes `false`
+    /// and is never answered from memory). Everything else is one request, with the socket from
+    /// `directory`, sent after the session's earlier ones were answered.
     pub async fn focus<H: RemoteHost>(
         &self,
         host: &H,
@@ -95,34 +166,9 @@ impl FocusGate {
         pane_id: &str,
         accept_recent: bool,
     ) -> Result<(), HerdrError> {
-        let key: Key = (session.map(str::to_owned), pane_id.to_owned());
+        let session: Session = session.map(str::to_owned);
         loop {
-            enum Role {
-                Recent,
-                Follow(watch::Receiver<Outcome>),
-                Lead(watch::Sender<Outcome>, u64),
-            }
-            let role = {
-                let mut state = self.lock();
-                match state.slots.get(&key) {
-                    Some(Slot::Done(at)) if accept_recent && at.elapsed() < RECENT => Role::Recent,
-                    Some(Slot::InFlight(receiver)) => Role::Follow(receiver.clone()),
-                    _ => {
-                        let (sender, receiver) = watch::channel(None);
-                        // A new focus makes every older one of this herdr session history:
-                        // the session's focused pane is about to change.
-                        state.counter += 1;
-                        let generation = state.counter;
-                        state.latest.insert(key.0.clone(), generation);
-                        state.slots.retain(|other, slot| {
-                            other.0 != key.0 || matches!(slot, Slot::InFlight(_))
-                        });
-                        state.slots.insert(key.clone(), Slot::InFlight(receiver));
-                        Role::Lead(sender, generation)
-                    }
-                }
-            };
-            match role {
+            match self.decide(&session, pane_id, accept_recent) {
                 Role::Recent => return Ok(()),
                 Role::Follow(mut receiver) => {
                     let outcome = receiver.wait_for(Option::is_some).await;
@@ -134,26 +180,23 @@ impl FocusGate {
                         Err(_) => continue,
                     }
                 }
-                Role::Lead(sender, generation) => {
+                Role::Lead(sender, id, queue) => {
                     let mut leading = Leading {
                         gate: self,
-                        key: key.clone(),
+                        session: session.clone(),
+                        id,
                         armed: true,
                     };
-                    let result = focus_pane_in(host, herdr, directory, session, pane_id).await;
+                    // No await sits between `decide` and this first poll of the lock, so the
+                    // place in line is the place in `decide`'s order.
+                    let turn = queue.lock().await;
+                    let result =
+                        focus_pane_in(host, herdr, directory, session.as_deref(), pane_id).await;
                     leading.armed = false;
-                    {
-                        let mut state = self.lock();
-                        // Remembered only while no later focus of the session has started: that
-                        // one decides which pane is focused, and this answer is history.
-                        let current = state.latest.get(&key.0) == Some(&generation);
-                        match &result {
-                            Ok(()) if current => {
-                                state.slots.insert(key.clone(), Slot::Done(Instant::now()))
-                            }
-                            _ => state.slots.remove(&key),
-                        };
-                    }
+                    // The last focus sent to the session: its acknowledgement stands until the
+                    // next one is asked for.
+                    self.finish(&session, id, result.is_ok().then_some(pane_id));
+                    drop(turn);
                     let _ = sender.send(Some(result.clone()));
                     return result;
                 }

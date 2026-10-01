@@ -1380,3 +1380,235 @@ async fn a_focus_in_another_herdr_session_does_not_invalidate_a_recent_one() {
         .unwrap();
     assert_eq!(focuses(&host), before);
 }
+
+// ---------------------------------------------------------------------------------------
+// The focus gate serializes a session's focuses: the order they reach herdr is the order they
+// were asked in, and an acknowledgement is only trusted as the session's last.
+
+/// Holds the first socket open until released: the request of the focus that opened it reaches
+/// herdr only then, however early it started.
+struct HoldFirstOpen {
+    host: FakeHost,
+    first: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl HoldFirstOpen {
+    fn new(host: &FakeHost) -> Self {
+        Self {
+            host: host.clone(),
+            first: std::sync::atomic::AtomicBool::new(true),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+impl crate::remote::RemoteHost for HoldFirstOpen {
+    type Stream = tokio::io::DuplexStream;
+
+    async fn exec_rendered(&self, line: &str) -> Result<crate::remote::ExecOutput, RemoteError> {
+        crate::remote::RemoteHost::exec_rendered(&self.host, line).await
+    }
+
+    async fn open_unix(&self, path: &str) -> Result<Self::Stream, RemoteError> {
+        if self.first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        crate::remote::RemoteHost::open_unix(&self.host, path).await
+    }
+}
+
+/// Lets every other task and future that can run, run.
+async fn settle() {
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Polls `future` once so that it takes its place, and hands it back.
+async fn poll_once<F: std::future::Future + Unpin>(future: &mut F) {
+    tokio::select! {
+        biased;
+        _ = future => unreachable!("the focus needs round trips"),
+        () = std::future::ready(()) => {}
+    }
+}
+
+fn focused_panes(host: &FakeHost) -> Vec<String> {
+    host.served()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Served::Focus(pane) => Some(pane),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn out_of_order_focus_does_not_leave_the_wrong_pane_recent() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let host = HoldFirstOpen::new(&fake);
+    let gate = FocusGate::new();
+    // A starts first and its socket is held; B starts meanwhile and must not reach herdr first.
+    let (a, b) = tokio::join!(
+        gate.focus(&host, HERDR, &directory, None, "w2:p1", false),
+        async {
+            host.entered.notified().await;
+            let b = gate.focus(&host, HERDR, &directory, None, "w2:p2", false);
+            tokio::pin!(b);
+            tokio::select! {
+                biased;
+                result = &mut b => panic!("B was sent ahead of A: {result:?}"),
+                () = settle() => {}
+            }
+            assert!(focused_panes(&fake).is_empty(), "B overtook A");
+            host.release.notify_one();
+            b.await
+        },
+    );
+    a.unwrap();
+    b.unwrap();
+    // Remote order is local order: A, then B. B is the pane herdr is on, and says so.
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2"]);
+    gate.focus(&host, HERDR, &directory, None, "w2:p2", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        focused_panes(&fake),
+        ["w2:p1", "w2:p2"],
+        "B is the last focus"
+    );
+    // A is not: a terminal on A sends its focus.
+    gate.focus(&host, HERDR, &directory, None, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2", "w2:p1"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn overlapping_a_b_a_reach_herdr_in_that_order_and_leave_a_recent() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    // The second A (a terminal's) does not join the first or take its answer: B was asked in
+    // between, so it is sent after B.
+    let (a1, b, a2) = tokio::join!(
+        focus_once(&gate, &host, &directory, "w2:p1", false),
+        focus_once(&gate, &host, &directory, "w2:p2", false),
+        focus_once(&gate, &host, &directory, "w2:p1", true),
+    );
+    a1.unwrap();
+    b.unwrap();
+    a2.unwrap();
+    assert_eq!(focused_panes(&host), ["w2:p1", "w2:p2", "w2:p1"]);
+    focus_once(&gate, &host, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        focused_panes(&host).len(),
+        3,
+        "A is the session's last focus"
+    );
+    focus_once(&gate, &host, &directory, "w2:p2", true)
+        .await
+        .unwrap();
+    assert_eq!(focused_panes(&host), ["w2:p1", "w2:p2", "w2:p1", "w2:p2"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_focus_cancelled_while_queued_does_not_wedge_the_queue_or_its_followers() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let host = HoldFirstOpen::new(&fake);
+    let gate = FocusGate::new();
+    let (a, c) = tokio::join!(
+        gate.focus(&host, HERDR, &directory, None, "w2:p1", false),
+        async {
+            host.entered.notified().await;
+            // B queues behind A, and C joins B.
+            let mut b = Box::pin(gate.focus(&host, HERDR, &directory, None, "w2:p2", false));
+            poll_once(&mut b).await;
+            let mut c = Box::pin(gate.focus(&host, HERDR, &directory, None, "w2:p2", true));
+            poll_once(&mut c).await;
+            // B is given up while it waits for its turn.
+            drop(b);
+            host.release.notify_one();
+            c.await
+        },
+    );
+    a.unwrap();
+    c.unwrap();
+    // C asked for itself and was sent after A.
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2"]);
+    // The queue is free: a later focus is served.
+    focus_once(&gate, &fake, &directory, "w2:p1", false)
+        .await
+        .unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p1", "w2:p2", "w2:p1"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_focus_makes_the_session_forget_its_acknowledgement() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let gate = FocusGate::new();
+    focus_once(&gate, &fake, &directory, "w2:p1", false)
+        .await
+        .unwrap();
+    {
+        // B is given up after it started: it may or may not have reached herdr.
+        let mut b = Box::pin(focus_once(&gate, &fake, &directory, "w2:p2", false));
+        poll_once(&mut b).await;
+    }
+    settle().await;
+    let before = focused_panes(&fake).len();
+    focus_once(&gate, &fake, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        focused_panes(&fake).last().map(String::as_str),
+        Some("w2:p1")
+    );
+    assert_eq!(focused_panes(&fake).len(), before + 1, "A was sent again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn another_herdr_session_does_not_wait_for_a_held_focus() {
+    let fake = host_with(&two_panes());
+    let directory = seeded(&fake).await;
+    let host = HoldFirstOpen::new(&fake);
+    let gate = FocusGate::new();
+    let (a, other) = tokio::join!(
+        gate.focus(&host, HERDR, &directory, None, "w2:p1", false),
+        async {
+            host.entered.notified().await;
+            // Session "work" is independent: its focus completes while the default session's
+            // is still held.
+            let other = gate
+                .focus(&host, HERDR, &directory, Some("work"), "w2:p2", false)
+                .await;
+            assert_eq!(
+                focused_panes(&fake),
+                ["w2:p2"],
+                "the held focus has not reached herdr"
+            );
+            host.release.notify_one();
+            other
+        },
+    );
+    a.unwrap();
+    other.unwrap();
+    assert_eq!(focused_panes(&fake), ["w2:p2", "w2:p1"]);
+    // Each session's last acknowledgement stands on its own.
+    gate.focus(&host, HERDR, &directory, None, "w2:p1", true)
+        .await
+        .unwrap();
+    gate.focus(&host, HERDR, &directory, Some("work"), "w2:p2", true)
+        .await
+        .unwrap();
+    assert_eq!(focused_panes(&fake).len(), 2);
+}
