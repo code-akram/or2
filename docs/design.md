@@ -56,7 +56,7 @@ or2/
 ├── core/                 Cargo workspace
 │   ├── or2-core/         transport · ssh · mosh · term · tmux · herdr
 │   ├── or2-ffi/          uniffi surface, the only API Kotlin sees
-│   └── or2-pair/         host CLI for Easy pair (QR + one-shot key exchange); depends on nothing in the app
+│   └── or2-pair/         host CLI for Easy pair (QR + pairing over sshd); depends on nothing in the app
 ├── android/app/          Jetpack Compose UI
 ├── spikes/               M0 throwaway prototypes, not part of the workspace
 └── docs/
@@ -435,18 +435,22 @@ unplugged (Doze) background runs.
 
 ### Easy pair checklist
 
-- [x] `or2-pair` CLI (macOS/Linux/Windows): checks, address gathering, terminal QR, one-shot
-  HMAC-authenticated key listener with on-host confirmation ([contracts](contracts.md#easy-pair-qr-onboarding),
-  [implementation](contracts.md#easy-pair-implementation-and-decisions-ffi-api-12)). Ticked on its unit tests and
-  the loopback end-to-end suite in a temporary home (Linux); a macOS or Windows host has not been run.
-- [x] Phone: scan or paste, Rust parser and exchange (FFI API 12), review screen, pinned host key, connect.
-  Ticked on the Rust and JVM tests (fakes, and the real native exchange against the CLI listener followed by a
-  real connect with the host key trusted) and the compile-checked device tests; the camera, its permission
-  dialog and a QR read off a real monitor are phone-only and unobserved.
-- [x] Docs: a ["Pair a host"](pairing.md) guide (one command + scan, troubleshooting, a Homebrew formula
-  built from source) and the [manual setup guide](manual-setup.md).
-- [ ] Phone acceptance of Easy pair: scan a real `or2-pair` code over Wi-Fi and over ZeroTier, with the
-  permission dialog, then connect.
+Version 1 (FFI API 12: a one-shot HMAC-authenticated TCP listener on a random port) shipped and was
+replaced before phone acceptance: on the first real host (a rented server reached over its public
+address) the extra port was unreachable although SSH worked. Version 2 pairs over sshd itself
+([contracts](contracts.md#easy-pair-qr-onboarding)).
+
+- [ ] `or2-pair` v2: the phone's code typed on the host, a bootstrap key with a forced command,
+  `enroll` with a state file, removal on every ending and the sweep, sshd version gating, IPv6 addresses;
+  v1 listener, bind policy and HMAC exchange removed. Unit tests and the end-to-end suite against a
+  disposable sshd.
+- [ ] Phone v2: `or2_core::pair` over SSH (pinned `hk`, bootstrap key only, one handshake), FFI API 13
+  `pair_new_code`/`pair_enroll`, the Easy pair screen with the code, messages.
+- [ ] Docs: ["Pair a host"](pairing.md) rewritten for v2 (no ports, no firewall workarounds) and the
+  [manual setup guide](manual-setup.md).
+- [ ] Phone acceptance of Easy pair: a real `or2-pair` code on a host reached over its public address
+  and on a LAN host, with the permission dialog, then connect.
+- [ ] Installer: release binaries for Linux and macOS and a POSIX `sh` installer (after v2).
 
 ## Decisions
 
