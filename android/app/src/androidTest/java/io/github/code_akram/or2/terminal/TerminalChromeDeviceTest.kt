@@ -262,12 +262,32 @@ class TerminalChromeDeviceTest {
         compose.onNodeWithTag("composer-paste").assertDoesNotExist()
         compose.onNodeWithTag("composer-panes").assertDoesNotExist()
         val density = compose.activity.resources.displayMetrics.density
-        val composer = compose.onNodeWithTag("composer").fetchSemanticsNode().boundsInRoot
+        // The IME and the composer's own layout are still settling right after `show`: measuring at once
+        // caught a half-moved row on the phone (2 of 3 runs passed). Wait until the three bounds stop moving.
+        val (composer, input, send) = settledBounds("composer", "composer-input", "composer-send")
         // One line of text and the actions share one row: about 40 dp (the old two-row card was 83 dp).
         assertTrue("composer is ${composer.height / density} dp tall", composer.height <= 52 * density)
-        val input = compose.onNodeWithTag("composer-input").fetchSemanticsNode().boundsInRoot
-        val send = compose.onNodeWithTag("composer-send").fetchSemanticsNode().boundsInRoot
         assertTrue("send sits right of the text on the same row", send.left >= input.right - 1 && send.bottom <= composer.bottom + 1 && send.top >= composer.top - 1)
+    }
+
+    /**
+     * The bounds of the nodes tagged [tags] once none of them has moved for [QUIET_MS], waiting at most
+     * [SETTLE_MS] (a bounded `waitUntil`, never a fixed sleep: it ends as soon as the layout is still).
+     */
+    private fun settledBounds(vararg tags: String): List<androidx.compose.ui.geometry.Rect> {
+        var last: List<androidx.compose.ui.geometry.Rect>? = null
+        var since = SystemClock.uptimeMillis()
+        compose.waitUntil(timeoutMillis = SETTLE_MS) {
+            val now = runCatching { tags.map { compose.onNodeWithTag(it).fetchSemanticsNode().boundsInRoot } }.getOrNull()
+            if (now == null || now != last) {
+                last = now
+                since = SystemClock.uptimeMillis()
+                false
+            } else {
+                SystemClock.uptimeMillis() - since >= QUIET_MS
+            }
+        }
+        return checkNotNull(last)
     }
 
     @Test
@@ -385,5 +405,13 @@ class TerminalChromeDeviceTest {
             view.send(MotionEvent.obtain(next, next + 50, MotionEvent.ACTION_MOVE, 560f, 500f + view.cellHeight * 4, 0))
             assertTrue("a normal drag scrolls again", session.scrolls.isNotEmpty())
         }
+    }
+
+    private companion object {
+        /** How long the composer's bounds must stay put before they are measured. */
+        const val QUIET_MS = 400L
+
+        /** The most the layout may take to settle before the test fails. */
+        const val SETTLE_MS = 8_000L
     }
 }

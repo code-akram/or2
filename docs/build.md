@@ -282,7 +282,8 @@ composer's `submit_text` send and pinch-to-zoom persistence (with its own prefer
 Every device test runs against a scratch terminal-preferences file (`Or2TestRunner`, the
 instrumentation runner: a `TerminalView` reads the saved font size when it is built, so grid sizes
 must not depend on the owner's pinch setting, and a pinching test must not write it); the runner
-restores the real file name when the run ends. `TerminalChromeDeviceTest` also covers a slow pinch
+restores the real file name when the run ends. The composer-geometry test waits (a bounded `waitUntil`, 400 ms of stillness, 8 s at most) until the composer, input and send bounds stop moving before it measures, because the IME and the row are still settling right after `show` (it passed 2 of 3 runs on the phone before).
+`TerminalChromeDeviceTest` also covers a slow pinch
 (1.02x per event), the finger left after a pinch not scrolling, the composer keeping a message it
 could not send, and the multi-line confirmation. Tests that call `show()` more than once wrap the content in a fresh `key(...)`, because
 `remember`/`rememberSaveable` state survives a second `setContent` otherwise. `TerminalDeviceTest` covers IME composition, keys, selection,
