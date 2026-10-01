@@ -35,8 +35,12 @@ fn mosh_server() -> Option<String> {
 }
 
 /// Kills the one `mosh-server` this test started, and whatever it spawned, when dropped, even
-/// during a panic. It only ever signals the exact process ids it was given, and re-checks that
+/// during a panic. It only ever signals the exact process ids it identified, and re-checks that
 /// each still is what it was before signalling, so a recycled id is never hit.
+///
+/// It is armed the moment the bootstrap returns, before anything can fail: from the pid the
+/// server printed or, if it printed none, from whichever process holds the UDP port it said it
+/// listens on.
 struct ServerGuard {
     /// `(pid, executable name)` pairs: the server, then its direct children.
     processes: Vec<(u32, String)>,
@@ -58,18 +62,79 @@ fn children(pid: u32) -> Vec<u32> {
         .unwrap_or_default()
 }
 
-impl ServerGuard {
-    fn new(pid: u32) -> Self {
-        let name = comm(pid).expect("the reported mosh-server pid is not running");
-        assert_eq!(name, "mosh-server", "pid {pid} is not a mosh-server");
-        Self {
-            processes: vec![(pid, name)],
+/// The processes of this user holding a UDP socket on local `port`, found by the socket's inode
+/// in `/proc/net/udp{,6}` and the `socket:[inode]` links under `/proc/<pid>/fd`.
+fn udp_port_owners(port: u16) -> Vec<u32> {
+    let mut inodes = Vec::new();
+    for table in ["/proc/net/udp", "/proc/net/udp6"] {
+        let Ok(text) = fs::read_to_string(table) else {
+            continue;
+        };
+        for line in text.lines().skip(1) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let local_port = fields
+                .get(1)
+                .and_then(|local| local.rsplit(':').next())
+                .and_then(|hex| u16::from_str_radix(hex, 16).ok());
+            if local_port == Some(port)
+                && let Some(inode) = fields.get(9)
+            {
+                inodes.push(format!("socket:[{inode}]"));
+            }
         }
+    }
+    let mut owners = Vec::new();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return owners;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        let holds = fds.flatten().any(|fd| {
+            fs::read_link(fd.path())
+                .map(|target| inodes.contains(&target.to_string_lossy().into_owned()))
+                .unwrap_or(false)
+        });
+        if holds {
+            owners.push(pid);
+        }
+    }
+    owners
+}
+
+impl ServerGuard {
+    /// Arms the guard with the server's process: the pid it reported, else the owner of its UDP
+    /// port, and only a process that really is a `mosh-server`. Never panics, so that it can be
+    /// built before any assertion; check [`ServerGuard::armed`] after.
+    fn adopt(reported: Option<u32>, port: u16) -> Self {
+        let mut processes: Vec<(u32, String)> = Vec::new();
+        for pid in reported.into_iter().chain(udp_port_owners(port)) {
+            if comm(pid).as_deref() == Some("mosh-server")
+                && processes.iter().all(|(p, _)| *p != pid)
+            {
+                processes.push((pid, "mosh-server".to_owned()));
+            }
+        }
+        Self { processes }
+    }
+
+    fn armed(&self) -> bool {
+        !self.processes.is_empty()
     }
 
     /// Remembers the server's children (its shell) so they can be cleaned up exactly too.
     fn note_children(&mut self) {
-        let server = self.processes[0].0;
+        let Some(&(server, _)) = self.processes.first() else {
+            return;
+        };
         for child in children(server) {
             if let Some(name) = comm(child)
                 && !self.processes.iter().any(|(pid, _)| *pid == child)
@@ -80,8 +145,9 @@ impl ServerGuard {
     }
 
     fn server_running(&self) -> bool {
-        let (pid, name) = &self.processes[0];
-        comm(*pid).as_deref() == Some(name.as_str())
+        self.processes
+            .first()
+            .is_some_and(|(pid, name)| comm(*pid).as_deref() == Some(name.as_str()))
     }
 }
 
@@ -230,15 +296,16 @@ fn expect_state(states: &mpsc::Receiver<SessionState>, expected: SessionState) {
     );
 }
 
-#[tokio::test]
-async fn a_real_mosh_server_session() {
+/// Starts a real `mosh-server` running bash, through the code M2 uses, and arms the guard over
+/// it at once. `None` (after saying so) when `mosh-server` is not installed.
+async fn bootstrap_local() -> Option<(MoshParams, ServerGuard)> {
     let Some(server) = mosh_server() else {
         assert!(
             std::env::var_os("OR2_REQUIRE_MOSH").is_none(),
             "mosh-server is required (OR2_REQUIRE_MOSH) but not installed"
         );
         eprintln!("SKIP: mosh-server is not installed");
-        return;
+        return None;
     };
     let caps = HostCapabilities {
         tmux: None,
@@ -252,9 +319,26 @@ async fn a_real_mosh_server_session() {
     let params: MoshParams = mosh::bootstrap(&LoopbackSsh(LocalHost::new()), &caps, size, &shell)
         .await
         .expect("bootstrap a local mosh-server");
-    // From here on the guard owns the server's lifetime.
-    let pid = params.server_pid.expect("mosh-server reports its pid");
-    let mut guard = ServerGuard::new(pid);
+    // From here on the guard owns the server's lifetime, before any assertion can fail.
+    let guard = ServerGuard::adopt(params.server_pid, params.port);
+    assert!(
+        guard.armed(),
+        "a mosh-server is listening on UDP port {} but could not be identified to stop it; \
+         stop it by hand",
+        params.port
+    );
+    assert!(
+        params.server_pid.is_some(),
+        "mosh-server did not report its pid (it was found by its port and will be stopped)"
+    );
+    Some((params, guard))
+}
+
+#[tokio::test]
+async fn a_real_mosh_server_session() {
+    let Some((params, mut guard)) = bootstrap_local().await else {
+        return;
+    };
     assert!(format!("{params:?}").contains("redacted"), "{params:?}");
 
     let transport = Recording::default();
@@ -303,14 +387,23 @@ async fn a_real_mosh_server_session() {
         new.load(Ordering::SeqCst) > 0,
         "the server should answer on the new socket after the roam"
     );
-    let old_after_roam = old.load(Ordering::SeqCst);
+    guard.note_children();
+    // A datagram the server sent to the old port just before it followed the new source can
+    // still be in flight or unread, so let those drain before counting.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (old_after_roam, new_after_roam) = (old.load(Ordering::SeqCst), new.load(Ordering::SeqCst));
     handle.send_text("echo again-$((6*9))\n".into()).unwrap();
     grid.wait_for(&handle, "again-54");
+    assert!(
+        new.load(Ordering::SeqCst) > new_after_roam,
+        "the new socket carries the later output"
+    );
     assert_eq!(
         old.load(Ordering::SeqCst),
         old_after_roam,
         "once it follows the new source the server stops answering the old port"
     );
+    guard.note_children();
 
     // Disconnect tells the server, which ends its session.
     assert!(guard.server_running());
@@ -324,4 +417,42 @@ async fn a_real_mosh_server_session() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// A server nobody connected to (the UDP port was firewalled, say) is stopped by
+/// `mosh::terminate`, and only a mosh-server is: a pid that is something else is left alone.
+#[tokio::test]
+async fn terminate_stops_a_server_nobody_connected_to() {
+    let Some((params, guard)) = bootstrap_local().await else {
+        return;
+    };
+    let pid = params.server_pid.expect("mosh-server reports its pid");
+    let host = LoopbackSsh(LocalHost::new());
+
+    // Without a reported pid the guard finds the server by the port it listens on.
+    let by_port = ServerGuard::adopt(None, params.port);
+    assert!(by_port.armed() && by_port.processes[0].0 == pid);
+
+    // This test process is not a mosh-server: nothing happens to it (or to anything else).
+    mosh::terminate(&host, std::process::id()).await.unwrap();
+    assert!(guard.server_running());
+
+    mosh::terminate(&host, pid).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while guard.server_running() {
+        assert!(
+            Instant::now() < deadline,
+            "mosh-server survived mosh::terminate"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Already gone is not an error.
+    mosh::terminate(&host, pid).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_udp_port_is_traced_to_the_process_holding_it() {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = socket.local_addr().unwrap().port();
+    assert!(udp_port_owners(port).contains(&std::process::id()));
 }
