@@ -27,6 +27,6 @@ pub mod ghostty;
 mod link;
 pub mod ssp;
 
-pub use bootstrap::{BootstrapError, MoshKey, MoshParams, bootstrap};
+pub use bootstrap::{BootstrapError, MoshKey, MoshParams, bootstrap, terminate};
 pub use driver::{CONNECT_TIMEOUT, HealthObserver, LinkControl, start, start_with};
 pub use ssp::session::LinkHealth;

@@ -49,8 +49,10 @@ pub struct MoshParams {
     /// The terminal size to start at. `mosh-server` has no size option (it starts at 80x24 and
     /// learns the real size from the client's first datagram), so this is the client's.
     pub size: TerminalSize,
-    /// The detached server's process id, when it printed one. Informational: nothing here kills
-    /// it, and the id is only meaningful on the host.
+    /// The detached server's process id, when it printed one. Only meaningful on the host. A
+    /// `mosh-server` waits for its client for as long as it lives, so a caller whose session
+    /// never connects (it closes `TimedOut` before `Connected`, or is disconnected first) hands
+    /// this to [`terminate`].
     pub server_pid: Option<u32>,
 }
 
@@ -97,6 +99,11 @@ impl BootstrapError {
             Self::Remote(RemoteError::Closed) => {
                 SessionFailure::ConnectionLost("the host connection closed".into())
             }
+            // The transport under the exec channel broke: reconnecting the host is the
+            // recovery, not running the command again.
+            Self::Remote(RemoteError::Io(reason)) => {
+                SessionFailure::ConnectionLost(format!("could not run mosh-server: {reason}"))
+            }
             error => SessionFailure::CommandFailed(error.to_string()),
         }
     }
@@ -140,7 +147,39 @@ pub async fn bootstrap(
     let params = parse_output(&output, size);
     // stdout carried the key.
     output.stdout.zeroize();
+    if params.is_err()
+        && let Some(pid) = detached_pid(&output)
+    {
+        // It started but its answer is unusable: nobody will ever connect to it.
+        let _ = terminate(host, pid).await;
+    }
     params
+}
+
+/// Stops the `mosh-server` with process id `pid` on `host`, which `bootstrap` started and no
+/// session reached (or that a disconnect abandoned before it connected). `mosh-server` has no
+/// idle timeout of its own (and one set through `MOSH_SERVER_NETWORK_TMOUT` would also end a
+/// healthy session whose client was offline for a while), so without this a failed connect
+/// leaves it and its shell on the host for good.
+///
+/// Only a process whose name ends in `mosh-server` is signalled, so an id that has since been
+/// reused by something else is left alone; a server that is already gone is not an error.
+/// Sends `SIGTERM`, which `mosh-server` handles by ending its session.
+pub async fn terminate(host: &impl RemoteHost, pid: u32) -> Result<(), RemoteError> {
+    let script = format!(
+        "case \"$(ps -p {pid} -o comm= 2>/dev/null)\" in *mosh-server) kill -TERM {pid} ;; esac"
+    );
+    host.exec_script(&script).await.map(drop)
+}
+
+/// The pid from `[mosh-server detached, pid = N]` on either stream.
+fn detached_pid(output: &ExecOutput) -> Option<u32> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    stdout
+        .lines()
+        .chain(stderr.lines())
+        .find_map(|line| parse_pid(line.trim()))
 }
 
 /// Reads `MOSH CONNECT <port> <key>` (stdout) and `[mosh-server detached, pid = N]` (stderr, but
@@ -485,13 +524,66 @@ mod tests {
             assert_eq!(got, BootstrapError::Remote(error));
             assert_eq!(got.into_failure(), failure);
         }
+        // A broken transport is a lost connection, not a failed command.
         let host = FakeHost::new(Err(RemoteError::Io("boom".into())));
         let got = bootstrap(&host, &caps(Some("/x/mosh-server")), size(), &[])
             .await
             .unwrap_err();
         assert!(matches!(
             got.into_failure(),
-            SessionFailure::CommandFailed(_)
+            SessionFailure::ConnectionLost(reason) if reason.contains("boom")
         ));
+        for error in [
+            RemoteError::Rejected("no".into()),
+            RemoteError::OutputTooLarge,
+        ] {
+            let host = FakeHost::new(Err(error));
+            let got = bootstrap(&host, &caps(Some("/x/mosh-server")), size(), &[])
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                got.into_failure(),
+                SessionFailure::CommandFailed(_)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn terminate_signals_only_a_process_named_mosh_server() {
+        let host = FakeHost::new(Ok(output(Some(0), "", "")));
+        terminate(&host, 4242).await.unwrap();
+        let ran = host.ran.lock().unwrap();
+        assert_eq!(ran.len(), 1);
+        let line = &ran[0];
+        assert!(line.starts_with("sh -c '"), "{line}");
+        // The id is checked against the process name before anything is signalled.
+        assert!(line.contains("ps -p 4242 -o comm="), "{line}");
+        assert!(line.contains("*mosh-server) kill -TERM 4242"), "{line}");
+        assert!(!line.contains("-KILL"), "{line}");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_started_with_an_unusable_answer_is_stopped() {
+        let host = FakeHost::new(Ok(output(
+            Some(0),
+            &format!("MOSH CONNECT 70000 {KEY}\n"),
+            "[mosh-server detached, pid = 77]\n",
+        )));
+        let error = bootstrap(&host, &caps(Some("/x/mosh-server")), size(), &[])
+            .await
+            .unwrap_err();
+        assert_eq!(error, BootstrapError::InvalidPort);
+        {
+            let ran = host.ran.lock().unwrap();
+            assert_eq!(ran.len(), 2, "the start, then the cleanup");
+            assert!(ran[1].contains("kill -TERM 77"), "{}", ran[1]);
+        }
+
+        // A failure without a detached server has nothing to stop.
+        let host = FakeHost::new(Ok(output(Some(1), "", "no locale")));
+        bootstrap(&host, &caps(Some("/x/mosh-server")), size(), &[])
+            .await
+            .unwrap_err();
+        assert_eq!(host.ran.lock().unwrap().len(), 1);
     }
 }
