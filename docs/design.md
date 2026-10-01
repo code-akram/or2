@@ -156,6 +156,8 @@ if ever, goes through UnifiedPush or ntfy, never FCM.
 
 ## Android specifics
 
+- UI tokens and component rules live in [the UI system](ui.md); Compose code uses them through
+  one theme, never ad-hoc colours or sizes.
 - `compileSdk` / `targetSdk` 36, `minSdk` 34 (Android 14).
 - OxygenOS kills background apps aggressively. Defences: a foreground service with a persistent
   notification while sessions are open (type `specialUse`), a one-time battery-optimisation
