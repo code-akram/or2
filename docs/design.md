@@ -424,6 +424,14 @@ the orphan cleanup).
 - [ ] Integration, external review and phone acceptance, including v0 step 3 (background
   10 minutes over mobile data, return to the same pane without re-typing).
 
+**M3 phone re-check (2026-10-02, Wi-Fi, plugged in, OnePlus 10 Pro, `or2.timing`):**
+fingerprint → first live herdr view 1.1–1.6 s (three hosts in parallel, SSH connected in about
+0.8 s); tap agent → mosh pane frame 0.8 s; reopen an open agent terminal 0.7 s; process killed →
+launcher start auto-resumes the same pane 2.0 s after the fingerprint, stopping both orphaned
+mosh-servers on reconnect; no battery dialog on return. Earlier the same day (before the polish
+lane) these paths took 5–11 s. Still deferred by the owner: mobile data, Wi-Fi→mobile handover,
+unplugged (Doze) background runs.
+
 ### Easy pair checklist
 
 - [ ] `or2-pair` CLI (macOS/Linux/Windows): checks, address gathering, terminal QR, one-shot
