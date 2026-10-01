@@ -289,6 +289,9 @@ pub(crate) async fn pump_channel(
     shutdown: impl Future<Output = ()>,
 ) -> Result<CloseReason, SessionFailure> {
     let (mut reader, writer) = channel.split();
+    // An abort or any other cancellation of this future closes the channel; the paths below that
+    // end it themselves disarm the guard.
+    let mut writer = CloseOnCancel(Some(writer));
     let mut exit_status = None;
     let mut exit_signal = false;
     let reading = async {
@@ -342,11 +345,46 @@ pub(crate) async fn pump_channel(
         () = shutdown => None,
     };
     match ended {
-        Some(result) => result,
+        // The server closed the channel or the connection broke: nothing left to close.
+        Some(result) => {
+            writer.disarm();
+            result
+        }
         None => {
             // Best effort: the host may already be gone.
-            let _ = tokio::time::timeout(CHANNEL_CLOSE_GRACE, writer.close()).await;
+            if let Some(writer) = writer.disarm() {
+                let _ = tokio::time::timeout(CHANNEL_CLOSE_GRACE, writer.close()).await;
+            }
             Ok(CloseReason::Disconnected)
+        }
+    }
+}
+
+/// The write half of a running terminal channel, closed in the background if dropped while
+/// armed (the pump was cancelled): a raw channel does not close itself, and the program on it
+/// would run on.
+struct CloseOnCancel(Option<russh::ChannelWriteHalf<client::Msg>>);
+
+impl CloseOnCancel {
+    fn disarm(&mut self) -> Option<russh::ChannelWriteHalf<client::Msg>> {
+        self.0.take()
+    }
+}
+
+impl std::ops::Deref for CloseOnCancel {
+    type Target = russh::ChannelWriteHalf<client::Msg>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("an armed channel writer")
+    }
+}
+
+impl Drop for CloseOnCancel {
+    fn drop(&mut self) {
+        if let Some(writer) = self.0.take() {
+            super::runtime().spawn(async move {
+                let _ = tokio::time::timeout(CHANNEL_CLOSE_GRACE, writer.close()).await;
+            });
         }
     }
 }

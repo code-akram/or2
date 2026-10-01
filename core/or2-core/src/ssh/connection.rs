@@ -362,7 +362,7 @@ enum OpenKind {
 /// A confirmed channel that nobody has taken yet. Dropped, it closes the channel through the
 /// connection (a raw russh channel does not close itself, and a leaked one holds a `MaxSessions`
 /// slot); [`OpenedChannel::into_inner`] hands it over, and with it the duty to close it.
-struct OpenedChannel {
+pub(super) struct OpenedChannel {
     channel: Option<russh::Channel<russh_client::Msg>>,
     host: Weak<SshHost>,
 }
@@ -375,8 +375,34 @@ impl OpenedChannel {
         }
     }
 
-    fn into_inner(mut self) -> russh::Channel<russh_client::Msg> {
+    /// Hands the channel over, and with it the duty to close it (or to know that the server
+    /// has). Call it only where the next owner takes over without an `await` in between.
+    pub(super) fn into_inner(mut self) -> russh::Channel<russh_client::Msg> {
         self.channel.take().expect("an armed opened channel")
+    }
+
+    /// Closes the channel deliberately (the guard is then disarmed, also if the close is
+    /// cancelled or fails). The caller bounds it.
+    pub(super) async fn close(mut self) -> Result<(), russh::Error> {
+        self.channel
+            .take()
+            .expect("an armed opened channel")
+            .close()
+            .await
+    }
+}
+
+impl std::ops::Deref for OpenedChannel {
+    type Target = russh::Channel<russh_client::Msg>;
+
+    fn deref(&self) -> &Self::Target {
+        self.channel.as_ref().expect("an armed opened channel")
+    }
+}
+
+impl std::ops::DerefMut for OpenedChannel {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.channel.as_mut().expect("an armed opened channel")
     }
 }
 
@@ -395,12 +421,12 @@ impl Drop for OpenedChannel {
 pub(super) struct PendingOpen(oneshot::Receiver<Result<OpenedChannel, russh::Error>>);
 
 impl PendingOpen {
-    /// Resolves with the server's answer. Cancel-safe: the answer is kept for the next call, and
-    /// the channel leaves the guard in the same poll that receives it, so a channel is never
-    /// between owners across an `await`.
-    pub(super) async fn wait(&mut self) -> Result<russh::Channel<russh_client::Msg>, russh::Error> {
+    /// Resolves with the server's answer. Cancel-safe: the answer is kept for the next call. The
+    /// channel stays in its close-on-drop guard until the caller disarms it, so no path (a
+    /// cancelled future, an aborted task) can leave it unclosed.
+    pub(super) async fn wait(&mut self) -> Result<OpenedChannel, russh::Error> {
         match (&mut self.0).await {
-            Ok(opened) => opened.map(OpenedChannel::into_inner),
+            Ok(opened) => opened,
             // The connection ended and took the open with it.
             Err(_) => Err(russh::Error::Disconnect),
         }
@@ -518,7 +544,8 @@ impl RemoteHost for SshHost {
             .await
             .map_err(|_| RemoteError::TimedOut)?
             .map_err(remote_error)?;
-        self.run_exec(channel, line, deadline).await
+        // `ExecChannel` takes over the duty to close it, with no `await` in between.
+        self.run_exec(channel.into_inner(), line, deadline).await
     }
 
     /// OpenSSH `direct-streamlocal@openssh.com`. A socket that is missing or refuses the
@@ -536,7 +563,7 @@ impl RemoteHost for SshHost {
             .await
             .map_err(|_| RemoteError::TimedOut)?
             .map_err(streamlocal_error)?;
-        Ok(channel.into_stream())
+        Ok(channel.into_inner().into_stream())
     }
 }
 

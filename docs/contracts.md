@@ -678,6 +678,19 @@ channel. Tests `a_delivered_session_open_dropped_unconsumed_is_closed`,
 `a_streamlocal_open_cancelled_after_delivery_has_the_channel_closed` (and, as controls, the two
 `..._taken_and_closed_by_the_caller_is_closed` and
 `pending_opens_end_on_host_close_without_retaining_the_host`).
+**No unowned path.** `PendingOpen::wait` returns the `OpenedChannel` guard itself (it derefs to the
+channel; `close()` closes it deliberately and `into_inner()` disarms it), so a terminal's
+`channel_task` holds the channel in the guard from the moment it is delivered: through the focus
+join, `pty-req` and the program request, and into `pump_channel`, whose write half is in its own
+close-on-cancel guard (disarmed when the server closed the channel, the connection broke or the
+pump closed it on a stop). A terminal task the host aborts (the 2 x `CHANNEL_CLOSE_GRACE` wait in
+`drive` ran out) therefore still closes its channel, once, wherever it was. Tests
+`an_aborted_terminal_task_closes_a_running_channel_exactly_once` and
+`an_aborted_terminal_task_closes_a_channel_still_waiting_for_its_focus_exactly_once`. The other
+holders of a raw channel take over without an `await` in between (`ExecChannel` for an exec, which
+closes on drop and disarms only once the server closed the channel; `ChannelStream` for a
+streamlocal socket, which russh closes on drop), so every session, exec and streamlocal channel is
+owned from confirmation to close.
 
 ### tmux
 

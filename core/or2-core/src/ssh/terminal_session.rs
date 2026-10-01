@@ -207,7 +207,7 @@ fn herdr_failure(error: HerdrError) -> SessionFailure {
 
 /// Opens the PTY channel, starts the program and pumps it. Returns why it ended; `Disconnected`
 /// only when asked to stop, after closing the channel.
-async fn channel_task(
+pub(super) async fn channel_task(
     host: Arc<SshHost>,
     target: TerminalTarget,
     events: &mpsc::Sender<Event>,
@@ -281,7 +281,8 @@ async fn channel_task(
         let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
         return CloseReason::Failed(failure);
     }
-    // From here on a channel exists: every exit closes it.
+    // From here on a channel exists: every exit closes it, an abort of this task included (the
+    // guard closes it when dropped; `close` and `into_inner` are the deliberate ways out).
     let started = tokio::select! {
         started = timeout(limit, start_program(&mut channel, command.as_deref(), events, &size)) => {
             started.unwrap_or(Err(SessionFailure::TimedOut))
@@ -296,7 +297,8 @@ async fn channel_task(
         return CloseReason::Failed(failure);
     }
     let _ = events.send(Event::Connected).await;
-    match pump_channel(channel, events, &mut writes, stopped(stop)).await {
+    // `pump_channel` takes over the duty to close it, with no `await` in between.
+    match pump_channel(channel.into_inner(), events, &mut writes, stopped(stop)).await {
         Ok(reason) => reason,
         Err(failure) => CloseReason::Failed(failure),
     }
