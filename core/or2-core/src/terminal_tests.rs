@@ -445,3 +445,23 @@ fn default_colours_and_ansi_palette_are_catppuccin_mocha() {
         0xf38ba8
     );
 }
+
+#[test]
+fn submit_follows_the_bracketed_paste_and_key_modes() {
+    let mut terminal = engine(20, 3);
+    assert!(!terminal.bracketed_paste().unwrap());
+    assert_eq!(terminal.submit_text_bytes("a\nb").unwrap(), b"a\rb");
+    assert_eq!(terminal.submit_enter_bytes().unwrap(), b"\r");
+    terminal.write(b"\x1b[?2004h");
+    assert!(terminal.bracketed_paste().unwrap());
+    assert_eq!(
+        terminal.submit_text_bytes("a\nb").unwrap(),
+        b"\x1b[200~a\nb\x1b[201~"
+    );
+    assert!(terminal.submit_text_bytes("").unwrap().is_empty());
+    terminal.write(b"\x1b[>8u");
+    assert_eq!(terminal.submit_enter_bytes().unwrap(), b"\x1b[13u");
+    terminal.write(b"\x1b[?2004l\x1b[<u");
+    assert!(!terminal.bracketed_paste().unwrap());
+    assert_eq!(terminal.submit_enter_bytes().unwrap(), b"\r");
+}

@@ -38,6 +38,7 @@ class UiSession(private val initial: SessionState = SessionState.Connected) : Se
     override fun close() { destroyed = true; closes++ }
     override fun resize(columns: UShort, rows: UShort) = Unit
     override fun sendText(text: String) = Unit
+    override fun submitText(text: String) = Unit
     override fun sendKey(input: KeyInput) = Unit
     override fun scroll(scroll: ViewportScroll) = Unit
     override fun state() = initial

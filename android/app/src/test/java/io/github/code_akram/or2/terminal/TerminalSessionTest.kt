@@ -30,6 +30,7 @@ class TerminalSessionTest {
             if (destroyed) throw IllegalStateException("Session object has already been destroyed")
         }
         override fun sendText(text: String) { touch(); inputError?.let { throw it } }
+        override fun submitText(text: String) { touch(); inputError?.let { throw it } }
         override fun sendKey(input: KeyInput) { touch(); inputError?.let { throw it } }
         override fun resize(columns: UShort, rows: UShort) { touch() }
         override fun scroll(scroll: ViewportScroll) { touch() }

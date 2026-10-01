@@ -394,6 +394,14 @@ impl Session {
         Ok(self.handle.send_text(text)?)
     }
 
+    /// Types `text` and presses Enter so agent TUIs with paste-burst detection submit instead
+    /// of inserting a newline: the text (one bracketed paste when the terminal has that mode
+    /// on), then Enter as a separate write after a short pause. Empty text only presses
+    /// Enter. Input sent afterwards stays behind the Enter. Requires `Connected`.
+    pub fn submit_text(&self, text: String) -> Result<(), SessionError> {
+        Ok(self.handle.submit_text(text)?)
+    }
+
     /// Keys row, hardware keys and modifier combinations; encoded with the terminal's modes.
     pub fn send_key(&self, input: KeyInput) -> Result<(), SessionError> {
         let input = input.try_into()?;

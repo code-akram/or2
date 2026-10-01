@@ -63,6 +63,7 @@ pub(super) async fn drive(
                     }
                     Event::Closed(reason) => break Ok(host_reason(reason, &mut closing).await),
                 },
+                () = pump.enter_pending() => pump.enter_due(&mut driver)?,
                 command = driver.next_command() => match command {
                     Command::Disconnect => break Ok(CloseReason::Disconnected),
                     command => pump.command(&mut driver, command)?,

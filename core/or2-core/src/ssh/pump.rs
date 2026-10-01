@@ -16,6 +16,7 @@ use russh::client;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
 use crate::session::{CloseReason, Command, SessionDriver, SessionFailure, SessionState};
+use crate::submit::SubmitSequencer;
 use crate::term::TerminalSize;
 use crate::terminal::TerminalEngine;
 
@@ -109,6 +110,7 @@ pub(crate) struct TerminalPump {
     writes: mpsc::UnboundedSender<Write>,
     size: watch::Sender<TerminalSize>,
     connected: bool,
+    submits: SubmitSequencer,
 }
 
 impl TerminalPump {
@@ -139,6 +141,7 @@ impl TerminalPump {
                 writes,
                 size: size_sender,
                 connected: false,
+                submits: SubmitSequencer::new(),
             },
             outgoing,
             latest_size,
@@ -191,12 +194,37 @@ impl TerminalPump {
         self.replies.borrow_mut().flush(&self.writes)
     }
 
-    /// Resize, input, scroll and full-frame commands. Anything else is the caller's.
+    /// Resolves when a submit's Enter is due ([`TerminalPump::enter_due`] then writes it).
+    /// Owns its deadline, so it does not borrow the pump.
+    pub(crate) fn enter_pending(&self) -> impl Future<Output = ()> + use<> {
+        self.submits.due()
+    }
+
+    /// Writes the Enter of a submit, then the input that queued up behind it.
+    pub(crate) fn enter_due(&mut self, driver: &mut SessionDriver) -> Result<(), SessionFailure> {
+        self.submits.disarm();
+        let bytes = self.terminal.submit_enter_bytes().map_err(internal)?;
+        let _ = self.writes.send(Write::Bytes(bytes));
+        while let Some(command) = self.submits.next_deferred() {
+            self.run(driver, command)?;
+        }
+        Ok(())
+    }
+
+    /// Resize, input, scroll and full-frame commands. Anything else is the caller's. Input
+    /// arriving while a submit waits to send its Enter queues behind it.
     pub(crate) fn command(
         &mut self,
         driver: &mut SessionDriver,
         command: Command,
     ) -> Result<(), SessionFailure> {
+        match self.submits.admit(command) {
+            Some(command) => self.run(driver, command),
+            None => Ok(()),
+        }
+    }
+
+    fn run(&mut self, driver: &mut SessionDriver, command: Command) -> Result<(), SessionFailure> {
         match command {
             Command::Resize(new_size) => {
                 self.size.send_replace(new_size);
@@ -210,6 +238,13 @@ impl TerminalPump {
                 let _ = self
                     .writes
                     .send(Write::Bytes(crate::input::text_bytes(&text)));
+            }
+            Command::Submit(text) => {
+                let bytes = self.terminal.submit_text_bytes(&text).map_err(internal)?;
+                if !bytes.is_empty() {
+                    let _ = self.writes.send(Write::Bytes(bytes));
+                }
+                self.submits.arm();
             }
             Command::Key(key) => {
                 let bytes = self.terminal.encode_key(&key).map_err(internal)?;
@@ -358,6 +393,150 @@ pub(crate) fn internal(error: impl std::fmt::Display) -> SessionFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::{Key, KeyInput, Modifiers};
+    use crate::session::{SessionObserver, channel};
+    use crate::submit::SUBMIT_ENTER_DELAY;
+    use tokio::time::Instant;
+
+    struct Quiet;
+
+    impl SessionObserver for Quiet {
+        fn state_changed(&self, _: &SessionState) {}
+        fn frame_ready(&self) {}
+    }
+
+    /// A pump with its writes, ready to take input, on a driver that is never read.
+    fn pump() -> (TerminalPump, SessionDriver, mpsc::UnboundedReceiver<Write>) {
+        let (_, driver) = channel(Arc::new(Quiet));
+        let (pump, writes, _) = TerminalPump::new(TerminalSize::new(80, 24).unwrap()).unwrap();
+        (pump, driver, writes)
+    }
+
+    fn bytes(write: Option<Write>) -> Vec<u8> {
+        match write.expect("a write") {
+            Write::Bytes(bytes) => bytes,
+            _ => panic!("expected input bytes"),
+        }
+    }
+
+    fn drain(writes: &mut mpsc::UnboundedReceiver<Write>) -> Vec<Vec<u8>> {
+        let mut all = Vec::new();
+        while let Ok(write) = writes.try_recv() {
+            all.push(bytes(Some(write)));
+        }
+        all
+    }
+
+    #[test]
+    fn submit_text_is_one_bracketed_paste_only_while_the_terminal_has_the_mode_on() {
+        let (mut pump, mut driver, mut writes) = pump();
+        let submit = || Command::Submit("hi\nthere".into());
+        pump.command(&mut driver, submit()).unwrap();
+        // Off: typed text with M1's newline mapping.
+        assert_eq!(bytes(writes.try_recv().ok()), b"hi\rthere");
+        assert!(writes.try_recv().is_err(), "the Enter is not part of it");
+        pump.submits.disarm();
+        pump.terminal.write(b"\x1b[?2004h");
+        pump.command(&mut driver, submit()).unwrap();
+        assert_eq!(
+            bytes(writes.try_recv().ok()),
+            b"\x1b[200~hi\nthere\x1b[201~"
+        );
+        pump.submits.disarm();
+        pump.terminal.write(b"\x1b[?2004l");
+        pump.command(&mut driver, submit()).unwrap();
+        assert_eq!(bytes(writes.try_recv().ok()), b"hi\rthere");
+    }
+
+    #[test]
+    fn a_paste_end_marker_in_submitted_text_is_removed() {
+        let (mut pump, mut driver, mut writes) = pump();
+        pump.terminal.write(b"\x1b[?2004h");
+        pump.command(&mut driver, Command::Submit("a\x1b[201~rm -rf b".into()))
+            .unwrap();
+        assert_eq!(
+            bytes(writes.try_recv().ok()),
+            b"\x1b[200~arm -rf b\x1b[201~"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_enter_is_a_separate_write_after_the_delay() {
+        let (mut pump, mut driver, mut writes) = pump();
+        let start = Instant::now();
+        pump.command(&mut driver, Command::Submit("go".into()))
+            .unwrap();
+        assert_eq!(drain(&mut writes), [b"go".to_vec()]);
+        // Nothing else is written while the delay runs.
+        let early = tokio::time::timeout(
+            SUBMIT_ENTER_DELAY - Duration::from_millis(1),
+            pump.enter_pending(),
+        )
+        .await;
+        assert!(early.is_err());
+        assert!(writes.try_recv().is_err());
+        pump.enter_pending().await;
+        assert_eq!(start.elapsed(), SUBMIT_ENTER_DELAY);
+        pump.enter_due(&mut driver).unwrap();
+        assert_eq!(drain(&mut writes), [b"\r".to_vec()]);
+        // Nothing is pending afterwards.
+        let after = tokio::time::timeout(Duration::from_secs(60), pump.enter_pending()).await;
+        assert!(after.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_enter_follows_the_terminals_key_modes() {
+        let (mut pump, mut driver, mut writes) = pump();
+        pump.terminal.write(b"\x1b[>8u");
+        pump.command(&mut driver, Command::Submit("go".into()))
+            .unwrap();
+        pump.enter_pending().await;
+        pump.enter_due(&mut driver).unwrap();
+        assert_eq!(drain(&mut writes), [b"go".to_vec(), b"\x1b[13u".to_vec()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn empty_text_submits_just_the_enter() {
+        let (mut pump, mut driver, mut writes) = pump();
+        pump.terminal.write(b"\x1b[?2004h");
+        pump.command(&mut driver, Command::Submit(String::new()))
+            .unwrap();
+        assert!(writes.try_recv().is_err(), "no empty paste");
+        pump.enter_pending().await;
+        pump.enter_due(&mut driver).unwrap();
+        assert_eq!(drain(&mut writes), [b"\r".to_vec()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn input_after_a_submit_stays_behind_its_enter() {
+        let (mut pump, mut driver, mut writes) = pump();
+        let tab = KeyInput::new(Key::Tab, Modifiers::default()).unwrap();
+        pump.command(&mut driver, Command::Submit("one".into()))
+            .unwrap();
+        pump.command(&mut driver, Command::Text("x".into()))
+            .unwrap();
+        pump.command(&mut driver, Command::Key(tab)).unwrap();
+        pump.command(&mut driver, Command::Submit("two".into()))
+            .unwrap();
+        pump.command(&mut driver, Command::Text("y".into()))
+            .unwrap();
+        assert_eq!(drain(&mut writes), [b"one".to_vec()]);
+        pump.enter_pending().await;
+        pump.enter_due(&mut driver).unwrap();
+        // The held input runs up to the next submit, which waits for its own Enter.
+        assert_eq!(
+            drain(&mut writes),
+            [
+                b"\r".to_vec(),
+                b"x".to_vec(),
+                b"\t".to_vec(),
+                b"two".to_vec()
+            ]
+        );
+        pump.enter_pending().await;
+        pump.enter_due(&mut driver).unwrap();
+        assert_eq!(drain(&mut writes), [b"\r".to_vec(), b"y".to_vec()]);
+    }
 
     #[test]
     fn query_batches_coalesce_and_credit_includes_queued_and_in_flight_bytes() {

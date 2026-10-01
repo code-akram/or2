@@ -84,6 +84,7 @@ class SessionContractTest {
             assertEquals(prompt, session.state())
 
             assertThrows(SessionException.NotConnected::class.java) { session.sendText("early") }
+            assertThrows(SessionException.NotConnected::class.java) { session.submitText("early") }
             assertThrows(SessionException.HostKeyMismatch::class.java) {
                 session.approveHostKey(clientKey.publicKey.fingerprint)
             }
@@ -138,6 +139,12 @@ class SessionContractTest {
             assertEquals(listOf(2), text.changedRows.map { it.index.toInt() })
             assertEquals("text c3 a9 0d", text.rowText(2))
 
+            // A submit echoes the typed text, then its Enter as the separate second write.
+            session.submitText("é\nx")
+            assertEquals("submit c3 a9 0d 78 | 0d", listener.awaitFrame(session).rowText(2))
+            session.submitText("")
+            assertEquals("submit | 0d", listener.awaitFrame(session).rowText(2))
+
             val ctrl = KeyModifiers(shift = false, ctrl = true, alt = false, meta = false)
             session.sendKey(KeyInput(TerminalKey.Character("c"), ctrl))
             assertEquals("key Character(\"c\")+ctrl", listener.awaitFrame(session).rowText(3))
@@ -170,6 +177,7 @@ class SessionContractTest {
             assertEquals(CloseReason.Disconnected, closed.reason)
             assertEquals(closed, session.state())
             assertThrows(SessionException.Closed::class.java) { session.sendText("late") }
+            assertThrows(SessionException.Closed::class.java) { session.submitText("late") }
             assertThrows(SessionException.Closed::class.java) { session.resize(10u, 10u) }
             session.disconnect() // Idempotent.
             listener.assertNoMoreStates()

@@ -58,6 +58,7 @@ class FakeSession(val events: MutableList<String> = mutableListOf()) : SessionIn
     override fun scroll(scroll: ViewportScroll) = Unit
     override fun sendKey(input: KeyInput) = Unit
     override fun sendText(text: String) = Unit
+    override fun submitText(text: String) = Unit
     override fun state() = nativeState
     override fun takeFrame(): TerminalFrame? {
         check(!destroyed) { "Session object has already been destroyed" }

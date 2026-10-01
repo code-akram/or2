@@ -11,7 +11,7 @@ document and the tests together, and bumping `API_VERSION` in `or2-ffi` when an 
 All M1 contracts below are implemented and tested. M2 changes are specified in
 [M2: hosts, multiplexers and mosh](#m2-hosts-multiplexers-and-mosh); lane 0 has landed the
 M2 contract types and the FFI API 4 surface (`API_VERSION` 5 since the M1 `connect` was
-removed, 6 with `focus_herdr_pane`); lanes A1 (host driver behind `connect_host`: address
+removed, 6 with `focus_herdr_pane`, 7 with `Session.submit_text`); lanes A1 (host driver behind `connect_host`: address
 racing, host connection, probe, tmux, terminal targets), A2 (herdr client), A3 (mosh core, no FFI
 export) and B (the Android app) have all landed, and the M1 `connect` export is gone (see
 [The M1 path is gone](#the-m1-path-is-gone)).
@@ -198,7 +198,25 @@ change is reverted to the requested size and followed by a full frame.
 
 - `send_text(text)`: committed IME text. Rust writes it as UTF-8 with `\r\n` and `\n` mapped
   to `\r`. Composing text stays in Kotlin (drawn as an overlay at the cursor) until committed.
-  Clipboard paste through the IME arrives here too; bracketed paste is not part of M1.
+  Clipboard paste through the IME arrives here too; this path never brackets a paste.
+- `submit_text(text)` (API 7): the composer's send. It types `text` and presses Enter such that
+  agent TUIs with paste-burst detection (Codex, Claude Code) see a *submit*, not a pasted
+  newline. Those programs treat a fast burst of input that contains Enter as a paste, so
+  `send_text(text + "\n")` or text immediately followed by an Enter key inserts a literal
+  newline and never submits. The driver therefore (1) writes the text: when the terminal has
+  bracketed paste on (DECSET 2004, read from libghostty's modes at that moment), as
+  `ESC[200~ text ESC[201~` with newlines as typed and any `ESC[201~` inside the text removed (so
+  it cannot end the paste early and inject what follows), otherwise as typing with `send_text`'s
+  newline mapping; then (2) after `SUBMIT_ENTER_DELAY` (100 ms, `or2_core::submit`), as a
+  *separate write*, writes Enter encoded by the key encoder with the modes of that moment
+  (Kitty and modifyOtherKeys apply, as for `send_key`). This is what herdr's `agent prompt`
+  does. Empty text writes nothing for step 1 and presses just Enter. The pause is a driver timer,
+  not a sleep: output, resizes and disconnects are served meanwhile, and input sent after the
+  submit (`send_text`, `send_key`, scroll translated to keys, another submit) is held and written
+  after the Enter, in order. Requires `Connected` (`NotConnected` before, `Closed` after), like
+  `send_text`. The SSH and mosh drivers implement it through `SubmitSequencer`; over mosh the two
+  writes are separate user-stream states but the server may batch them on a high-latency link,
+  which can still defeat burst detection there.
 - `send_key(KeyInput { key, modifiers })`: keys row, hardware keys and modifier combinations.
   `TerminalKey` names Enter, Tab, Backspace, Escape, Insert, Delete, Home, End, PageUp,
   PageDown, the arrows, `Function { number }` (1–12) and `Character { text }`: the unmodified
@@ -222,7 +240,9 @@ real `ConnectRequest` and returns a real `Session` whose driver is a determinist
 Rust thread: it presents a host key generated once per process, checks it against the
 request's trusted keys with the production trust code, waits for the decision, then renders
 fixed cells (styles, a combining mark, CJK and emoji wide cells, a wide bar cursor) and echoes
-input: row 2 shows the bytes `send_text` would write, row 3 the validated key. App code must
+input: row 2 shows the bytes `send_text` would write (`text c3 a9 0d`) or, for `submit_text`, the
+typed text bytes then the separate Enter (`submit c3 a9 0d 78 | 0d`; the probe terminal never
+enables bracketed paste and has no delay), row 3 the validated key. App code must
 never call it. The JVM tests (`SessionContractTest`, `KeyContractTest`) and the device test
 (`NativeDeviceTest`) use it and the key exports against the real native library.
 
@@ -1001,7 +1021,8 @@ vacuously.
 ## FFI API 6 (`or2-ffi`)
 
 API 5 was API 4 without the M1 `connect` export; **API 6 adds `HostConnection.focus_herdr_pane`
-and `HostError.PaneNotFound`** (the rest of the surface below is unchanged).
+and `HostError.PaneNotFound`**; **API 7 adds `Session.submit_text(text) -> Result<(), SessionError>`**
+(see [Input and resize](#input-and-resize)). The rest of the surface below is unchanged.
 
 ```rust
 #[derive(uniffi::Record)] pub struct HostAddress { pub host: String, pub port: u16 }

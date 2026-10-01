@@ -360,6 +360,50 @@ async fn a_session_connects_shows_output_takes_input_resizes_roams_and_ends() {
 }
 
 #[tokio::test]
+async fn submit_sends_the_text_then_a_separate_enter_after_the_delay_in_order() {
+    let mut server = FakeServer::new(KEY).await;
+    let (handle, _control, states) = start_fake(server.port(), KEY, CONNECT_TIMEOUT);
+    server
+        .hear_until(|heard| heard.iter().any(|h| !h.resizes.is_empty()))
+        .await;
+    server.say(b"$ ").await;
+    assert_eq!(state(&states).await, SessionState::Connected);
+
+    // Bracketed paste off: typed text, then Enter alone. The user stream is cumulative until the
+    // server acknowledges, so the first instruction with the text must not yet hold the Enter.
+    let started = StdInstant::now();
+    handle.submit_text("ab\ncd".into()).unwrap();
+    let heard = server
+        .hear_until(|heard| heard.last().is_some_and(|h| h.keys.ends_with(b"\r")))
+        .await;
+    assert!(started.elapsed() >= crate::submit::SUBMIT_ENTER_DELAY);
+    assert!(
+        heard.iter().any(|h| h.keys == b"ab\rcd"),
+        "text alone first"
+    );
+    assert_eq!(heard.last().unwrap().keys, b"ab\rcd\r");
+    server.say(b"x").await; // acknowledges everything heard
+
+    // Bracketed paste on: one paste, a marker inside the text removed, then Enter; input sent
+    // straight after the submit lands after its Enter.
+    server.say(b"\x1b[?2004h").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let tab = KeyInput::new(Key::Tab, Modifiers::default()).unwrap();
+    handle.submit_text("ab\x1b[201~\ncd".into()).unwrap();
+    handle.send_text("z".into()).unwrap();
+    handle.send_key(tab).unwrap();
+    let heard = server
+        .hear_until(|heard| heard.last().is_some_and(|h| h.keys.ends_with(b"\t")))
+        .await;
+    assert!(
+        heard.iter().any(|h| h.keys == b"\x1b[200~ab\ncd\x1b[201~"),
+        "the paste alone first"
+    );
+    assert_eq!(heard.last().unwrap().keys, b"\x1b[200~ab\ncd\x1b[201~\rz\t");
+    handle.disconnect();
+}
+
+#[tokio::test]
 async fn disconnect_says_goodbye_to_the_server_and_closes() {
     let mut server = FakeServer::new(KEY).await;
     let (handle, _control, states) = start_fake(server.port(), KEY, CONNECT_TIMEOUT);

@@ -24,6 +24,7 @@ use crate::session::{
     CloseReason, Command, SessionDriver, SessionFailure, SessionHandle, SessionObserver,
     SessionState, channel,
 };
+use crate::submit::SubmitSequencer;
 use crate::transport::{DatagramTransport, DirectUdp, Endpoint, EndpointError};
 
 use super::bootstrap::MoshParams;
@@ -190,6 +191,7 @@ async fn run<T: DatagramTransport>(
     let mut next_health = Instant::now() + HEALTH_INTERVAL;
     // The socket being opened for a rebind, and when to give up on it.
     let mut opening: Option<Opening<T>> = None;
+    let mut submits = SubmitSequencer::new();
     let mut opening_deadline = Instant::now();
 
     loop {
@@ -250,37 +252,21 @@ async fn run<T: DatagramTransport>(
                     return Ok(CloseReason::RemoteExited { exit_status: None });
                 }
             }
+            () = submits.due() => {
+                submits.disarm();
+                let bytes = session.terminal().live().engine().submit_enter_bytes().map_err(internal)?;
+                session.send_input(&bytes);
+                while let Some(command) = submits.next_deferred() {
+                    apply_input(command, driver, &mut session, connected, &mut submits)?;
+                }
+            }
             command = driver.next_command() => {
-                match command {
-                    Command::Disconnect => {
-                        goodbye(&mut link, &mut session, &mut buffer).await;
-                        return Ok(CloseReason::Disconnected);
-                    }
-                    // mosh has no host key prompt: the SSH connection that ran the bootstrap
-                    // made that decision.
-                    Command::ApproveHostKey { .. } | Command::RejectHostKey => {}
-                    Command::Resize(size) => {
-                        session.resize(size.rows(), size.columns()).map_err(internal)?;
-                        if connected {
-                            publish(driver, &mut session)?;
-                        }
-                    }
-                    Command::Text(text) => session.send_input(&text_bytes(&text)),
-                    Command::Key(key) => {
-                        let bytes = session.terminal().live().engine().encode_key(&key).map_err(internal)?;
-                        session.send_input(&bytes);
-                    }
-                    Command::Scroll(scroll) => {
-                        let bytes = session.terminal().live().engine().scroll(scroll).map_err(internal)?;
-                        if !bytes.is_empty() {
-                            session.send_input(&bytes);
-                        }
-                        publish(driver, &mut session)?;
-                    }
-                    Command::FullFrame => {
-                        session.terminal().live().engine().request_full_frame();
-                        publish(driver, &mut session)?;
-                    }
+                if matches!(command, Command::Disconnect) {
+                    goodbye(&mut link, &mut session, &mut buffer).await;
+                    return Ok(CloseReason::Disconnected);
+                }
+                if let Some(command) = submits.admit(command) {
+                    apply_input(command, driver, &mut session, connected, &mut submits)?;
                 }
             }
             opened = poll_fn(|cx| match opening.as_mut() {
@@ -305,6 +291,70 @@ async fn run<T: DatagramTransport>(
             }
         }
     }
+}
+
+/// Runs every command but `Disconnect`. Input held behind a submit's Enter reaches here later.
+fn apply_input(
+    command: Command,
+    driver: &mut SessionDriver,
+    session: &mut Session<GhosttyScreen>,
+    connected: bool,
+    submits: &mut SubmitSequencer,
+) -> Result<(), SessionFailure> {
+    match command {
+        // Handled by the caller, which owns the link.
+        Command::Disconnect => {}
+        // mosh has no host key prompt: the SSH connection that ran the bootstrap made that
+        // decision.
+        Command::ApproveHostKey { .. } | Command::RejectHostKey => {}
+        Command::Resize(size) => {
+            session
+                .resize(size.rows(), size.columns())
+                .map_err(internal)?;
+            if connected {
+                publish(driver, session)?;
+            }
+        }
+        Command::Text(text) => session.send_input(&text_bytes(&text)),
+        Command::Submit(text) => {
+            let bytes = session
+                .terminal()
+                .live()
+                .engine()
+                .submit_text_bytes(&text)
+                .map_err(internal)?;
+            if !bytes.is_empty() {
+                session.send_input(&bytes);
+            }
+            submits.arm();
+        }
+        Command::Key(key) => {
+            let bytes = session
+                .terminal()
+                .live()
+                .engine()
+                .encode_key(&key)
+                .map_err(internal)?;
+            session.send_input(&bytes);
+        }
+        Command::Scroll(scroll) => {
+            let bytes = session
+                .terminal()
+                .live()
+                .engine()
+                .scroll(scroll)
+                .map_err(internal)?;
+            if !bytes.is_empty() {
+                session.send_input(&bytes);
+            }
+            publish(driver, session)?;
+        }
+        Command::FullFrame => {
+            session.terminal().live().engine().request_full_frame();
+            publish(driver, session)?;
+        }
+    }
+    Ok(())
 }
 
 /// A socket being opened for a rebind.

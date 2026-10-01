@@ -150,8 +150,11 @@ Catppuccin Mocha (MIT). Dark only for M2; the terminal default theme uses the sa
   toolbar (which stays, so `Esc`, `Ctrl` and `Tab` remain reachable), with a mono placeholder
   (`Message <host>...`), a row of 48 dp icon actions (paste, panes, close) and, right-aligned, a
   circular send button (`surfaceTrack` until there is text and the session is connected, then
-  `accent`). Sending writes the text plus Enter to the session; this is the quick-reply path for
-  blocked agents. The text is cleared only when it was sent: after a dropped session it stays to
+  `accent`). Sending calls the session's `submit_text`: Rust writes the text (one bracketed paste
+  when the program enabled it) and then Enter as a separate write after a short pause, so agent
+  TUIs with paste-burst detection submit instead of inserting a newline; this is the quick-reply
+  path for blocked agents. The text is cleared only when it was sent: after a dropped session it
+  stays to
   resend. Several lines are confirmed ("Send N lines? They will run as typed") like a multi-line
   paste. Attach, snippets and dictation are not implemented.
 

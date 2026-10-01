@@ -8,7 +8,7 @@ use libghostty_vt::snapshot::Decoder;
 use libghostty_vt::style::{
     Palette, PaletteIndex, RgbColor, StyleColor, Underline as GhosttyUnderline,
 };
-use libghostty_vt::terminal::ScrollViewport;
+use libghostty_vt::terminal::{Mode, ScrollViewport};
 use libghostty_vt::{RenderState, Terminal};
 
 use crate::frame::{
@@ -311,6 +311,24 @@ impl TerminalEngine {
             rgb(colors.background),
             scrollback,
         )?)
+    }
+
+    /// Whether the program has bracketed paste (DECSET 2004) on.
+    pub fn bracketed_paste(&self) -> Result<bool, TerminalError> {
+        Ok(self.terminal.mode(Mode::BRACKETED_PASTE)?)
+    }
+
+    /// The first write of a submit ([`crate::submit`]) under the terminal's current modes.
+    pub fn submit_text_bytes(&self, text: &str) -> Result<Vec<u8>, TerminalError> {
+        Ok(crate::submit::submit_text_bytes(
+            text,
+            self.bracketed_paste()?,
+        ))
+    }
+
+    /// The Enter that ends a submit, encoded like any other key.
+    pub fn submit_enter_bytes(&mut self) -> Result<Vec<u8>, TerminalError> {
+        self.encode_key(&crate::submit::enter_key())
     }
 
     pub fn encode_key(&mut self, input: &KeyInput) -> Result<Vec<u8>, TerminalError> {

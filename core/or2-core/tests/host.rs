@@ -734,6 +734,28 @@ fn shell_terminal_echoes_resizes_before_and_after_connected_and_reports_the_exit
 }
 
 #[test]
+fn submit_text_types_a_line_or_pastes_it_and_then_presses_enter_separately() {
+    require_sshd!();
+    let live = Live::new();
+    let mut term = live.open("t", TerminalTarget::Shell, 100, 24);
+    term.quiet();
+    // Bracketed paste off: the text is typed and the Enter runs it.
+    term.handle
+        .submit_text("printf 'SUB-%s\\n' one".into())
+        .unwrap();
+    term.wait("SUB-one");
+    // Bracketed paste on, with a raw tty, so `cat -v` shows every byte as it arrives: the text
+    // is one paste, then (later, on its own) the Enter, and a marker in the text is gone.
+    term.send("stty raw; printf '\\033[?2004hOR2-%s' ARMED; cat -v\n");
+    term.wait("OR2-ARMED");
+    term.handle.submit_text("hi\x1b[201~ there".into()).unwrap();
+    term.handle.send_text("!".into()).unwrap();
+    term.wait("^[[200~hi there^[[201~^M!");
+    live.host.disconnect();
+    assert_eq!(term.closed(), CloseReason::Disconnected);
+}
+
+#[test]
 fn several_terminals_share_one_connection_independently() {
     require_sshd!();
     let live = Live::new();

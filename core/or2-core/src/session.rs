@@ -192,6 +192,8 @@ pub enum Command {
     /// Latest wins; allowed before `Connected` so the PTY opens at the right size.
     Resize(TerminalSize),
     Text(String),
+    /// Text, then Enter as a separate, delayed write (see [`crate::submit`]).
+    Submit(String),
     Key(KeyInput),
     Scroll(ViewportScroll),
     /// The renderer lost its grid: publish a full frame.
@@ -302,6 +304,16 @@ impl SessionHandle {
             return Ok(());
         }
         self.send(Command::Text(text))
+    }
+
+    /// Types `text` and presses Enter so a program with paste-burst detection sees a submit,
+    /// not a pasted newline: the driver writes the text (as one bracketed paste when the
+    /// terminal has that mode on), pauses [`crate::submit::SUBMIT_ENTER_DELAY`] and writes Enter
+    /// as its own write. Empty text only presses Enter. Input sent afterwards stays behind
+    /// the Enter.
+    pub fn submit_text(&self, text: String) -> Result<(), SessionError> {
+        self.require_connected()?;
+        self.send(Command::Submit(text))
     }
 
     pub fn send_key(&self, key: KeyInput) -> Result<(), SessionError> {
@@ -560,6 +572,10 @@ mod tests {
             Err(SessionError::NotConnected)
         );
         assert_eq!(handle.request_full_frame(), Err(SessionError::NotConnected));
+        assert_eq!(
+            handle.submit_text("ls".into()),
+            Err(SessionError::NotConnected)
+        );
         let size = TerminalSize::new(120, 40).unwrap();
         handle.resize(size).unwrap();
         assert_eq!(driver.blocking_next_command(), Command::Resize(size));
@@ -569,8 +585,15 @@ mod tests {
         handle.send_text(String::new()).unwrap();
         handle.send_text("ls\n".into()).unwrap();
         handle.send_key(key.clone()).unwrap();
+        handle.submit_text("go".into()).unwrap();
+        handle.submit_text(String::new()).unwrap();
         assert_eq!(driver.blocking_next_command(), Command::Text("ls\n".into()));
         assert_eq!(driver.blocking_next_command(), Command::Key(key));
+        assert_eq!(driver.blocking_next_command(), Command::Submit("go".into()));
+        assert_eq!(
+            driver.blocking_next_command(),
+            Command::Submit(String::new())
+        );
     }
 
     #[test]
@@ -667,6 +690,7 @@ mod tests {
             SessionState::Closed(CloseReason::Disconnected)
         );
         assert_eq!(handle.send_text("x".into()), Err(SessionError::Closed));
+        assert_eq!(handle.submit_text("x".into()), Err(SessionError::Closed));
         assert_eq!(
             handle.resize(TerminalSize::new(1, 1).unwrap()),
             Err(SessionError::Closed)

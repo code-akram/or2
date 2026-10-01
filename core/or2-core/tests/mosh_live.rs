@@ -362,6 +362,10 @@ async fn a_real_mosh_server_session() {
     handle.send_text("echo out-$((6*7))\n".into()).unwrap();
     grid.wait_for(&handle, "out-42");
 
+    // A submit types the line and presses Enter on its own, so the shell runs it.
+    handle.submit_text("echo sub-$((6*9+1))".into()).unwrap();
+    grid.wait_for(&handle, "sub-55");
+
     // A resize reaches the PTY: `stty size` reports rows then columns.
     handle.resize(TerminalSize::new(100, 30).unwrap()).unwrap();
     handle.send_text("stty size\n".into()).unwrap();

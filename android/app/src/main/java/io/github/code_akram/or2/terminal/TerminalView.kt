@@ -240,16 +240,17 @@ class TerminalView(context: Context) : View(context) {
     }
 
     /**
-     * The composer's send: [text] as typed, then Enter, through the same input path as the keys.
-     * Pending Ctrl/Alt latches do not apply to a composed message. Returns whether both reached
-     * the session: false when it is closed or gone, so the caller keeps the message.
+     * The composer's send: Rust types [text] and presses Enter as a separate write after a short
+     * pause (`submit_text`), which agent TUIs with paste-burst detection need to see a submit
+     * rather than a pasted newline. Pending Ctrl/Alt latches do not apply to a composed message.
+     * Returns whether the session took it: false when it is closed or gone, so the caller keeps
+     * the message.
      */
     fun sendLine(text: String): Boolean {
         if (text.isEmpty()) return false
         clearSelection()
         input.discardComposition()
-        if (!sessionCall { sendText(text) }) return false
-        return sessionCall { sendKey(KeyInput(TerminalKey.Enter, KeyModifiers(false, false, false, false))) }
+        return sessionCall { submitText(text) }
     }
 
     fun showKeyboard() {

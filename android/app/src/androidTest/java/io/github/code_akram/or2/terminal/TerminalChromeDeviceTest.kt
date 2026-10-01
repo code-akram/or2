@@ -50,6 +50,7 @@ class TerminalChromeDeviceTest {
 
     private class Recording : SessionInterface {
         val texts = mutableListOf<String>()
+        val submits = mutableListOf<String>()
         val keys = mutableListOf<KeyInput>()
         val scrolls = mutableListOf<ViewportScroll>()
 
@@ -58,6 +59,10 @@ class TerminalChromeDeviceTest {
         override fun sendText(text: String) {
             if (refuse) throw SessionException.NotConnected()
             texts += text
+        }
+        override fun submitText(text: String) {
+            if (refuse) throw SessionException.NotConnected()
+            submits += text
         }
         override fun sendKey(input: KeyInput) {
             if (refuse) throw SessionException.NotConnected()
@@ -165,7 +170,7 @@ class TerminalChromeDeviceTest {
     }
 
     @Test
-    fun theComposerSendsTextPlusEnterAndTheSendButtonWaitsForText() {
+    fun theComposerSubmitsTheTextAndTheSendButtonWaitsForText() {
         show()
         compose.onNodeWithTag("key:Composer").performClick()
         compose.onNodeWithTag("composer-input").assertIsDisplayed()
@@ -173,9 +178,9 @@ class TerminalChromeDeviceTest {
         compose.onNodeWithTag("composer-input").performTextInput("yes, go ahead")
         compose.onNodeWithTag("composer-send").assertIsEnabled().performClick()
         compose.runOnIdle {
-            assertEquals(listOf("yes, go ahead"), session.texts)
-            assertEquals(listOf(TerminalKey.Enter), session.keys.map { it.key })
-            assertFalse(session.keys.single().modifiers.ctrl)
+            // One submit: Rust types the text and presses Enter itself, as a separate write.
+            assertEquals(listOf("yes, go ahead"), session.submits)
+            assertTrue(session.texts.isEmpty() && session.keys.isEmpty())
         }
         compose.onNodeWithTag("composer-send").assertIsNotEnabled() // Cleared after sending.
         compose.onNodeWithTag("key:Esc").assertIsDisplayed() // The toolbar stays: Esc, Ctrl and Tab are one tap away.
@@ -196,12 +201,12 @@ class TerminalChromeDeviceTest {
         compose.onNodeWithTag("composer-send").assertIsEnabled().performClick()
         compose.onNodeWithTag("composer-input").assertTextContains("yes, go ahead")
         compose.onNodeWithTag("composer-send").assertIsEnabled()
-        compose.runOnIdle { assertTrue(session.texts.isEmpty() && session.keys.isEmpty()) }
+        compose.runOnIdle { assertTrue(session.submits.isEmpty() && session.texts.isEmpty() && session.keys.isEmpty()) }
         session.refuse = false // Back up: the same text goes out on the next try, and only then is it cleared.
         compose.onNodeWithTag("composer-send").performClick()
         compose.runOnIdle {
-            assertEquals(listOf("yes, go ahead"), session.texts)
-            assertEquals(listOf(TerminalKey.Enter), session.keys.map { it.key })
+            assertEquals(listOf("yes, go ahead"), session.submits)
+            assertTrue(session.texts.isEmpty() && session.keys.isEmpty())
         }
         compose.onNodeWithTag("composer-send").assertIsNotEnabled()
     }
@@ -211,7 +216,7 @@ class TerminalChromeDeviceTest {
         show(composer = true, state = SessionState.Closed(CloseReason.Disconnected))
         compose.onNodeWithTag("composer-input").performTextInput("too late")
         compose.onNodeWithTag("composer-send").assertIsNotEnabled()
-        compose.runOnIdle { assertTrue(session.texts.isEmpty()) }
+        compose.runOnIdle { assertTrue(session.submits.isEmpty() && session.texts.isEmpty()) }
     }
 
     @Test
@@ -220,15 +225,15 @@ class TerminalChromeDeviceTest {
         compose.onNodeWithTag("composer-input").performTextInput("first\nsecond")
         compose.onNodeWithTag("composer-send").performClick()
         compose.onNodeWithText("Send 2 lines?").assertIsDisplayed()
-        compose.runOnIdle { assertTrue("nothing runs before the answer", session.texts.isEmpty() && session.keys.isEmpty()) }
+        compose.runOnIdle { assertTrue("nothing runs before the answer", session.submits.isEmpty() && session.texts.isEmpty() && session.keys.isEmpty()) }
         compose.onNodeWithText("Cancel").performClick()
         compose.onNodeWithTag("composer-input").assertTextContains("first\nsecond") // Kept to edit or send again.
-        compose.runOnIdle { assertTrue(session.texts.isEmpty()) }
+        compose.runOnIdle { assertTrue(session.submits.isEmpty()) }
         compose.onNodeWithTag("composer-send").performClick()
         compose.onNodeWithTag("composer-send-confirm").performClick()
         compose.runOnIdle {
-            assertEquals(listOf("first\nsecond"), session.texts)
-            assertEquals(listOf(TerminalKey.Enter), session.keys.map { it.key })
+            assertEquals(listOf("first\nsecond"), session.submits)
+            assertTrue(session.texts.isEmpty() && session.keys.isEmpty())
         }
         compose.onNodeWithTag("composer-send").assertIsNotEnabled() // Cleared once it went out.
     }

@@ -27,6 +27,7 @@ use or2_core::keys::ClientKey;
 use or2_core::session::{
     self as core, CloseReason, Command, HostKeyPrompt, SessionDriver, SessionFailure, SessionState,
 };
+use or2_core::submit::submit_text_bytes;
 use or2_core::term::TerminalSize;
 use or2_core::trust::{self, HostKey, HostKeyVerdict};
 use tokio::sync::watch;
@@ -147,6 +148,16 @@ async fn serve_terminal(
                     .map(|b| format!("{b:02x}"))
                     .collect();
                 screen.text_echo = format!("text {}", hex.join(" "));
+                publish(&mut driver, screen.delta(2));
+            }
+            Command::Submit(text) => {
+                // The probe terminal never turns bracketed paste on, so the text is typed;
+                // the Enter is the separate second write.
+                let typed: String = submit_text_bytes(&text, false)
+                    .iter()
+                    .map(|b| format!(" {b:02x}"))
+                    .collect();
+                screen.text_echo = format!("submit{typed} | 0d");
                 publish(&mut driver, screen.delta(2));
             }
             Command::Key(key) => {

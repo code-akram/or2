@@ -241,7 +241,7 @@ name validation) and the address-list host form from fabricated state; `HomeUiDe
 screen (card progress and failure in place, long-press options, session thumbnails, chips, FAB)
 and that a thumbnail holds the terminal's native handle until it leaves composition;
 `TerminalChromeDeviceTest` the key toolbar, latched modifiers, the arrow pad with auto-repeat, the
-composer's text-plus-Enter send and pinch-to-zoom persistence (with its own preferences file).
+composer's `submit_text` send and pinch-to-zoom persistence (with its own preferences file).
 Every device test runs against a scratch terminal-preferences file (`Or2TestRunner`, the
 instrumentation runner: a `TerminalView` reads the saved font size when it is built, so grid sizes
 must not depend on the owner's pinch setting, and a pinching test must not write it); the runner
@@ -288,7 +288,7 @@ Manual phone checks still required:
 - Terminal chrome and Home: pinch zooms the font (remembered after a restart; the default gives
   about 55 columns), drag down on the handle or the minimise button returns to Home with the
   session still running and its live thumbnail under SESSIONS (tap resumes), the arrow pad keys
-  repeat while held, a composer message arrives as text plus Enter (try it on a blocked agent),
+  repeat while held, a composer message is submitted, not left as a pasted newline (try it on a blocked agent),
   haptics on modifier latch, send and host-key approval. Compare each `UiGalleryActivity` screen
   with the Moshi references named in [the UI system](ui.md).
 - Integrated terminal IME show/hide geometry, committed/composing text, keys row, selection,
