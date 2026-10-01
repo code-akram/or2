@@ -1288,6 +1288,8 @@ dependencies = [
  "or2-core",
  "rand",
  "russh",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
