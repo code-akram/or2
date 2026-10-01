@@ -316,7 +316,16 @@ pub trait RemoteHost: Send + Sync + 'static {
   `TimedOut`). A channel that ends with neither an exit status nor a signal is `Closed` when
   the connection is gone. `open_unix` is `direct-streamlocal@openssh.com`; a refusal is `Io` when
   the channel-open failure reason is `CONNECT_FAILED` and `Rejected` otherwise (mapping below).
-  The exec timeout also bounds `open_unix`.
+  The exec timeout also bounds `open_unix`. **It bounds the whole exec exchange**: opening the
+  channel, sending the exec request, sending EOF and collecting the output share one deadline
+  (`SshHost::run_exec`; the exec request and the EOF await russh's bounded outbound queue, which
+  a stalled connection fills, so they are no more immediate than the reads), and the guard that
+  closes the channel is itself bounded (250 ms). The first exec of a connection is the
+  capability probe, whose cache initializer therefore ends within the exec timeout (plus the
+  5 s herdr listing): a timed-out probe is not cached and a caller waiting behind it is never
+  stuck, it simply probes in turn. A test stalls the client's writes, fills the outbound queue,
+  and checks the exec request, the probe and a second probe caller all end `TimedOut` in time
+  and that the next probe after the path recovers succeeds.
 - `ExecOutput { status: Option<u32>, stdout: SecretBytes, stderr: SecretBytes }`; output is
   capped at 1 MiB per stream (excess fails with `RemoteError::OutputTooLarge`); each exec has a
   10 s timeout (`RemoteError::TimedOut`). **Output is secret-bearing** (`mosh-server new` prints

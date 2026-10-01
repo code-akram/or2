@@ -127,12 +127,14 @@ impl SshHost {
         self.handle.channel_open_session().await
     }
 
-    /// Runs `line` on `channel` without a PTY and collects it until the channel closes.
+    /// Runs `line` on `channel` without a PTY and collects it until the channel closes. No
+    /// timing of its own: [`SshHost::run_exec`] bounds the whole exchange, because sending the
+    /// request and the EOF await russh's bounded outbound queue just as the reads await the
+    /// server.
     async fn collect(
         &self,
         channel: &mut russh::Channel<russh_client::Msg>,
         line: &str,
-        deadline: Instant,
     ) -> Result<ExecOutput, RemoteError> {
         channel.exec(true, line).await.map_err(remote_error)?;
         // The command reads no input: give it EOF now, like a closed stdin.
@@ -144,10 +146,7 @@ impl SshHost {
         };
         let mut signalled = false;
         loop {
-            let message = timeout_at(deadline, channel.wait())
-                .await
-                .map_err(|_| RemoteError::TimedOut)?;
-            match message {
+            match channel.wait().await {
                 Some(russh::ChannelMsg::Data { data }) => {
                     output.stdout.extend_capped(&data, OUTPUT_CAP)?
                 }
@@ -178,6 +177,33 @@ impl SshHost {
                 Some(_) => {}
             }
         }
+    }
+}
+
+impl SshHost {
+    /// Runs `line` on the freshly opened `channel` and fails with `TimedOut` unless the WHOLE
+    /// exchange (the exec request, the EOF and collecting the output) is over by `deadline`.
+    /// Sending either request awaits russh's bounded outbound queue, which a stalled
+    /// connection fills (one terminal not draining its output blocks the shared loop), so the
+    /// request and the EOF are no more immediate than the reads. The [`ExecChannel`] guard
+    /// closes the channel whichever way this ends, cancellation included, and the guard's own
+    /// close is bounded too.
+    async fn run_exec(
+        &self,
+        channel: russh::Channel<russh_client::Msg>,
+        line: &str,
+        deadline: Instant,
+    ) -> Result<ExecOutput, RemoteError> {
+        let mut exec = ExecChannel(Some(channel));
+        let result = match timeout_at(deadline, self.collect(exec.channel(), line)).await {
+            Ok(result) => result,
+            Err(_) => Err(RemoteError::TimedOut),
+        };
+        match result {
+            Ok(_) => exec.finished(),
+            Err(_) => exec.close().await,
+        }
+        result
     }
 }
 
@@ -253,13 +279,7 @@ impl RemoteHost for SshHost {
             .await
             .map_err(|_| RemoteError::TimedOut)?
             .map_err(remote_error)?;
-        let mut exec = ExecChannel(Some(channel));
-        let result = self.collect(exec.channel(), line, deadline).await;
-        match result {
-            Ok(_) => exec.finished(),
-            Err(_) => exec.close().await,
-        }
-        result
+        self.run_exec(channel, line, deadline).await
     }
 
     /// OpenSSH `direct-streamlocal@openssh.com`. A socket that is missing or refuses the

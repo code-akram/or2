@@ -431,6 +431,17 @@ impl Fixture {
         trusted: bool,
         keep_socket: bool,
     ) -> Self {
+        Self::start_over(Arc::new(DirectTcp), options, probe, trusted, keep_socket)
+    }
+
+    /// [`Self::start_keeping`] over any transport.
+    fn start_over<T: Transport>(
+        transport: Arc<T>,
+        options: HostOptions,
+        probe: &'static str,
+        trusted: bool,
+        keep_socket: bool,
+    ) -> Self {
         let host = ClientKey::generate_ed25519("");
         let host_openssh = host.public_key().openssh;
         let key = ClientKey::generate_ed25519("");
@@ -484,7 +495,7 @@ impl Fixture {
         )
         .unwrap();
         let (tap, tapped) = oneshot::channel();
-        let handle = start_tapped(Arc::new(DirectTcp), request, observer, options, Some(tap));
+        let handle = start_tapped(transport, request, observer, options, Some(tap));
         Self {
             handle,
             states,
@@ -492,6 +503,26 @@ impl Fixture {
             task,
             tapped: Some(tapped),
         }
+    }
+
+    /// A trusted fixture over `transport`, waited until `Connected`.
+    fn connected_over<T: Transport>(transport: Arc<T>, exec_timeout: Duration) -> Self {
+        let fixture = Self::start_over(
+            transport,
+            HostOptions {
+                exec_timeout,
+                ..HostOptions::default()
+            },
+            PROBE_WITH_TMUX,
+            true,
+            false,
+        );
+        assert_eq!(next(&fixture.states), HostState::Authenticating);
+        assert_eq!(
+            next(&fixture.states),
+            HostState::Connected { address_index: 0 }
+        );
+        fixture
     }
 
     /// The established connection, as the host driver's own tasks use it.
@@ -1099,5 +1130,165 @@ fn a_cancelled_exec_wipes_what_it_had_collected() {
     });
     assert!(outcome.is_err(), "the caller gave up first");
     assert_eq!(wiped("or2-secret-cancelled"), 1);
+    fixture.handle.disconnect();
+}
+
+// ---------------------------------------------------------------------------------------
+// A stalled outbound path.
+
+/// Lets a test stop the client's writes to the wire (reads keep working), like a peer that
+/// stopped reading until the kernel buffers and russh's queues are full.
+#[derive(Default)]
+struct Stall {
+    stalled: AtomicBool,
+    waker: Mutex<Option<std::task::Waker>>,
+}
+
+impl Stall {
+    fn stall(&self) {
+        self.stalled.store(true, Ordering::SeqCst);
+    }
+
+    fn release(&self) {
+        self.stalled.store(false, Ordering::SeqCst);
+        if let Some(waker) = self.waker.lock().unwrap().take() {
+            waker.wake();
+        }
+    }
+
+    /// `Pending` (with the waker kept for `release`) while stalled.
+    fn poll_open(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        if !self.stalled.load(Ordering::SeqCst) {
+            return std::task::Poll::Ready(());
+        }
+        *self.waker.lock().unwrap() = Some(cx.waker().clone());
+        // `release` may have run between the check and storing the waker.
+        if self.stalled.load(Ordering::SeqCst) {
+            std::task::Poll::Pending
+        } else {
+            std::task::Poll::Ready(())
+        }
+    }
+}
+
+struct Stalling<S> {
+    inner: S,
+    stall: Arc<Stall>,
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Stalling<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Stalling<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::task::ready!(self.stall.poll_open(cx));
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::ready!(self.stall.poll_open(cx));
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+struct StallingTcp(Arc<Stall>);
+
+impl Transport for StallingTcp {
+    type Stream = Stalling<tokio::net::TcpStream>;
+
+    async fn connect(
+        &self,
+        endpoint: &crate::transport::Endpoint,
+    ) -> std::io::Result<Self::Stream> {
+        Ok(Stalling {
+            inner: DirectTcp.connect(endpoint).await?,
+            stall: Arc::clone(&self.0),
+        })
+    }
+}
+
+#[test]
+fn a_stalled_outbound_path_cannot_hold_an_exec_or_the_probe_past_the_exec_timeout() {
+    let stall = Arc::new(Stall::default());
+    let mut fixture = Fixture::connected_over(
+        Arc::new(StallingTcp(Arc::clone(&stall))),
+        Duration::from_millis(400),
+    );
+    let ssh = fixture.ssh();
+    // Two channels confirmed while the path still works: one for the exec under test, one to
+    // fill russh's outbound queue.
+    let exec_channel = runtime().block_on(ssh.open_channel()).unwrap();
+    let filler_channel = runtime().block_on(ssh.open_channel()).unwrap();
+
+    stall.stall();
+    let filler = runtime().spawn(async move {
+        for _ in 0..400 {
+            if filler_channel.data(&[b'x'; 16 * 1024][..]).await.is_err() {
+                break;
+            }
+        }
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!filler.is_finished(), "the queue is full: the sender waits");
+
+    // The exec request itself waits for queue space (the channel is already open, so only the
+    // request and the EOF are at stake): the whole exchange is bounded by the deadline.
+    let started = std::time::Instant::now();
+    let result = runtime().block_on(ssh.run_exec(
+        exec_channel,
+        "tmux list-sessions",
+        Instant::now() + Duration::from_millis(400),
+    ));
+    assert_eq!(result.unwrap_err(), RemoteError::TimedOut);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+
+    // The probe holds the cache's initialization while it runs; it is bounded, so a second
+    // caller waiting behind it is not stuck either, and a timed-out probe is not cached.
+    let started = std::time::Instant::now();
+    let (first, second) =
+        runtime().block_on(async { tokio::join!(ssh.capabilities(), ssh.capabilities()) });
+    assert_eq!(first.unwrap_err(), RemoteError::TimedOut);
+    assert_eq!(second.unwrap_err(), RemoteError::TimedOut);
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(fixture.shared.probes.load(Ordering::SeqCst), 0);
+
+    // The path recovers: the next caller probes afresh and succeeds.
+    stall.release();
+    runtime()
+        .block_on(async { timeout(Duration::from_secs(5), filler).await })
+        .unwrap()
+        .unwrap();
+    let caps = runtime().block_on(ssh.capabilities()).unwrap();
+    assert_eq!(caps.tmux.as_deref(), Some("/fake/tmux"));
+    assert_eq!(fixture.shared.probes.load(Ordering::SeqCst), 1);
     fixture.handle.disconnect();
 }
