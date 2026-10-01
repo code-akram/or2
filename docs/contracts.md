@@ -1659,7 +1659,15 @@ mosh session. Where the text above left a choice open, this is what the code doe
   gets no dialog, and Home's host card (Failed, tap to connect) and Resume card are what remain.
 - **Reattach:** `ReattachMemory` keeps `LastTerminal(hostId, target, transport)` in the app's
   private preferences (`or2-app`, key `last_terminal`, URL-encoded parts). It is written once a
-  terminal screen is showing a *connected* terminal (and again if its transport changes). It is
+  terminal screen is showing a terminal that is *connected now* and is not being closed (and again if its
+  transport changes): `ReattachMemory.rememberShown` checks `ActiveTerminal.isOpenForReattach` (state
+  `Connected`, not `disconnectRequested`, not retired) when it runs, not the history `hasConnected` and not the
+  state the effect was queued with, and the screen's effect takes the terminal's state as an input. A terminal
+  the user disconnected or closed, or whose shell exited, stays on screen with its final frame while the effect
+  starts again on every recreation or revisit; remembering it from `hasConnected` would resurrect it and the
+  next foreground return would reopen what was ended on purpose. A close processed before the effect runs wins.
+  `ReattachRememberTest` runs the effect against the holder's real state (user disconnect, remote exit, a fast
+  exit, dismissal, a lost connection) and the decision on return. It is
   forgotten when the user ends it: Disconnect or Close of the session, Disconnect of its host,
   deleting the host, "Disconnect all", or the remote shell exiting. Losing the network or the
   connection never forgets it.

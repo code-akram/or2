@@ -1,5 +1,6 @@
 package io.github.code_akram.or2.app
 
+import io.github.code_akram.or2.connection.ActiveTerminal
 import io.github.code_akram.or2.connection.UserCloseListener
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.ffi.HostState
@@ -81,6 +82,20 @@ class ReattachMemory(private val store: PrefStore) : UserCloseListener {
     private companion object {
         const val KEY = "last_terminal"
     }
+}
+
+/**
+ * What the terminal screen's remembering effect calls once it is showing [terminal]: only a terminal
+ * that is connected *now* and is not being closed becomes the Resume target. `hasConnected` is
+ * history (it stays true through `Closed`) and says nothing about the present: a terminal the user
+ * disconnected, or whose shell exited, stays listed with its final frame, and the effect starts again
+ * on every recreation or revisit, so remembering on history would bring back what the user ended and
+ * the next foreground return would reopen it. The state is read when this runs, not when the effect was
+ * queued, so a close the holder processed in between (the user's Disconnect or Close, which also
+ * forgot the memory; a remote exit) wins.
+ */
+fun ReattachMemory.rememberShown(terminal: ActiveTerminal, transport: TerminalTransport) {
+    if (terminal.isOpenForReattach) remember(LastTerminal(terminal.host.id, terminal.target, transport))
 }
 
 /** A terminal the app holds, as the reattach decision sees it. [alive] is false once it closed. */

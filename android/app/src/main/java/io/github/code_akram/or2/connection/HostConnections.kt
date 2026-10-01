@@ -206,6 +206,14 @@ class ActiveTerminal internal constructor(val id: Long, val host: Host, val targ
     internal var fallbackEligible = false
     val state = mutableState.asStateFlow()
     val hasConnected = mutableHasConnected.asStateFlow()
+
+    /**
+     * Connected now and not deliberately closing (the user's Disconnect or Close sets the flag before
+     * the native close is reported, and a dismissed terminal is retired): the only state a terminal may
+     * become the Resume target in. Unlike [hasConnected] it is not history.
+     */
+    val isOpenForReattach: Boolean
+        get() = mutableState.value == SessionState.Connected && !disconnectRequested && !retired
     val frameReady = mutableFrames.asSharedFlow()
     val handle = mutableHandle.asStateFlow()
 

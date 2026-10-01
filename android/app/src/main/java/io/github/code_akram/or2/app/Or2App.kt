@@ -246,12 +246,15 @@ fun Or2App(
         connect(offer.hosts)
     }
 
-    // What the user last had in front of them: remembered once the terminal connected.
-    val shownConnected = currentTerminal?.hasConnected?.collectAsStateWithLifecycle()?.value == true
+    // What the user last had in front of them: remembered while the terminal is connected now (and not being
+    // closed: `rememberShown` checks that when it runs). Its state is an input of the effect, and a terminal
+    // that closed (the user's disconnect, a remote exit) never becomes the target again when the screen is
+    // recreated or visited once more, whatever it once did.
+    val shownState = currentTerminal?.state?.collectAsStateWithLifecycle()?.value
     val shownTransport = currentTerminal?.transport?.collectAsStateWithLifecycle()?.value
-    LaunchedEffect(currentTerminal, shownConnected, shownTransport) {
-        if (currentTerminal != null && shownConnected && shownTransport != null) {
-            actions.reattach.remember(LastTerminal(currentTerminal.host.id, currentTerminal.target, shownTransport))
+    LaunchedEffect(currentTerminal, shownState, shownTransport) {
+        if (currentTerminal != null && shownState == SessionState.Connected && shownTransport != null) {
+            actions.reattach.rememberShown(currentTerminal, shownTransport)
         }
     }
     // A terminal id saved by a previous process means nothing now: the process died while the user was
