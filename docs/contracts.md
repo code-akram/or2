@@ -1851,8 +1851,9 @@ The app records its pid and stops it over the next SSH connection to that host.
   host that is deleted forgets its entries.
 - **Stop on reconnect.** When a host reaches `Connected` (the Resume path, the reconnect chip, a tap),
   `HostConnections.reapOrphans` stops every pid recorded for that host except those of this process's own
-  sessions that have not closed (`orphanedServers`: a mosh session outlives a lost SSH connection, so a
-  reconnect must not stop its own server). It runs beside the connect (a launched coroutine on the
+  sessions **on that host** that have not closed (`orphanedServers`: a mosh session outlives a lost SSH
+  connection, so a reconnect must not stop its own server; another host's live session with the same pid
+  protects nothing here, since a pid only names a process on its own machine). It runs beside the connect (a launched coroutine on the
   connection's port, ahead of the capability probe's answer and of any reopened terminal), so Resume does
   not wait for it. A stop that succeeds clears its record; one that fails keeps it for the next connection.
 - **Probe.** `contract_probe_host`'s mosh terminals report `server_pid` 4242 (`PROBE_SERVER_PID`) before

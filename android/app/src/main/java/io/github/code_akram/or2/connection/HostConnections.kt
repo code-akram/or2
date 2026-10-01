@@ -654,7 +654,11 @@ class HostConnections(
      */
     private fun reapOrphans(current: ActiveHost) {
         val ledger = moshServers ?: return
-        val live = mutableTerminals.value.filter { it.state.value !is SessionState.Closed }.mapNotNull { it.moshServerPid }.toSet()
+        // A pid only identifies a process on its own host: another host's live session says nothing
+        // about this host's orphan that happens to carry the same number.
+        val live = mutableTerminals.value
+            .filter { it.host.id == current.host.id && it.state.value !is SessionState.Closed }
+            .mapNotNull { it.moshServerPid }.toSet()
         val orphans = orphanedServers(ledger.pids(current.host.id), live)
         if (orphans.isEmpty()) return
         scope.launch {

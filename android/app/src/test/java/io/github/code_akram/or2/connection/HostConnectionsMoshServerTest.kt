@@ -1,6 +1,8 @@
 package io.github.code_akram.or2.connection
 
 import io.github.code_akram.or2.app.MemoryPrefStore
+import io.github.code_akram.or2.data.Host
+import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostListener
@@ -36,6 +38,8 @@ class HostConnectionsMoshServerTest {
         private val stopFailure: Exception? = null,
     ) {
         val ports = mutableListOf<FakePort>()
+        /** The holder's own record (a second instance over [store] would not see what is written through it). */
+        val ledger = MoshServerLedger(store)
         private val listeners = mutableListOf<HostListener>()
         val holder = HostConnections(
             { _, listener ->
@@ -48,12 +52,12 @@ class HostConnectionsMoshServerTest {
                 }
             },
             FakeTrust(), StandardTestDispatcher(scope.testScheduler), UnconfinedTestDispatcher(scope.testScheduler),
-            moshServers = MoshServerLedger(store),
+            moshServers = ledger,
         )
 
         /** The host connects and reaches `Connected` (as after Resume's unlock). */
-        suspend fun connect() {
-            holder.connect(host, byteArrayOf(1))
+        suspend fun connect(target: Host = host) {
+            holder.connect(target, byteArrayOf(1))
             ports.last().nativeState = HostState.Connected(0u)
             listeners.last().onHostStateChanged(HostState.Connected(0u))
             scope.advanceUntilIdle()
@@ -64,7 +68,7 @@ class HostConnectionsMoshServerTest {
             scope.advanceUntilIdle()
         }
 
-        fun open(): ActiveTerminal = holder.openTerminal(holder.host(host.id)!!, shell)
+        fun open(target: Host = host): ActiveTerminal = holder.openTerminal(holder.host(target.id)!!, shell)
 
         fun sessionState(port: Int, terminal: Int, state: SessionState) {
             ports[port].terminals[terminal].second.onStateChanged(state)
@@ -188,6 +192,22 @@ class HostConnectionsMoshServerTest {
         process.sessionState(0, 0, SessionState.Connected)
         process.holder.release(host.id, closeTerminals = true)
         assertEquals(emptyList<UInt>(), process.recorded)
+    }
+
+    @Test
+    fun anEqualPidOnAnotherHostDoesNotProtectAnOrphan() = runTest {
+        val store = MemoryPrefStore()
+        val a = testHost(id = 1)
+        val b = testHost(id = 2)
+        val process = Proc(this, store)
+        process.connect(a)
+        process.open(a)
+        process.sessionState(0, 0, SessionState.Connected) // A's live session runs pid 4242 on host A.
+        process.ledger.record(b.id, 4242u) // B's orphan has the same number, on another machine.
+        process.connect(b)
+        assertEquals("a pid only identifies a process within its host", listOf(4242u), process.ports[1].stopped)
+        assertEquals(emptyList<UInt>(), process.ledger.pids(b.id))
+        assertEquals(listOf(4242u), process.ledger.pids(a.id)) // A's own live server is untouched.
     }
 
     @Test
