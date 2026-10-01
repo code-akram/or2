@@ -227,24 +227,28 @@ Consequences for `or2-core`:
 **M2: multiplexers.** tmux picker, herdr agent inbox across hosts, multi-address hosts.
 **M3: stays connected.** mosh transport, foreground service, automatic reattach. Passes the v0 test.
 **M4: agent features.** Quick replies, opt-in notifications, image paste (SFTP upload + path), voice.
-M4 backlog (owner requests):
-- **Wake a sleeping host.** Two complementary paths, both opt-in per host:
-  1. *Magic packet (Wake-on-LAN):* optional MAC address field in the host form (validated
-     `aa:bb:cc:dd:ee:ff`, stored in Room, never sent anywhere but the packet); a "Wake" action
-     on a host shown as asleep sends the standard magic packet (6 × `0xFF` + 16 × MAC) as UDP to
-     port 9 on the limited broadcast and the subnet-directed broadcast of the current network,
-     **through or2's `DatagramTransport`** (no socket opened outside it), then retries the
-     connection for up to ~30 s with progress shown in place. Works only on the same LAN as the
-     host; the Mac needs "Wake for network access" and power.
-  2. *TCP wake probe* (Moshi's "Mosh Wake Probe"): before reconnecting a sleeping host or
-     restoring its mosh session, open a TCP connection attempt to its SSH port on each address;
-     macOS's Bonjour Sleep Proxy (an always-on Apple TV/HomePod/AirPort) wakes the Mac on that
-     attempt, even when the phone is not on the same LAN segment as a broadcast could reach.
-  Neither works with the lid closed on battery; document that, and that long-running agents
-  belong on the always-on host.
-- Ideas seen in Moshi worth considering: "Keep screen on while a terminal is open" (per-device
-  setting), and a "Reopen terminal on launch" setting (or2 already reattaches; make it a visible
-  choice).
+M4 backlog (owner requests, all to implement):
+1. **Wake-on-LAN magic packet.** Optional MAC address field in the host form (validated
+   `aa:bb:cc:dd:ee:ff`, stored in Room, used only in the packet). A "Wake" action on a host shown
+   as asleep sends the standard magic packet (6 × `0xFF` + 16 × MAC) as UDP to port 9 on the
+   limited broadcast and the current network's subnet-directed broadcast, **through or2's
+   `DatagramTransport`** (no socket outside it), then retries the connection for up to ~30 s
+   with in-place progress. Same LAN only; the Mac needs "Wake for network access" and power.
+2. **TCP wake probe** (Moshi's "Mosh Wake Probe"), per-host toggle: before reconnecting a
+   sleeping host or restoring its mosh session, make a TCP connection attempt to its SSH port on
+   each address so macOS's Bonjour Sleep Proxy (an always-on Apple TV/HomePod/AirPort) wakes it;
+   then connect normally. Needs no MAC address and can work beyond the broadcast domain.
+3. **Device behaviour settings** (seen in Moshi): "Keep screen on while a terminal is open"
+   (per-device, off by default, uses the window keep-screen-on flag only while a terminal is
+   visible) and "Reopen the last terminal on launch" as a visible choice for or2's existing
+   reattach (on by default).
+
+Limits to surface, not solve: a MacBook with the lid closed on battery enters sleep and then
+standby with Wi-Fi off, so neither wake path reaches it ("Wake for network access: Always" on
+battery helps only in light sleep). When a wake attempt fails for a host marked "sleeps", show
+"Can't wake: it may be asleep with the lid closed or on battery" and stop retrying; the host
+form's help text explains the options (keep it awake on power, a closed-lid keep-awake tool or
+`pmset disablesleep`, or run long agents on the always-on host).
 **Later.** tmux control mode, embedded ZeroTier, chat view, diff viewer, port-forward preview.
 
 ### M1 implementation checklist
