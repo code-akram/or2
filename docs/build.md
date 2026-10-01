@@ -76,8 +76,15 @@ shell/tmux/herdr terminals, concurrency, close order, loss through a cuttable TC
 sshd sessions get a private `TMUX_TMPDIR` (the test's tmux server lives in the fixture
 directory and is killed with it), a temporary `$HOME` and a fake `herdr` script there, so no
 real tmux or herdr server is ever contacted. `local.rs` runs the capability probe and tmux
-commands through `LocalHost` with a restricted `PATH`. Tests skip (printing `SKIP`) when
-`/usr/bin/sshd` or `tmux` is absent.
+commands through `LocalHost` with a restricted `PATH` (programs the probe must find are fakes
+under the temporary `$HOME`, so a real herdr or mosh-server in `/usr/bin` cannot change the
+result). Tests skip (printing `SKIP`) when `/usr/bin/sshd` or `tmux` is absent, unless
+`OR2_REQUIRE_SSHD` / `OR2_REQUIRE_TMUX` is set, which fails instead: set both in CI so the
+suite is never vacuously green. The herdr terminal test also skips (printing why) on a machine
+with a real herdr in a standard directory, because the probe would find it whatever `$HOME`
+is. The in-process russh server tests in `ssh/connection_tests.rs` (no sshd needed) cover
+refused channels, terminal setup timeout, cancelled execs, the connect timer around the
+host-key prompt and a dying connection task.
 
 Gradle builds the host library, generates Kotlin under `app/build/generated/uniffi/kotlin`,
 and cross-builds the release Rust library into `app/build/generated/uniffi/jniLibs/arm64-v8a`.
