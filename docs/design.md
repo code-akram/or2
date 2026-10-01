@@ -393,7 +393,9 @@ the orphan cleanup).
   reconnect chip and `Asleep` hosts, auto-resume after process death, the host-form address hint and
   the manifest permissions, on FFI API 9. `resume_mosh` was **rejected after review** (nonce reuse
   under a persisted key, and the transport state a fresh client lacks); process death is handled by
-  the fast Home Resume path instead. Ticked on the Rust suite (real `sshd`, `tmux`, herdr, `mosh-server`),
+  the fast Home Resume path instead, and the `mosh-server` it orphans is stopped by its recorded pid
+  over the next connection (FFI API 10). Merged with the review fixes of M3-A (unconfirmed goodbyes stopped
+  over SSH, the host-owned cancellation signal, stops kept as host debt). Ticked on the Rust suite (real `sshd`, `tmux`, herdr, `mosh-server`),
   the JVM, real-FFI and fake-backed tests and the compile-checked device tests; the phone-only
   behaviour stays in the acceptance item below
   ([contracts](contracts.md#m3-follow-up-advisor-review-owner-decisions-2026-10-01)).

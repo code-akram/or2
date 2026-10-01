@@ -10,7 +10,9 @@
 //! ends `Failed` (before or after `Connected`), calls `mosh::terminate` before the session
 //! reports its end. A stop that cannot run because the SSH server has no free session channel
 //! (OpenSSH's `MaxSessions`) is not forgotten: the host keeps it as a [`ServerDebt`] and
-//! retries, with bounds, when capacity returns.
+//! retries, with bounds, when capacity returns. A start may also carry an absolute deadline
+//! (AUTO's budget): when it passes before the session is `Connected`, the same cleanup runs and
+//! the session closes `Failed { TimedOut }`.
 //!
 //! **Time.** Closing is bounded so the host can wait for it: after a user disconnect of the
 //! host a session needs at most [`ABANDON_GRACE`] (a running bootstrap), [`GOODBYE_TIMEOUT`]
