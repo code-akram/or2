@@ -113,7 +113,14 @@ Catppuccin Mocha (MIT). Dark only for M2; the terminal default theme uses the sa
   (open sessions as live terminal thumbnail cards, ~45 % width, rounded 16 dp, the terminal inset
   8 dp so corners never slice glyphs, with a compact host pill and a transport pill — `SSH`/`Mosh`
   — overlaid, 16 sp title and mono path below; tap resumes), CONNECTIONS (host cards, "Long press for options." hint right-aligned in the
-  section header), then status chips. A FAB adds a host.
+  section header), then status chips. A FAB adds a host. When the last terminal can be resumed
+  (its session is gone or its host is not connected), a **Resume card** sits above SESSIONS: an
+  `ActionCard` with the kicker `RESUME`, the title `Alpha: herdr w1:p2`, the muted line "Unlocks
+  if needed, then returns to this terminal." and the transport it had as the mono meta line
+  (`Mosh`/`SSH`); tapping it unlocks, connects and reopens it.
+- **Transport preference (host form):** under the inbox switch, a `Transport` label and an
+  `Auto` / `SSH` / `Mosh` segmented control with one muted `Secondary` sentence that follows the
+  selection (`Mosh when the host has mosh-server; SSH if mosh cannot connect.`).
 - **Focus progress:** opening or returning to an agent's terminal first focuses its pane in herdr;
   a floating `surfaceRaised` card with an accent spinner and a mono `Focusing host: herdr w1:p1…`
   line shows in place (above the content, at the top of a full-screen terminal), never a dialog.
@@ -128,6 +135,13 @@ Catppuccin Mocha (MIT). Dark only for M2; the terminal default theme uses the sa
   a small round "minimise" button (18 dp disc, `attention`) and sidebar toggle (18 dp, green) with
   48 dp touch targets, the mono title (`host: target`) in `textMuted`, and a trailing transport badge
   (`Mosh` in a saturated teal pill with dark text, `SSH` in a `surfaceTrack` pill with 70 % text).
+  The badge shows the transport the session really runs over (`SSH` after an AUTO fallback). A
+  mosh session that has heard nothing for more than 5 s greys it (the `SSH` look: `surfaceTrack`
+  with `textMuted` text, still reading `Mosh`) and a mono line `Last heard 12 s ago` in `attention`
+  appears under the header; the AUTO fallback explanation (`Mosh could not reach the host over UDP.
+  Using SSH for this connection.`) is a muted mono line in the same place. Both lines are drawn
+  over the first terminal row on a card-coloured scrim and never move the terminal: a flapping link
+  must not resize the grid. They go away on recovery (the stale line also when the session closes).
   The drag handle overlaps the top of the 48 dp header row, so the header costs no extra height.
   The card follows the terminal's own background (the remote can change it with OSC 11). The sidebar toggle opens the sessions sheet
   (switch session, disconnect). The terminal is edge to edge below it with a thin `accent`

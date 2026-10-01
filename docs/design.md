@@ -376,10 +376,14 @@ Interfaces are in [contracts: M3](contracts.md#m3-stays-connected) (FFI API 8).
 
 - [ ] M3-A: mosh terminals on host connections (transport choice, peer pinning, bootstrap,
   terminate on early failure), link health, `roam`/`network_changed`, mosh survives host loss.
-- [x] M3-B (code, branch `m3/b`; phone acceptance pending): foreground service owning connections,
-  notification, network callback, Room v3 transport preference with AUTO fallback, grouped
-  reconnect unlock, reattach to the last pane, battery-optimisation prompt. Decisions and
-  deviations are in [contracts: M3-B](contracts.md#m3-b-android-status-and-decisions-branch-m3b).
+- [ ] M3-B: foreground service owning connections, notification, network callback, Room v3
+  transport preference with AUTO fallback, grouped reconnect unlock, reattach to the last pane,
+  battery-optimisation prompt. Code is on branch `m3/b` (JVM and fake-backed tests, review fixes
+  applied) and ticks when it has run against M3-A's real mosh and on the phone: the notification,
+  the service starting from the foreground, the permission and battery dialogs, the network
+  callback and reattach after 10 minutes in the background are device-only behaviour that nothing
+  here has observed. Decisions and deviations are in
+  [contracts: M3-B](contracts.md#m3-b-android-status-and-decisions-branch-m3b).
 - [ ] UI-C: compact default scale everywhere (type, controls, popups, arrow pad).
 - [ ] Integration, external review and phone acceptance, including v0 step 3 (background
   10 minutes over mobile data, return to the same pane without re-typing).
