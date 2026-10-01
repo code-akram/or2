@@ -34,6 +34,10 @@ pub enum RemoteError {
     Rejected(String),
     #[error("i/o failed: {0}")]
     Io(String),
+    /// The command ran and reported that it could not do its job (a nonzero or signalled
+    /// exit); the message says what the caller was trying to do.
+    #[error("{0}")]
+    Failed(String),
 }
 
 /// Command output that is wiped when dropped. Any exec can carry a secret (`mosh-server new`

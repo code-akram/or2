@@ -406,7 +406,8 @@ impl HostConnection {
     /// `mosh-server` has no idle timeout). Only a process the host's `ps` names `mosh-server`
     /// is signalled, so a pid that was reused is left alone, and a server that is already gone
     /// is success. `Ok` therefore means "no such server runs any more"; an error (no free SSH
-    /// channel, a slow host, `Closed`) means it may still run and the caller should keep the
+    /// channel, a slow host, a stop command that failed or could not inspect the process
+    /// because the host has no usable `ps`, `Closed`) means it may still run and the caller should keep the
     /// pid for the next connection. `InvalidName` for pid 0. Cancelling the coroutine drops
     /// the reply only.
     pub async fn stop_mosh_server(&self, pid: u32) -> Result<(), HostError> {

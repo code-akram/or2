@@ -539,6 +539,8 @@ mod tests {
         refuse: std::sync::atomic::AtomicU32,
         closed: AtomicBool,
         runs: std::sync::atomic::AtomicU32,
+        /// The exit status the stop command reports (0: it worked).
+        status: std::sync::atomic::AtomicU32,
         debt: ServerDebt,
     }
 
@@ -559,7 +561,7 @@ mod tests {
             }
             self.runs.fetch_add(1, Ordering::SeqCst);
             Ok(crate::remote::ExecOutput {
-                status: Some(0),
+                status: Some(self.status.load(Ordering::SeqCst)),
                 stdout: crate::remote::SecretBytes::new(),
                 stderr: crate::remote::SecretBytes::new(),
             })
@@ -638,6 +640,41 @@ mod tests {
         assert_eq!(host.debt.stranded(), [4242]);
         assert!(host.debt.owed().is_empty());
         assert_eq!(host.runs.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_stop_command_that_failed_keeps_the_debt_until_it_succeeds() {
+        let host = Arc::new(FakeHost::default());
+        // The exec ran but the stop did not happen (no `ps`, `kill` refused): still owed.
+        host.status.store(3, Ordering::SeqCst);
+        stop_server(
+            &host,
+            Some(4242),
+            Pacing {
+                interval: Duration::from_millis(30),
+                attempts: 100,
+            },
+        )
+        .await;
+        assert_eq!(host.runs.load(Ordering::SeqCst), 1);
+        assert_eq!(host.debt.owed(), [4242]);
+        // The host is fixed: the retry succeeds and settles the debt.
+        host.status.store(0, Ordering::SeqCst);
+        until("the debt to be settled", || host.debt.owed().is_empty()).await;
+        assert!(host.debt.stranded().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stop_command_that_keeps_failing_ends_stranded_not_settled() {
+        let host = Arc::new(FakeHost::default());
+        host.status.store(4, Ordering::SeqCst);
+        stop_server(&host, Some(7), FAST).await;
+        until("the retries to run out", || {
+            !host.debt.stranded().is_empty()
+        })
+        .await;
+        assert_eq!(host.debt.stranded(), [7]);
+        assert!(host.debt.owed().is_empty());
     }
 
     #[tokio::test]

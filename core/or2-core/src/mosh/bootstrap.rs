@@ -169,13 +169,63 @@ pub async fn bootstrap(
 /// leaves it and its shell on the host for good.
 ///
 /// Only a process whose name ends in `mosh-server` is signalled, so an id that has since been
-/// reused by something else is left alone; a server that is already gone is not an error.
-/// Sends `SIGTERM`, which `mosh-server` handles by ending its session.
+/// reused by something else is left alone. Sends `SIGTERM`, which `mosh-server` handles by
+/// ending its session.
+///
+/// `Ok` means no such server is left for the caller to stop: it was signalled, it was already
+/// gone, or the pid is another program. Anything that leaves a server possibly running is an
+/// error, so a caller that keeps a record of the debt keeps it: the stop command exited nonzero
+/// or was cut off by a signal (`ps` missing or unusable on the host, `kill` refused), as well
+/// as every failure to run the command at all. The script's own statuses are [`STOP_NO_PS`]
+/// and [`STOP_NOT_SIGNALLED`].
 pub async fn terminate(host: &impl RemoteHost, pid: u32) -> Result<(), RemoteError> {
-    let script = format!(
-        "case \"$(ps -p {pid} -o comm= 2>/dev/null)\" in *mosh-server) kill -TERM {pid} ;; esac"
-    );
-    host.exec_script(&script).await.map(drop)
+    let output = host.exec_script(&stop_script(pid)).await?;
+    if output.success() {
+        return Ok(());
+    }
+    let what = match output.status {
+        Some(STOP_NO_PS) => "the host cannot say which program runs under the pid".to_owned(),
+        Some(STOP_NOT_SIGNALLED) => "the host refused the signal".to_owned(),
+        Some(status) => format!("the stop command exited with status {status}"),
+        None => "the stop command was cut off by a signal".to_owned(),
+    };
+    let detail = detail(&String::from_utf8_lossy(&output.stderr));
+    Err(RemoteError::Failed(if detail.is_empty() {
+        format!("could not stop mosh-server {pid}: {what}")
+    } else {
+        format!("could not stop mosh-server {pid}: {what}: {detail}")
+    }))
+}
+
+/// The stop script's status when `ps` is absent or unusable and the process exists (or cannot
+/// be shown not to).
+const STOP_NO_PS: u32 = 3;
+/// The stop script's status when a `mosh-server` could not be signalled.
+const STOP_NOT_SIGNALLED: u32 = 4;
+
+/// The shell run on the host (no quote or backslash: it goes through `render_script`). Status 0
+/// means signalled, already gone, or not a mosh-server. `ps -p` exits 1 when no such process
+/// exists, but also on a `ps` that merely does not understand `-p` (BusyBox), so an empty
+/// answer only counts as "gone" when `kill -0` agrees.
+fn stop_script(pid: u32) -> String {
+    format!(
+        r#"if ! command -v ps >/dev/null 2>&1; then echo ps-is-not-available >&2; exit {STOP_NO_PS}; fi
+name=$(ps -p {pid} -o comm= 2>/dev/null)
+st=$?
+if [ "$st" -gt 1 ]; then echo ps-failed >&2; exit {STOP_NO_PS}; fi
+if [ -z "$name" ]; then
+  if kill -0 {pid} 2>/dev/null; then echo ps-cannot-name-a-running-process >&2; exit {STOP_NO_PS}; fi
+  exit 0
+fi
+case "$name" in
+  *mosh-server)
+    if kill -TERM {pid} 2>/dev/null; then exit 0; fi
+    if [ -z "$(ps -p {pid} -o comm= 2>/dev/null)" ]; then exit 0; fi
+    echo kill-failed >&2
+    exit {STOP_NOT_SIGNALLED} ;;
+esac
+exit 0"#
+    )
 }
 
 /// stdout as text in memory that is wiped on drop: a lossy conversion of invalid UTF-8 would
@@ -570,8 +620,33 @@ mod tests {
         assert!(line.starts_with("sh -c '"), "{line}");
         // The id is checked against the process name before anything is signalled.
         assert!(line.contains("ps -p 4242 -o comm="), "{line}");
-        assert!(line.contains("*mosh-server) kill -TERM 4242"), "{line}");
+        assert!(line.contains("*mosh-server)"), "{line}");
+        assert!(line.contains("kill -TERM 4242"), "{line}");
         assert!(!line.contains("-KILL"), "{line}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_stop_command_is_an_error_and_only_success_is_not() {
+        // The review's case: `kill` was refused and the script exited 1.
+        for (status, stderr) in [
+            (Some(1), "kill: Operation not permitted"),
+            (Some(3), ""),
+            (Some(4), ""),
+            (Some(127), "sh: ps: not found"),
+            // Killed by a signal: the exit status is lost.
+            (None, ""),
+        ] {
+            let host = FakeHost::new(Ok(output(status, "", stderr)));
+            assert!(
+                terminate(&host, 4242).await.is_err(),
+                "status {status:?} was reported as a stop"
+            );
+        }
+        let host = FakeHost::new(Ok(output(Some(0), "", "")));
+        assert_eq!(terminate(&host, 4242).await, Ok(()));
+        // A transport failure still passes through typed.
+        let host = FakeHost::new(Err(RemoteError::Closed));
+        assert_eq!(terminate(&host, 4242).await, Err(RemoteError::Closed));
     }
 
     #[tokio::test]

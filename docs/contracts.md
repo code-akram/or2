@@ -1828,9 +1828,14 @@ The app records its pid and stops it over the next SSH connection to that host.
   `HostCommand::StopMoshServer`, answered through a `oneshot` like the other queries, bounded by
   `QUERY_TIMEOUT`) runs `mosh::terminate` on the host's connection. `terminate` only signals a process
   that `ps` names `*mosh-server`, so a pid that was reused by another program is left alone and a server
-  that is already gone is not an error: `Ok` means "no such server runs any more". An error (`CommandFailed`:
-  no free SSH channel, a slow host; `Closed`: the connection ended; `InvalidName` for pid 0) means it may
-  still run. Not-connected hosts answer `NotConnected`. The stop is a plain exec: it does not go through
+  that is already gone is not an error: `Ok` means "no such server runs any more". The stop script's exit
+  status is read: `terminate` fails (`RemoteError::Failed`, `CommandFailed` over the FFI) when the script
+  could not inspect the process (`ps` missing, or failing while `kill -0` shows the pid alive; status 3),
+  when the signal was refused and the process is still there (status 4), on any other nonzero status and
+  on a signalled exit. An empty `ps` answer counts as gone only when `kill -0` agrees. Both ledgers (the
+  host's `ServerDebt`, the Android record) therefore keep the debt of a stop that did not happen. An error
+  (`CommandFailed`: no free SSH channel, a slow host, a failed stop; `Closed`: the connection ended;
+  `InvalidName` for pid 0) means it may still run. Not-connected hosts answer `NotConnected`. The stop is a plain exec: it does not go through
   the host's `ServerDebt`, because the caller (the app) is the one that keeps the record and retries.
 - **Record (`MoshServerLedger`, Kotlin).** `(host id, pid)` pairs in the app's private preferences
   (`mosh_servers`, `1:4242,7:555`; no key, nothing secret). `HostConnections` records the pid when a mosh

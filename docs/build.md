@@ -110,6 +110,12 @@ panics. **CI must install mosh and set `OR2_REQUIRE_MOSH=1`** (any value), which
 skip into a failure; otherwise that interop claim is never verified. It needs no network
 beyond 127.0.0.1 and does not touch `~/.ssh` or any sshd.
 
+`core/or2-core/tests/terminate.rs` runs the real stop script of `mosh::terminate` through `LocalHost`
+with a restricted `PATH` (no `ps`, a failing `ps`, a fake `ps` naming a vanished pid) against
+processes the test starts itself (a `sleep` symlinked as `mosh-server`, one named otherwise): a
+signalled server, an unrelated process and a vanished one are `Ok`; an unusable `ps` and a failed
+signal are errors. It needs only `sh`, `ps` and `sleep`.
+
 Gradle builds the host library, generates Kotlin under `app/build/generated/uniffi/kotlin`,
 and cross-builds the release Rust library into `app/build/generated/uniffi/jniLibs/arm64-v8a`.
 The app has minSdk 34, compile/targetSdk 36, and no Google Play Services/FCM dependencies.
