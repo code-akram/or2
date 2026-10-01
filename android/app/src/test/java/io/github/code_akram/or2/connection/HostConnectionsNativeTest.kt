@@ -1,6 +1,7 @@
 package io.github.code_akram.or2.connection
 
 import io.github.code_akram.or2.OpenSshFixture
+import io.github.code_akram.or2.assumeConnectHostIsReal
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.HostRecord
@@ -20,7 +21,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
-import org.junit.Ignore
 import org.junit.Test
 import java.net.InetAddress
 import java.nio.file.Files
@@ -56,10 +56,10 @@ class HostConnectionsNativeTest {
         }
     }
 
-    @Ignore("enabled when lane A1 lands")
     @Test
     fun productionFirstUsePersistTrustedReconnectChangedRejectTerminalAndRetainedClose() = runBlocking {
         assumeTrue("sshd is not installed", Files.isExecutable(Path.of("/usr/bin/sshd")))
+        assumeConnectHostIsReal()
         OpenSshFixture().use { fixture ->
             Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { main ->
                 withContext(main) {

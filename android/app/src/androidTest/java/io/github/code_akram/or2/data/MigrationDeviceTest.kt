@@ -74,6 +74,19 @@ class MigrationDeviceTest {
         }
     }
 
+    /** The migration drops columns; no JVM test can tell what SQLite the phone ships, so this does. */
+    @Test
+    fun theDevicesSqliteSupportsDropColumn() {
+        helper.createDatabase(name, 1).use { db ->
+            val version = db.query("SELECT sqlite_version()").use { cursor ->
+                cursor.moveToFirst()
+                cursor.getString(0)
+            }
+            val (major, minor) = version.split('.').take(2).map { it.toInt() }
+            assertTrue("DROP COLUMN needs SQLite 3.35, found $version", major > 3 || (major == 3 && minor >= 35))
+        }
+    }
+
     @Test
     fun theMigratedDatabaseOpensThroughRoomWithTheProductionMigration() {
         helper.createDatabase(name, 1).use { db ->

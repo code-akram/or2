@@ -10,7 +10,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * Never destructive: key records are bound to Keystore entries that cannot be recreated, and
  * trust must survive an upgrade (the destination is unchanged). `hosts` is altered in place and
  * never dropped or recreated: with foreign keys on, `DROP TABLE hosts` deletes every row first
- * and would cascade away `trusted_host_keys`. `DROP COLUMN` needs SQLite 3.35; minSdk 34 ships 3.42+.
+ * and would cascade away `trusted_host_keys`. `DROP COLUMN` needs SQLite 3.35. Android 14 (the
+ * minSdk) is documented to ship 3.42, but the JVM tests run their own SQLite, so
+ * `MigrationDeviceTest.theDevicesSqliteSupportsDropColumn` is the check on the real device.
  */
 val MIGRATION_1_2_STATEMENTS = listOf(
     "CREATE TABLE IF NOT EXISTS `host_addresses` (`hostId` INTEGER NOT NULL, `position` INTEGER NOT NULL, " +

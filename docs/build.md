@@ -98,9 +98,10 @@ use fakes to exercise callbacks before handle assignment, persist-before-approve
 prompts, disconnect-versus-destruction, display disposal, factory cancellation, and private-array
 wipe timing. `HostConnectionsTest` covers the per-host rules on fakes: one connection per host,
 terminals sharing it (independent lifecycle, display lease, final frame through `Closed`),
-capability probe and one herdr watch per running session (the default session is watched with
-no name), and a key array shared by several hosts being wiped only after the last
-`connect_host` call. Fakes implement the app's `HostPort` (the generated `HostConnection`
+capability probe and herdr watches (the default session is watched with no name, and every
+listed session is watched whether running or not, because the probe is cached per connection;
+hidden hosts are not watched), and a key array shared by several hosts being wiped only after the
+last `connect_host` call. Fakes implement the app's `HostPort` (the generated `HostConnection`
 returns concrete `Session`/`HerdrWatch` classes). `UnlockPlanTest` covers biometric grouping
 (one prompt per distinct key record), `InboxModelTest` the inbox ordering and the flow that
 assembles it, `HostRecordsTest` trust clearing on any address-list change (over a fake of the
@@ -109,8 +110,15 @@ compares the result with a fresh v2 database. `HostConnectionsProbeTest` drives 
 over the real FFI with `contract_probe_host` (host-key relay and persistence, capabilities,
 agents into the inbox, terminals and frames, disconnect ordering).
 `HostConnectionsNativeTest` and `ConnectHostContractTest` need a working `connect_host` (a
-failing placeholder until lane A1) and a disposable loopback OpenSSH fixture, so their sshd cases
-are `@Ignore`d until A1 is integrated; they skip when `/usr/bin/sshd` is unavailable. No home
+failing placeholder until lane A1) and a disposable loopback OpenSSH fixture. Their sshd cases
+call `assumeConnectHostIsReal()`, which connects once to a closed loopback port and skips the test
+while the placeholder answers, so they run by themselves once A1 is integrated; they also skip
+when `/usr/bin/sshd` is unavailable. The fixture's sshd sessions are hermetic: `TMUX_TMPDIR` is a
+private directory (no test can reach the user's tmux server), `$HOME` is the fixture directory,
+and `PATH` starts with a fake `herdr` that lists no sessions, so the holder's automatic capability
+probe and herdr watches (every connected inbox host gets them) can never find or subscribe to a
+real herdr session. The one `OpenSshFixture` lives in `OpenSshFixture.kt`; other suites
+(A1's `HostConnectNativeTest`) share it rather than carrying a copy. No home
 SSH files or system sshd settings are read or modified. Key-operation tests use
 real key exports and AES-GCM on the JVM (not Android Keystore). Device tests
 load the packaged arm64 `.so` with Android JNA. Both cover the bootstrap geometry and errors,
@@ -154,7 +162,8 @@ Arch with `assembleDebugAndroidTest` while the phone is unavailable.
 (host, port, add, remove, reorder) clearing trust while label/key/inbox edits keep it,
 stale-destination rejection, and foreign-key cleanup. `MigrationDeviceTest` migrates a populated
 v1 database (keys, hosts, trusted keys) through Room's `MigrationTestHelper`, validating against
-`2.json`, and opens it with the production database builder. `VaultDeviceTest` creates and
+`2.json`, opens it with the production database builder, and checks that the phone's SQLite is
+at least 3.35 (the migration uses `DROP COLUMN`; no JVM test can check the platform's version). `VaultDeviceTest` creates and
 deletes a disposable Keystore alias: it verifies hardware security level, per-use strong
 biometric policy, non-exportability and rejection without authentication (skips if strong
 biometrics are not enrolled). `EntryUiDeviceTest` displays first-use/changed-key dialogs using

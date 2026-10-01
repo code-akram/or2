@@ -1,6 +1,13 @@
 package io.github.code_akram.or2
 
+import io.github.code_akram.or2.ffi.CloseReason
+import io.github.code_akram.or2.ffi.HostAddress
+import io.github.code_akram.or2.ffi.HostConnectRequest
+import io.github.code_akram.or2.ffi.HostState
+import io.github.code_akram.or2.ffi.SessionFailure
+import io.github.code_akram.or2.ffi.connectHost
 import io.github.code_akram.or2.ffi.generateEd25519Key
+import org.junit.Assume.assumeFalse
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.nio.file.Files
@@ -8,7 +15,13 @@ import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.TimeUnit
 
-/** No system configuration, home keys or existing authorized_keys are read or changed. */
+/**
+ * No system configuration, home keys or existing authorized_keys are read or changed. Sessions
+ * of this sshd are hermetic too: `TMUX_TMPDIR` is a private directory (a tmux started here never
+ * touches the user's server), `$HOME` is the fixture directory, and `PATH` starts with a fake
+ * `herdr` whose session list is empty, so the holder's automatic capability probe and watches can
+ * never find or subscribe to a real herdr session.
+ */
 internal class OpenSshFixture : AutoCloseable {
     val directory: Path = Files.createTempDirectory("or2-sshd-")
     val port: Int = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { it.localPort }
@@ -26,6 +39,18 @@ internal class OpenSshFixture : AutoCloseable {
                 host.privateKey.fill(0)
             }
             directory.resolve("authorized").toFile().writeText("")
+            Files.createDirectory(directory.resolve("tmux")) // Private tmux sockets: never the default.
+            val bin = Files.createDirectories(directory.resolve(".local/bin"))
+            bin.resolve("herdr").toFile().apply {
+                // No sessions, and nothing else works.
+                writeText(
+                    "#!/bin/sh\n" +
+                        "if [ \"\$1 \$2\" = \"session list\" ]; then echo '{\"sessions\":[]}'; exit 0; fi\n" +
+                        "echo \"fake herdr: \$*\" >&2\n" +
+                        "exit 1\n",
+                )
+                setExecutable(true)
+            }
             val config = directory.resolve("sshd_config")
             config.toFile().writeText(
                 """
@@ -41,7 +66,7 @@ internal class OpenSshFixture : AutoCloseable {
                 PubkeyAuthentication yes
                 PrintMotd no
                 PrintLastLog no
-                SetEnv HOME=$directory HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR=$directory
+                SetEnv HOME=$directory HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR=$directory TMUX_TMPDIR=${directory.resolve("tmux")} PATH=$bin:/usr/bin:/bin
                 LogLevel VERBOSE
                 """.trimIndent() + "\n",
             )
@@ -71,4 +96,30 @@ internal class OpenSshFixture : AutoCloseable {
         }
         directory.toFile().deleteRecursively()
     }
+}
+
+/**
+ * Skips the calling test while `connect_host` is still lane 0's placeholder, which closes every
+ * connection with `Failed { Internal("host connections land with lane A1") }`. Once the real host
+ * driver is in, this passes and the cases simply run. Only a closed loopback port is contacted.
+ */
+internal fun assumeConnectHostIsReal() {
+    val loopback = checkNotNull(InetAddress.getLoopbackAddress().hostAddress)
+    val closedPort = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { it.localPort }
+    val recorder = HostRecorder()
+    val key = generateEd25519Key("")
+    var closed: HostState.Closed? = null
+    try {
+        val request = HostConnectRequest(listOf(HostAddress(loopback, closedPort.toUShort())), "or2-gate", key.privateKey, emptyList())
+        connectHost(request, recorder).use {
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            while (closed == null && System.nanoTime() < deadline) {
+                closed = recorder.items.poll(100, TimeUnit.MILLISECONDS) as? HostState.Closed
+            }
+        }
+    } finally {
+        key.privateKey.fill(0)
+    }
+    val message = ((closed?.reason as? CloseReason.Failed)?.failure as? SessionFailure.Internal)?.message
+    assumeFalse("connect_host is still lane 0's placeholder", message?.contains("land with lane A1") == true)
 }

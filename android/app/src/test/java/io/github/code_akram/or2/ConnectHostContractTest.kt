@@ -18,7 +18,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
-import org.junit.Ignore
 import org.junit.Test
 import java.net.InetAddress
 import java.nio.file.Files
@@ -30,10 +29,10 @@ import java.util.concurrent.TimeUnit
  * `connect` test: the same shell checks, now through `HostConnection.open_terminal`.
  */
 class ConnectHostContractTest {
-    @Ignore("enabled when lane A1 lands")
     @Test
     fun realOpenSshShellThroughUniFfi() {
         assumeTrue("sshd is not installed", Files.isExecutable(Path.of("/usr/bin/sshd")))
+        assumeConnectHostIsReal()
         OpenSshFixture().use { fixture ->
             val hostListener = HostRecorder()
             val key = generateEd25519Key("")

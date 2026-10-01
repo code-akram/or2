@@ -10,14 +10,14 @@ document and the tests together, and bumping `API_VERSION` in `or2-ffi` when an 
 
 All M1 contracts below are implemented and tested. M2 changes are specified in
 [M2: hosts, multiplexers and mosh](#m2-hosts-multiplexers-and-mosh); lane 0 has landed the
-M2 contract types and the FFI API 4 surface (`API_VERSION = 4`), with the lane A1, A2 and B
-behaviour still to come.
+M2 contract types and the FFI API 4 surface (`API_VERSION = 4`); lane B's Android side has
+landed against them, with the lane A1 and A2 behaviour still to come.
 
 | Contract | Implemented and tested | Open |
 |---|---|---|
 | Transport | `Transport` trait, `DirectTcp`, `Endpoint` validation | address racing (M2), UDP (M2 core, M3 export), jump host |
 | Key material | Ed25519 generation, OpenSSH import with passphrase, storage form, typed errors; Keystore/biometric vault in Kotlin | secure-element and FIDO2 keys (later) |
-| Host-key trust | verdicts, prompts bound to the presented fingerprint, Kotlin persistence and UI | per-host trust shared by several addresses (M2) |
+| Host-key trust | verdicts, prompts bound to the presented fingerprint, Kotlin persistence and UI; per-host trust shared by the host's ordered address list (lane B) | connecting to several addresses for real (lane A1) |
 | Session lifecycle | state machine, handle/driver split, `connect` over russh with PTY shell, timeouts, keepalive | `Connecting -> Connected` for channel sessions (lane 0); sessions as channels of a host connection (lane A1) |
 | Frames | libghostty-vt adapter, full/delta merge, notify-once mailbox, Canvas drawing | |
 | Input | libghostty key encoding, IME, keys row, scrolling, selection | bracketed paste |
@@ -565,8 +565,10 @@ impl HostConnection {                     // all non-blocking unless async
 
 ## Android (lane B)
 
-Lane B has landed in the app; it builds against `connect_host` and so needs lane A1 to connect
-for real (until then every connection closes with `Failed { Internal }`, which the UI reports).
+Lane B has landed in the app. It builds against `connect_host` and connects for real only with
+lane A1's host driver; against lane 0's placeholder every connection closes with
+`Failed { Internal }`, which the UI reports, and the sshd tests skip themselves
+(`assumeConnectHostIsReal`) instead of failing.
 
 - **Room v2** with a real `Migration(1, 2)` (never destructive: Keystore-bound keys cannot be
   recreated). New `host_addresses(hostId -> hosts.id ON DELETE CASCADE, position, hostname,
@@ -576,7 +578,7 @@ for real (until then every connection closes with `Failed { Internal }`, which t
   would cascade away `trusted_host_keys`. Trust therefore survives the upgrade (the destination
   is unchanged). The schema is exported (`app/schemas/`, KSP arg `room.schemaLocation`; version
   1 is the shipped M1 shape). Tests: `MigrationSqlTest` (JVM, real SQLite) and
-  `MigrationDeviceTest` (`MigrationTestHelper`).
+  `MigrationDeviceTest` (`MigrationTestHelper`, and the platform SQLite version).
 - **Trust is keyed to the host's ordered address list.** Any change to it clears trust: a
   hostname, a port, an added, removed or reordered entry (a reorder changes nothing about what
   is trusted, but "any change" is the rule and the cost is one re-prompt). Label, username, key
@@ -597,22 +599,37 @@ for real (until then every connection closes with `Failed { Internal }`, which t
   batch; hosts without a key are reported at the end.
 - **Host-key prompts live on the host**: persist trust before approving, bound to the presented
   fingerprint, with M1's expiry checks. The host screen shows the dialog; a prompt for a host
-  whose screen is not showing appears as a dialog naming the host.
+  whose screen is not showing appears as a dialog naming the host, and never over the shown
+  host's own dialog (one dialog at a time).
+- **Edits are applied, then acted on:** an edit that changes a live connection's destination,
+  login or key, and a host deletion, end the connection (and, for a deletion, its terminals)
+  only after the write succeeded; a failed write reports the storage error and leaves the
+  connection alone.
 - **Terminals** keep M1's per-session lifecycle: the final frame stays readable through
   `Closed`; a display lease delays native `close()` until the screen leaves composition.
   Closing a host closes its terminals through their own callbacks; they stay listed (with their
   final frame) until the user closes them, and forgetting a connection never touches them.
 - **Capabilities and watches:** when a connection reaches `Connected` the holder calls
-  `capabilities()` once and starts one `watch_herdr` per running herdr session (none when herdr
-  is not installed). The default session is watched with `None`, never by its listed name.
-  "Refresh" re-queries and adds watches for new sessions and stops those of vanished ones. A
-  watch the host refuses is shown as `Unavailable`. Watches run for every connected host; the
-  inbox shows only those flagged `showInInbox`, read from the current host list.
+  `capabilities()` and, when herdr is installed (none otherwise), starts one `watch_herdr` for the
+  default session (`None`, never its listed name, and whether or not it is listed or running) and
+  one for every other listed session, **running or not**. The connection caches its capability
+  probe, so the session list is the connect-time snapshot and "Refresh" cannot discover sessions
+  started later; a watch on a stopped or missing session reports `Unavailable { NotRunning }` and
+  retries every 10 s (A2), so those rows recover by themselves. A session started after connect
+  under a name that was not listed is therefore only picked up by reconnecting. "Refresh"
+  re-queries and reconciles the watches with the answer (adds new ones, stops those no longer
+  listed). A watch the host refuses is shown as `Unavailable`. A watch's `stop()` or `close()`
+  failing never aborts a sync or a teardown. When the host closes, its watch handles are released
+  at once (the watch records keep their final state); the `HostConnection` object itself stays
+  readable until the host is replaced or dismissed. Watches run only for hosts flagged
+  `showInInbox` (a hidden host still gets its capability probe for the host screen): editing the
+  flag on a live connection starts or stops them (`setWatching`), without ending the connection.
 - **Screens:** Inbox (start destination): agents across all `showInInbox` hosts grouped blocked,
   working, done, idle (then unknown), each row with host, agent display name, workspace and
   tab, status chip and cwd; within a status by host, session, workspace, tab, pane, so a refresh
   never reshuffles rows. Per-host status with unlock/retry/open actions and "Connect all" (one
-  prompt per key). Tapping a row opens `Herdr { session, pane_id }`. Host screen: connection
+  prompt per key). Tapping a row opens `Herdr { session, pane_id }`, or returns to the terminal
+  already open for exactly that host and target (one not closed or being closed). Host screen: connection
   state and address used, host-key prompt, Shell, tmux sessions (attach, create by name with the
   Rust name rules checked first, refresh) and herdr sessions. Terminal: the M1 terminal screen
   per session, a switcher among open sessions, and Back to the previous screen without
@@ -621,5 +638,10 @@ for real (until then every connection closes with `Failed { Internal }`, which t
 - **Host form:** ordered address list (add, remove, reorder, a port per address, 1 to 8), username,
   key, and the inbox switch. Hostnames and the username are trimmed before saving.
 - The M1 `connect` export has no Kotlin use left; its JVM contract test was replaced by
-  `ConnectHostContractTest` and `HostConnectionsNativeTest`, whose sshd cases are `@Ignore`d
-  until lane A1 lands.
+  `ConnectHostContractTest` and `HostConnectionsNativeTest`. Their sshd cases skip themselves
+  (`assumeConnectHostIsReal`) while `connect_host` is lane 0's placeholder and run once lane A1's
+  driver is in. The fixture's sshd sessions have a private `TMUX_TMPDIR`, a temporary `$HOME`
+  and a fake `herdr` first on `PATH`, so neither the user's tmux server nor a real herdr session
+  can be reached by the holder's automatic probe and watches.
+- `MigrationDeviceTest.theDevicesSqliteSupportsDropColumn` checks on the phone that its SQLite
+  is at least 3.35 (the version `DROP COLUMN` needs); no JVM test can.
