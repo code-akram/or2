@@ -7,7 +7,7 @@ import java.sql.Connection
 import java.sql.DriverManager
 
 /**
- * Runs the real v1 -> v2 migration statements on SQLite (JVM `sqlite-jdbc`, test-only) over a
+ * Runs the real v1 -> v2 and v2 -> v3 migration statements on SQLite (JVM `sqlite-jdbc`, test-only) over a
  * database built from the checked-in v1 schema, with foreign keys on as Room has them. The
  * resulting tables must equal a fresh v2 database built from the checked-in v2 schema. The
  * device `MigrationTest` runs the same migration through Room's `MigrationTestHelper`.
@@ -56,11 +56,11 @@ class MigrationSqlTest {
         }
     }
 
-    private fun migrate(connection: Connection) {
+    private fun migrate(connection: Connection, statements: List<String> = MIGRATION_1_2_STATEMENTS) {
         // Room runs a migration inside one transaction.
         connection.autoCommit = false
         try {
-            MIGRATION_1_2_STATEMENTS.forEach { connection.exec(it) }
+            statements.forEach { connection.exec(it) }
             connection.commit()
         } catch (error: Throwable) {
             connection.rollback()
@@ -155,4 +155,100 @@ class MigrationSqlTest {
             assertEquals(1, (connection.rows("SELECT showInInbox FROM hosts")[0][0] as Number).toInt())
         }
     }
+
+    // --- v2 -> v3: hosts.transport ----------------------------------------------------------
+
+    private fun populatedV2(): Connection {
+        val connection = database(2)
+        connection.exec("INSERT INTO keys VALUES ('key-1', 'Phone key', 'ssh-ed25519', 'ssh-ed25519 AAAA', 'SHA256:fp', 'c', x'0a0b0c', x'0102')")
+        connection.exec("INSERT INTO hosts (id, label, username, keyId, showInInbox) VALUES (1, 'Alpha', 'u1', 'key-1', 1)")
+        connection.exec("INSERT INTO hosts (id, label, username, keyId, showInInbox) VALUES (5, 'Beta', 'u2', NULL, 0)")
+        connection.exec("INSERT INTO host_addresses VALUES (1, 0, 'alpha.invalid', 22)")
+        connection.exec("INSERT INTO host_addresses VALUES (1, 1, 'alpha2.invalid', 2222)")
+        connection.exec("INSERT INTO host_addresses VALUES (5, 0, 'beta.invalid', 22)")
+        connection.exec("INSERT INTO trusted_host_keys VALUES (1, 'ssh-ed25519 H1', 'SHA256:h1', 'ssh-ed25519')")
+        return connection
+    }
+
+    @Test
+    fun theVersion3SchemaIsCheckedInWithTheTransportColumn() {
+        assertTrue(File(schemas, "3.json").isFile)
+        val hosts = createStatements(3).first { it.startsWith("CREATE TABLE") && "`label`" in it }
+        assertTrue(hosts, "`transport` TEXT NOT NULL DEFAULT 'AUTO'" in hosts)
+        assertEquals(4, createStatements(3).count { it.startsWith("CREATE TABLE") })
+    }
+
+    @Test
+    fun existingHostsGetAutoAndNothingElseChanges() {
+        populatedV2().use { connection ->
+            val before = connection.rows("SELECT id, label, username, keyId, showInInbox FROM hosts ORDER BY id")
+            migrate(connection, MIGRATION_2_3_STATEMENTS)
+            assertEquals(listOf("id", "label", "username", "keyId", "showInInbox", "transport"), connection.rows("PRAGMA table_info(hosts)").map { it[1] })
+            assertEquals(listOf(listOf(1, "AUTO"), listOf(5, "AUTO")),
+                connection.rows("SELECT id, transport FROM hosts ORDER BY id").map { row -> row.map { (it as? Number)?.toInt() ?: it } })
+            assertEquals(before, connection.rows("SELECT id, label, username, keyId, showInInbox FROM hosts ORDER BY id"))
+            assertEquals(3, connection.rows("SELECT * FROM host_addresses").size)
+            assertEquals(listOf(listOf(1, "ssh-ed25519 H1")), connection.rows("SELECT hostId, openssh FROM trusted_host_keys").map { row -> row.map { (it as? Number)?.toInt() ?: it } })
+            val key = connection.rows("SELECT id, ciphertext, iv FROM keys")
+            assertArrayEquals(byteArrayOf(0x0a, 0x0b, 0x0c), key[0][1] as ByteArray)
+            assertArrayEquals(byteArrayOf(1, 2), key[0][2] as ByteArray)
+            assertEquals(emptyList<List<Any?>>(), connection.rows("PRAGMA foreign_key_check"))
+        }
+    }
+
+    @Test
+    fun theMigratedSchemaEqualsAFreshVersion3Database() {
+        populatedV2().use { migrated ->
+            migrate(migrated, MIGRATION_2_3_STATEMENTS)
+            database(3).use { fresh -> assertEquals(fresh.shape(), migrated.shape()) }
+        }
+    }
+
+    @Test
+    fun aVersion1DatabaseReachesVersion3ThroughBothMigrations() {
+        populatedV1().use { connection ->
+            migrate(connection)
+            migrate(connection, MIGRATION_2_3_STATEMENTS)
+            database(3).use { fresh -> assertEquals(fresh.shape(), connection.shape()) }
+            assertEquals(listOf("AUTO", "AUTO", "AUTO"), connection.rows("SELECT transport FROM hosts ORDER BY id").map { it[0] })
+            assertEquals(3, connection.rows("SELECT * FROM trusted_host_keys").size)
+            assertEquals(2, connection.rows("SELECT * FROM keys").size)
+        }
+    }
+
+    @Test
+    fun theTransportColumnTakesTheThreeValuesAndDefaultsToAuto() {
+        populatedV2().use { connection ->
+            migrate(connection, MIGRATION_2_3_STATEMENTS)
+            connection.exec("UPDATE hosts SET transport = 'MOSH' WHERE id = 1")
+            connection.exec("UPDATE hosts SET transport = 'SSH' WHERE id = 5")
+            assertEquals(listOf("MOSH", "SSH"), connection.rows("SELECT transport FROM hosts ORDER BY id").map { it[0] })
+            connection.exec("INSERT INTO hosts (id, label, username, keyId) VALUES (9, 'New', 'u', NULL)")
+            assertEquals("AUTO", connection.rows("SELECT transport FROM hosts WHERE id = 9")[0][0])
+            assertThrows(java.sql.SQLException::class.java) { connection.exec("UPDATE hosts SET transport = NULL WHERE id = 1") }
+        }
+    }
+
+    @Test
+    fun foreignKeysStillCascadeAfterVersion3() {
+        populatedV2().use { connection ->
+            migrate(connection, MIGRATION_2_3_STATEMENTS)
+            connection.exec("DELETE FROM hosts WHERE id = 1")
+            assertEquals(0, connection.rows("SELECT * FROM host_addresses WHERE hostId = 1").size)
+            assertEquals(0, connection.rows("SELECT * FROM trusted_host_keys WHERE hostId = 1").size)
+            connection.exec("DELETE FROM keys WHERE id = 'key-1'")
+            assertEquals(1, connection.rows("SELECT * FROM hosts").size)
+        }
+    }
+
+    @Test
+    fun theMigrationsAreAdditiveAndNeverDestructive() {
+        val statements = MIGRATION_2_3_STATEMENTS
+        assertEquals(1, statements.size)
+        assertTrue(statements.single().startsWith("ALTER TABLE `hosts` ADD COLUMN `transport`"))
+        assertTrue(statements.none { Regex("\\b(DROP|DELETE|TRUNCATE)\\b", RegexOption.IGNORE_CASE).containsMatchIn(it) })
+        assertEquals(3, exportedVersion3)
+    }
+
+    private val exportedVersion3 get() = Regex("\"version\": (\\d+)").find(File(schemas, "3.json").readText())!!.groupValues[1].toInt()
 }

@@ -34,6 +34,7 @@ import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.HostRecord
 import io.github.code_akram.or2.data.KeyRecord
+import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.keys.shortFingerprint
 import io.github.code_akram.or2.ui.BottomInsetSpacer
 import io.github.code_akram.or2.ui.GroupCard
@@ -48,6 +49,7 @@ import io.github.code_akram.or2.ui.Or2Toggle
 import io.github.code_akram.or2.ui.Or2Type
 import io.github.code_akram.or2.ui.PillButton
 import io.github.code_akram.or2.ui.PrimaryButton
+import io.github.code_akram.or2.ui.Segmented
 import io.github.code_akram.or2.ui.TopBar
 
 /**
@@ -68,12 +70,13 @@ fun HostFormScreen(
     var username by rememberSaveable(identity) { mutableStateOf(previous?.username ?: "") }
     var keyId by rememberSaveable(identity) { mutableStateOf(if (previous == null) keys.singleOrNull()?.id else previous.keyId) }
     var showInInbox by rememberSaveable(identity) { mutableStateOf(previous?.showInInbox ?: true) }
+    var transport by rememberSaveable(identity) { mutableStateOf(previous?.transport ?: TransportPref.AUTO) }
     val usernameError = if (username.isEmpty()) null else hostFieldError(username)
     val valid = validHost(label, addresses, username) && keys.any { it.id == keyId }
     fun submit() {
         if (!valid || busy) return
         save(Host(
-            HostRecord(previous?.id ?: 0, label.trim(), username, keyId, showInInbox),
+            HostRecord(previous?.id ?: 0, label.trim(), username, keyId, showInInbox, transport),
             addresses.map { HostEndpoint(it.hostname, it.port.toInt()) },
         ))
     }
@@ -129,6 +132,15 @@ fun HostFormScreen(
                         }
                     }
                 }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Transport", style = Or2Type.Body, color = Or2Colors.Text)
+                Segmented(
+                    TransportChoices.map(::transportLabel), TransportChoices.indexOf(transport), { transport = TransportChoices[it] },
+                    Modifier.testTag("host-transport"), tagPrefix = "host-transport",
+                )
+                Text(transportExplanation(transport), style = Or2Type.Secondary, color = Or2Colors.TextMuted,
+                    modifier = Modifier.testTag("host-transport-note"))
             }
             GroupCard {
                 ListRow(

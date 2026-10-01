@@ -7,6 +7,7 @@ import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.HostRecord
 import io.github.code_akram.or2.data.HostWithAddresses
 import io.github.code_akram.or2.data.KeyRecord
+import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.data.TrustStore
 import io.github.code_akram.or2.data.TrustedHostKey
 import io.github.code_akram.or2.ffi.*
@@ -16,7 +17,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 fun testHost(
     id: Long = 7, label: String = "Fixture", keyId: String? = "ephemeral",
     addresses: List<HostEndpoint> = listOf(HostEndpoint("fixture.invalid", 2222)), showInInbox: Boolean = true,
-) = Host(HostRecord(id, label, "fixture", keyId, showInInbox), addresses)
+    transport: TransportPref = TransportPref.AUTO,
+) = Host(HostRecord(id, label, "fixture", keyId, showInInbox, transport), addresses)
 
 val testPublicKey = PublicKeyInfo("test-algorithm", "test-public-line", "test-fingerprint", "")
 val testPrompt = HostState.AwaitingHostKeyDecision(testPublicKey, emptyList())
@@ -38,16 +40,17 @@ class FakeTrust(val events: MutableList<String> = mutableListOf()) : TrustStore 
     }
 }
 
-class FakeSession(val events: MutableList<String> = mutableListOf()) : SessionInterface, AutoCloseable {
+class FakeSession(val events: MutableList<String> = mutableListOf(), val transport: TerminalTransport = TerminalTransport.SSH) : SessionInterface, AutoCloseable {
     var destroyed = false
+    var roams = 0
     var nativeState: SessionState = SessionState.Connecting
     val lastFrame = TerminalFrame(1uL, 2u, 1u, true,
         listOf(CellStyle(0xffffffu, 0u, null, Underline.NONE, false, false, false, false, false)),
         listOf(TerminalRow(0u, false, listOf(TerminalCell("L", CellWidth.NARROW, 0u), TerminalCell("R", CellWidth.NARROW, 0u)))),
         null, 0u, Scrollback(1uL, 0uL))
     var pending: TerminalFrame? = lastFrame
-    override fun transport() = TerminalTransport.SSH
-    override fun roam() = Unit
+    override fun transport() = transport
+    override fun roam() { roams++ }
     override fun approveHostKey(fingerprint: String) = Unit
     override fun rejectHostKey() = Unit
     override fun disconnect() {
@@ -95,6 +98,9 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     val focusFailures = mutableMapOf<String, Exception>()
     var focusGate: CompletableDeferred<Unit>? = null
     val terminals = mutableListOf<Triple<TerminalTarget, SessionListener, FakeSession>>()
+
+    /** The transport each `openTerminal` call asked for, in call order. */
+    val transports = mutableListOf<TerminalTransport>()
     val watches = mutableListOf<Triple<String?, HerdrListener, FakeWatch>>()
 
     override fun state() = nativeState
@@ -108,7 +114,8 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     override fun openTerminal(target: TerminalTarget, transport: TerminalTransport, columns: UShort, rows: UShort, listener: SessionListener): SessionInterface {
         check(!destroyed) { "Host connection object has already been destroyed" }
         openFailure?.let { throw it }
-        return FakeSession().also { terminals += Triple(target, listener, it) }
+        transports += transport
+        return FakeSession(transport = transport).also { terminals += Triple(target, listener, it) }
     }
     override suspend fun capabilities(): HostCapabilities {
         capabilityCalls++
@@ -161,9 +168,9 @@ class FakeDao : AppDao() {
     }
     override suspend fun insertAddresses(addresses: List<HostAddressRecord>) { this.addresses.value += addresses }
     override suspend fun deleteAddresses(hostId: Long) { addresses.value = addresses.value.filterNot { it.hostId == hostId } }
-    override suspend fun updateHost(id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean) {
+    override suspend fun updateHost(id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean, transport: TransportPref) {
         if (failSave) error("storage failure")
-        records.value = records.value.map { if (it.id == id) HostRecord(id, label, username, keyId, showInInbox) else it }
+        records.value = records.value.map { if (it.id == id) HostRecord(id, label, username, keyId, showInInbox, transport) else it }
     }
     override suspend fun deleteHost(id: Long) {
         if (failDelete) error("storage failure")

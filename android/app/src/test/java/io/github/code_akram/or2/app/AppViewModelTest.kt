@@ -4,6 +4,7 @@ import io.github.code_akram.or2.connection.FakeDao
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.HostRecord
+import io.github.code_akram.or2.data.TransportPref
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -133,6 +134,23 @@ class AppViewModelTest {
             assertTrue(model.message.value!!.contains("Storage"))
             model.message(null)
             assertNull(model.message.value)
+        } finally { Dispatchers.resetMain() }
+    }
+
+    @Test
+    fun theTransportPreferenceIsSavedWithTheHostAndChangedByAnEdit() {
+        Dispatchers.setMain(UnconfinedTestDispatcher())
+        try {
+            val dao = FakeDao()
+            val model = AppViewModel(dao) {}
+            model.saveHost(draft(id = 0).let { it.copy(record = it.record.copy(transport = TransportPref.MOSH)) }, null)
+            val saved = dao.records.value.single()
+            assertEquals(TransportPref.MOSH, saved.transport)
+            val stored = Host(saved, listOf(HostEndpoint("fixture.invalid", 2222)))
+            model.saveHost(stored.copy(record = saved.copy(transport = TransportPref.SSH)), stored)
+            assertEquals(TransportPref.SSH, dao.records.value.single().transport)
+            // The default for a host nobody chose a transport for.
+            assertEquals(TransportPref.AUTO, draft().record.transport)
         } finally { Dispatchers.resetMain() }
     }
 }

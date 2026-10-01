@@ -18,6 +18,9 @@ import io.github.code_akram.or2.ffi.PublicKeyInfo
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
+/** Which transport a host's terminals prefer. AUTO uses mosh when the host has `mosh-server`, else SSH. */
+enum class TransportPref { AUTO, SSH, MOSH }
+
 @Entity(tableName = "keys")
 data class KeyRecord(
     @PrimaryKey val id: String,
@@ -44,6 +47,7 @@ data class HostRecord(
     val username: String,
     val keyId: String?,
     @ColumnInfo(defaultValue = "1") val showInInbox: Boolean = true,
+    @ColumnInfo(defaultValue = "'AUTO'") val transport: TransportPref = TransportPref.AUTO,
 )
 
 /** One of a host's addresses, tried in `position` order (0 is preferred). */
@@ -80,6 +84,7 @@ data class Host(val record: HostRecord, val addresses: List<HostEndpoint>) {
     val username get() = record.username
     val keyId get() = record.keyId
     val showInInbox get() = record.showInInbox
+    val transport get() = record.transport
 
     /** `host:port` summaries for lists and dialogs. */
     val addressSummary get() = addresses.joinToString(", ") { "${it.hostname}:${it.port}" }
@@ -146,8 +151,8 @@ abstract class AppDao : TrustStore {
     @Query("DELETE FROM host_addresses WHERE hostId = :hostId")
     abstract suspend fun deleteAddresses(hostId: Long)
 
-    @Query("UPDATE hosts SET label = :label, username = :username, keyId = :keyId, showInInbox = :showInInbox WHERE id = :id")
-    abstract suspend fun updateHost(id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean)
+    @Query("UPDATE hosts SET label = :label, username = :username, keyId = :keyId, showInInbox = :showInInbox, transport = :transport WHERE id = :id")
+    abstract suspend fun updateHost(id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean, transport: TransportPref)
 
     @Query("DELETE FROM hosts WHERE id = :id")
     abstract suspend fun deleteHost(id: Long)
@@ -182,7 +187,7 @@ abstract class AppDao : TrustStore {
         } else {
             val stored = host(host.id) ?: error("Host was deleted.")
             if (host.addresses != stored.addresses) clearTrust(host.id)
-            updateHost(host.id, host.label, host.username, host.keyId, host.showInInbox)
+            updateHost(host.id, host.label, host.username, host.keyId, host.showInInbox, host.transport)
             deleteAddresses(host.id)
             insertAddresses(addressRows(host.id, host.addresses))
         }
@@ -194,7 +199,7 @@ abstract class AppDao : TrustStore {
 
 @Database(
     entities = [HostRecord::class, HostAddressRecord::class, KeyRecord::class, TrustedHostKey::class],
-    version = 2, exportSchema = true,
+    version = 3, exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dao(): AppDao
