@@ -1,4 +1,4 @@
-//! Host connection contract for Kotlin (FFI API 9): request, state, errors, terminal targets,
+//! Host connection contract for Kotlin (FFI API 10): request, state, errors, terminal targets,
 //! queries, the `HostConnection` object and the `HostListener` callback. See
 //! docs/contracts.md for threading and ownership rules.
 
@@ -399,6 +399,18 @@ impl HostConnection {
         pane_id: String,
     ) -> Result<(), HostError> {
         Ok(self.handle.focus_herdr_pane(session, pane_id).await?)
+    }
+
+    /// Stops the `mosh-server` with process id `pid` on the host (API 10): one an earlier
+    /// process left running when it died with its mosh session open (its key died with it, and
+    /// `mosh-server` has no idle timeout). Only a process the host's `ps` names `mosh-server`
+    /// is signalled, so a pid that was reused is left alone, and a server that is already gone
+    /// is success. `Ok` therefore means "no such server runs any more"; an error (no free SSH
+    /// channel, a slow host, `Closed`) means it may still run and the caller should keep the
+    /// pid for the next connection. `InvalidName` for pid 0. Cancelling the coroutine drops
+    /// the reply only.
+    pub async fn stop_mosh_server(&self, pid: u32) -> Result<(), HostError> {
+        Ok(self.handle.stop_mosh_server(pid).await?)
     }
 
     /// Watches a herdr session (`None` is the default session); it ends with the connection.

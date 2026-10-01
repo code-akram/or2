@@ -458,6 +458,15 @@ impl Session {
         self.transport
     }
 
+    /// A mosh terminal's `mosh-server` process id on the host (API 10), set before the
+    /// session is `Connected` and kept after it closes; `None` for SSH, and when the bootstrap
+    /// did not report it. Not a secret. The app records it with the host while the session
+    /// lives, so a server orphaned by the process's death can be stopped over the next
+    /// connection (`HostConnection.stop_mosh_server`).
+    pub fn server_pid(&self) -> Option<u32> {
+        self.handle.server_pid()
+    }
+
     /// mosh: open a new UDP socket now (the network changed), instead of noticing after
     /// seconds without answers. SSH: a no-op. Never fails; a closed session ignores it.
     pub fn roam(&self) {

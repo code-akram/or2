@@ -46,6 +46,7 @@ use crate::host::{
     HostCapabilities, HostCommand, HostConnectRequest, HostDriver, HostError, HostHandle,
     HostObserver, HostState, TerminalTarget, TerminalTransport, TmuxSession, UserCancel,
 };
+use crate::mosh;
 use crate::probe;
 use crate::remote::{ExecOutput, OUTPUT_CAP, RemoteError, RemoteHost, SecretBytes};
 use crate::session::{CloseReason, HostKeyPrompt, SessionDriver, SessionFailure};
@@ -686,6 +687,19 @@ fn dispatch<D: DatagramTransport>(
                 let _tracker = tracker;
                 tokio::select! {
                     result = focus_herdr_pane(&host, session, pane_id) => { let _ = reply.send(result); }
+                    _ = closed_reason(&mut closing) => {}
+                }
+            });
+        }
+        HostCommand::StopMoshServer { pid, reply } => {
+            let host = Arc::clone(host);
+            let (mut closing, tracker) = (closing.clone(), tracker.clone());
+            runtime().spawn(async move {
+                let _tracker = tracker;
+                tokio::select! {
+                    result = mosh::terminate(&*host, pid) => {
+                        let _ = reply.send(result.map_err(host_error));
+                    }
                     _ = closed_reason(&mut closing) => {}
                 }
             });

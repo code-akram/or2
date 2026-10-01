@@ -191,6 +191,7 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
         }
     };
     let pid = params.server_pid;
+    driver.set_server_pid(pid);
     params.size = size;
     // The address the SSH connection reached, with the server's port: an IPv6 scope id and
     // flow label stay (a link-local host is reachable only through its interface).

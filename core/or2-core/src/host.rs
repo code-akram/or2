@@ -328,6 +328,14 @@ pub enum HostCommand {
         pane_id: String,
         reply: oneshot::Sender<Result<(), HostError>>,
     },
+    /// Stop the `mosh-server` with process id `pid` on the host ([`crate::mosh::terminate`]):
+    /// only a process `ps` names `mosh-server` is signalled, and one that is already gone is
+    /// success. Reply `CommandFailed` when the stop could not run (no free channel, a slow
+    /// host), `Closed` when the connection ended.
+    StopMoshServer {
+        pid: u32,
+        reply: oneshot::Sender<Result<(), HostError>>,
+    },
     /// Run [`herdr::run`] (or an equivalent) on `driver`, with the herdr path from the probe.
     /// The session name is validated. With no herdr found, move `driver` to
     /// `Unavailable { NotInstalled }` and wait for its stop.
@@ -540,6 +548,23 @@ impl HostHandle {
             pane_id,
             reply,
         })?;
+        await_reply(response, QUERY_TIMEOUT).await
+    }
+
+    /// Stops the `mosh-server` with process id `pid` on the host, which an earlier client left
+    /// running (the app's process died with its session open: the key died with it, and
+    /// `mosh-server` has no idle timeout). Resolves `Ok` when the server is gone: stopped, or
+    /// not running (a recorded pid is old; the process may have ended, or the id been reused).
+    /// Only a process that `ps` names `mosh-server` is signalled, so a reused pid is never
+    /// touched. `Err` when the stop could not run (the host had no free channel, answered too
+    /// slowly or closed): the caller keeps the pid and tries again on the next connection.
+    pub async fn stop_mosh_server(&self, pid: u32) -> Result<(), HostError> {
+        let (reply, response) = oneshot::channel();
+        self.require_connected()?;
+        if pid == 0 {
+            return Err(HostError::InvalidName);
+        }
+        self.send(HostCommand::StopMoshServer { pid, reply })?;
         await_reply(response, QUERY_TIMEOUT).await
     }
 
@@ -1154,6 +1179,45 @@ mod tests {
         let focus = || handle.focus_herdr_pane(Some("work".into()), "w1:p2".into());
         assert_eq!(focus().await, Ok(()));
         assert_eq!(focus().await, Err(HostError::PaneNotFound));
+        drop(answers.join().unwrap());
+    }
+
+    #[tokio::test]
+    async fn stopping_a_mosh_server_carries_its_pid_and_is_answered_through_its_reply() {
+        let (_recorder, handle, mut driver) = setup(false);
+        assert_eq!(
+            handle.stop_mosh_server(7).await,
+            Err(HostError::NotConnected)
+        );
+        connect(&mut driver);
+        assert_eq!(
+            handle.stop_mosh_server(0).await,
+            Err(HostError::InvalidName),
+            "pid 0 names no process"
+        );
+        let answers = std::thread::spawn(move || {
+            for answer in [
+                Ok(()),
+                Err(HostError::CommandFailed {
+                    message: "no channel".into(),
+                }),
+            ] {
+                let HostCommand::StopMoshServer { pid, reply } = driver.blocking_next_command()
+                else {
+                    panic!("unexpected command")
+                };
+                assert_eq!(pid, 4242);
+                reply.send(answer).unwrap();
+            }
+            driver
+        });
+        assert_eq!(handle.stop_mosh_server(4242).await, Ok(()));
+        assert_eq!(
+            handle.stop_mosh_server(4242).await,
+            Err(HostError::CommandFailed {
+                message: "no channel".into()
+            })
+        );
         drop(answers.join().unwrap());
     }
 

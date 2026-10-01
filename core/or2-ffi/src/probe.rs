@@ -8,7 +8,7 @@
 //! frames and input across the real FFI. App code must never call it.
 //!
 //! `contract_probe_host` does the same for a host connection (API 4): see its documentation.
-//! It also serves `TerminalTransport::Mosh` terminals (API 8, API 9) deterministically.
+//! It also serves `TerminalTransport::Mosh` terminals (API 8 to 10) deterministically.
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -380,6 +380,16 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                     Err(core_host::HostError::PaneNotFound)
                 });
             }
+            HostCommand::StopMoshServer { pid, reply } => {
+                // A stop that cannot run, for tests of the caller keeping the pid.
+                let _ = reply.send(if pid == PROBE_UNSTOPPABLE_PID {
+                    Err(core_host::HostError::CommandFailed {
+                        message: "the host did not answer in time".into(),
+                    })
+                } else {
+                    Ok(())
+                });
+            }
             HostCommand::WatchHerdr {
                 session,
                 driver: watcher,
@@ -404,6 +414,9 @@ async fn run_terminal(
     mosh: bool,
     stop: watch::Receiver<Option<CloseReason>>,
 ) {
+    if mosh {
+        driver.set_server_pid(Some(PROBE_SERVER_PID));
+    }
     driver
         .transition(SessionState::Connected)
         .expect("Connecting -> Connected");
@@ -433,6 +446,10 @@ async fn run_herdr_watch(
 }
 
 /// The panes of [`probe_view`]; the first is focused until `focus_herdr_pane` moves it.
+/// The `mosh-server` pid every probe mosh terminal reports (`Session.server_pid`).
+pub const PROBE_SERVER_PID: u32 = 4242;
+/// A pid whose `stop_mosh_server` fails on a probe host, whatever else is true.
+pub const PROBE_UNSTOPPABLE_PID: u32 = 13;
 const PROBE_PANES: [&str; 3] = ["w1:p1", "w1:p2", "w2:p1"];
 
 /// One blocked, one working and one idle agent; `resolved` turns the blocked one into working;

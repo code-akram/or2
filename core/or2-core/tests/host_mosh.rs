@@ -165,6 +165,7 @@ struct Live {
     log: Log,
     udp: TestUdp,
     slow: Option<SlowServer>,
+    key: ClientKey,
 }
 
 /// A `mosh-server` in front of the real one on the sshd sessions' `PATH`: it records that it
@@ -267,7 +268,32 @@ impl Live {
             log,
             udp,
             slow,
+            key,
         }
+    }
+
+    /// A second, direct connection to the same sshd, like the one a restarted app makes.
+    fn reconnect(&self) -> (HostHandle, mpsc::Receiver<HostState>) {
+        let (tx, states) = mpsc::channel();
+        let host = connect_host_with_datagrams(
+            Arc::new(DirectTcp),
+            Arc::new(TestUdp::default()),
+            request(&self.key, self.sshd.port, &self.sshd.host),
+            Arc::new(HostObs {
+                tx,
+                log: Log::default(),
+            }),
+            HostOptions::default(),
+        );
+        assert_eq!(
+            states.recv_timeout(WAIT).unwrap(),
+            HostState::Authenticating
+        );
+        assert_eq!(
+            states.recv_timeout(WAIT).unwrap(),
+            HostState::Connected { address_index: 0 }
+        );
+        (host, states)
     }
 
     /// Opens a terminal and returns it without waiting for `Connected`.
@@ -1155,4 +1181,105 @@ fn a_full_ssh_channel_limit_does_not_leak_the_server_of_a_timed_out_mosh_session
 fn a_host_disconnect_settles_a_stop_that_was_waiting_for_a_channel() {
     require!();
     a_full_channel_limit_scenario(true);
+}
+
+/// A runtime for the async `stop_mosh_server`, which the test threads call like Kotlin does.
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}
+
+/// A `sleep` the test owns, standing in for whatever process reuses a recorded pid; killed by
+/// its exact pid when the guard goes.
+struct Bystander(std::process::Child);
+
+impl Bystander {
+    fn new() -> Self {
+        Self(
+            std::process::Command::new("sleep")
+                .arg("300")
+                .spawn()
+                .expect("start a sleep"),
+        )
+    }
+
+    fn running(&mut self) -> bool {
+        self.0.try_wait().unwrap().is_none()
+    }
+}
+
+impl Drop for Bystander {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The app died with a mosh session open: its SSH connection and UDP are gone, the server keeps
+/// running. A new connection to the host stops it by the pid the session reported, and only it:
+/// a pid that names another process, and one that names nothing, are left alone and are not
+/// errors.
+#[test]
+fn a_server_orphaned_by_a_dead_client_is_stopped_over_a_new_connection_by_its_pid() {
+    require!();
+    let live = Live::new();
+    let mut mosh = live.mosh("m", TerminalTarget::Shell);
+    mosh.quiet();
+    let pid = mosh
+        .handle
+        .server_pid()
+        .expect("the session knows its server");
+    assert_eq!(live.servers(), [pid], "it is the fixture's mosh-server");
+
+    // The old client is gone without a goodbye: no SSH, no UDP.
+    live.udp.mute.store(true, Ordering::SeqCst);
+    live.proxy.cut();
+    live.host_closed();
+    assert_eq!(live.servers(), [pid], "the server outlives its client");
+
+    let (host, _states) = live.reconnect();
+    let mut bystander = Bystander::new();
+    assert_eq!(block_on(host.stop_mosh_server(bystander.0.id())), Ok(()));
+    assert!(
+        bystander.running(),
+        "a pid that is not a mosh-server is not signalled"
+    );
+    assert_eq!(
+        live.servers(),
+        [pid],
+        "nor is the real server touched by it"
+    );
+
+    assert_eq!(block_on(host.stop_mosh_server(pid)), Ok(()));
+    live.wait_no_servers("the orphaned server to be stopped by pid");
+    assert!(bystander.running());
+    // Already gone is success, and so is a pid nothing has.
+    assert_eq!(block_on(host.stop_mosh_server(pid)), Ok(()));
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let gone_pid = gone.id();
+    gone.wait().unwrap();
+    assert_eq!(block_on(host.stop_mosh_server(gone_pid)), Ok(()));
+    assert_eq!(
+        block_on(host.stop_mosh_server(0)),
+        Err(HostError::InvalidName)
+    );
+    host.disconnect();
+    // The old session ends however it likes; the fixture's reaper cleans up after it.
+    mosh.handle.disconnect();
+}
+
+#[test]
+fn stopping_a_server_needs_a_connected_host() {
+    require!();
+    let live = Live::new();
+    let (host, states) = live.reconnect();
+    host.disconnect();
+    assert!(matches!(
+        states.recv_timeout(WAIT).unwrap(),
+        HostState::Closed(CloseReason::Disconnected)
+    ));
+    assert_eq!(block_on(host.stop_mosh_server(1)), Err(HostError::Closed));
 }

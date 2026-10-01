@@ -17,6 +17,7 @@
 //! A session that owns a channel on an established host connection goes straight from
 //! `Connecting` to `Connected`: host-key and authentication states belong to the host.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::mpsc;
@@ -238,7 +239,12 @@ pub enum PublishError {
 struct Shared {
     state: Mutex<SessionState>,
     frames: Mutex<FrameMailbox>,
+    /// A mosh session's `mosh-server` process id on the host, or [`NO_SERVER_PID`].
+    server_pid: AtomicU32,
 }
+
+/// No server pid (a real process id is never 0: that is the scheduler).
+const NO_SERVER_PID: u32 = 0;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -248,6 +254,7 @@ pub fn channel(observer: Arc<dyn SessionObserver>) -> (SessionHandle, SessionDri
     let shared = Arc::new(Shared {
         state: Mutex::new(SessionState::Connecting),
         frames: Mutex::new(FrameMailbox::default()),
+        server_pid: AtomicU32::new(NO_SERVER_PID),
     });
     let (sender, receiver) = mpsc::unbounded_channel();
     (
@@ -273,6 +280,20 @@ pub struct SessionHandle {
 impl SessionHandle {
     pub fn state(&self) -> SessionState {
         lock(&self.shared.state).clone()
+    }
+
+    /// A mosh session's `mosh-server` process id on the host, known from before the session
+    /// is `Connected` (the bootstrap reported it) and kept after it closes. `None` for other
+    /// sessions, and when the bootstrap's output did not name the server. Not a secret: it is
+    /// what the app records so a server orphaned by the process's death can be stopped over
+    /// the next SSH connection ([`HostHandle::stop_mosh_server`]).
+    ///
+    /// [`HostHandle::stop_mosh_server`]: crate::host::HostHandle::stop_mosh_server
+    pub fn server_pid(&self) -> Option<u32> {
+        match self.shared.server_pid.load(Ordering::SeqCst) {
+            NO_SERVER_PID => None,
+            pid => Some(pid),
+        }
     }
 
     pub fn approve_host_key(&self, fingerprint: &str) -> Result<(), SessionError> {
@@ -391,6 +412,14 @@ impl SessionDriver {
         lock(&self.shared.state).clone()
     }
 
+    /// Records the `mosh-server` pid [`SessionHandle::server_pid`] reports. Set before the
+    /// move to `Connected`, so a listener that sees `Connected` can read it.
+    pub fn set_server_pid(&self, pid: Option<u32>) {
+        self.shared
+            .server_pid
+            .store(pid.unwrap_or(NO_SERVER_PID), Ordering::SeqCst);
+    }
+
     /// Moves to `next` and notifies the observer. On `Closed` the observer is released
     /// afterwards, breaking any reference cycle through Kotlin, and further commands fail.
     pub fn transition(&mut self, next: SessionState) -> Result<(), TransitionError> {
@@ -498,6 +527,22 @@ mod tests {
             *lock(&recorder.handle) = Some(handle.clone());
         }
         (recorder, handle, driver)
+    }
+
+    #[test]
+    fn a_server_pid_set_by_the_driver_is_readable_before_and_after_the_close() {
+        let (_recorder, handle, mut driver) = setup(false);
+        assert_eq!(handle.server_pid(), None);
+        driver.set_server_pid(Some(4242));
+        driver.transition(SessionState::Connected).unwrap();
+        assert_eq!(handle.server_pid(), Some(4242));
+        driver.close(CloseReason::Disconnected);
+        assert_eq!(handle.server_pid(), Some(4242));
+        // A server the bootstrap did not name, and a zero, read as unknown.
+        driver.set_server_pid(None);
+        assert_eq!(handle.server_pid(), None);
+        driver.set_server_pid(Some(0));
+        assert_eq!(handle.server_pid(), None);
     }
 
     fn events(recorder: &Recorder) -> Vec<String> {
