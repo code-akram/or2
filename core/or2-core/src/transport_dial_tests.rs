@@ -410,3 +410,27 @@ async fn the_system_resolver_resolves_ip_literals_and_localhost() {
     );
     assert!(SystemResolver.resolve("host.invalid", 22).await.is_err());
 }
+
+#[tokio::test(start_paused = true)]
+async fn mixed_outcomes_of_one_endpoint_survive_to_the_host_race_description() {
+    let resolver = FakeResolver::new(vec![answer(0, Ok(vec![v4(1), v4(2)]))]);
+    let connector = FakeConnector::new(vec![(v4(1), Dial::Refuse), (v4(2), Dial::Hang)]);
+    let (result, _) = dial_with(&resolver, &connector, "fixture.example.org").await;
+    let error = result.unwrap_err();
+    // The combined error keeps the kind of the first failure and says what each address did;
+    // the description the host race prints (RaceFailure, RaceReport) must not reduce it to the
+    // kind's friendly word.
+    let description = super::super::describe_error(&error);
+    assert!(
+        description.contains("connection refused") && description.contains("no answer within 5 s"),
+        "{description}"
+    );
+    let failure = super::super::RaceFailure {
+        errors: vec![error],
+    };
+    assert_eq!(
+        failure.to_string(),
+        format!("address 0: {description}"),
+        "the race failure names every outcome of the endpoint"
+    );
+}

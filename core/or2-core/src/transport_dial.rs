@@ -218,8 +218,27 @@ fn combine(errors: Vec<io::Error>) -> io::Error {
     }
     io::Error::new(
         kind,
-        format!("{} addresses: {}", errors.len(), words.join(", ")),
+        Summary(format!("{} addresses: {}", errors.len(), words.join(", "))),
     )
+}
+
+/// The text of [`combine`]'s error. The kind it is filed under is the first failure's (callers
+/// branch on it), but a description for a person ([`super::describe_error`]) must keep these
+/// words, which say what every address did, rather than the friendly name of that one kind.
+#[derive(Debug)]
+pub(super) struct Summary(String);
+
+impl std::fmt::Display for Summary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Summary {}
+
+/// Whether `error` is a [`combine`]d error.
+pub(super) fn is_summary(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<Summary>())
 }
 
 /// Connects to `endpoint`: resolves it, drops what cannot work, and races the resolved addresses

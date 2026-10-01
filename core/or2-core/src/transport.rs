@@ -160,6 +160,11 @@ pub struct RaceFailure {
 /// Errors this module raised carry their own text; an operating-system error is named by its
 /// kind.
 pub fn describe_error(error: &io::Error) -> String {
+    // What several addresses of one endpoint said (`2 addresses: connection refused, no answer
+    // within 5 s`) is filed under one kind; the words are the description.
+    if dial::is_summary(error) {
+        return error.to_string();
+    }
     match error.kind() {
         io::ErrorKind::ConnectionRefused => "connection refused".into(),
         io::ErrorKind::NetworkUnreachable | io::ErrorKind::HostUnreachable => {

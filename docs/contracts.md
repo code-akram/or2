@@ -463,7 +463,9 @@ Connecting ──▶ AwaitingHostKey ──▶ Authenticating ──▶ Connecte
   words and with no host names or addresses**: `TCP connection failed: address 0: name not
   resolved (mDNS) after 3 tries; address 1: no answer within 6 s` (`transport::describe_error`:
   `connection refused`, `no route to the host` for ENETUNREACH/EHOSTUNREACH, which fail at once and
-  start the next address, `no answer`, or the text of an error `transport` raised). The app puts
+  start the next address, `no answer`, or the text of an error `transport` raised, including a
+  hostname's several resolved addresses summed up as `2 addresses: connection refused, no answer
+  within 5 s`: that text survives into the host's message, not only the kind of its first failure). The app puts
   the host names back for its own screen. If the **overall connect timer fires while the race is
   still running** (an allowance longer than the timeout, a test), the close is also `Unreachable`,
   `no address answered within 20 s: address 0: still trying after 20 s; ...`
