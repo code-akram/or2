@@ -2479,6 +2479,10 @@ and the file are opened relative to it with `O_NOFOLLOW` (and `O_DIRECTORY` for 
 again. A symbolic link at either name is refused with a message, not followed. `~/.ssh` and the file must
 belong to the account (the home to the account or root, as sshd allows), the file must be a regular file with
 no other hard link, and a missing file is created with `O_CREAT|O_EXCL` (mode 0600, forced after the umask).
+The file is opened `O_NONBLOCK|O_NOFOLLOW` and `fstat`ed **before** anything else: a FIFO, socket or device
+is refused as "not a regular file" without blocking (a blocking write open of a FIFO with no reader hung
+`--check`), and only for a regular file is `O_NONBLOCK` cleared and the same descriptor used from then on.
+`--check` and the real run share this open.
 The file is read, backed up (the backup is created exclusively, also relative to the `~/.ssh` handle) and
 appended to (one `write` on an `O_APPEND` handle; a failed write truncates back to the old length) through
 those same handles, under an advisory `flock`, so a path replaced after the checks changes nothing. Files over

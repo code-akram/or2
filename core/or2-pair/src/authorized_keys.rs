@@ -312,6 +312,38 @@ mod unix {
         })
     }
 
+    /// Opens an existing or new *file* below `dir` for `check_file` to judge: never following a
+    /// link and never blocking on what it finds. A FIFO opened for writing would block until a
+    /// reader turned up (and a device or socket can fail oddly), so the open is non-blocking, the
+    /// descriptor is `fstat`ed, and anything that is not a regular file is refused *before* the
+    /// non-blocking flag is cleared and the handle used. Only the verified descriptor is kept.
+    fn open_file(
+        dir: RawFd,
+        name: &str,
+        full: &Path,
+        flags: libc::c_int,
+        mode: libc::mode_t,
+    ) -> io::Result<OwnedFd> {
+        let not_regular = || refuse(format!("{} is not a regular file", full.display()));
+        let fd = match open_nofollow(dir, name, full, flags | libc::O_NONBLOCK, mode) {
+            Ok(fd) => fd,
+            // Opening a FIFO for writing with no reader, or a socket or device, fails with ENXIO:
+            // say what it is rather than the errno.
+            Err(error) if error.raw_os_error() == Some(libc::ENXIO) => return Err(not_regular()),
+            Err(error) => return Err(error),
+        };
+        if kind(&fstat(fd.as_raw_fd())?) != libc::S_IFREG {
+            return Err(not_regular());
+        }
+        // A regular file: ordinary blocking I/O from here.
+        // SAFETY: `fd` is open.
+        let status = retry(-1, || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) })?;
+        retry(-1, || unsafe {
+            libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, status & !libc::O_NONBLOCK)
+        })?;
+        Ok(fd)
+    }
+
     fn kind(stat: &libc::stat) -> libc::mode_t {
         stat.st_mode & libc::S_IFMT
     }
@@ -430,12 +462,12 @@ mod unix {
         // a path planted in between is refused rather than written through.
         let append = libc::O_RDWR | libc::O_APPEND;
         let (file, created) =
-            match open_nofollow(dir.as_raw_fd(), "authorized_keys", &file_path, append, 0) {
+            match open_file(dir.as_raw_fd(), "authorized_keys", &file_path, append, 0) {
                 Ok(fd) => (fd, false),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     let make = append | libc::O_CREAT | libc::O_EXCL;
                     let fd =
-                        open_nofollow(dir.as_raw_fd(), "authorized_keys", &file_path, make, 0o600)?;
+                        open_file(dir.as_raw_fd(), "authorized_keys", &file_path, make, 0o600)?;
                     fchmod(fd.as_raw_fd(), 0o600)?;
                     (fd, true)
                 }
@@ -532,7 +564,7 @@ mod unix {
                     Writable::No(format!("{} is not writable", account.home.display()))
                 });
             };
-            match open_nofollow(
+            match open_file(
                 dir.as_raw_fd(),
                 "authorized_keys",
                 &file_path,
@@ -818,6 +850,81 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(ssh_dir(home.path())).unwrap();
         fs::create_dir(path(home.path())).unwrap();
+        assert!(add(home.path(), &key(ED25519), "phone", at()).is_err());
+    }
+
+    /// A 0600 FIFO where `authorized_keys` should be, in a disposable home.
+    #[cfg(unix)]
+    fn home_with_a_fifo() -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        let name =
+            std::ffi::CString::new(path(home.path()).as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `name` is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        home
+    }
+
+    /// Runs `work` on its own thread and fails the test, instead of hanging it, when it blocks.
+    #[cfg(unix)]
+    fn within_seconds<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(work());
+        });
+        receive
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the call blocked on a FIFO instead of refusing it")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_as_authorized_keys_is_refused_by_the_check_without_blocking() {
+        // Review of 6afa42e: a blocking O_WRONLY open of a FIFO with no reader hung `--check`.
+        let home = home_with_a_fifo();
+        let root = home.path().to_owned();
+        let result = within_seconds(move || writable(&root));
+        assert!(
+            matches!(&result, Writable::No(why) if why.contains("not a regular file")),
+            "{result:?}"
+        );
+        // With a reader on the other end the open would not have blocked; the answer is the same.
+        let reader = {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(path(home.path()))
+                .unwrap()
+        };
+        let root = home.path().to_owned();
+        let result = within_seconds(move || writable(&root));
+        assert!(
+            matches!(&result, Writable::No(why) if why.contains("not a regular file")),
+            "{result:?}"
+        );
+        drop(reader);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_as_authorized_keys_is_refused_by_add_without_blocking_or_writing() {
+        let home = home_with_a_fifo();
+        let root = home.path().to_owned();
+        let error = within_seconds(move || add(&root, &key(ED25519), "phone", at())).unwrap_err();
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+        assert_eq!(fs::read_dir(ssh_dir(home.path())).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn other_special_files_are_refused_too() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        std::os::unix::net::UnixListener::bind(path(home.path())).unwrap();
+        let root = home.path().to_owned();
+        let result = within_seconds(move || writable(&root));
+        assert!(matches!(result, Writable::No(_)), "{result:?}");
         assert!(add(home.path(), &key(ED25519), "phone", at()).is_err());
     }
 
