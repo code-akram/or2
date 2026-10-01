@@ -251,7 +251,11 @@ cargo only; no network and no extra tool) generates, from the locked dependency 
 | `android/app/src/main/assets/licenses/android.json` | the release runtime classpath: coordinates, SPDX licence, project URL, the licence text and any `LICENSE`/`NOTICE` at the root of the artifact | every `releaseRuntimeClasspath` line of `android/app/gradle.lockfile` (the strict lock) and each artifact's POM from the offline Gradle cache (`$GRADLE_USER_HOME` or `~/.gradle`; parent POMs for inherited licences). An artifact whose POM licence is not in the script's table, or that has no POM in the cache, stops the generator |
 | `android/app/src/main/assets/licenses/notices.md` | a copy of `THIRD_PARTY_NOTICES.md` (authoritative for vendored code and components built outside Cargo and Gradle) | the file itself |
 | `android/app/src/main/assets/licenses/COPYING` | a copy of `LICENSE` (or2's GPL-3.0 text, shown by About or2) | the file itself |
-| `core/or2-pair/THIRD_PARTY.md` | the same for the `or2-pair` host CLI: all targets, one numbered copy of each distinct text | `cargo tree -p or2-pair --target all -e normal`; written only when that package exists in the workspace |
+| `core/or2-pair/THIRD_PARTY.md` | the same for the `or2-pair` host CLI: all targets, one numbered copy of each distinct text | `cargo tree -p or2-pair --target all -e normal` (the crates it links, with their texts) |
+
+A Maven artifact whose POM lists a second licence for code it bundles (camera-core and libyuv) is shown
+with `AND` and that project's own text, kept in `scripts/licenses/libyuv/`; a licence name the script
+does not know still stops it.
 
 A crate that ships no licence file (russh, uniffi, ...) is shown with the SPDX standard text of its
 declared licence from `scripts/licenses/spdx/`, flagged `fallback` with a note. The Ghostty

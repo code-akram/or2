@@ -42,6 +42,6 @@ and the licence texts in `scripts/licenses/ghostty/` cannot go stale unnoticed.
   system monospace, see `docs/ui.md`); JetBrains Mono is not included.
 - Icons: the UI's icons are path data in `ui/Icons.kt` and a status-bar glyph in
   `res/drawable/ic_stat_or2.xml`; no icon set is bundled.
-- Forthcoming (Easy pair, not on this branch): CameraX (`androidx.camera`, Apache-2.0) and ZXing
-  core (`com.google.zxing:core`, Apache-2.0). They arrive through Gradle and are then listed by the
-  generator in `android.json`; any code taken from them would be added to the first table.
+- CameraX (`androidx.camera`, Apache-2.0) and ZXing core (`com.google.zxing:core`, Apache-2.0),
+  used by Easy pair, arrive through Gradle and are listed by the generator in `android.json`; no code
+  was taken from them. The crates linked into `or2-pair` are listed in `core/or2-pair/THIRD_PARTY.md`.

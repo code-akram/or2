@@ -38,7 +38,7 @@ class LicenseDataTest {
     @Test
     fun theAndroidListHoldsTheReleaseRuntimeClasspath() {
         val names = data.android.map { it.name }
-        for (known in listOf("androidx.room:room-runtime", "androidx.biometric:biometric", "net.java.dev.jna:jna", "org.jetbrains.kotlin:kotlin-stdlib")) {
+        for (known in listOf("androidx.room:room-runtime", "androidx.biometric:biometric", "net.java.dev.jna:jna", "org.jetbrains.kotlin:kotlin-stdlib", "androidx.camera:camera-core", "com.google.zxing:core")) {
             assertTrue("$known missing from the Android list", known in names)
         }
         // Test-only artifacts never reach the release classpath.
@@ -47,6 +47,10 @@ class LicenseDataTest {
         val jna = data.android.single { it.name == "net.java.dev.jna:jna" }
         assertEquals("LGPL-2.1-or-later OR Apache-2.0", jna.license)
         assertEquals("jna", jna.displayName)
+        // camera-core bundles libyuv: both licences apply (AND), each with its own text.
+        val camera = data.android.single { it.name == "androidx.camera:camera-core" }
+        assertEquals("Apache-2.0 AND BSD-3-Clause", camera.license)
+        assertTrue(camera.texts.any { it.body.contains("The LibYuv Project Authors") })
     }
 
     @Test

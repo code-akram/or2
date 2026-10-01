@@ -34,6 +34,7 @@ CORE = ROOT / "core"
 ASSETS = ROOT / "android/app/src/main/assets/licenses"
 SPDX_DIR = ROOT / "scripts/licenses/spdx"
 GHOSTTY_DIR = ROOT / "scripts/licenses/ghostty"
+LIBYUV_DIR = ROOT / "scripts/licenses/libyuv"
 LOCKFILE = ROOT / "android/app/gradle.lockfile"
 ANDROID_TARGET = "aarch64-linux-android"
 FFI_PACKAGE = "or2-ffi"
@@ -348,6 +349,21 @@ SPDX_BY_POM_NAME = {
 }
 
 
+# A POM that lists a second licence for code bundled in the artifact (not an alternative): matched by
+# the licence URL, applied with AND, with the project's own text. camera-core bundles libyuv in its
+# native image-processing library and says so with a "BSD License" entry.
+BUNDLED_BY_POM_URL = {
+    "https://chromium.googlesource.com/libyuv/libyuv/": ("BSD-3-Clause", LIBYUV_DIR / "LICENSE", "libyuv/LICENSE (bundled libyuv)"),
+}
+
+
+def bundled_licence(url):
+    for prefix, found in BUNDLED_BY_POM_URL.items():
+        if url.startswith(prefix):
+            return found
+    return None
+
+
 def gradle_home():
     import os
 
@@ -438,8 +454,14 @@ def android_document():
             continue  # a BOM or aggregator: no code ships
         if not licences:
             die(f"{group}:{artifact}:{version} declares no licence in its POM or its parents")
-        resolved, entry_texts = [], []
+        resolved, bundled, entry_texts = [], [], []
         for lic in licences:
+            extra = bundled_licence(lic["url"])
+            if extra is not None:
+                identifier, path, label = extra
+                bundled.append(identifier)
+                entry_texts.append({"id": texts.add(read_text(path)), "file": label})
+                continue
             key = lic["name"].strip().lower()
             if key not in SPDX_BY_POM_NAME:
                 die(f"{group}:{artifact}:{version}: unknown POM licence {lic['name']!r} ({lic['url']}); classify it in SPDX_BY_POM_NAME")
@@ -451,11 +473,14 @@ def android_document():
             entry_texts.append({"id": texts.add(body), "file": member})
         # Dual-licensed artifacts list every licence; the expression keeps them as alternatives.
         unique = sorted(set(resolved), key=resolved.index)
+        expression = " OR ".join(unique)
+        for identifier in bundled:
+            expression = f"({expression}) AND {identifier}" if " OR " in expression else f"{expression} AND {identifier}"
         entry = {
             "name": f"{group}:{artifact}",
             "title": name if name and "${" not in name else artifact,
             "version": version,
-            "license": " OR ".join(unique),
+            "license": expression,
             "repository": url,
             "source": "maven",
             "texts": [],
