@@ -685,3 +685,224 @@ async fn a_roam_to_another_address_is_refused_and_the_session_keeps_its_server()
     grid.wait_for(&handle, "hiok").await;
     handle.disconnect();
 }
+
+fn sample(heard: u64) -> LinkHealth {
+    LinkHealth {
+        since_heard_ms: heard,
+        since_ack_ms: heard + 10,
+    }
+}
+
+#[test]
+fn health_is_passed_on_at_most_once_a_second_and_only_when_a_value_changes() {
+    let mut throttle = HealthThrottle::default();
+    let start = Instant::now();
+    // The first sample always goes out.
+    assert_eq!(throttle.offer(start, sample(300)), Some(sample(300)));
+    // Too soon, whatever it says; and a suppressed sample is not remembered.
+    assert_eq!(
+        throttle.offer(start + Duration::from_millis(400), sample(900)),
+        None
+    );
+    assert_eq!(
+        throttle.offer(start + Duration::from_millis(999), sample(5000)),
+        None
+    );
+    // Due and unchanged: nothing to say.
+    assert_eq!(
+        throttle.offer(start + Duration::from_secs(1), sample(300)),
+        None
+    );
+    assert_eq!(
+        throttle.offer(start + Duration::from_secs(30), sample(300)),
+        None
+    );
+    // Due and changed, in either field.
+    assert_eq!(
+        throttle.offer(start + Duration::from_secs(31), sample(6000)),
+        Some(sample(6000))
+    );
+    let ack_only = LinkHealth {
+        since_heard_ms: 6000,
+        since_ack_ms: 9000,
+    };
+    assert_eq!(
+        throttle.offer(start + Duration::from_secs(32), ack_only),
+        Some(ack_only)
+    );
+    // The interval counts from the last report, not from the last offer.
+    assert_eq!(
+        throttle.offer(start + Duration::from_millis(32_500), sample(1)),
+        None
+    );
+    assert_eq!(
+        throttle.offer(start + Duration::from_millis(33_000), sample(1)),
+        Some(sample(1))
+    );
+    // Back to a value reported earlier counts as a change when it differs from the last one.
+    assert_eq!(
+        throttle.offer(start + Duration::from_secs(40), sample(6000)),
+        Some(sample(6000))
+    );
+}
+
+/// Observes health as the session's own observer sees it.
+struct HealthRecorder {
+    states: Mutex<mpsc::Sender<SessionState>>,
+    health: Mutex<Vec<(StdInstant, LinkHealth, bool)>>,
+    connected: std::sync::atomic::AtomicBool,
+}
+
+impl SessionObserver for HealthRecorder {
+    fn state_changed(&self, state: &SessionState) {
+        if *state == SessionState::Connected {
+            self.connected.store(true, Ordering::SeqCst);
+        }
+        let _ = self.states.lock().unwrap().send(state.clone());
+    }
+
+    fn frame_ready(&self) {}
+
+    fn link_health(&self, health: LinkHealth) {
+        let connected = self.connected.load(Ordering::SeqCst);
+        self.health
+            .lock()
+            .unwrap()
+            .push((StdInstant::now(), health, connected));
+    }
+}
+
+#[tokio::test]
+async fn a_connected_session_reports_link_health_through_its_observer_about_once_a_second() {
+    let mut server = FakeServer::new(KEY).await;
+    let (sender, states) = mpsc::channel();
+    let recorder = Arc::new(HealthRecorder {
+        states: Mutex::new(sender),
+        health: Mutex::new(Vec::new()),
+        connected: std::sync::atomic::AtomicBool::new(false),
+    });
+    let (handle, _control) = spawn(
+        DirectUdp,
+        params(server.port(), KEY, 20, 5),
+        LOCALHOST,
+        recorder.clone(),
+        None,
+        CONNECT_TIMEOUT,
+    )
+    .unwrap();
+    server.hear(Duration::from_secs(5)).await.unwrap();
+    // Silent until the server authenticates.
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    assert!(
+        recorder.health.lock().unwrap().is_empty(),
+        "no health before Connected"
+    );
+    server.say(b"hi").await;
+    assert_eq!(state(&states).await, SessionState::Connected);
+    tokio::time::sleep(Duration::from_millis(3300)).await;
+    let reports = recorder.health.lock().unwrap().clone();
+    assert!(
+        (2..=4).contains(&reports.len()),
+        "about one report a second, got {}",
+        reports.len()
+    );
+    assert!(reports.iter().all(|(_, _, connected)| *connected));
+    for pair in reports.windows(2) {
+        assert!(
+            pair[1].0.duration_since(pair[0].0) >= Duration::from_millis(900),
+            "at most once a second"
+        );
+        assert_ne!(pair[0].1, pair[1].1, "only when a value changes");
+    }
+    // A server that stays silent shows as growing staleness.
+    let (first, last) = (reports[0].1, reports[reports.len() - 1].1);
+    assert!(last.since_heard_ms > first.since_heard_ms);
+    handle.disconnect();
+}
+
+#[tokio::test]
+async fn roam_on_the_session_handle_opens_a_new_socket_like_the_link_control() {
+    let mut server = FakeServer::new(KEY).await;
+    let (handle, _control, states) = start_fake(server.port(), KEY, CONNECT_TIMEOUT);
+    let first_port = server
+        .hear(Duration::from_secs(5))
+        .await
+        .unwrap()
+        .from
+        .port();
+    server.say(b"hi").await;
+    assert_eq!(state(&states).await, SessionState::Connected);
+    handle.roam();
+    handle.send_text("c".into()).unwrap();
+    let heard = server
+        .hear_until(|heard| heard.iter().any(|h| h.from.port() != first_port))
+        .await;
+    assert_ne!(heard.last().unwrap().from.port(), first_port);
+    handle.disconnect();
+}
+
+/// `Plan::shutdown` ends a session like a disconnect (the host driver uses it when the user
+/// disconnects the host): the server is told, even if the permit was given before the
+/// session ever looked, and a session still connecting closes `Disconnected` too.
+#[tokio::test]
+async fn the_shutdown_signal_disconnects_with_the_goodbye_handshake() {
+    let mut server = FakeServer::new(KEY).await;
+    let (sender, states) = mpsc::channel();
+    let (_handle, mut driver) = channel(Arc::new(Recorder(Mutex::new(sender))));
+    let shutdown = Arc::new(Notify::new());
+    let plan = Plan {
+        transport: Arc::new(DirectUdp),
+        peer: SocketAddr::new(LOCALHOST, server.port()),
+        params: params(server.port(), KEY, 20, 5),
+        health: None,
+        roam: Arc::new(Notify::new()),
+        shutdown: shutdown.clone(),
+        connect_timeout: CONNECT_TIMEOUT,
+    };
+    // The session future is not `Send` (libghostty): its own thread, as in production.
+    let session = std::thread::spawn(move || {
+        crate::ssh::runtime().block_on(async move {
+            let reason = run_session(plan, &mut driver).await;
+            (reason, driver.state())
+        })
+    });
+    server.hear(Duration::from_secs(5)).await.unwrap();
+    server.say(b"hi").await;
+    assert_eq!(state(&states).await, SessionState::Connected);
+    shutdown.notify_one();
+    let goodbye = server
+        .hear_until(|heard| heard.iter().any(|h| h.new_num == SHUTDOWN_NUM))
+        .await;
+    assert!(!goodbye.is_empty());
+    server.say_goodbye().await;
+    let (reason, state_then) = tokio::task::spawn_blocking(move || session.join().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(reason, CloseReason::Disconnected);
+    assert_eq!(
+        state_then,
+        SessionState::Connected,
+        "the caller can tell it connected"
+    );
+
+    // Before any datagram arrives: closed at once, `Connecting` tells the caller to clean up.
+    let server = FakeServer::new(KEY).await;
+    let (_handle, mut driver) = channel(Arc::new(Recorder(Mutex::new(mpsc::channel().0))));
+    let shutdown = Arc::new(Notify::new());
+    shutdown.notify_one();
+    let reason = run_session(
+        Plan {
+            transport: Arc::new(DirectUdp),
+            peer: SocketAddr::new(LOCALHOST, server.port()),
+            params: params(server.port(), KEY, 20, 5),
+            health: None,
+            roam: Arc::new(Notify::new()),
+            shutdown,
+            connect_timeout: CONNECT_TIMEOUT,
+        },
+        &mut driver,
+    )
+    .await;
+    assert_eq!(reason, CloseReason::Disconnected);
+    assert_eq!(driver.state(), SessionState::Connecting);
+}
