@@ -132,6 +132,7 @@ internal class OpenSshFixture : AutoCloseable {
                 host.privateKey.fill(0)
             }
             directory.resolve("authorized").toFile().writeText("")
+            Files.createDirectory(directory.resolve("tmux")) // Private tmux sockets: never the default.
             val config = directory.resolve("sshd_config")
             config.toFile().writeText(
                 """
@@ -147,7 +148,7 @@ internal class OpenSshFixture : AutoCloseable {
                 PubkeyAuthentication yes
                 PrintMotd no
                 PrintLastLog no
-                SetEnv HOME=$directory HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR=$directory
+                SetEnv HOME=$directory HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR=$directory TMUX_TMPDIR=${directory.resolve("tmux")}
                 LogLevel VERBOSE
                 """.trimIndent() + "\n",
             )

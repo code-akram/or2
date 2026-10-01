@@ -291,8 +291,10 @@ impl HostConnection {
     }
 }
 
-/// Validates synchronously; networking and all callbacks run on Rust-owned threads. Until the
-/// host driver lands (lane A1) every connection closes with `Failed { Internal }`.
+/// Validates synchronously; networking and all callbacks run on Rust-owned threads. The
+/// connection races the request's addresses, asks for a host-key decision when needed, and
+/// ends with exactly one `Closed`. Terminals and herdr watches on it close first (`Disconnected`
+/// for a user disconnect, else the host's failure), then the host reports `Closed`.
 #[uniffi::export]
 pub fn connect_host(
     request: HostConnectRequest,
@@ -346,7 +348,8 @@ impl HostConnection {
         Ok(Session::new(handle))
     }
 
-    /// Cancelling the coroutine cancels the query.
+    /// Programs and locale are probed once per connection; `herdr_sessions` is read afresh
+    /// on every call. Cancelling the coroutine cancels the query.
     pub async fn capabilities(&self) -> Result<HostCapabilities, HostError> {
         Ok(self.handle.capabilities().await?.into())
     }
@@ -557,7 +560,8 @@ mod tests {
                 Ok(())
             }
         }
-        let host = connect_host(request(vec![address("h", 22)]), Box::new(Quiet)).unwrap();
+        // A loopback address nothing listens on: the connection fails fast, offline.
+        let host = connect_host(request(vec![address("127.0.0.1", 1)]), Box::new(Quiet)).unwrap();
         assert_eq!(
             host.open_terminal(TerminalTarget::Shell, 0, 24, Box::new(Silent))
                 .err(),

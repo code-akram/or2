@@ -10,15 +10,16 @@ document and the tests together, and bumping `API_VERSION` in `or2-ffi` when an 
 
 All M1 contracts below are implemented and tested. M2 changes are specified in
 [M2: hosts, multiplexers and mosh](#m2-hosts-multiplexers-and-mosh); lane 0 has landed the
-M2 contract types and the FFI API 4 surface (`API_VERSION = 4`), with the lane A1, A2 and B
-behaviour still to come.
+M2 contract types and the FFI API 4 surface (`API_VERSION = 4`), and lane A1 has landed the
+host driver behind `connect_host` (address racing, host connection, probe, tmux, terminal
+targets); the lane A2 and B behaviour is still to come.
 
 | Contract | Implemented and tested | Open |
 |---|---|---|
-| Transport | `Transport` trait, `DirectTcp`, `Endpoint` validation | address racing (M2), UDP (M2 core, M3 export), jump host |
+| Transport | `Transport` trait, `DirectTcp`, `Endpoint` validation, address racing (`transport::race`) | UDP (M2 core, M3 export), jump host |
 | Key material | Ed25519 generation, OpenSSH import with passphrase, storage form, typed errors; Keystore/biometric vault in Kotlin | secure-element and FIDO2 keys (later) |
-| Host-key trust | verdicts, prompts bound to the presented fingerprint, Kotlin persistence and UI | per-host trust shared by several addresses (M2) |
-| Session lifecycle | state machine, handle/driver split, `connect` over russh with PTY shell, timeouts, keepalive | `Connecting -> Connected` for channel sessions (lane 0); sessions as channels of a host connection (lane A1) |
+| Host-key trust | verdicts, prompts bound to the presented fingerprint, Kotlin persistence and UI; one trust set per host shared by all its addresses (`HostConnectRequest`) | |
+| Session lifecycle | state machine, handle/driver split, `connect` over russh with PTY shell, timeouts, keepalive | removal of the M1 `connect` export (with lane B; [checklist](#removing-the-m1-path)) |
 | Frames | libghostty-vt adapter, full/delta merge, notify-once mailbox, Canvas drawing | |
 | Input | libghostty key encoding, IME, keys row, scrolling, selection | bracketed paste |
 
@@ -127,7 +128,7 @@ Connecting ──▶ AwaitingHostKeyDecision ──▶ Authenticating ──▶ 
 
 `CloseReason`: `Disconnected`, `RemoteExited { exit_status }`, or `Failed { failure }` with
 `SessionFailure`: `Unreachable`, `TimedOut`, `HostKeyRejected`, `UnsupportedHostKey`,
-`AuthenticationRejected`, `ShellRejected` (PTY or shell refused), `ConnectionLost`, `Protocol`,
+`AuthenticationRejected`, `ShellRejected` (PTY, shell or, on a host, the session channel refused), `ConnectionLost`, `Protocol`,
 `Internal` (M2 adds `NotInstalled { program }` and `CommandFailed`, for terminals on a host).
 Messages are diagnostics without secrets, not for matching. Lane A maps transport
 `io::Error`s to `Unreachable`, its connect timeout to `TimedOut`, russh auth failure to
@@ -243,11 +244,31 @@ this text disagree, fix one of them in the same change.
 | A3: mosh core | vendored mosh-rs, `DatagramTransport`, `Screen` over libghostty, bootstrap, mosh session driver; **no FFI export** | lane 0 (`RemoteHost`) |
 | B: Android | Room v2, host connection holder, multiple sessions, inbox, host screen with tmux picker, navigation | lane 0 (generated bindings, probe) |
 
-Lane 0 has landed. A2 and A3 land independently. A1 and B land together: A1 removes the M1
-`connect` export and B removes its Kotlin use. `connect_host` exists from lane 0 so Kotlin
-compiles against it, but until A1 lands it closes every connection with
-`Failed { Internal }` (never a pretend success). Lane A2 has landed: `herdr::run`, `watch` and
-`focus_pane` are the real client.
+Lanes 0, A2 and A1 have landed. A3 lands independently. A1 and B land together: the lead
+removes the M1 `connect` export (kept, marked "M1 path: removed when lane B lands", so the
+app keeps working) once B removes its Kotlin use. `connect_host` is real since A1, and
+`herdr::run`, `watch` and `focus_pane` are the real client since A2; the host driver treats a
+failed `focus_pane` as `CommandFailed`.
+
+### Removing the M1 path
+
+The M1 `connect` path stays compiled until lane B has removed its Kotlin use. Deleting it
+touches these places, so none is left dead:
+
+- `or2-ffi/src/session.rs`: the `connect` export and its `ConnectRequest` record (bump
+  `API_VERSION`, regenerate the bindings), `ConnectContractTest.kt` and the app's production
+  connector.
+- `or2-core/src/ssh.rs`: `connect`, `start`, `drive`, `network`, `shell`,
+  `authenticated_shell` and the `From<HostKeyRequest>`/`From<TransportEnd>` impls for the M1
+  `Event`; `session::ConnectRequest` if nothing else uses it.
+- `or2-core/src/ssh/pump.rs`: the M1-only `Event` variants `HostKey`, `Authenticating` and
+  `TransportEnded`, and their no-op arms in `ssh/terminal_session.rs` (`drive`).
+- Tests: `ssh_tests.rs` (the M1 driver tests; the reply-budget test there imports
+  `super::pump::GeneratedReplies`, so move it next to `pump.rs` instead of dropping it) and
+  `tests/openssh.rs` (`host.rs` covers the host path). The prompt-time behaviour M1 tests
+  there (timer pause, EOF during the prompt) has host-path tests in
+  `ssh/connection_tests.rs`.
+- `docs/build.md`: the sentences that describe the M1 connector and `openssh.rs`.
 
 ## Remote commands (`or2_core::remote`)
 
@@ -291,9 +312,17 @@ pub trait RemoteHost: Send + Sync + 'static {
   method a `RemoteHost` implements, so a probe written over `RemoteHost` runs on `LocalHost`
   too. Untrusted values (session names, pane ids) are only ever separate arguments.
 - Lane 0 put the tmux and probe result types in `or2_core::host` (`TmuxSession`,
-  `HostCapabilities`, `HerdrSessionInfo`) next to the other host types; there is no separate
-  `tmux` module yet (lane A1 adds the command code). The output cap and exec timeout are the
-  constants `remote::OUTPUT_CAP` and `remote::EXEC_TIMEOUT`.
+  `HostCapabilities`, `HerdrSessionInfo`) next to the other host types; lane A1 added the
+  command code as `or2_core::tmux` and `or2_core::probe`, both generic over `RemoteHost`. The
+  output cap and exec timeout are the constants `remote::OUTPUT_CAP` and
+  `remote::EXEC_TIMEOUT`.
+- The SSH `RemoteHost` (lane A1) runs each exec on its own session channel without a PTY and
+  sends EOF at once, so a command that reads stdin ends. Output over the cap, a refused
+  command and the timeout close that channel before failing (`OutputTooLarge`, `Rejected`,
+  `TimedOut`). A channel that ends with neither an exit status nor a signal is `Closed` when
+  the connection is gone. `open_unix` is `direct-streamlocal@openssh.com`; a refusal (the
+  target does not exist, streamlocal forwarding is disabled) is `Rejected`. The exec timeout
+  also bounds `open_unix`.
 - `ExecOutput { status: Option<u32>, stdout: Vec<u8>, stderr: Vec<u8> }`; output is capped at
   1 MiB per stream (excess fails with `RemoteError::OutputTooLarge`); each exec has a 10 s
   timeout (`RemoteError::TimedOut`).
@@ -325,6 +354,28 @@ else `en_US.UTF-8`). Every later tmux/herdr/mosh command uses the absolute path 
 host driver passes `HostCapabilities.herdr` to `herdr::run`, `herdr::watch` and
 `herdr::focus_pane` (as `mosh::bootstrap` takes `caps`), so no client repeats the PATH search.
 The probe is a fixed script run with `exec_script`.
+
+Lane A1: `or2_core::probe::PROBE_SCRIPT` and `probe::parse` (`probe::probe(&host)` runs them).
+The script prints `or2:tmux:<path>`, `or2:herdr:<path>`, `or2:mosh-server:<path>` and
+`or2:locale:<name>`; `parse` is lenient (unknown lines are ignored, a relative path or one
+with `\`, `=` or a control character counts as not installed, odd or missing locale falls
+back to `en_US.UTF-8`). A path with a space is fine (one quoted token). `C.UTF-8` is reported
+when `locale -a` lists `C.UTF-8` or `C.utf8`; otherwise the first `*.UTF-8`/`*.utf8` entry as
+listed. The script contains no `'` or `\` (a test enforces it, because `render_script`
+rejects them). A probe that fails to run is not cached, so the next query or watch retry runs
+it again.
+
+Lane A1 decisions, both from review: (1) herdr's session list is **not** part of the script.
+When herdr was found, `probe::herdr_sessions` runs `<herdr> session list --json` as a second
+exec bounded by `probe::HERDR_LIST_TIMEOUT` (5 s), so a wedged herdr costs only
+`herdr_sessions` (empty), never tmux, mosh-server or the locale, and never makes the probe
+fail and be retried at full cost on every terminal open. Only a connection that closes
+mid-probe fails it. JSON is read for each session's `name`, `running` and `default`, unknown
+fields ignored. (2) The cache holds programs and locale; **`capabilities()` reads herdr's
+session list afresh on every call** (`probe::with_fresh_sessions`), so `running` and sessions
+started or stopped after connecting show on the host screen. A listing that fails (herdr
+gone, hung, garbage) keeps the last list rather than emptying it. Live per-pane state is
+still `watch_herdr`'s job; terminal opens and watches use only the cached paths.
 
 ## Host connection (`or2_core::host`)
 
@@ -387,8 +438,58 @@ Connecting ──▶ AwaitingHostKey ──▶ Authenticating ──▶ Connecte
 - Rust API: `HostConnectRequest::new(addresses: &[(&str, u16)], username, private_key,
   trusted_host_keys)` validates in order: address count (`NoAddresses`, `TooManyAddresses`),
   each address (`InvalidAddress { index, error }`; FFI keeps only `index`), username, trusted
-  keys (`InvalidTrustedHostKey { index }`), key. `connect_host` (lane 0) closes from a Rust
-  thread with `Failed { Internal("host connections land with lane A1") }`.
+  keys (`InvalidTrustedHostKey { index }`), key.
+- **Lane A1 implementation.** `ssh::connect_host(request, observer)` is `connect_host_with`
+  over `DirectTcp` and `HostOptions::default()`; `connect_host_with<T: Transport>` takes any
+  transport and `HostOptions { connect_timeout (20 s), exec_timeout (10 s), stagger (250 ms) }`
+  so tests need not wait for production timings. The driver is `ssh/connection.rs`: a thread
+  `or2-host` (`HostDriver`, commands, callbacks) plus a network task (`transport::race`, the
+  host-key relay of M1, handshake, authentication, then holding the connection) that reports
+  to it, and an `Arc<SshHost>` (the russh `Handle`, the exec timeout and the cached probe)
+  that is the `RemoteHost` shared by terminals, queries and herdr watches. Each terminal is
+  its own thread `or2-terminal` (below); queries and watches are tasks on the process runtime.
+  An address that wins the race but whose SSH handshake then fails is not retried on the
+  next address: racing is only over TCP, as specified.
+- **Closing order.** Whatever ends the host is one `CloseReason`: `Disconnected` for a user
+  disconnect (or the release of the last handle), the failure for loss, `Unreachable` when
+  every address fails (its message lists each address by position and error kind, never by
+  name), `TimedOut` when the 20 s connect timeout expires (paused while the user decides on a
+  host key), `HostKeyRejected`, `AuthenticationRejected`, `UnsupportedHostKey`. The driver
+  hands that reason to every terminal and watch, waits (up to 3 s) until each has delivered
+  its own `Closed`, tears the connection down (a user disconnect first sends the SSH
+  disconnect and each terminal's channel close), and only then reports the host's `Closed`.
+  So the callback order is always: terminals and watches `Closed`, then the host `Closed`,
+  exactly as `contract_probe_host`. A terminal closes with the host's reason: `Disconnected`
+  or, on loss, the host's `ConnectionLost` (a channel that dies with the connection waits
+  up to 250 ms for the host's reason so both report the same cause). Queries still running
+  are dropped, so their callers see `HostError::Closed`. The wait for terminals and watches
+  is bounded (3 s) so one wedged session, for example a terminal thread stuck in a slow
+  observer callback, cannot hold the host open forever: past the bound the host's `Closed`
+  can arrive **before** that session's. The order is therefore guaranteed unless a session
+  is wedged; Kotlin callbacks are documented to return quickly, so it should not happen.
+- **A network task that ends without reporting** (it panicked; a buggy `Transport` is
+  re-raised by `race`) closes the host with `Failed(Internal)` instead of leaving it in its
+  last state, so terminals and watches are told and exactly one `Closed` is reported.
+- **Session channels are limited by the server.** Every terminal and every exec in flight
+  (probe, tmux listing, herdr client) is one session channel on the host's single
+  connection, and OpenSSH's `MaxSessions` defaults to 10 per connection. A refused channel
+  open is not a lost connection: a terminal closes with `ShellRejected` (the connection
+  stays `Connected`; Kotlin must not reconnect), and an exec fails with `Rejected`
+  (`CommandFailed` from a query). A dropped (cancelled) exec closes its channel, so it does
+  not keep counting against the limit.
+- **One slow terminal slows the connection.** russh delivers channel data to a bounded
+  per-channel queue from the one loop that serves the whole SSH session, so a terminal that
+  stops draining its output (a very slow engine or a blocking observer callback) eventually
+  stalls every other channel on that host: other terminals, queries (which then hit their
+  10 s timeout), the herdr socket and keepalive replies. Backpressure is kept on purpose: the
+  alternative, buffering without bound or failing a terminal that falls behind, would break
+  ordinary output floods (`cat` of a large file) to protect a rare case. Keep observers
+  quick; there is no per-terminal buffer to tune.
+- **The private key is dropped after authentication**; the connection keeps only what it
+  needs, not the `ClientKey`.
+- `ssh::connect_tapped` and `ssh::SshRemote` (feature `test-support`) hand an integration
+  test the established connection as a `RemoteHost`, to test exec limits and streamlocal
+  against a real sshd without a second code path.
 
 ### Terminal sessions on a host
 
@@ -417,13 +518,38 @@ ids `[A-Za-z0-9:_-]{1,128}`. A missing program closes the session with
 herdr pane focus closes it with `SessionFailure::CommandFailed` (FFI
 `SessionFailure.CommandFailed(message)`, a diagnostic).
 
+Lane A1 (`ssh/terminal_session.rs`, `ssh/pump.rs`): the session is a thread `or2-terminal`
+owning the engine and the `SessionDriver`, plus a task owning the channel; `ssh/pump.rs` is the
+terminal pump M1's one-connection session shares (`TerminalPump`: engine, reply budget,
+commands, frames; `pump_channel`: concurrent channel read and write). Order: for tmux and herdr
+the probe (cached), then for a herdr pane the focus, then the channel (`pty-req` at the
+requested size, `shell` or `exec`, then a window change if the size changed meanwhile), then
+`Connected`. Anything that fails before the channel exists (missing program, failed focus,
+failed probe) closes the session from `Connecting` without opening one. Every other way a
+session ends (user disconnect, host close, protocol failure) closes its channel first, so the
+program does not outlive the session on the host: a tmux client detaches, the tmux session
+lives on. The program's own exit is `RemoteExited { exit_status }`. Channel setup (open,
+`pty-req`, `shell`/`exec`, each awaiting the server's reply) is bounded by the host's exec
+timeout (10 s): a server that never answers closes the session with `TimedOut`, after
+closing the channel. A refused channel open (`MaxSessions`, see above) is `ShellRejected`,
+never `ConnectionLost`.
+
 ### tmux
 
-`list_tmux_sessions()` runs `<tmux> list-sessions -F` with fields joined by U+001F:
-`session_name`, `session_windows`, `session_attached`, `session_created`,
-`session_activity`. "no server running" / "no sessions" is an empty list, not an error.
+`list_tmux_sessions()` runs `<tmux> -u list-sessions -F <format>` (`or2_core::tmux`).
+Lane A1 decision: the fields are joined by `:` with the name last (`#{session_windows}:
+#{session_attached}:#{session_created}:#{session_activity}:#{session_name}`), not by U+001F,
+because a control character cannot appear in a command line `RemoteCommand` renders for every
+login shell. tmux turns `:` and `.` in names into `_`, so the delimiter never occurs in a
+name, and the name being last keeps even a surprising one from shifting the numeric fields.
+`-u` (also on `new-session`) makes tmux treat the terminal as UTF-8 whatever locale the
+non-interactive login shell has, so non-ASCII names round-trip. "no server running", a missing
+or stale socket ("error connecting to ... (No such file or directory)"), "no sessions" and
+"server exited unexpectedly" are an empty list, not an error; any other failure is
+`HostError::CommandFailed` with tmux's first stderr line. Lines that do not parse are skipped.
 `TmuxSession { name, windows: u32, attached_clients: u32, created_unix: i64,
-activity_unix: i64 }`, sorted by most recent activity.
+activity_unix: i64 }`, sorted by most recent activity (ties by name). tmux uses its default
+socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run in.
 
 ## herdr (`or2_core::herdr`)
 
@@ -610,6 +736,7 @@ impl HostConnection {                     // all non-blocking unless async
     fn disconnect(&self);
     fn open_terminal(&self, target: TerminalTarget, columns: u16, rows: u16,
                      listener: Box<dyn SessionListener>) -> Result<Arc<Session>, HostError>;
+    /// Programs and locale are probed once per connection; `herdr_sessions` is read afresh.
     async fn capabilities(&self) -> Result<HostCapabilities, HostError>;
     async fn list_tmux_sessions(&self) -> Result<Vec<TmuxSession>, HostError>;
     fn watch_herdr(&self, session: Option<String>, listener: Box<dyn HerdrListener>)

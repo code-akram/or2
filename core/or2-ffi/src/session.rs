@@ -366,6 +366,9 @@ impl Session {
 }
 
 /// Validates synchronously; networking and all callbacks run on Rust-owned threads.
+///
+/// M1 path: removed when lane B lands (Kotlin moves to `connect_host` plus
+/// `HostConnection.open_terminal`).
 #[uniffi::export]
 pub fn connect(
     request: ConnectRequest,

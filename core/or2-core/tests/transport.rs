@@ -74,3 +74,47 @@ async fn transport_stream_is_accepted_by_russh_connect_stream() {
     assert!(result.is_err(), "a non-SSH peer must not produce a session");
     assert_eq!(&server.await.unwrap(), b"SSH-2.0-");
 }
+
+#[tokio::test]
+async fn race_skips_a_refused_address_at_once_and_reports_every_failure() {
+    use or2_core::transport::{RACE_STAGGER, race};
+    let transport = Arc::new(DirectTcp);
+    let (dead, dead_endpoint) = listener().await;
+    drop(dead);
+    let (live, live_endpoint) = listener().await;
+    let accept = tokio::spawn(async move { live.accept().await.unwrap().0 });
+
+    // A refusal does not wait out the stagger: the live address starts as soon as the dead
+    // one fails, so the whole race is far quicker than 250 ms.
+    let started = std::time::Instant::now();
+    let raced = race(
+        &transport,
+        &[dead_endpoint.clone(), live_endpoint.clone()],
+        RACE_STAGGER,
+    )
+    .await
+    .unwrap();
+    assert_eq!(raced.index, 1);
+    assert!(raced.stream.nodelay().unwrap());
+    assert!(started.elapsed() < RACE_STAGGER, "{:?}", started.elapsed());
+    accept.await.unwrap();
+
+    // All dead: every address's error is listed, in request order.
+    let failure = race(
+        &transport,
+        &[dead_endpoint.clone(), dead_endpoint],
+        RACE_STAGGER,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.errors.len(), 2);
+    assert!(
+        failure
+            .errors
+            .iter()
+            .all(|error| error.kind() == ErrorKind::ConnectionRefused)
+    );
+    let text = failure.to_string();
+    assert!(text.contains("address 0: ConnectionRefused"), "{text}");
+    assert!(text.contains("address 1: ConnectionRefused"), "{text}");
+}
