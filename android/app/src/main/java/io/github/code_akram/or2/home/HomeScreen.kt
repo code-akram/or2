@@ -73,6 +73,9 @@ class HomeSession(
     val preview: @Composable (Modifier) -> Unit,
 )
 
+/** The "Resume" card: where the user was ([title], over [transport]) when the connection went away. */
+class HomeResume(val title: String, val detail: String)
+
 /**
  * The start screen: only trailing icon buttons on top (agents inbox, keys), then SESSIONS (live
  * thumbnails of open terminals; tap resumes), CONNECTIONS (host cards; long press for options)
@@ -98,6 +101,8 @@ fun HomeScreen(
     openKeys: () -> Unit,
     connectAll: () -> Unit,
     modifier: Modifier = Modifier,
+    resume: HomeResume? = null,
+    onResume: () -> Unit = {},
 ) {
     var options by remember { mutableStateOf<HostCard?>(null) }
     var deleting by remember { mutableStateOf<Host?>(null) }
@@ -117,6 +122,10 @@ fun HomeScreen(
                 IconAction(Or2Icons.Key, "SSH keys", openKeys, Modifier.testTag("nav-keys"))
             })
             Column(Modifier.padding(horizontal = Or2Dimens.Gutter)) {
+                if (resume != null) {
+                    ActionCard("Resume", resume.title, "Unlocks if needed, then returns to this terminal.", meta = resume.detail,
+                        icon = Or2Icons.Terminal, onClick = onResume, modifier = Modifier.padding(top = 12.dp).testTag("home-resume"))
+                }
                 if (sessions.isNotEmpty()) {
                     SectionHeader("Sessions", topGap = 12.dp)
                     SessionRow(sessions, openSession)

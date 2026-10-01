@@ -27,6 +27,9 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.activity.compose.LocalActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -43,6 +46,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.code_akram.or2.connection.ActiveHost
 import io.github.code_akram.or2.connection.ActiveTerminal
 import io.github.code_akram.or2.connection.HostConnections
+import io.github.code_akram.or2.connection.reconnectOffer
+import io.github.code_akram.or2.connection.ReconnectOffer
+import io.github.code_akram.or2.connection.terminalClosedStates
 import io.github.code_akram.or2.connection.transports
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.KeyRecord
@@ -51,6 +57,7 @@ import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalTarget
+import io.github.code_akram.or2.home.HomeResume
 import io.github.code_akram.or2.home.HomeScreen
 import io.github.code_akram.or2.home.HomeSession
 import io.github.code_akram.or2.home.HostCard
@@ -80,7 +87,9 @@ import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Icons
 import io.github.code_akram.or2.ui.Or2Theme
+import io.github.code_akram.or2.ui.Or2Dialog
 import io.github.code_akram.or2.ui.Or2Type
+import io.github.code_akram.or2.ui.TextAction
 import io.github.code_akram.or2.ui.Spinner
 import io.github.code_akram.or2.ui.TopBar
 import io.github.code_akram.or2.ui.or2Background
@@ -99,6 +108,11 @@ class AppActions(
     val reject: (ActiveHost) -> Unit,
     /** Shows a message, or clears it when null. */
     val message: (String?) -> Unit,
+    /** The last focused terminal, for reattach after the app returns to the foreground. */
+    val reattach: ReattachMemory = ReattachMemory(MemoryPrefStore()),
+    /** The one-time battery-optimisation explanation; [requestBatteryExemption] opens the system dialog. */
+    val battery: BatteryPrompt = BatteryPrompt(MemoryPrefStore()),
+    val requestBatteryExemption: () -> Unit = {},
 )
 
 /**
@@ -133,6 +147,8 @@ fun Or2App(
     val pending by remember(connections) { connections.pendingHostKeys() }.collectAsStateWithLifecycle(emptyList())
 
     val transports by remember(connections) { connections.transports() }.collectAsStateWithLifecycle(emptyMap())
+    val closedStates by remember(connections) { connections.terminalClosedStates() }.collectAsStateWithLifecycle(emptyMap())
+    val last by actions.reattach.last.collectAsStateWithLifecycle()
 
     // Hosts between the tap and the key being unlocked: their card says "Unlocking key...".
     var unlocking by remember { mutableStateOf(emptySet<Long>()) }
@@ -184,6 +200,101 @@ fun Or2App(
         }
     }
 
+    // --- reattach: the last focused terminal, and what to do when the app returns -----------------
+    val connectedHosts = states.filterValues { it is HostState.Connected }.keys
+    val reattach = decideReattach(
+        last, terminals.map { OpenSession(it.id, it.host.id, it.target, closedStates[it.id] != true) },
+        connectedHosts, hosts.map { it.id }.toSet(),
+    )
+    var pendingResume by remember { mutableStateOf<LastTerminal?>(null) }
+    val resumeCard = when {
+        pendingResume != null -> null
+        reattach is Reattach.Reopen -> resumeCardOf(reattach.last, hosts)
+        reattach is Reattach.Resume -> resumeCardOf(reattach.last, hosts)
+        else -> null
+    }
+    fun hostLabel(id: Long) = hosts.find { it.id == id }?.label ?: "the host"
+    // A terminal reopened or resumed replaces a terminal screen instead of stacking on it.
+    fun enterReattached(activation: Activation) {
+        enter(activation, replace = NavStack.decode(saved).current is Destination.Terminal)
+    }
+    fun reopen(target: LastTerminal) = activations.launchReopen(target, hostLabel(target.hostId), ::enterReattached)
+    fun resumeLast() {
+        val target = last ?: return
+        val host = hosts.find { it.id == target.hostId } ?: return
+        if (target.hostId in connectedHosts) {
+            reopen(target)
+        } else {
+            pendingResume = target
+            if (!busy) connect(listOf(host))
+        }
+    }
+    val resumeState = pendingResume?.let { states[it.hostId] }
+    LaunchedEffect(pendingResume, resumeState, busy) {
+        val target = pendingResume ?: return@LaunchedEffect
+        when (resumeStep(resumeState, busy)) {
+            ResumeStep.WAIT -> Unit
+            ResumeStep.ABORT -> pendingResume = null
+            ResumeStep.OPEN -> { pendingResume = null; reopen(target) }
+        }
+    }
+
+    // What the user last had in front of them: remembered once the terminal connected.
+    val shownConnected = currentTerminal?.hasConnected?.collectAsStateWithLifecycle()?.value == true
+    val shownTransport = currentTerminal?.transport?.collectAsStateWithLifecycle()?.value
+    LaunchedEffect(currentTerminal, shownConnected, shownTransport) {
+        if (currentTerminal != null && shownConnected && shownTransport != null) {
+            actions.reattach.remember(LastTerminal(currentTerminal.host.id, currentTerminal.target, shownTransport))
+        }
+    }
+    // A terminal id saved by a previous process means nothing now: start from Home (Resume is there).
+    LaunchedEffect(Unit) {
+        val top = NavStack.decode(saved).current
+        if (top is Destination.Terminal && connections.terminal(top.terminalId) == null) navigate(NavStack())
+    }
+
+    // Leaving and returning: see the contract's reattach, battery and reconnect rules.
+    val activity = LocalActivity.current
+    var returning by remember { mutableStateOf(false) }
+    var stoppedOnTerminal by remember { mutableStateOf(false) }
+    var batteryExplanation by remember { mutableStateOf(false) }
+    var offer by remember { mutableStateOf<ReconnectOffer?>(null) }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        if (activity?.isChangingConfigurations == true) return@LifecycleEventEffect
+        returning = true
+        stoppedOnTerminal = NavStack.decode(saved).current is Destination.Terminal
+        actions.battery.onBackgrounded(connections.hasOpenSession())
+    }
+    LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        if (!returning) return@LifecycleEventEffect
+        returning = false
+        if (actions.battery.takeIfDue()) batteryExplanation = true
+        offer = reconnectOffer(hosts, connections.hosts.value)
+        val liveHosts = connections.hosts.value.filterValues { it.state.value is HostState.Connected }.keys
+        val decision = decideReattach(
+            actions.reattach.last.value,
+            connections.terminals.value.map { OpenSession(it.id, it.host.id, it.target, it.state.value !is SessionState.Closed) },
+            liveHosts, hosts.map { it.id }.toSet(),
+        )
+        when {
+            !stoppedOnTerminal -> Unit
+            decision is Reattach.Show -> connections.terminal(decision.terminalId)?.let { terminal ->
+                activations.launchReuse(terminal) { activation ->
+                    enterReattached(activation)
+                    (activation as? Activation.Ready)?.terminal?.handle?.value?.let { handle -> runCatching { handle.requestFullFrame() } }
+                }
+            }
+            decision is Reattach.Reopen -> reopen(decision.last)
+            else -> {
+                // Nothing of it is left to show: a terminal screen for a session that is gone gives way to Home's Resume card.
+                val top = NavStack.decode(saved).current
+                if (top is Destination.Terminal && connections.terminal(top.terminalId).let { it == null || it.state.value is SessionState.Closed }) {
+                    navigate(NavStack())
+                }
+            }
+        }
+    }
+
     AppScaffold(fullScreen = current is Destination.Terminal) {
         Box(Modifier.fillMaxSize()) {
             if (!loaded && (current is Destination.HostForm || current is Destination.HostPage)) {
@@ -231,6 +342,7 @@ fun Or2App(
                         openInbox = { navigate(nav.push(Destination.Inbox)) },
                         openKeys = { navigate(nav.push(Destination.Keys)) },
                         connectAll = { connect(connectable.map { it.host }) },
+                        resume = resumeCard, onResume = { resumeLast() },
                     )
                 }
                 Destination.Inbox -> InboxScreen(
@@ -285,6 +397,54 @@ fun Or2App(
         HostTrustDialog(prompt, busy, { actions.approve(active, prompt) }, { actions.reject(active) },
             hostLabel = hosts.find { it.id == active.host.id }?.label ?: active.host.label)
     }
+    offer?.let { pendingOffer ->
+        val prompts = pendingOffer.prompts
+        Or2Dialog(
+            onDismiss = { offer = null }, title = "Reconnect?",
+            confirm = {
+                TextAction("Reconnect", {
+                    offer = null
+                    // Coming back from a terminal that was lost: reopen it once its host is connected again.
+                    last?.takeIf { stoppedOnTerminal && pendingOffer.hosts.any { host -> host.id == it.hostId } }
+                        ?.let { pendingResume = it }
+                    connect(pendingOffer.hosts)
+                }, modifier = Modifier.testTag("reconnect-confirm"))
+            },
+            dismiss = { TextAction("Not now", { offer = null }, color = Or2Colors.Text, modifier = Modifier.testTag("reconnect-dismiss")) },
+            modifier = Modifier.testTag("reconnect-dialog"),
+        ) {
+            Text(
+                "The connection to " + pendingOffer.hosts.joinToString { it.label } + " was lost while the app was away. " +
+                    if (prompts == 1) "Reconnecting asks for your fingerprint once." else "Reconnecting asks for your fingerprint $prompts times, once per key.",
+            )
+        }
+    }
+    if (batteryExplanation) {
+        Or2Dialog(
+            onDismiss = { batteryExplanation = false }, title = "Keep sessions connected",
+            confirm = {
+                TextAction("Allow", { batteryExplanation = false; actions.requestBatteryExemption() }, modifier = Modifier.testTag("battery-allow"))
+            },
+            dismiss = { TextAction("Not now", { batteryExplanation = false }, color = Or2Colors.Text, modifier = Modifier.testTag("battery-dismiss")) },
+            modifier = Modifier.testTag("battery-dialog"),
+        ) {
+            Text(
+                "Android may stop or slow or2 while it is in the background and drop your sessions. " +
+                    "Allow or2 to ignore battery optimisation so they stay connected. This is asked only once.",
+            )
+        }
+    }
+}
+
+/** The Home card for the last terminal: what it was and how it was reached. */
+private fun resumeCardOf(last: LastTerminal, hosts: List<Host>): HomeResume? {
+    val host = hosts.find { it.id == last.hostId } ?: return null
+    val what = when (val target = last.target) {
+        TerminalTarget.Shell -> "shell"
+        is TerminalTarget.Tmux -> "tmux ${target.sessionName}"
+        is TerminalTarget.Herdr -> "herdr" + (target.paneId?.let { " $it" } ?: "")
+    }
+    return HomeResume("${host.label}: $what", last.transport.name.lowercase().replaceFirstChar { it.uppercase() })
 }
 
 /** The cwd herdr reports for the pane this terminal is attached to, if the inbox knows it. */

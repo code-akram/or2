@@ -53,7 +53,7 @@ class HomeUiDeviceTest {
 
     private fun show(
         hosts: List<HostCard>, sessions: List<HomeSession> = emptyList(), keyCount: Int = 1, blocked: Int = 0, working: Int = 0,
-        canConnectAll: Boolean = false, busy: Boolean = false,
+        canConnectAll: Boolean = false, busy: Boolean = false, resume: HomeResume? = null,
     ) = compose.runOnUiThread {
         compose.activity.setContent {
             Or2Theme {
@@ -63,6 +63,7 @@ class HomeUiDeviceTest {
                     addHost = { calls += "add" }, editHost = { calls += "edit:${it.id}" }, connectHost = { calls += "connect:${it.id}" },
                     disconnectHost = { calls += "disconnect:${it.id}" }, deleteHost = { calls += "delete:${it.id}" },
                     openInbox = { calls += "inbox" }, openKeys = { calls += "keys" }, connectAll = { calls += "all" },
+                    resume = resume, onResume = { calls += "resume" },
                 )
             }
         }
@@ -201,5 +202,21 @@ class HomeUiDeviceTest {
             assertEquals(1, session.closes)
             assertTrue(holder.terminals.value.isEmpty())
         }
+    }
+
+    @Test
+    fun theResumeCardNamesWhereTheUserWasAndTapResumesIt() {
+        show(listOf(card(one, null)), resume = HomeResume("Alpha: herdr w1:p2", "Mosh"))
+        compose.onNodeWithTag("home-resume").assertIsDisplayed()
+        compose.onNodeWithText("Alpha: herdr w1:p2").assertIsDisplayed()
+        compose.onNodeWithText("Mosh").assertIsDisplayed()
+        compose.onNodeWithTag("home-resume").performClick()
+        compose.runOnIdle { assertEquals(listOf("resume"), calls) }
+    }
+
+    @Test
+    fun withNothingToResumeThereIsNoResumeCard() {
+        show(listOf(card(one, HostState.Connected(0u))))
+        compose.onNodeWithTag("home-resume").assertDoesNotExist()
     }
 }

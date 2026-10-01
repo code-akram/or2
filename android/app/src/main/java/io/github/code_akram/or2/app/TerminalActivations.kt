@@ -83,6 +83,36 @@ class TerminalActivations(private val connections: HostConnections, private val 
         else Activation.Failed("That terminal is no longer open.")
     }
 
+    /**
+     * Reattach: reopens the terminal the user last had on a connected host. A herdr pane is focused
+     * first, exactly as for an inbox tap; an open terminal for the same target is reused. The
+     * capability probe is awaited briefly so AUTO can still choose mosh right after connecting, and
+     * [LastTerminal.transport] is what the target had before.
+     */
+    suspend fun reopen(last: LastTerminal, hostLabel: String): Activation {
+        val active = connections.host(last.hostId) ?: return Activation.Failed("$hostLabel is no longer connected.")
+        try {
+            connections.awaitCapabilities(active)
+            val target = last.target
+            (target as? TerminalTarget.Herdr)?.paneId?.let { connections.focusHerdrPane(active, target.session, it) }
+            connections.findOpenTerminal(last.hostId, target)?.let { return Activation.Ready(it) }
+            return Activation.Ready(connections.openTerminal(active, target, last.transport))
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            return Activation.Failed(focusMessage(error))
+        }
+    }
+
+    fun launchReopen(last: LastTerminal, hostLabel: String, done: (Activation) -> Unit) {
+        val title = when (val target = last.target) {
+            TerminalTarget.Shell -> "shell"
+            is TerminalTarget.Tmux -> "tmux ${target.sessionName}"
+            is TerminalTarget.Herdr -> "herdr" + (target.paneId?.let { " $it" } ?: "")
+        }
+        launch("Resuming $hostLabel: $title", done) { reopen(last, hostLabel) }
+    }
+
     fun launchOpenAgent(hostId: Long, hostLabel: String, session: String?, paneId: String, done: (Activation) -> Unit) =
         launch("Focusing $hostLabel: herdr $paneId", done) { openAgent(hostId, hostLabel, session, paneId) }
 

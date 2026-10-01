@@ -1,7 +1,15 @@
 package io.github.code_akram.or2
 
+import android.Manifest
+import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -50,9 +58,15 @@ class MainActivity : FragmentActivity() {
     private val app get() = application as Or2Application
     private lateinit var model: AppViewModel
     private var busy by mutableStateOf(false)
+    private var afterNotificationAnswer: (() -> Unit)? = null
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        // Granted or not, connecting goes on: the service runs without its notification being visible.
+        afterNotificationAnswer?.also { afterNotificationAnswer = null }?.invoke()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        app.watchConnections()
         enableEdgeToEdge(
             // Dark only: transparent bars with light icons over the app's own background.
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
@@ -73,6 +87,9 @@ class MainActivity : FragmentActivity() {
             approve = { active, prompt -> operation { app.connections.approve(active, prompt) } },
             reject = { active -> operation { app.connections.reject(active) } },
             message = model::message,
+            reattach = app.reattach,
+            battery = app.battery,
+            requestBatteryExemption = ::requestBatteryExemption,
         )
         setContent {
             val hosts by model.hosts.collectAsStateWithLifecycle()
@@ -143,7 +160,32 @@ class MainActivity : FragmentActivity() {
         }
     }
 
-    private fun connect(hosts: List<Host>) = operation { connectGrouped(hosts, app.connections, biometricUnlocker) }
+    /** The first connection asks for `POST_NOTIFICATIONS` (Android 13+), once; then connects either way. */
+    private fun connect(hosts: List<Host>) {
+        val granted = checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        if (app.notificationPolicy.shouldAsk(Build.VERSION.SDK_INT, granted)) {
+            app.notificationPolicy.markAsked()
+            afterNotificationAnswer = { startConnect(hosts) }
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            startConnect(hosts)
+        }
+    }
+
+    private fun startConnect(hosts: List<Host>) = operation { connectGrouped(hosts, app.connections, biometricUnlocker) }
+
+    /**
+     * The system's own "let this app ignore battery optimisations?" dialog; shown only after our
+     * explanation. Play Store policy restricts this request; or2 ships through F-Droid.
+     */
+    @SuppressLint("BatteryLife", "UseKtx")
+    private fun requestBatteryExemption() {
+        try {
+            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+        } catch (_: ActivityNotFoundException) {
+            // No such screen on this device; the explanation was the one and only ask.
+        }
+    }
 
     /** One strong-biometric prompt per call; the decrypted array is wiped when the block ends. */
     private val biometricUnlocker = object : KeyUnlocker {

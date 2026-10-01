@@ -2,6 +2,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <!-- Network changes: ConnectivityManager's default-network callback roams mosh and probes SSH. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- ConnectionService: keeps connections alive while any host or session is open. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Its ongoing notification (Android 13+; the service runs without it, asked once). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- One-time, explained request so sessions are not killed in the background. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <application
         android:name=".app.Or2Application"
         android:allowBackup="false"
@@ -18,5 +27,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- specialUse: an interactive SSH/mosh client has no matching foreground-service category.
+             It holds user-opened terminal connections open while the app is in the background. -->
+        <service
+            android:name=".service.ConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps user-opened SSH and mosh terminal sessions connected while the app is in the background" />
+        </service>
     </application>
 </manifest>
