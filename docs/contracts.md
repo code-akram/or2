@@ -2354,6 +2354,10 @@ letters, digits, `.`, `_`, `-` (at most 32 characters; the same text is shown at
 cannot inject terminal escapes or a second line), the date in the comment is UTC, a missing final newline is
 repaired, the backup is `authorized_keys.or2-backup-<UTC date>-<time>` (mode 0600, never overwrites an
 earlier one), and a key already present (any options, any comment) changes nothing, not even a backup.
+"Already present" means an *entry* whose parsed key type and decoded key data equal the key's: each line is
+read as `[options] keytype base64 [comment]` (options may hold quoted whitespace and `\"`), comment lines and
+malformed lines (an unterminated quote, no key data) are ignored, and a key that merely appears in another
+entry's comment or in a quoted option is not an authorization, so pairing it adds it.
 
 **`authorized_keys` is written through checked handles (Unix).** The home directory is opened once; `~/.ssh`
 and the file are opened relative to it with `O_NOFOLLOW` (and `O_DIRECTORY` for `~/.ssh`), never by path

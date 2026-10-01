@@ -74,20 +74,67 @@ pub fn line_for(key: &KeyLine, device: &str, date: &str) -> String {
     format!("{OPTIONS} {} or2-{device}-{date}", key.openssh())
 }
 
-/// Whether some line of `contents` carries `key` (any options before it, any comment after it).
+/// Whether some entry of `contents` authorizes `key`: its parsed key type and key data equal
+/// the key's, whatever options precede it and whatever comment follows. Text elsewhere on a line
+/// (a comment that mentions a key, a quoted option) is not an authorization, exactly as sshd
+/// reads the file.
 pub fn contains(contents: &[u8], key: &KeyLine) -> bool {
-    let text = String::from_utf8_lossy(contents);
-    let blob = key.base64();
-    text.lines().any(|line| {
-        let line = line.trim();
-        if line.starts_with('#') {
-            return false;
+    contents
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| entry_key(&String::from_utf8_lossy(line)))
+        .any(|(algorithm, blob)| algorithm == key.algorithm() && blob == key.blob())
+}
+
+/// Whether `token` names a public key type (sshd tells the key from the options this way: an
+/// options field never starts like one).
+fn is_key_type(token: &str) -> bool {
+    token.starts_with("ssh-")
+        || token.starts_with("ecdsa-sha2-")
+        || token.starts_with("sk-")
+        || token.ends_with("-cert-v01@openssh.com")
+}
+
+/// The key type and decoded key data of one `authorized_keys` line, or `None` for a blank line,
+/// a comment, or a line that is not a well-formed entry (an unterminated quote in the options,
+/// no key data, key data that is not base64).
+///
+/// A line is `[options] keytype base64 [comment]`. The options are comma-separated and may
+/// contain whitespace inside double quotes (with `\"` for a quote inside quotes); the field ends
+/// at the first whitespace outside quotes.
+fn entry_key(line: &str) -> Option<(String, Vec<u8>)> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let mut rest = line;
+    if !is_key_type(rest.split_whitespace().next()?) {
+        // An options field: skip it, quotes and all.
+        let mut quoted = false;
+        let mut escaped = false;
+        let mut end = None;
+        for (index, c) in rest.char_indices() {
+            if escaped {
+                escaped = false;
+            } else if quoted && c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                quoted = !quoted;
+            } else if !quoted && c.is_whitespace() {
+                end = Some(index);
+                break;
+            }
         }
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        tokens
-            .windows(2)
-            .any(|pair| pair[0] == key.algorithm() && pair[1] == blob)
-    })
+        // No whitespace outside quotes: options and nothing after them. An unterminated quote
+        // runs to the end of the line, so it ends up here as well.
+        rest = rest[end?..].trim_start();
+    }
+    let mut fields = rest.split_whitespace();
+    let algorithm = fields.next().filter(|token| is_key_type(token))?;
+    let blob = STANDARD.decode(fields.next()?.as_bytes()).ok()?;
+    Some((algorithm.to_owned(), blob))
 }
 
 fn refuse(message: impl Into<String>) -> io::Error {
@@ -880,6 +927,94 @@ mod tests {
             &key(ED25519)
         ));
         assert!(!contains(format!("{OTHER}\n").as_bytes(), &key(ED25519)));
+    }
+
+    // --- Finding 10: duplicates are the parsed key of an entry, not text anywhere on a line ---
+
+    #[test]
+    fn a_key_in_another_keys_comment_or_options_is_not_authorized() {
+        let a = ED25519;
+        let b = OTHER;
+        for (what, line) in [
+            ("a comment", format!("{a} migration note: was {b}")),
+            ("a comment with options", format!("no-pty {a} also {b} x")),
+            ("a quoted option", format!("command=\"echo {b}\" {a}")),
+            (
+                "an escaped quote in an option",
+                format!("command=\"say \\\" {b} \\\"\",no-pty {a} c"),
+            ),
+            ("tabs between fields", format!("{a}\tc\t{b}")),
+            ("a commented-out line", format!("# {b}")),
+            ("an indented comment", format!("   # {b}")),
+            (
+                "a certificate for another key type",
+                format!("ssh-ed25519-cert-v01@openssh.com {b}"),
+            ),
+            (
+                "an unterminated quote",
+                format!("command=\"never closed {b}"),
+            ),
+            ("just the algorithm", "ssh-ed25519".to_owned()),
+        ] {
+            let contents = format!("{line}\n");
+            assert!(
+                !contains(contents.as_bytes(), &key(b)),
+                "{what}: {line:?} was taken for an authorization of the second key"
+            );
+        }
+        // The key that really is the entry's key still counts, however it is dressed.
+        assert!(contains(
+            format!("{OPTIONS} {a} note: {b}\n").as_bytes(),
+            &key(a)
+        ));
+    }
+
+    #[test]
+    fn an_entry_counts_for_its_own_key_whatever_precedes_and_follows_it() {
+        let a = ED25519;
+        for line in [
+            a.to_owned(),
+            format!("  {a}"),
+            format!("{a} comment with spaces"),
+            format!("{a}\r"),
+            format!("from=\"10.0.0.0/8,*.lan\" {a} c"),
+            format!("command=\"/bin/true a b\",no-pty,environment=\"K=V W\" {a}"),
+            format!("command=\"say \\\"hi\\\"\" {a}"),
+            format!("restrict,port-forwarding\t{a}"),
+        ] {
+            assert!(
+                contains(format!("x\n{line}\ny\n").as_bytes(), &key(a)),
+                "{line:?} is an entry for the key"
+            );
+        }
+    }
+
+    #[test]
+    fn pairing_a_key_that_only_a_comment_mentions_adds_it() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        let before = format!("{ED25519} migrate to {OTHER} later\n");
+        fs::write(path(home.path()), &before).unwrap();
+        let added = add(home.path(), &key(OTHER), "phone", at()).unwrap();
+        assert!(
+            matches!(
+                added,
+                Added::Added {
+                    backup: Some(_),
+                    ..
+                }
+            ),
+            "{added:?}"
+        );
+        let after = fs::read_to_string(path(home.path())).unwrap();
+        assert!(after.starts_with(&before));
+        assert!(
+            after
+                .lines()
+                .last()
+                .unwrap()
+                .contains(&format!("{OTHER} or2-phone-"))
+        );
     }
 
     #[test]

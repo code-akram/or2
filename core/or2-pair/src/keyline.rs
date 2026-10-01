@@ -64,6 +64,11 @@ impl KeyLine {
         STANDARD.encode(&self.blob)
     }
 
+    /// The decoded key data.
+    pub fn blob(&self) -> &[u8] {
+        &self.blob
+    }
+
     /// `<algorithm> <base64>`.
     pub fn openssh(&self) -> String {
         format!("{} {}", self.algorithm, self.base64())
