@@ -4,7 +4,13 @@ import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.TrustStore
 import io.github.code_akram.or2.ffi.AgentStatus
+import io.github.code_akram.or2.data.TransportPref
+import io.github.code_akram.or2.ffi.ClientKeyMaterial
 import io.github.code_akram.or2.ffi.CloseReason
+import io.github.code_akram.or2.ffi.LinkHealth
+import io.github.code_akram.or2.ffi.TerminalTransport
+import io.github.code_akram.or2.ffi.networkChanged
+import kotlinx.coroutines.launch
 import io.github.code_akram.or2.ffi.HerdrState
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.PublicKeyInfo
@@ -159,6 +165,77 @@ class HostConnectionsProbeTest {
                     holder.reject(changed)
                     withTimeout(5000) { changed.state.first { it is HostState.Closed } }
                     assertEquals(1, store.replacements) // Reject never overwrites the old trust.
+                } finally { key.privateKey.fill(0); holder.release(host.id, closeTerminals = true) }
+            }
+        }
+    }
+
+    private fun TerminalFrame.rowText(index: Int) =
+        changedRows.single { it.index.toInt() == index }.cells.joinToString("") { it.text }.trimEnd()
+
+    /** Connects [host] to the probe and returns its connection, probed and connected. */
+    private suspend fun connectedProbe(holder: HostConnections, host: Host, key: ClientKeyMaterial): ActiveHost {
+        holder.connect(host, key.privateKey.copyOf())
+        val active = holder.host(host.id)!!
+        val prompt = withTimeout(5000) { active.state.first { it is HostState.AwaitingHostKeyDecision } } as HostState.AwaitingHostKeyDecision
+        holder.approve(active, prompt)
+        withTimeout(5000) { active.state.first { it is HostState.Connected } }
+        withTimeout(5000) { active.capabilities.first { it != null } }
+        return active
+    }
+
+    @Test
+    fun autoOpensMoshAgainstTheProbeWithItsHealthSequenceAndRoamsOnNetworkChanged() = runBlocking<Unit> {
+        Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { main ->
+            withContext(main) {
+                val store = Store()
+                val holder = HostConnections(probe, store, main)
+                val key = generateEd25519Key("probe")
+                val host = testHost(addresses = listOf(HostEndpoint("probe.invalid", 22)))
+                try {
+                    val active = connectedProbe(holder, host, key)
+                    assertEquals("/usr/bin/mosh-server", active.capabilities.value!!.moshServer)
+
+                    val health = mutableListOf<LinkHealth>()
+                    val mosh = holder.openTerminal(active, TerminalTarget.Tmux("work"))
+                    val collector = launch { mosh.linkHealth.collect { it?.let(health::add) } }
+                    assertEquals(TerminalTransport.MOSH, mosh.transport.value) // AUTO, and mosh-server was probed.
+                    assertEquals(TerminalTransport.MOSH, mosh.handle.value!!.transport())
+                    withTimeout(5000) { mosh.state.first { it == SessionState.Connected } }
+                    withTimeout(5000) { mosh.linkHealth.first { it?.sinceHeardMs == 400uL } }
+                    collector.cancel()
+                    // Stale in the middle (past the 5 s grey-out), recovered at the end.
+                    assertEquals(listOf(300uL, 6000uL, 400uL), health.map { it.sinceHeardMs })
+                    assertEquals(listOf("Last heard 6 s ago"), health.mapNotNull(::linkStaleLabel))
+                    assertNull(linkStaleLabel(mosh.linkHealth.value))
+
+                    withTimeout(5000) { mosh.frameReady.first() }
+                    mosh.handle.value!!.takeFrame()
+                    networkChanged() // What the service's debounced callback calls.
+                    withTimeout(5000) { mosh.frameReady.first() }
+                    assertEquals("roams 1", mosh.handle.value!!.takeFrame()!!.rowText(2))
+
+                    holder.disconnect(host.id)
+                    withTimeout(5000) { active.state.first { it is HostState.Closed } }
+                } finally { key.privateKey.fill(0); holder.release(host.id, closeTerminals = true) }
+            }
+        }
+    }
+
+    @Test
+    fun aHostPreferringSshGetsSshAgainstTheProbeEvenThoughMoshServerExists() = runBlocking<Unit> {
+        Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { main ->
+            withContext(main) {
+                val store = Store()
+                val holder = HostConnections(probe, store, main)
+                val key = generateEd25519Key("probe")
+                val host = testHost(addresses = listOf(HostEndpoint("probe.invalid", 22)), transport = TransportPref.SSH)
+                try {
+                    val active = connectedProbe(holder, host, key)
+                    val shell = holder.openTerminal(active, TerminalTarget.Shell)
+                    assertEquals(TerminalTransport.SSH, shell.transport.value)
+                    withTimeout(5000) { shell.state.first { it == SessionState.Connected } }
+                    assertNull(shell.linkHealth.value)
                 } finally { key.privateKey.fill(0); holder.release(host.id, closeTerminals = true) }
             }
         }

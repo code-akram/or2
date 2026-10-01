@@ -44,10 +44,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.code_akram.or2.connection.ActiveTerminal
 import io.github.code_akram.or2.connection.HostConnections
+import io.github.code_akram.or2.connection.linkStaleLabel
+import io.github.code_akram.or2.ffi.LinkHealth
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.terminal.TerminalScreen
 import io.github.code_akram.or2.terminal.Transport
-import io.github.code_akram.or2.terminal.transport
+import io.github.code_akram.or2.terminal.display
 import io.github.code_akram.or2.ui.Badge
 import io.github.code_akram.or2.ui.GroupCard
 import io.github.code_akram.or2.ui.GroupDivider
@@ -97,21 +99,24 @@ fun SessionScreen(
         val state by terminal.state.collectAsStateWithLifecycle()
         val handle by terminal.handle.collectAsStateWithLifecycle()
         val hasConnected by terminal.hasConnected.collectAsStateWithLifecycle()
+        val transport by terminal.transport.collectAsStateWithLifecycle()
+        val linkHealth by terminal.linkHealth.collectAsStateWithLifecycle()
+        val note by terminal.note.collectAsStateWithLifecycle()
         val closed = state is SessionState.Closed
         val endSession = { if (closed) { holder.dismissTerminal(terminal); minimise() } else holder.disconnectTerminal(terminal) }
         var switcher by remember { mutableStateOf(false) }
         // The card follows the terminal's own background, which the remote can change (OSC 11).
         var background by remember { mutableStateOf(Or2Colors.TerminalBackground) }
         if (hasConnected) {
-            TerminalCard(terminalTitle(terminal), terminal.transport(), state, minimise, openSwitcher = { switcher = true }, endSession,
-                background = background) {
+            TerminalCard(terminalTitle(terminal), transport.display(), state, minimise, openSwitcher = { switcher = true }, endSession,
+                background = background, linkHealth = linkHealth, note = note) {
                 // Keep the borrowed handle composed through Closed so its final frame stays visible.
                 handle?.let { TerminalScreen(it, terminal.state, terminal.frameReady, Modifier.weight(1f),
                     composerHint = "Message " + terminal.host.label + "…", openPanes = { switcher = true },
                     onBackground = { background = it }) }
             }
         } else {
-            PendingTerminal(terminal, state, closed, endSession, minimise, open, select)
+            PendingTerminal(terminal, state, closed, endSession, minimise, open, select, note)
         }
         if (switcher) {
             SessionSwitcher(terminal, open, closed, select = { switcher = false; select(it) }, endSession = { switcher = false; endSession() },
@@ -120,12 +125,19 @@ fun SessionScreen(
     }
 }
 
-/** The full-height card: drag handle, header row (mono [title], [transport] badge), and the terminal below. */
+/**
+ * The full-height card: drag handle, header row (mono [title], [transport] badge), and the terminal
+ * below. A mosh session that has not heard from the server for more than five seconds
+ * ([linkHealth]) greys its badge and says how long ago; [note] is a muted explanation (AUTO fell
+ * back to SSH).
+ */
 @Composable
 fun TerminalCard(
     title: String, transport: Transport, state: SessionState, minimise: () -> Unit, openSwitcher: () -> Unit, endSession: () -> Unit,
-    modifier: Modifier = Modifier, background: Color = Or2Colors.TerminalBackground, content: @Composable ColumnScope.() -> Unit,
+    modifier: Modifier = Modifier, background: Color = Or2Colors.TerminalBackground, linkHealth: LinkHealth? = null, note: String? = null,
+    content: @Composable ColumnScope.() -> Unit,
 ) {
+    val stale = linkStaleLabel(linkHealth)
     var dragY by remember { mutableFloatStateOf(0f) }
     val threshold = with(LocalDensity.current) { 96.dp.toPx() }
     Column(
@@ -156,9 +168,17 @@ fun TerminalCard(
                         title, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, maxLines = 1,
                         overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(horizontal = 4.dp).testTag("terminal-title"),
                     )
-                    TransportBadge(transport, Modifier.padding(end = 12.dp), small = true)
+                    TransportBadge(transport, Modifier.padding(end = 12.dp).testTag("terminal-transport"), small = true, stale = stale != null)
                 }
             }
+        }
+        if (stale != null) {
+            Text(stale, style = Or2Type.MonoSmall, color = Or2Colors.Attention,
+                modifier = Modifier.padding(horizontal = Or2Dimens.Gutter).testTag("terminal-link"))
+        }
+        if (note != null) {
+            Text(note, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted,
+                modifier = Modifier.padding(horizontal = Or2Dimens.Gutter).testTag("terminal-note"))
         }
         if (state !is SessionState.Connected) {
             Row(Modifier.fillMaxWidth().padding(horizontal = Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
@@ -186,9 +206,16 @@ private fun RoundHeaderButton(icon: ImageVector, description: String, color: Col
     }
 }
 
-/** `SSH` in a `surfaceTrack` pill with 70 % text (it sits on the terminal), `Mosh` in a saturated teal one. */
+/**
+ * `SSH` in a `surfaceTrack` pill with 70 % text (it sits on the terminal), `Mosh` in a saturated teal one.
+ * [stale] (no word from the server for a while) greys either into the `SSH` look with muted text.
+ */
 @Composable
-fun TransportBadge(transport: Transport, modifier: Modifier = Modifier, small: Boolean = false) {
+fun TransportBadge(transport: Transport, modifier: Modifier = Modifier, small: Boolean = false, stale: Boolean = false) {
+    if (stale) {
+        Badge(transport.label, modifier, container = Or2Colors.SurfaceTrack, content = Or2Colors.TextMuted, small = small)
+        return
+    }
     when (transport) {
         Transport.SSH -> Badge(transport.label, modifier, container = Or2Colors.SurfaceTrack, content = Or2Colors.Text.copy(alpha = 0.7f), small = small)
         Transport.MOSH -> Badge(transport.label, modifier, container = Or2Colors.Teal, content = Or2Colors.Background, small = small)
@@ -199,13 +226,14 @@ fun TransportBadge(transport: Transport, modifier: Modifier = Modifier, small: B
 @Composable
 private fun PendingTerminal(
     terminal: ActiveTerminal, state: SessionState, closed: Boolean, endSession: () -> Unit, minimise: () -> Unit,
-    open: List<ActiveTerminal>, select: (ActiveTerminal) -> Unit,
+    open: List<ActiveTerminal>, select: (ActiveTerminal) -> Unit, note: String? = null,
 ) {
     Column(Modifier.fillMaxSize()) {
         TopBar(title = terminal.host.label, back = minimise, backIcon = Or2Icons.ChevronDown)
         Column(Modifier.padding(horizontal = Or2Dimens.Gutter), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(terminal.title + " · " + sessionMessage(state), style = Or2Type.Mono, color = Or2Colors.TextMuted,
                 modifier = Modifier.testTag("terminal-status"))
+            if (note != null) Text(note, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.testTag("terminal-note"))
             PillButton(if (closed) "Close session" else "Disconnect", endSession, Modifier.testTag("terminal-end"))
             if (open.size > 1) SessionList(terminal, open, select)
         }

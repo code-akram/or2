@@ -2,7 +2,9 @@ package io.github.code_akram.or2.connection
 
 import io.github.code_akram.or2.app.TerminalActivations
 import io.github.code_akram.or2.data.Host
+import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.data.TrustStore
+import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HerdrListener
 import io.github.code_akram.or2.ffi.HerdrState
 import io.github.code_akram.or2.ffi.HerdrUnavailable
@@ -33,8 +35,12 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 
 /**
@@ -106,6 +112,12 @@ class ActiveHost internal constructor(val host: Host) {
     internal var destroyed = false
     internal var disconnectRequested = false
 
+    /**
+     * Set when mosh failed on this connection under AUTO (UDP blocked, no `mosh-server`): later
+     * AUTO terminals on it go straight to SSH. The note explains why, in muted text.
+     */
+    internal var moshFallbackNote: String? = null
+
     /** Whether herdr watches should run: the host's inbox flag, which can change on a live connection. */
     internal var watching = host.showInInbox
     val state = mutableState.asStateFlow()
@@ -120,6 +132,16 @@ class ActiveHost internal constructor(val host: Host) {
 
     /** True until the host has closed; a live host is never connected a second time. */
     val isLive get() = mutableState.value !is HostState.Closed && !disconnectRequested
+
+    /**
+     * The SSH connection was up and then failed (network loss, a reset): worth offering a
+     * reconnect. A deliberate disconnect, a remote exit and a connect that never succeeded are not.
+     */
+    val wasLost: Boolean
+        get() {
+            val state = mutableState.value
+            return mutableHasConnected.value && !disconnectRequested && state is HostState.Closed && state.reason is CloseReason.Failed
+        }
 }
 
 /** One terminal session on a host connection. Several may be open per host. */
@@ -128,14 +150,32 @@ class ActiveTerminal internal constructor(val id: Long, val host: Host, val targ
     internal val mutableHasConnected = MutableStateFlow(false)
     internal val mutableFrames = MutableSharedFlow<Unit>(replay = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     internal val mutableHandle = MutableStateFlow<SessionInterface?>(null)
+    internal val mutableTransport = MutableStateFlow(TerminalTransport.SSH)
+    internal val mutableLinkHealth = MutableStateFlow<LinkHealth?>(null)
+    internal val mutableNote = MutableStateFlow<String?>(null)
     internal var displays = 0
     internal var retired = false
     internal var destroyed = false
     internal var disconnectRequested = false
+
+    /** Which session object's callbacks count: a fallback to SSH replaces the handle and bumps this. */
+    internal var attempt = 0
+
+    /** AUTO chose mosh, so a `TimedOut` or `NotInstalled` before the first frame retries over SSH. */
+    internal var fallbackEligible = false
     val state = mutableState.asStateFlow()
     val hasConnected = mutableHasConnected.asStateFlow()
     val frameReady = mutableFrames.asSharedFlow()
     val handle = mutableHandle.asStateFlow()
+
+    /** The transport the session really runs over (the handle's own answer), SSH after a fallback. */
+    val transport = mutableTransport.asStateFlow()
+
+    /** Mosh only: the latest link health, null before the first report. */
+    val linkHealth = mutableLinkHealth.asStateFlow()
+
+    /** A muted explanation (AUTO fell back to SSH), or null. */
+    val note = mutableNote.asStateFlow()
 
     /** Short label for the session switcher. */
     val title: String
@@ -144,6 +184,12 @@ class ActiveTerminal internal constructor(val id: Long, val host: Host, val targ
             is TerminalTarget.Tmux -> "tmux ${target.sessionName}"
             is TerminalTarget.Herdr -> "herdr" + (target.session?.let { " $it" } ?: "") + (target.paneId?.let { " $it" } ?: "")
         }
+}
+
+/** The user's own closing of a host or terminal (disconnect, close, delete, remote shell exit). */
+interface UserCloseListener {
+    fun hostClosed(hostId: Long)
+    fun terminalClosed(hostId: Long, target: TerminalTarget)
 }
 
 /**
@@ -161,6 +207,9 @@ class HostConnections(
     private val worker: CoroutineDispatcher = Dispatchers.Default,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + main)
+
+    /** Told when the user (not the network) ends a host or terminal, so reattach forgets it. */
+    var userClose: UserCloseListener? = null
     private val mutableHosts = MutableStateFlow<Map<Long, ActiveHost>>(emptyMap())
     private val mutableTerminals = MutableStateFlow<List<ActiveTerminal>>(emptyList())
     private var nextTerminalId = 1L
@@ -288,6 +337,7 @@ class HostConnections(
     /** Ends the connection; its terminals and watches close, and the closed state stays visible. */
     fun disconnect(hostId: Long) {
         val current = mutableHosts.value[hostId] ?: return
+        userClose?.hostClosed(hostId)
         current.disconnectRequested = true
         current.mutablePort.value?.disconnect()
     }
@@ -305,7 +355,10 @@ class HostConnections(
      */
     fun release(hostId: Long, closeTerminals: Boolean) {
         dismissHost(hostId)
-        if (closeTerminals) mutableTerminals.value.filter { it.host.id == hostId }.forEach(::dismissTerminal)
+        if (closeTerminals) {
+            userClose?.hostClosed(hostId)
+            mutableTerminals.value.filter { it.host.id == hostId }.forEach(::dismissTerminal)
+        }
     }
 
     private fun retireHost(current: ActiveHost) {
@@ -436,42 +489,123 @@ class HostConnections(
 
     // --- terminals ----------------------------------------------------------------------
 
-    /** Call on main. Opens a terminal on a connected host; throws [HostException] if it cannot. */
-    fun openTerminal(current: ActiveHost, target: TerminalTarget): ActiveTerminal {
+    /**
+     * Call on main. Opens a terminal on a connected host; throws [HostException] if it cannot.
+     * The transport follows the host's preference ([chooseTransport]); [remembered] is the transport
+     * the same target had before (reattach). Under AUTO a mosh terminal that fails with `TimedOut`
+     * or `NotInstalled` before it connected is retried over SSH on the same [ActiveTerminal].
+     */
+    fun openTerminal(current: ActiveHost, target: TerminalTarget, remembered: TerminalTransport? = null): ActiveTerminal {
         if (!owns(current) || current.retired) throw HostException.Closed()
         val port = current.mutablePort.value ?: throw HostException.NotConnected()
+        val pref = current.host.transport
+        val moshServer = current.capabilities.value?.moshServer
+        val choice = chooseTransport(pref, moshServer, current.moshFallbackNote != null, remembered)
         val terminal = ActiveTerminal(nextTerminalId, current.host, target)
-        val listener = object : SessionListener {
-            override fun onStateChanged(state: SessionState) {
-                scope.launch {
-                    // Preserve a transient Connected even if the UI observes only Closed.
-                    if (state == SessionState.Connected) terminal.mutableHasConnected.value = true
-                    terminal.mutableState.value = state
-                }
-            }
-
-            override fun onFrameReady() {
-                scope.launch { terminal.mutableFrames.emit(Unit) }
-            }
-
-            // Link health is mosh-only; the SSH transport is the only one the app opens so far.
-            override fun onLinkHealth(health: LinkHealth) = Unit
+        terminal.fallbackEligible = pref == TransportPref.AUTO && choice == TerminalTransport.MOSH
+        if (pref == TransportPref.AUTO && moshServer != null && choice == TerminalTransport.SSH) {
+            terminal.mutableNote.value = current.moshFallbackNote
         }
-        val session = port.openTerminal(target, TerminalTransport.SSH, 80u, 24u, listener)
+        val session = port.openTerminal(target, choice, 80u, 24u, sessionListener(terminal, current, attempt = 0))
         nextTerminalId++
+        terminal.mutableTransport.value = session.transport()
         terminal.mutableHandle.value = session
         mutableTerminals.value += terminal
         return terminal
     }
 
+    private fun sessionListener(terminal: ActiveTerminal, current: ActiveHost, attempt: Int) = object : SessionListener {
+        override fun onStateChanged(state: SessionState) {
+            scope.launch { sessionState(terminal, current, attempt, state) }
+        }
+
+        override fun onFrameReady() {
+            scope.launch { if (attempt == terminal.attempt) terminal.mutableFrames.emit(Unit) }
+        }
+
+        override fun onLinkHealth(health: LinkHealth) {
+            scope.launch { if (attempt == terminal.attempt) terminal.mutableLinkHealth.value = health }
+        }
+    }
+
+    private fun sessionState(terminal: ActiveTerminal, current: ActiveHost, attempt: Int, state: SessionState) {
+        // A replaced session (the mosh attempt after a fallback) is over; nothing it says counts.
+        if (attempt != terminal.attempt) return
+        if (state is SessionState.Closed && fallBackToSsh(terminal, current, state)) return
+        // Preserve a transient Connected even if the UI observes only Closed.
+        if (state == SessionState.Connected) terminal.mutableHasConnected.value = true
+        terminal.mutableState.value = state
+        // A shell the user exited is over: reattach must not offer it again.
+        if (state is SessionState.Closed && state.reason is CloseReason.RemoteExited) {
+            userClose?.terminalClosed(terminal.host.id, terminal.target)
+        }
+    }
+
+    /** Returns true when the mosh attempt was replaced by an SSH one (the closed state is not shown). */
+    private fun fallBackToSsh(terminal: ActiveTerminal, current: ActiveHost, state: SessionState.Closed): Boolean {
+        val failure = (state.reason as? CloseReason.Failed)?.failure ?: return false
+        if (!terminal.fallbackEligible || !isMoshFallback(failure) || terminal.mutableHasConnected.value) return false
+        if (terminal.disconnectRequested || terminal.retired || !owns(current) || current.retired) return false
+        val port = current.mutablePort.value ?: return false
+        val previous = terminal.mutableHandle.value
+        val previousAttempt = terminal.attempt
+        val note = moshFallbackNote(failure)
+        terminal.attempt = previousAttempt + 1
+        terminal.fallbackEligible = false
+        terminal.mutableState.value = SessionState.Connecting
+        try {
+            val session = port.openTerminal(terminal.target, TerminalTransport.SSH, 80u, 24u,
+                sessionListener(terminal, current, terminal.attempt))
+            current.moshFallbackNote = note
+            terminal.mutableNote.value = note
+            terminal.mutableLinkHealth.value = null
+            terminal.mutableTransport.value = session.transport()
+            terminal.mutableHandle.value = session
+        } catch (error: HostException) {
+            // The retry could not even start (the host is gone): show the mosh failure as it was.
+            terminal.attempt = previousAttempt
+            terminal.mutableState.value = state
+            return true
+        }
+        // The old object has nothing left to say; release it once its observers have moved on.
+        if (previous != null) scope.launch { yield(); (previous as? AutoCloseable)?.close() }
+        return true
+    }
+
+    /**
+     * Waits (at most [timeoutMs]) for the capability probe of [current], so a terminal opened
+     * right after connecting can choose mosh. Returns at once when the probe has answered.
+     */
+    suspend fun awaitCapabilities(current: ActiveHost, timeoutMs: Long = 3_000) {
+        if (current.capabilities.value != null || current.capabilitiesError.value != null) return
+        withTimeoutOrNull(timeoutMs) {
+            merge(current.capabilities, current.capabilitiesError).filterNotNull().first()
+        }
+    }
+
+    /** The user ends this terminal. */
     fun disconnectTerminal(terminal: ActiveTerminal) {
+        userClose?.terminalClosed(terminal.host.id, terminal.target)
         terminal.disconnectRequested = true
         terminal.mutableHandle.value?.disconnect()
+    }
+
+    /** True while any terminal has not closed: the foreground service and the battery prompt care. */
+    fun hasOpenSession(): Boolean = mutableTerminals.value.any { !it.retired && it.state.value !is SessionState.Closed }
+
+    /**
+     * The notification's "Disconnect all": ends every terminal and every host connection (their
+     * closed states stay visible, as after any disconnect). The service stops once all report Closed.
+     */
+    fun disconnectAll() {
+        mutableTerminals.value.filter { !it.retired && it.state.value !is SessionState.Closed }.forEach(::disconnectTerminal)
+        mutableHosts.value.values.filter { it.isLive }.forEach { disconnect(it.host.id) }
     }
 
     /** Retire ownership, but never destroy a handle still leased by a composed terminal screen. */
     fun dismissTerminal(terminal: ActiveTerminal) {
         if (terminal !in mutableTerminals.value) return
+        userClose?.terminalClosed(terminal.host.id, terminal.target)
         mutableTerminals.value -= terminal
         retireTerminal(terminal)
     }

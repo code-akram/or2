@@ -43,6 +43,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.code_akram.or2.connection.ActiveHost
 import io.github.code_akram.or2.connection.ActiveTerminal
 import io.github.code_akram.or2.connection.HostConnections
+import io.github.code_akram.or2.connection.transports
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.ffi.AgentStatus
@@ -71,7 +72,7 @@ import io.github.code_akram.or2.session.HostTrustDialog
 import io.github.code_akram.or2.session.SessionScreen
 import io.github.code_akram.or2.session.hostErrorMessage
 import io.github.code_akram.or2.terminal.TerminalThumbnail
-import io.github.code_akram.or2.terminal.transport
+import io.github.code_akram.or2.terminal.display
 import io.github.code_akram.or2.ui.IconAction
 import io.github.code_akram.or2.ui.Or2BottomInsets
 import io.github.code_akram.or2.ui.Or2Card
@@ -131,6 +132,8 @@ fun Or2App(
     val states by remember(connections) { connections.hostStates() }.collectAsStateWithLifecycle(emptyMap())
     val pending by remember(connections) { connections.pendingHostKeys() }.collectAsStateWithLifecycle(emptyList())
 
+    val transports by remember(connections) { connections.transports() }.collectAsStateWithLifecycle(emptyMap())
+
     // Hosts between the tap and the key being unlocked: their card says "Unlocking key...".
     var unlocking by remember { mutableStateOf(emptySet<Long>()) }
     LaunchedEffect(busy) { if (!busy) unlocking = emptySet() }
@@ -189,12 +192,12 @@ fun Or2App(
             } else when (current) {
                 Destination.Home -> {
                     val blockedByHost = inbox.groups.filter { it.status == AgentStatus.BLOCKED }.flatMap { it.items }.groupingBy { it.hostId }.eachCount()
-                    val sessions = remember(terminals, inbox, connections) {
+                    val sessions = remember(terminals, inbox, connections, transports) {
                         terminals.map { terminal ->
                             HomeSession(
                                 terminal.id, terminal.host.label, terminal.title,
                                 inbox.cwdOf(terminal) ?: (terminal.host.username + "@" + terminal.host.addresses.first().hostname),
-                                terminal.transport(),
+                                (transports[terminal.id] ?: terminal.transport.value).display(),
                             ) { thumbnail -> TerminalThumbnail(terminal, connections, thumbnail) }
                         }
                     }
