@@ -372,7 +372,8 @@ service and mosh.
 
 ### M3 implementation checklist
 
-Interfaces are in [contracts: M3](contracts.md#m3-stays-connected) (FFI API 9 with the follow-up).
+Interfaces are in [contracts: M3](contracts.md#m3-stays-connected) (FFI API 10, with the follow-up and
+the orphan cleanup).
 
 - [x] M3-A: mosh terminals on host connections (transport choice, peer pinning, bootstrap,
   terminate on early failure), link health, `roam`/`network_changed`, mosh survives host loss.

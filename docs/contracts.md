@@ -1223,7 +1223,9 @@ calls the removed M1 `connect` export. The loopback-sshd JVM tests (`HostConnect
 
 M3 makes sessions survive the phone's life: a foreground service owns every connection, mosh
 carries terminals across network changes, and the app returns to the same pane. FFI API
-becomes **8** (**9** with the follow-up below). Everything in M1/M2 still applies unless changed here.
+becomes **8** (M3-A), **9** with the follow-up's deadline and **10** with orphan cleanup, both below.
+Everything in M1/M2 still applies unless changed here. All of it is integrated on one branch; the
+sections below describe that integrated state.
 
 ## Lanes
 
@@ -1252,8 +1254,8 @@ get their own tokens (`OnAccentDisabled`, `Placeholder`; `ThemeTest` checks the 
 knob is `text` when on. Not taken as proposed: "disabled content at 0.5 of Text", which computes to 3.2:1
 on `accentMuted` (worse than the 3.9:1 it replaced), so 80 % is used (5.5:1).
 
-M3-A lands its FFI surface and probe support first (a small commit), so M3-B builds against
-real generated bindings; the implementation follows on the same branch.
+M3-A landed its FFI surface and probe support first (a small commit), so M3-B could build against
+real generated bindings; the implementation followed on the same branch.
 
 ## Mosh terminals (`or2_core`, FFI)
 
@@ -1265,9 +1267,14 @@ impl HostConnection {
                      columns: u16, rows: u16, mosh_budget_ms: Option<u32>,   // API 9, see the follow-up
                      listener: Box<dyn SessionListener>)
         -> Result<Arc<Session>, HostError>;
+    /// API 10, async: stop a mosh-server an earlier process left running (see "Orphan cleanup").
+    async fn stop_mosh_server(&self, pid: u32) -> Result<(), HostError>;
 }
 impl Session {
     fn transport(&self) -> TerminalTransport;
+    /// API 10: a mosh session's mosh-server pid on the host (set before `Connected`, kept after
+    /// `Closed`); None for SSH, and when the bootstrap did not report it. Not a secret.
+    fn server_pid(&self) -> Option<u32>;
     /// mosh: open a new UDP socket now (the network changed). SSH: no-op.
     fn roam(&self);
 }
@@ -1307,7 +1314,7 @@ pub trait SessionListener {                   // added method
     `| roams N` (`text 78 | roams 2`). SSH probe terminals ignore `roam()`.
   - `transport()` returns what `open_terminal` was given.
 
-### M3-A implementation (API 8, on `m3/a`)
+### M3-A implementation (API 8)
 
 The FFI surface is final and the mosh implementation is behind it. `HostConnection.open_terminal(..,
 Mosh, ..)` on a real host now bootstraps a real `mosh-server`; the placeholder that closed the
@@ -1395,8 +1402,10 @@ session `Failed { Internal { "mosh terminals land with M3-A" } }` is gone.
    **M3-B hand-off:** a `Failed { TimedOut }` close does not promise the server was stopped
    (a stop may still be waiting for a channel, see "Cleanup debt"); a
    transport fallback to SSH after it is still right, and the UI must not claim cleanup.
-   A deliberately retained pid for a later best-effort terminate over a fresh host connection
-   is possible (the app would have to hold it) and is not done.
+   The retained pid for a later best-effort terminate over a fresh host connection exists now, for
+   the one case that matters most: a session that reached `Connected` and whose process then died
+   (see "Orphan cleanup" under the M3 follow-up). The windows above, which end without a
+   `Connected` session, still keep no record.
 
 **Host close semantics.** A mosh session ignores the host connection once it is running.
 `HostDriver` gives every terminal the host's `closing` watch, and a small watcher task per mosh
@@ -1702,8 +1711,8 @@ mosh session. Where the text above left a choice open, this is what the code doe
 
 A Fable 5.1 strategy review found that, with ZeroTier carrying both hosts, the default network
 rarely changes on Wi-Fi to mobile handover, and that OxygenOS process death is the most likely way
-to fail v0 step 3. These changes landed after lanes M3-A and M3-B (branch `m3/follow-up`; FFI API
-becomes **9**). Implemented, in the order of the review:
+to fail v0 step 3. These changes landed after lanes M3-A and M3-B and are integrated with them
+(FFI API **9**, then **10** with the orphan cleanup). Implemented, in the order of the review:
 
 - **`resume_mosh`: rejected after review, not implemented.** The owner approved persisting a
   per-session ticket `{ host_id, target, transport, server_port, key, peer_ip, server_pid }` under a
@@ -1736,9 +1745,10 @@ becomes **9**). Implemented, in the order of the review:
   shown. `shouldAutoResume` decides: a remembered terminal whose host still exists, has a key and
   is not connected. A cold start from the launcher has no saved destination and shows Home's Resume
   card as before (one tap and the fingerprint). Cancelling the prompt leaves the Resume card. SSH keys
-  stay per-use; no mosh key is ever stored. The cost, accepted: after process death the old
-  `mosh-server` is orphaned (its key died with the process; `mosh-server` has no idle timeout), and
-  the reopened terminal starts a new one. The pane's tmux or herdr session is untouched.
+  stay per-use; no mosh key is ever stored. After process death the old `mosh-server` is orphaned (its
+  key died with the process; `mosh-server` has no idle timeout), and the reopened terminal starts a new
+  one; the orphan is stopped by pid over the new SSH connection (see "Orphan cleanup"). The pane's tmux
+  or herdr session is untouched.
 - **Roaming triggers.** `network_changed()` also fires when the default network's **transport set**
   changes (`onCapabilitiesChanged`: Wi-Fi to cellular under a VPN keeps the same default network,
   and this is the only signal) or its **interface** changes (`onLinkPropertiesChanged`), not on every
@@ -1808,12 +1818,58 @@ COLUMN`s), exported as `4.json`. Tests: JVM `MigrationSqlTest` (v3 to v4 and v1 
 data, trust and cascades intact) and device `MigrationDeviceTest` (`MigrationTestHelper` v3 to v4 and
 the full chain, then the DAO round trip including the failure memory's clearing).
 
+**Orphan cleanup (FFI API 10).** After the process dies the old `mosh-server` keeps running on the host.
+The app records its pid and stops it over the next SSH connection to that host.
+
+- **Core and FFI.** `Session.server_pid()` (`SessionHandle::server_pid`, `SessionDriver::set_server_pid`:
+  an atomic in the session's shared state, `0` meaning none) is set by `mosh_session::drive` as soon as the
+  bootstrap reported the pid, so it is readable before `Connected` and after `Closed`. `async
+  HostConnection.stop_mosh_server(pid: u32)` (core `HostHandle::stop_mosh_server`, command
+  `HostCommand::StopMoshServer`, answered through a `oneshot` like the other queries, bounded by
+  `QUERY_TIMEOUT`) runs `mosh::terminate` on the host's connection. `terminate` only signals a process
+  that `ps` names `*mosh-server`, so a pid that was reused by another program is left alone and a server
+  that is already gone is not an error: `Ok` means "no such server runs any more". An error (`CommandFailed`:
+  no free SSH channel, a slow host; `Closed`: the connection ended; `InvalidName` for pid 0) means it may
+  still run. Not-connected hosts answer `NotConnected`. The stop is a plain exec: it does not go through
+  the host's `ServerDebt`, because the caller (the app) is the one that keeps the record and retries.
+- **Record (`MoshServerLedger`, Kotlin).** `(host id, pid)` pairs in the app's private preferences
+  (`mosh_servers`, `1:4242,7:555`; no key, nothing secret). `HostConnections` records the pid when a mosh
+  session reaches `Connected` (the process can die at any moment after), and clears it when the session
+  closes `Disconnected` (Rust stopped the server before reporting the close, or the peer confirmed) or
+  `RemoteExited` (the server announced its own end). A session that closes `Failed` stays recorded: its
+  stop may not have reached the host (for example the connection was lost), and a repeat is harmless. A
+  host that is deleted forgets its entries.
+- **Stop on reconnect.** When a host reaches `Connected` (the Resume path, the reconnect chip, a tap),
+  `HostConnections.reapOrphans` stops every pid recorded for that host except those of this process's own
+  sessions that have not closed (`orphanedServers`: a mosh session outlives a lost SSH connection, so a
+  reconnect must not stop its own server). It runs beside the connect (a launched coroutine on the
+  connection's port, ahead of the capability probe's answer and of any reopened terminal), so Resume does
+  not wait for it. A stop that succeeds clears its record; one that fails keeps it for the next connection.
+- **Probe.** `contract_probe_host`'s mosh terminals report `server_pid` 4242 (`PROBE_SERVER_PID`) before
+  `Connected`; `stop_mosh_server` succeeds for any pid but 13 (`PROBE_UNSTOPPABLE_PID`), which fails with
+  `CommandFailed`, so the keep-on-failure path is testable without a host.
+- **Tests.** Rust live (`host_mosh.rs`, real `sshd` and `mosh-server`): a session's `server_pid` is the
+  fixture's `mosh-server`; after its SSH connection is cut and its UDP muted (a client that is gone without a
+  goodbye) a new connection stops it by that pid and the process is gone; a pid naming another process (a
+  `sleep` the test owns) is not signalled, a server already gone and a pid nothing has are `Ok`, pid 0 is
+  `InvalidName`, a closed host answers `Closed`. Core unit tests (`host`: the command carries the pid and is
+  answered through its reply; `session`: the pid reads before and after the close). JVM: `MoshServerLedgerTest`
+  (per host, durable, tolerant of foreign text, purge), `HostConnectionsMoshServerTest` (recorded at
+  `Connected`, cleared on `Disconnected` and `RemoteExited`, kept on `Failed`, a new process stops the old
+  process's server and forgets it, a failed stop is retried on the next connection, a live session's server
+  is spared on a reconnect, other hosts' servers are untouched, deleting a host forgets its servers) and the
+  real FFI through the probe (`HostConnectionsProbeTest`).
+- **Limits, accepted.** The record is written only for a session that reached `Connected`: a start that failed
+  with a pid the stop could not reach (host lost during the bootstrap) is not recorded. A user disconnect
+  whose goodbye was unconfirmed while the SSH connection was already lost is stranded in Rust
+  (`ServerDebt::stranded`) and the app clears it as a normal close. Either leaves a server until someone stops
+  it, as before. A pid is only a pid: stopping needs the host's `ps` to name it `mosh-server`, which is
+  what makes a stale record safe.
+
 **Not done / for the phone.** The service, the network callbacks (the transport-set trigger needs a
-real VPN-carried handover), the chip, process-death auto-resume through the recents list, and the
-5 s Auto budget on cellular have run only on fakes, the Rust suite and compile-checked device tests; the
-acceptance protocol below is where they meet a phone. The orphaned `mosh-server` after process death
-(above) is an open issue: the app could remember its pid (not secret) and stop it over the new SSH
-connection, which needs an exec path in the FFI that does not exist yet.
+real VPN-carried handover), the chip, process-death auto-resume through the recents list (and the orphan
+stop it now triggers), and the 5 s Auto budget on cellular have run only on fakes, the Rust suite and
+compile-checked device tests; the acceptance protocol below is where they meet a phone.
 
 ### M3 acceptance protocol
 
