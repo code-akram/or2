@@ -54,8 +54,9 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.light(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.light(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
+            // Dark only: transparent bars with light icons over the app's own background.
+            statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
         )
         model = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
@@ -77,7 +78,8 @@ class MainActivity : FragmentActivity() {
             val hosts by model.hosts.collectAsStateWithLifecycle()
             val keys by model.keys.collectAsStateWithLifecycle()
             val message by model.message.collectAsStateWithLifecycle()
-            Or2App(hosts, keys, message, busy, app.connections, actions)
+            val loaded by model.loaded.collectAsStateWithLifecycle()
+            Or2App(hosts, keys, message, busy, app.connections, actions, loaded)
         }
     }
 

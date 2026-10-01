@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn endpoint_accepts_names_and_ip_literals() {
-        for host in ["example.org", "10.147.17.3", "fe80::1", "host-b"] {
+        for host in ["example.org", "203.0.113.3", "fe80::1", "host-b"] {
             let endpoint = Endpoint::new(host, 2222).unwrap();
             assert_eq!(endpoint.host(), host);
             assert_eq!(endpoint.port(), 2222);

@@ -1,0 +1,575 @@
+package io.github.code_akram.or2.ui
+
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.exclude
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.windowInsetsBottomHeight
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+
+// --- top bar -------------------------------------------------------------------------------
+
+/** A 48 dp round icon button; every icon in the app is one of these or sits in a row. */
+@Composable
+fun IconAction(
+    icon: ImageVector, description: String, onClick: () -> Unit, modifier: Modifier = Modifier,
+    tint: Color = Or2Colors.Text, enabled: Boolean = true,
+) {
+    Box(
+        modifier.size(Or2Dimens.IconButton).clip(CircleShape)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, description, Modifier.size(Or2Dimens.Icon), tint = if (enabled) tint else Or2Colors.TextMuted)
+    }
+}
+
+/**
+ * The navigation-bar inset a scrolling screen reserves at the end of its content, so lists run
+ * edge to edge and scroll under the gesture bar instead of being cut above it. The keyboard
+ * already covers the bar when it is up (the root applies the IME padding), so it is excluded.
+ */
+val Or2BottomInsets: WindowInsets @Composable get() = WindowInsets.navigationBars.exclude(WindowInsets.ime)
+
+/** The end-of-content spacer that carries [Or2BottomInsets]. */
+@Composable
+fun BottomInsetSpacer(modifier: Modifier = Modifier) {
+    Spacer(modifier.windowInsetsBottomHeight(Or2BottomInsets))
+}
+
+/**
+ * No app-bar fill: an optional back arrow, a light 20 sp title on the background and trailing
+ * icon buttons. Top-level screens pass no title and only [actions].
+ */
+@Composable
+fun TopBar(
+    modifier: Modifier = Modifier, title: String? = null, back: (() -> Unit)? = null,
+    backIcon: ImageVector = Or2Icons.Back, backDescription: String = "Back", endPadding: Dp = 4.dp, actions: @Composable RowScope.() -> Unit = {},
+) {
+    Row(
+        modifier.fillMaxWidth().padding(start = 4.dp, end = endPadding).heightIn(min = 56.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (back != null) IconAction(backIcon, backDescription, back, Modifier.testTag("top-back"))
+        if (title != null) {
+            Text(
+                title, style = Or2Type.TopBarTitle, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).padding(start = if (back != null) 20.dp else Or2Dimens.Gutter - 4.dp)
+                    .semantics { heading() },
+            )
+        } else {
+            Spacer(Modifier.weight(1f))
+        }
+        actions()
+    }
+}
+
+// --- sections and cards --------------------------------------------------------------------
+
+/** Muted UPPERCASE section header, optionally with a right-aligned hint. */
+@Composable
+fun SectionHeader(text: String, modifier: Modifier = Modifier, hint: String? = null, topGap: Dp = Or2Dimens.SectionGap) {
+    Row(
+        modifier.fillMaxWidth().padding(top = topGap, bottom = Or2Dimens.SectionHeaderGap),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text.uppercase(), style = Or2Type.SectionHeader, color = Or2Colors.TextMuted,
+            modifier = Modifier.weight(1f).semantics { heading() },
+        )
+        if (hint != null) Text(hint, style = Or2Type.Secondary, color = Or2Colors.TextMuted)
+    }
+}
+
+/** A `surface` card with the 20 dp radius; click and long-click are optional. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun Or2Card(
+    modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, onLongClick: (() -> Unit)? = null,
+    color: Color = Or2Colors.Surface, border: BorderStroke? = null, shape: Shape = Or2Shapes.Card,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val interactive = if (onClick != null || onLongClick != null) {
+        Modifier.combinedClickable(role = Role.Button, onClick = onClick ?: {}, onLongClick = onLongClick)
+    } else {
+        Modifier
+    }
+    Column(
+        modifier.fillMaxWidth().clip(shape).background(color)
+            .then(if (border != null) Modifier.border(border, shape) else Modifier).then(interactive),
+        content = content,
+    )
+}
+
+/** Rows of one group: one `surface` card, hairlines between rows are drawn by [GroupDivider]. */
+@Composable
+fun GroupCard(modifier: Modifier = Modifier, color: Color = Or2Colors.Surface, content: @Composable ColumnScope.() -> Unit) {
+    Column(modifier.fillMaxWidth().clip(Or2Shapes.Card).background(color), content = content)
+}
+
+/** The 1 px hairline between rows, inset to the text column. */
+@Composable
+fun GroupDivider(inset: Dp = Or2Dimens.Gutter) {
+    Box(Modifier.fillMaxWidth().padding(start = inset).height(1.dp).background(Or2Colors.Divider))
+}
+
+/**
+ * A grouped-list row: optional 24 dp muted outline icon, label, muted subtitle (mono for
+ * machine text), trailing value and chevron. At least 56 dp tall, 72 dp with a subtitle.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun ListRow(
+    title: String, modifier: Modifier = Modifier, subtitle: String? = null, subtitleMono: Boolean = false,
+    icon: ImageVector? = null, value: String? = null, chevron: Boolean = false,
+    titleColor: Color = Or2Colors.Text, onClick: (() -> Unit)? = null, onLongClick: (() -> Unit)? = null,
+    enabled: Boolean = true, trailing: @Composable (() -> Unit)? = null,
+) {
+    val interactive = if (onClick != null || onLongClick != null) {
+        Modifier.combinedClickable(enabled = enabled, role = Role.Button, onClick = onClick ?: {}, onLongClick = onLongClick)
+    } else {
+        Modifier
+    }
+    Row(
+        modifier.fillMaxWidth().heightIn(min = if (subtitle != null) Or2Dimens.RowMinSubtitle else Or2Dimens.RowMin)
+            .then(interactive).padding(horizontal = Or2Dimens.Gutter, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (icon != null) {
+            Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Subtle)
+            Spacer(Modifier.width(16.dp))
+        }
+        Column(Modifier.weight(1f)) {
+            Text(title, style = Or2Type.RowLabel, color = if (enabled) titleColor else Or2Colors.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (subtitle != null) {
+                Text(
+                    subtitle, style = if (subtitleMono) Or2Type.MonoSmall else Or2Type.Secondary,
+                    color = Or2Colors.TextMuted, maxLines = if (subtitleMono) 1 else 2, overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (value != null) {
+            Spacer(Modifier.width(12.dp))
+            Text(value, style = Or2Type.Body, color = Or2Colors.TextMuted, maxLines = 1)
+        }
+        if (trailing != null) {
+            Spacer(Modifier.width(12.dp))
+            trailing()
+        }
+        if (chevron) {
+            Spacer(Modifier.width(8.dp))
+            Icon(Or2Icons.ChevronRight, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Subtle)
+        }
+    }
+}
+
+// --- status ----------------------------------------------------------------------------------
+
+/** A coloured dot; [pulsing] dots (working agents) breathe between full and 70 % alpha, 1.6 s. */
+@Composable
+fun StatusDot(color: Color, modifier: Modifier = Modifier, size: Dp = Or2Dimens.StatusDot, pulsing: Boolean = false) {
+    val alpha = if (pulsing) {
+        val transition = rememberInfiniteTransition(label = "pulse")
+        transition.animateFloat(
+            initialValue = 1f, targetValue = 0.7f,
+            animationSpec = infiniteRepeatable(tween(800, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+            label = "pulse-alpha",
+        ).value
+    } else {
+        1f
+    }
+    Box(modifier.size(size).alpha(alpha).clip(CircleShape).background(color))
+}
+
+/**
+ * The accent spinner shown in the icon slot while a host connects: pass the slot's size (the
+ * server icon's) so it sits exactly where the icon does, running on a faint ring so it never reads
+ * as a stray arc.
+ */
+@Composable
+fun Spinner(modifier: Modifier = Modifier, size: Dp = 20.dp) {
+    CircularProgressIndicator(
+        modifier.size(size), color = Or2Colors.Accent, trackColor = Or2Colors.SurfaceTrack,
+        strokeWidth = if (size >= 24.dp) 3.dp else 2.dp,
+    )
+}
+
+/** A pill in `surface` with a 10 dp coloured dot and a muted label, e.g. `● Needs attention: 1`. */
+@Composable
+fun StatusChip(label: String, dot: Color, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
+    Row(
+        modifier.then(if (onClick != null) Modifier.minimumInteractiveComponentSize() else Modifier)
+            .clip(Or2Shapes.Pill).background(Or2Colors.Surface)
+            .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        StatusDot(dot)
+        Spacer(Modifier.width(10.dp))
+        Text(label, style = Or2Type.Chip, color = Or2Colors.TextMuted, maxLines = 1)
+    }
+}
+
+/** A small tag: "PRO"-style kickers, the transport badge (`SSH`, `Mosh`). */
+@Composable
+fun Badge(
+    text: String, modifier: Modifier = Modifier, container: Color = Or2Colors.AccentMuted, content: Color = Or2Colors.Accent,
+    small: Boolean = false,
+) {
+    Text(
+        text, style = if (small) Or2Type.Pill else Or2Type.Badge, color = content, maxLines = 1,
+        modifier = modifier.clip(Or2Shapes.Pill).background(container)
+            .padding(horizontal = if (small) 8.dp else 12.dp, vertical = if (small) 2.dp else 6.dp),
+    )
+}
+
+// --- inputs ----------------------------------------------------------------------------------
+
+/**
+ * A filled `surface` field with its label above in `text`; placeholder and, by default, the typed
+ * text in mono. [errorText] is shown below in the danger colour. [tag] is the test tag of the
+ * editable text itself (the modifier applies to the whole labelled field).
+ */
+@Composable
+fun Or2Field(
+    value: String, onValueChange: (String) -> Unit, modifier: Modifier = Modifier, label: String? = null,
+    placeholder: String = "", mono: Boolean = true, enabled: Boolean = true, errorText: String? = null,
+    singleLine: Boolean = true, keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    keyboardActions: KeyboardActions = KeyboardActions.Default,
+    visualTransformation: VisualTransformation = VisualTransformation.None, trailing: @Composable (() -> Unit)? = null,
+    tag: String? = null,
+) {
+    Column(modifier) {
+        val style: TextStyle = (if (mono) Or2Type.Mono else Or2Type.Body)
+        BasicTextField(
+            value, onValueChange, Modifier.fillMaxWidth().then(if (tag != null) Modifier.testTag(tag) else Modifier),
+            enabled = enabled, singleLine = singleLine,
+            textStyle = style.copy(color = if (enabled) Or2Colors.Text else Or2Colors.TextMuted),
+            cursorBrush = SolidColor(Or2Colors.Accent), keyboardOptions = keyboardOptions, keyboardActions = keyboardActions,
+            visualTransformation = visualTransformation,
+            // The label is drawn inside the decoration, so the field's semantics merge it: an
+            // assistive service reads "Name, edit box" instead of an unlabelled edit box.
+            decorationBox = { inner ->
+                Column {
+                    if (label != null) {
+                        Text(label, style = Or2Type.Body, color = Or2Colors.Text, modifier = Modifier.padding(bottom = 8.dp))
+                    }
+                    Row(
+                        Modifier.fillMaxWidth().heightIn(min = Or2Dimens.Field).clip(Or2Shapes.Field).background(Or2Colors.Surface)
+                            .then(if (errorText != null) Modifier.border(1.dp, Or2Colors.Danger, Or2Shapes.Field) else Modifier)
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(Modifier.weight(1f)) {
+                            if (value.isEmpty()) Text(placeholder, style = style, color = Or2Colors.TextMuted, maxLines = 1)
+                            inner()
+                        }
+                        trailing?.let {
+                            Spacer(Modifier.width(8.dp))
+                            it()
+                        }
+                    }
+                }
+            },
+        )
+        if (errorText != null) {
+            Text(errorText, style = Or2Type.Secondary, color = Or2Colors.Danger, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
+        }
+    }
+}
+
+/** A `surfaceTrack` pill with the selected segment raised in `surface`; the others are muted. */
+@Composable
+fun Segmented(
+    options: List<String>, selected: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier,
+    icons: List<ImageVector?> = emptyList(), tagPrefix: String = "segment",
+) {
+    Row(
+        modifier.clip(Or2Shapes.Pill).background(Or2Colors.SurfaceTrack).selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        options.forEachIndexed { index, option ->
+            val on = index == selected
+            val fill by animateColorAsState(if (on) Or2Colors.Surface else Color.Transparent, label = "segment-fill")
+            // The clickable spans the whole 40 dp track; the raised segment is drawn 4 dp inside it.
+            Row(
+                Modifier.heightIn(min = 40.dp).clip(Or2Shapes.Pill)
+                    .selectable(selected = on, role = Role.Tab, onClick = { onSelect(index) })
+                    .semantics { contentDescription = option }.padding(4.dp)
+                    .clip(Or2Shapes.Pill).background(fill)
+                    .padding(horizontal = 14.dp).testTag("$tagPrefix:$index"),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center,
+            ) {
+                icons.getOrNull(index)?.let {
+                    Icon(it, null, Modifier.size(20.dp), tint = if (on) Or2Colors.Text else Or2Colors.TextMuted)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(option, style = Or2Type.Body, color = if (on) Or2Colors.Text else Or2Colors.TextMuted, maxLines = 1)
+            }
+        }
+    }
+}
+
+/** `accent` track with a `background` knob when on; `surfaceTrack` when off. */
+@Composable
+fun Or2Toggle(checked: Boolean, onCheckedChange: (Boolean) -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
+    val track by animateColorAsState(if (checked) Or2Colors.Accent else Or2Colors.SurfaceTrack, label = "toggle-track")
+    val knob by animateColorAsState(if (checked) Or2Colors.Background else Or2Colors.TextMuted, label = "toggle-knob")
+    val offset by animateDpAsState(if (checked) 22.dp else 0.dp, label = "toggle-offset")
+    Box(
+        modifier.size(width = 52.dp, height = 32.dp).clip(Or2Shapes.Pill).background(track)
+            .toggleable(checked, enabled = enabled, role = Role.Switch, onValueChange = onCheckedChange)
+            .padding(4.dp),
+    ) {
+        Box(Modifier.offset(x = offset).size(24.dp).clip(CircleShape).background(knob))
+    }
+}
+
+// --- buttons ---------------------------------------------------------------------------------
+
+/** The full-width pill at the end of a form: `accent`, 56 dp, text in `background`. */
+@Composable
+fun PrimaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
+    Box(
+        modifier.fillMaxWidth().height(Or2Dimens.PrimaryButton).clip(Or2Shapes.Pill)
+            .background(if (enabled) Or2Colors.Accent else Or2Colors.AccentMuted)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, style = Or2Type.Button, color = if (enabled) Or2Colors.Background else Or2Colors.TextMuted, maxLines = 1)
+    }
+}
+
+/** A secondary pill: `surfaceTrack` with text, optional trailing icon (e.g. "Skip"). */
+@Composable
+fun PillButton(
+    text: String, onClick: () -> Unit, modifier: Modifier = Modifier, icon: ImageVector? = null,
+    enabled: Boolean = true, container: Color = Or2Colors.SurfaceTrack, content: Color = Or2Colors.Text,
+) {
+    Row(
+        modifier.heightIn(min = 48.dp).clip(Or2Shapes.Pill).background(container)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick).padding(horizontal = 24.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center,
+    ) {
+        Text(text, style = Or2Type.Body, color = if (enabled) content else Or2Colors.TextMuted, maxLines = 1)
+        if (icon != null) {
+            Spacer(Modifier.width(8.dp))
+            Icon(icon, null, Modifier.size(20.dp), tint = if (enabled) content else Or2Colors.TextMuted)
+        }
+    }
+}
+
+/** A text-only action for dialogs and sheet headers. */
+@Composable
+fun TextAction(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, color: Color = Or2Colors.Accent, enabled: Boolean = true) {
+    Text(
+        text, style = Or2Type.Body, color = if (enabled) color else Or2Colors.TextMuted, maxLines = 1,
+        modifier = modifier.heightIn(min = 48.dp).clip(Or2Shapes.Pill)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+    )
+}
+
+// --- empty states, notices ---------------------------------------------------------------------
+
+/** Centred 96 dp `surface` circle with a 40 dp outline icon, a 20 sp title and a muted explanation. */
+@Composable
+fun EmptyState(
+    icon: ImageVector, title: String, body: String, modifier: Modifier = Modifier, action: @Composable (() -> Unit)? = null,
+) {
+    Column(modifier.fillMaxWidth().padding(horizontal = Or2Dimens.Gutter), horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(Modifier.size(Or2Dimens.EmptyCircle).clip(CircleShape).background(Or2Colors.Surface), contentAlignment = Alignment.Center) {
+            Icon(icon, null, Modifier.size(Or2Dimens.EmptyIcon), tint = Or2Colors.Subtle)
+        }
+        Spacer(Modifier.height(24.dp))
+        Text(title, style = Or2Type.CardTitle, color = Or2Colors.Text, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(8.dp))
+        Text(body, style = Or2Type.Body, color = Or2Colors.TextMuted, textAlign = TextAlign.Center)
+        if (action != null) {
+            Spacer(Modifier.height(24.dp))
+            action()
+        }
+    }
+}
+
+/** A warning/call-to-action card: `attentionSurface` with a 1 px border and a leading outline icon. */
+@Composable
+fun AttentionCard(
+    title: String, subtitle: String?, modifier: Modifier = Modifier, icon: ImageVector = Or2Icons.Warning,
+    onClick: (() -> Unit)? = null, subtitleColor: Color = Or2Colors.TextMuted,
+) {
+    Or2Card(
+        modifier, onClick = onClick, color = Or2Colors.AttentionSurface,
+        border = BorderStroke(1.dp, Or2Colors.AttentionBorder),
+    ) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Attention)
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = Or2Type.RowLabel, color = Or2Colors.Text)
+                if (subtitle != null) Text(subtitle, style = Or2Type.Secondary, color = subtitleColor)
+            }
+            if (onClick != null) Icon(Or2Icons.ChevronRight, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Subtle)
+        }
+    }
+}
+
+// --- sheets and dialogs --------------------------------------------------------------------------
+
+@Composable
+fun SheetHandle(modifier: Modifier = Modifier) {
+    Box(
+        modifier.padding(vertical = 14.dp).size(Or2Dimens.SheetHandleWidth, Or2Dimens.SheetHandleHeight)
+            .clip(Or2Shapes.Pill).background(Or2Colors.Subtle),
+    )
+}
+
+/**
+ * A modal bottom sheet in `surfaceRaised`: 28 dp top radius, drag handle, optional title on the
+ * left and a "Done" action on the right. Always opens fully.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun Or2Sheet(
+    onDismiss: () -> Unit, modifier: Modifier = Modifier, title: String? = null, done: String? = "Done",
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss, modifier = modifier,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = Or2Shapes.Sheet, containerColor = Or2Colors.SurfaceRaised, contentColor = Or2Colors.Text,
+        scrimColor = Or2Colors.Scrim, dragHandle = { SheetHandle() },
+    ) {
+        if (title != null || done != null) {
+            Row(
+                Modifier.fillMaxWidth().padding(start = Or2Dimens.Gutter + 4.dp, end = Or2Dimens.Gutter - 4.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    title.orEmpty(), style = Or2Type.ScreenTitle, color = Or2Colors.Text, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).semantics { heading() },
+                )
+                if (done != null) TextAction(done, onDismiss, color = Or2Colors.Text, modifier = Modifier.testTag("sheet-done"))
+            }
+        }
+        content()
+    }
+}
+
+/** An alert dialog in the app's own style; the caller supplies its buttons with [TextAction]. */
+@Composable
+fun Or2Dialog(
+    onDismiss: () -> Unit, title: String, confirm: @Composable () -> Unit, modifier: Modifier = Modifier,
+    dismiss: @Composable (() -> Unit)? = null, titleColor: Color = Or2Colors.Text,
+    titleStyle: TextStyle = Or2Type.CardTitle, content: @Composable () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss, modifier = modifier,
+        title = { Text(title, style = titleStyle, color = titleColor) },
+        text = content, confirmButton = confirm, dismissButton = dismiss,
+        shape = Or2Shapes.Card, containerColor = Or2Colors.SurfaceRaised, titleContentColor = titleColor,
+        textContentColor = Or2Colors.Text,
+    )
+}
+
+/** A line of mono machine text in a `surfaceRaisedRow` block (fingerprints, public keys). */
+@Composable
+fun MonoBlock(text: String, modifier: Modifier = Modifier, color: Color = Or2Colors.Text, container: Color = Or2Colors.SurfaceRaisedRow) {
+    Text(
+        text, style = Or2Type.Mono, color = color,
+        modifier = modifier.fillMaxWidth().clip(Or2Shapes.Field).background(container).padding(horizontal = 16.dp, vertical = 12.dp),
+    )
+}
+
+/**
+ * A call-to-action card with an icon tile: a mono accent kicker, a 20 sp title, a muted
+ * explanation and a mono meta line (`~3 min · needs hostname + key`), then a chevron.
+ */
+@Composable
+fun ActionCard(
+    kicker: String, title: String, body: String, modifier: Modifier = Modifier, meta: String? = null,
+    icon: ImageVector = Or2Icons.Server, onClick: (() -> Unit)? = null,
+) {
+    Or2Card(modifier, onClick = onClick) {
+        Row(Modifier.padding(Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(Or2Dimens.IconTile).clip(Or2Shapes.Tile).background(Or2Colors.AccentMuted),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(icon, null, Modifier.size(28.dp), tint = Or2Colors.Accent)
+            }
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f)) {
+                Text(kicker.uppercase(), style = Or2Type.Kicker, color = Or2Colors.Accent.copy(alpha = 0.7f))
+                Text(title, style = Or2Type.CardTitle, color = Or2Colors.Text)
+                Text(body, style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.padding(top = 4.dp))
+                if (meta != null) Text(meta, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.padding(top = 8.dp))
+            }
+            Spacer(Modifier.width(8.dp))
+            Icon(Or2Icons.ChevronRight, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Accent)
+        }
+    }
+}

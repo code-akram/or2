@@ -11,6 +11,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TerminalGridTest {
+    @Test
+    fun theKotlinDefaultBackgroundIsTheCoresDefault() {
+        // core/terminal.rs sets this as the terminal's default background; the app's theme and a
+        // grid before its first frame must agree with it, or the card around the terminal would
+        // flash a different colour.
+        val source = java.io.File("../../core/or2-core/src/terminal.rs").readText()
+        val match = Regex("""DEFAULT_BACKGROUND: RgbColor = RgbColor \{\s*r: 0x(\w+),\s*g: 0x(\w+),\s*b: 0x(\w+),""").find(source)
+        assertNotNull("DEFAULT_BACKGROUND not found in core/or2-core/src/terminal.rs", match)
+        val (r, g, b) = match!!.destructured
+        assertEquals(((r.toInt(16) shl 16) or (g.toInt(16) shl 8) or b.toInt(16)).toUInt(), DefaultBackground)
+        assertEquals(DefaultBackground, TerminalGrid().background)
+    }
+
     private fun style(color: UInt) = CellStyle(color, 0u, null, Underline.NONE, false, false, false, false, false)
     private fun row(index: Int, text: String) = TerminalRow(index.toUShort(), false,
         listOf(TerminalCell(text, CellWidth.NARROW, 0u)))

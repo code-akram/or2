@@ -10,12 +10,24 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 class AppViewModel(private val dao: AppDao, private val deleteVaultKey: (String) -> Unit) : ViewModel() {
-    val hosts = dao.hosts().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-    val keys = dao.keys().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    private val hostsRead = MutableStateFlow(false)
+    private val keysRead = MutableStateFlow(false)
+    val hosts = dao.hosts().onEach { hostsRead.value = true }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val keys = dao.keys().onEach { keysRead.value = true }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /**
+     * False until the stored hosts and keys have both been read once. Until then `hosts` and `keys`
+     * are empty placeholders, so a restored edit form or host page must wait instead of treating
+     * its host as missing (and saving an edit as a new host).
+     */
+    val loaded = combine(hostsRead, keysRead) { hostsDone, keysDone -> hostsDone && keysDone }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
     private val mutableMessage = MutableStateFlow<String?>(null)
     val message = mutableMessage.asStateFlow()
     fun message(text: String?) { mutableMessage.value = text }

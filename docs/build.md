@@ -6,8 +6,10 @@ The Compose app loads `or2-ffi` through generated UniFFI Kotlin/JNA bindings. Ho
 UniFFI and persistence dependencies. The production connector calls `connect_host` and opens
 terminals with `HostConnection.open_terminal`; the contract probes (`contract_probe_session`,
 `contract_probe_host`) are used only by tests. The terminal screen embeds the Canvas terminal
-with IME and keys-row input, keeping the final displayed frame visible through `Closed`; the
-inbox is the start destination.
+with IME and a floating key toolbar, arrow pad and composer, keeping the final displayed frame
+visible through `Closed`; Home (open sessions as live thumbnails, host cards) is the start
+destination and the agents inbox its sibling. Visuals follow [the UI system](ui.md) through one
+theme (`ui/Theme.kt`, `ui/Components.kt`, `ui/Icons.kt`).
 
 ## Shared user-local toolchain
 
@@ -106,7 +108,10 @@ The Gradle wrapper verifies its distribution checksum. `core/Cargo.lock` and
 Only update locks intentionally, using `--write-locks` when changing dependencies.
 Android runtime classpaths exclude Kotlin's legacy `kotlin-stdlib-common` metadata module:
 Gradle 8.13 otherwise writes a redundant record that fails its next locked resolution.
-The actual JVM `kotlin-stdlib` remains present and strictly locked. No runtime classpath or
+The actual JVM `kotlin-stdlib` remains present and strictly locked.
+`room-testing` (androidTest) needs kotlinx-serialization 1.8.1, and consistent resolution holds the
+androidTest classpath at the debug runtime's version, so the 1.8.1 BOM is a `debugImplementation`:
+debug and androidTest resolve 1.8.1, the shipped release runtime stays at 1.7.3. No runtime classpath or
 dependency group is exempted from locking.
 
 Room 2.8.3 uses KSP 2.2.21-2.0.4 with Kotlin 2.2.21; generated DAO implementations are build
@@ -129,7 +134,10 @@ capability probe and herdr watches (the default session is watched with no name,
 listed session is watched whether running or not, because the probe is cached per connection;
 hidden hosts are not watched), and a key array shared by several hosts being wiped only after the
 last `connect_host` call. Fakes implement the app's `HostPort` (the generated `HostConnection`
-returns concrete `Session`/`HerdrWatch` classes). `UnlockPlanTest` covers biometric grouping
+returns concrete `Session`/`HerdrWatch` classes). `TerminalActivationsTest` covers the pane focus every agent-terminal entry point awaits (inbox
+A to B to A reusing A's terminal after focusing A, switcher and thumbnail resume, `PaneNotFound`
+and other errors not navigating, progress, cancellation) on fakes, and `TerminalActivationsProbeTest`
+the same over the real FFI against `contract_probe_host`'s deterministic answers. `UnlockPlanTest` covers biometric grouping
 (one prompt per distinct key record), `InboxModelTest` the inbox ordering and the flow that
 assembles it, `HostRecordsTest` trust clearing on any address-list change (over a fake of the
 DAO's primitives), and `MigrationSqlTest` runs the real v1 to v2 SQL with foreign keys on and
@@ -180,6 +188,20 @@ session. It looks for `herdr` in `OR2_HERDR`, `PATH`, then `~/.local/bin`; witho
 with a message, or fails if `OR2_REQUIRE_HERDR` is set. The restart test waits for two 10 s
 retry intervals (about 20 s in all).
 
+## UI gallery (debug builds)
+
+`UiGalleryActivity` (debug source set, like `TerminalProbeActivity`) renders every screen and key
+state with fake data: no network, no biometrics, no database. Without an extra it lists the
+screens; `am start -n io.github.code_akram.or2/.gallery.UiGalleryActivity --es screen <name>`
+opens one directly. Names: `home`, `home-empty`, `host-cards` (unlocking, checking,
+authenticating, connected with a blocked agent, failed, idle), `inbox`, `inbox-empty`,
+`picker-herdr`, `picker-tmux`, `picker-recent`, `host-form`, `host-form-edit`, `keys`,
+`keys-empty`, `hostkey-first`, `hostkey-changed`, `terminal`, `terminal-arrowpad`,
+`terminal-composer` (opens with a message typed and the keyboard up, to show the caret and the
+lit send button). The terminal screens run the native contract probe and replace its first
+frame with a Catppuccin demo session (`gallery/DemoFrames.kt`). Use it to screenshot the phone
+without touching real hosts or the biometric prompt.
+
 Debug artifacts:
 - `android/app/build/outputs/apk/debug/app-debug.apk`
 - `android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk`
@@ -193,7 +215,7 @@ The generic example below uses caller-supplied endpoint and serial variables, no
 ```sh
 adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" install -r android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am instrument -w io.github.code_akram.or2.test/androidx.test.runner.AndroidJUnitRunner
+adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am instrument -w io.github.code_akram.or2.test/io.github.code_akram.or2.Or2TestRunner
 adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am start -W -n io.github.code_akram.or2/.MainActivity
 ```
 
@@ -214,8 +236,19 @@ fake public-key metadata without a network or production DB writes, checks the t
 and its switcher against fake host connections, and that the integrated screen retains the same
 terminal view and final grid through `Closed` until the session is closed. `InboxUiDeviceTest`,
 `HostScreenUiDeviceTest` and `HostFormUiDeviceTest` render the inbox, host screen (connection
-state, host-key prompt, shell, tmux list and name validation, herdr sessions) and the address-list
-host form from fabricated state. `TerminalDeviceTest` covers IME composition, keys, selection,
+state, host-key prompt, the session picker sheet with herdr, tmux and Recent, "Skip" for a shell,
+name validation) and the address-list host form from fabricated state; `HomeUiDeviceTest` the Home
+screen (card progress and failure in place, long-press options, session thumbnails, chips, FAB)
+and that a thumbnail holds the terminal's native handle until it leaves composition;
+`TerminalChromeDeviceTest` the key toolbar, latched modifiers, the arrow pad with auto-repeat, the
+composer's text-plus-Enter send and pinch-to-zoom persistence (with its own preferences file).
+Every device test runs against a scratch terminal-preferences file (`Or2TestRunner`, the
+instrumentation runner: a `TerminalView` reads the saved font size when it is built, so grid sizes
+must not depend on the owner's pinch setting, and a pinching test must not write it); the runner
+restores the real file name when the run ends. `TerminalChromeDeviceTest` also covers a slow pinch
+(1.02x per event), the finger left after a pinch not scrolling, the composer keeping a message it
+could not send, and the multi-line confirmation. Tests that call `show()` more than once wrap the content in a fresh `key(...)`, because
+`remember`/`rememberSaveable` state survives a second `setContent` otherwise. `TerminalDeviceTest` covers IME composition, keys, selection,
 resize and remount snapshots; `TerminalVisualDeviceTest` captures renderer fixtures and reports
 frame timings.
 
@@ -223,8 +256,8 @@ Manual phone checks still required:
 - Upgrade: install the M1 build, add a key and a host, trust its key, then install the M2 build
   over it. The host, key and trusted key must all survive (the key must still unlock), and the
   host must reconnect without a new host-key prompt.
-- Hosts: empty/list/add/edit/delete; the address list (add, remove, reorder, port per address,
-  at most 8); the inbox switch; changing any address or port clears trust, changing only the
+- Hosts: empty/list/add (FAB)/edit/delete (long press a card); the address list (add, remove,
+  reorder, port per address, at most 8); the inbox switch; changing any address or port clears trust, changing only the
   label, key choice or inbox switch does not (a changed key or username ends a live connection).
 - Keys: Ed25519 generate; system-picker import, encrypted-file passphrase retry and format errors;
   copy/share the public line; delete and reselection on hosts.
@@ -252,6 +285,12 @@ Manual phone checks still required:
   all of them and each keeps its final frame until closed.
 - Activity recreation must keep established connections and terminals; disconnect shows
   `Closed`, and "Close" releases the handle after the renderer leaves composition.
+- Terminal chrome and Home: pinch zooms the font (remembered after a restart; the default gives
+  about 55 columns), drag down on the handle or the minimise button returns to Home with the
+  session still running and its live thumbnail under SESSIONS (tap resumes), the arrow pad keys
+  repeat while held, a composer message arrives as text plus Enter (try it on a blocked agent),
+  haptics on modifier latch, send and host-key approval. Compare each `UiGalleryActivity` screen
+  with the Moshi references named in [the UI system](ui.md).
 - Integrated terminal IME show/hide geometry, committed/composing text, keys row, selection,
   scrolling, recreation and final-frame retention; collect apply/draw and Window frame timings.
 - Capture representative screenshots and inspect them; visual verification and successful

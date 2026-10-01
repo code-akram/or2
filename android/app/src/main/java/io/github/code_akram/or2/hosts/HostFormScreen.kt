@@ -1,0 +1,184 @@
+package io.github.code_akram.or2.hosts
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import io.github.code_akram.or2.data.Host
+import io.github.code_akram.or2.data.HostEndpoint
+import io.github.code_akram.or2.data.HostRecord
+import io.github.code_akram.or2.data.KeyRecord
+import io.github.code_akram.or2.keys.shortFingerprint
+import io.github.code_akram.or2.ui.BottomInsetSpacer
+import io.github.code_akram.or2.ui.GroupCard
+import io.github.code_akram.or2.ui.GroupDivider
+import io.github.code_akram.or2.ui.IconAction
+import io.github.code_akram.or2.ui.ListRow
+import io.github.code_akram.or2.ui.Or2Colors
+import io.github.code_akram.or2.ui.Or2Dimens
+import io.github.code_akram.or2.ui.Or2Field
+import io.github.code_akram.or2.ui.Or2Icons
+import io.github.code_akram.or2.ui.Or2Toggle
+import io.github.code_akram.or2.ui.Or2Type
+import io.github.code_akram.or2.ui.PillButton
+import io.github.code_akram.or2.ui.PrimaryButton
+import io.github.code_akram.or2.ui.TopBar
+
+/**
+ * Add or edit a host: filled fields with labels above and mono placeholders, an ordered address
+ * list (each with its own port), the key choice, the inbox toggle, a full-width pill and a
+ * mirrored top-bar check. Stateless storage-wise: [save] gets the finished host.
+ */
+@Composable
+fun HostFormScreen(
+    previous: Host?, keys: List<KeyRecord>, busy: Boolean, save: (Host) -> Unit, close: () -> Unit, openKeys: () -> Unit = {},
+) {
+    // Typed input survives rotation and process death, and is re-seeded when a different host is edited.
+    val identity = previous?.id ?: 0L
+    var label by rememberSaveable(identity) { mutableStateOf(previous?.label ?: "") }
+    var addresses by rememberSaveable(identity, stateSaver = AddressDraftsSaver) {
+        mutableStateOf(previous?.addresses?.map(AddressDraft::of) ?: listOf(AddressDraft("", "22")))
+    }
+    var username by rememberSaveable(identity) { mutableStateOf(previous?.username ?: "") }
+    var keyId by rememberSaveable(identity) { mutableStateOf(if (previous == null) keys.singleOrNull()?.id else previous.keyId) }
+    var showInInbox by rememberSaveable(identity) { mutableStateOf(previous?.showInInbox ?: true) }
+    val usernameError = if (username.isEmpty()) null else hostFieldError(username)
+    val valid = validHost(label, addresses, username) && keys.any { it.id == keyId }
+    fun submit() {
+        if (!valid || busy) return
+        save(Host(
+            HostRecord(previous?.id ?: 0, label.trim(), username, keyId, showInInbox),
+            addresses.map { HostEndpoint(it.hostname, it.port.toInt()) },
+        ))
+    }
+    Column(Modifier.fillMaxSize()) {
+        TopBar(
+            title = if (previous == null) "New Connection" else "Edit Connection", back = close, backIcon = Or2Icons.Close, backDescription = "Close",
+            actions = { IconAction(Or2Icons.Check, "Save", ::submit, Modifier.testTag("host-form-save"), tint = Or2Colors.Accent, enabled = valid && !busy) },
+        )
+        Column(
+            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).testTag("host-form"),
+            verticalArrangement = Arrangement.spacedBy(24.dp),
+        ) {
+            Spacer(Modifier.height(0.dp))
+            Or2Field(label, { label = it }, label = "Name", placeholder = "My server", mono = false, tag = "host-label")
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Addresses", style = Or2Type.Body, color = Or2Colors.Text)
+                    Text("In order of preference. All are tried; the first to answer wins.", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
+                }
+                addresses.forEachIndexed { index, address ->
+                    AddressRow(
+                        index, address, count = addresses.size,
+                        change = { updated -> addresses = addresses.toMutableList().also { it[index] = updated } },
+                        up = { addresses = addresses.moved(index, -1) },
+                        down = { addresses = addresses.moved(index, 1) },
+                        remove = { addresses = addresses.filterIndexed { i, _ -> i != index } },
+                    )
+                }
+                PillButton("Add address", { addresses = addresses + AddressDraft("", "22") }, Modifier.testTag("address-add").fillMaxWidth(),
+                    icon = Or2Icons.Plus, enabled = addresses.size < Host.MAX_ADDRESSES)
+            }
+            Or2Field(username, { username = it }, label = "Username", placeholder = "your-username",
+                errorText = usernameError, tag = "host-username")
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("SSH key", style = Or2Type.Body, color = Or2Colors.Text)
+                if (keys.isEmpty()) {
+                    Text("Generate or import a key on the Keys screen first.", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
+                    PillButton("Add a key", openKeys, Modifier.testTag("host-add-key"), icon = Or2Icons.Key)
+                } else {
+                    // A fresh form is calm: the hint is muted, not an error, until a key is chosen.
+                    if (keys.none { it.id == keyId }) Text("Choose a key", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
+                    GroupCard(Modifier.selectableGroup()) {
+                        keys.forEachIndexed { index, key ->
+                            if (index > 0) GroupDivider(inset = 56.dp)
+                            ListRow(
+                                key.label, subtitle = shortFingerprint(key.fingerprint), subtitleMono = true, icon = Or2Icons.Key,
+                                modifier = Modifier.testTag("host-key:${key.id}").semantics(mergeDescendants = true) {}
+                                    .selectable(selected = keyId == key.id, role = Role.RadioButton, onClick = { keyId = key.id }),
+                                trailing = if (keyId == key.id) ({
+                                    Icon(Or2Icons.Check, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Accent)
+                                }) else null,
+                            )
+                        }
+                    }
+                }
+            }
+            GroupCard {
+                ListRow(
+                    "Show agents in the inbox", onClick = { showInInbox = !showInInbox },
+                    trailing = { Or2Toggle(showInInbox, { showInInbox = it }, Modifier.testTag("host-inbox")) },
+                )
+            }
+            if (previous != null) {
+                Text("Changing any address or port clears previous host-key trust.", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                PrimaryButton("Save", ::submit, Modifier.testTag("host-form-primary"), enabled = valid && !busy)
+                Text(
+                    "Private keys stay encrypted in hardware-backed storage on this device. Connecting always needs your biometric.",
+                    style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                )
+            }
+            Spacer(Modifier.height(32.dp))
+            BottomInsetSpacer()
+        }
+    }
+}
+
+/** An address list as saved state: hostname and port strings, flattened. */
+private val AddressDraftsSaver = listSaver<List<AddressDraft>, String>(
+    save = { drafts -> drafts.flatMap { listOf(it.hostname, it.port) } },
+    restore = { flat -> flat.chunked(2).map { AddressDraft(it[0], it[1]) } },
+)
+
+/** One address: hostname and port side by side, with its order and remove controls below. */
+@Composable
+private fun AddressRow(
+    index: Int, address: AddressDraft, count: Int, change: (AddressDraft) -> Unit,
+    up: () -> Unit, down: () -> Unit, remove: () -> Unit,
+) {
+    val hostnameError = if (address.hostname.isEmpty()) null else hostFieldError(address.hostname)
+    Column(Modifier.testTag("address:$index"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
+            Or2Field(address.hostname, { change(address.copy(hostname = it)) }, Modifier.weight(1f), tag = "address-hostname:$index",
+                label = "Host", placeholder = "192.0.2.10", errorText = hostnameError,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false))
+            Or2Field(address.port, { change(address.copy(port = it)) }, Modifier.width(96.dp), tag = "address-port:$index",
+                label = "Port", placeholder = "22", errorText = if (portError(address.port) != null) "1-65535" else null,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+            Text("Address ${index + 1}", style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.weight(1f))
+            IconAction(Or2Icons.ArrowUp, "Move address ${index + 1} up", up, Modifier.testTag("address-up:$index"), tint = Or2Colors.TextMuted, enabled = index > 0)
+            IconAction(Or2Icons.ArrowDown, "Move address ${index + 1} down", down, Modifier.testTag("address-down:$index"), tint = Or2Colors.TextMuted, enabled = index < count - 1)
+            IconAction(Or2Icons.Trash, "Remove address ${index + 1}", remove, Modifier.testTag("address-remove:$index"), tint = Or2Colors.TextMuted, enabled = count > 1)
+        }
+    }
+}

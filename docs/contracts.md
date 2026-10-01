@@ -1068,6 +1068,14 @@ impl HostConnection {                     // all non-blocking unless async
   drops the reply; a focus already sent still happens. `contract_probe_host` answers
   deterministically: the probe view's panes `w1:p1`, `w1:p2` and `w2:p1` succeed (and become the
   focused pane of watches started afterwards), any other id is `PaneNotFound`.
+  The app side is `TerminalActivations` (`app/`, reached as `HostConnections.activations`): the
+  inbox row (a first open too, so a vanished pane never opens a terminal), the session switcher, a
+  Home thumbnail and the host screen's recent list all go through it. It awaits the focus, then
+  yields `Activation.Ready(terminal)` or `Activation.Failed(message)`; `PaneNotFound` says the
+  agent's pane is gone, any other error is shown, and neither navigates. Terminals that are not for
+  one pane (shell, tmux, a herdr session picked whole, a closed terminal) need no focus. While it
+  waits, `pending` drives a non-modal progress card; leaving the screen cancels the wait (a focus
+  already sent still happens).
 - `CommandFailed` carries `reason`, not `message`: a UniFFI error variant field named
   `message` generates a Kotlin property that clashes with `Throwable.message`. `EmptyDimension`
   is raised by the FFI layer (core takes a validated `TerminalSize`), like `SessionError`'s.

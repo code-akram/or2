@@ -698,7 +698,7 @@ mod tests {
     fn connect_request_validates_every_field() {
         let key = ClientKey::generate_ed25519("k").to_stored();
         let trusted = vec![host_key().info().openssh];
-        let request = ConnectRequest::new("host", 22, "akram", &key, &trusted, 80, 24).unwrap();
+        let request = ConnectRequest::new("host", 22, "dev", &key, &trusted, 80, 24).unwrap();
         assert_eq!(request.endpoint.host(), "host");
         assert_eq!(request.endpoint.port(), 22);
         assert_eq!(request.trusted_host_keys.len(), 1);

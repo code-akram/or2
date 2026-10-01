@@ -1,5 +1,6 @@
 package io.github.code_akram.or2.connection
 
+import io.github.code_akram.or2.app.TerminalActivations
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.TrustStore
 import io.github.code_akram.or2.ffi.HerdrListener
@@ -48,6 +49,9 @@ interface HostPort : AutoCloseable {
     suspend fun capabilities(): HostCapabilities
     suspend fun listTmuxSessions(): List<TmuxSession>
     fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface
+
+    /** API 6: resolves once herdr acknowledged the focus; `PaneNotFound` when the pane is gone. */
+    suspend fun focusHerdrPane(session: String?, paneId: String)
 }
 
 class NativeHostPort(private val connection: HostConnection) : HostPort {
@@ -61,6 +65,7 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
     override suspend fun listTmuxSessions() = connection.listTmuxSessions()
     override fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface =
         connection.watchHerdr(session, listener)
+    override suspend fun focusHerdrPane(session: String?, paneId: String) = connection.focusHerdrPane(session, paneId)
     override fun close() = connection.close()
 }
 
@@ -157,6 +162,9 @@ class HostConnections(
     private val mutableHosts = MutableStateFlow<Map<Long, ActiveHost>>(emptyMap())
     private val mutableTerminals = MutableStateFlow<List<ActiveTerminal>>(emptyList())
     private var nextTerminalId = 1L
+
+    /** Opening, reusing and switching to agent terminals, with the pane focus each needs first. */
+    val activations = TerminalActivations(this, scope)
 
     /** Connections by host id, including closed ones the user has not dismissed or replaced. */
     val hosts = mutableHosts.asStateFlow()
@@ -405,6 +413,18 @@ class HostConnections(
             kept += watch
         }
         current.mutableWatches.value = kept
+    }
+
+    /**
+     * Focuses [paneId] in herdr [session] (null: the default session) and returns once herdr
+     * acknowledged. herdr's focus is shared state, so a reused agent terminal shows whichever pane
+     * is focused now: the app calls this before showing an agent terminal again (see
+     * `TerminalActivations`). Throws [HostException] (`PaneNotFound` when the pane has gone).
+     */
+    suspend fun focusHerdrPane(current: ActiveHost, session: String?, paneId: String) {
+        if (!owns(current) || current.retired) throw HostException.Closed()
+        val port = current.mutablePort.value ?: throw HostException.NotConnected()
+        port.focusHerdrPane(session, paneId)
     }
 
     private class HerdrWatchSpec(val session: String?, val name: String)

@@ -16,11 +16,13 @@ import android.view.Choreographer
 import android.view.GestureDetector
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.OverScroller
+import androidx.compose.ui.graphics.toArgb
 import io.github.code_akram.or2.ffi.CellStyle
 import io.github.code_akram.or2.ffi.CellWidth
 import io.github.code_akram.or2.ffi.CursorShape
@@ -28,8 +30,13 @@ import io.github.code_akram.or2.ffi.KeyModifiers
 import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.Underline
+import io.github.code_akram.or2.ffi.KeyInput
+import io.github.code_akram.or2.ffi.TerminalKey
 import io.github.code_akram.or2.ffi.ViewportScroll
+import io.github.code_akram.or2.ui.Or2Colors
+import io.github.code_akram.or2.ui.Or2Dimens
 import kotlin.math.ceil
+import kotlin.math.roundToInt
 
 /** Canvas is the only renderer. The cache retains glyph commands, not terminal bitmaps. */
 class TerminalView(context: Context) : View(context) {
@@ -37,19 +44,23 @@ class TerminalView(context: Context) : View(context) {
     val applyTimings = FrameTimings()
     /** CPU display-list recording only; Window frame metrics measure the render pipeline. */
     val drawTimings = FrameTimings()
-    /** Main-thread, unclipped Compose layout bounds for content-free device diagnostics. */
-    internal var primaryKeyRowBounds: RectF? = null
-    internal val primaryKeyBounds = mutableMapOf<String, RectF>()
-    internal var actionRowBounds: RectF? = null
-    internal val actionBounds = mutableMapOf<String, RectF>()
+    /** Main-thread, unclipped Compose layout bounds of the key toolbar for content-free device diagnostics. */
+    internal var toolbarBounds: RectF? = null
+    internal val toolbarKeyBounds = mutableMapOf<String, RectF>()
     var showTimings = false
     // Debug comparison only. Production keeps composition-capable text mode; immediate
     // single-letter delivery with the phone's default IME passed real-SSH acceptance.
     internal var directLatinInput = false
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    /**
+     * The font size in density-independent pixels (not scaled by the system font size, so the
+     * column count is predictable); pinch changes it and it is remembered per device ([TerminalPrefs]).
+     */
+    var fontSizeSp = TerminalPrefs.load(context)
+        private set
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.MONOSPACE
-        textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 14f, resources.displayMetrics)
+        textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, fontSizeSp, resources.displayMetrics)
     }
     private val baseTypeface = terminalTypeface(textPaint)
     internal val fontHasMonospacedAdvances = textPaint.hasMonospacedAdvances()
@@ -60,9 +71,11 @@ class TerminalView(context: Context) : View(context) {
         if (resolvedStyle == Typeface.NORMAL) baseTypeface else Typeface.create(baseTypeface, resolvedStyle)
     }
     internal val boldUsesFake = !typefaces[Typeface.BOLD].isBold
-    val cellWidth = ceil(textPaint.measureText("M"))
-    val cellHeight = ceil(textPaint.fontMetrics.bottom - textPaint.fontMetrics.top)
-    private val baseline = -textPaint.fontMetrics.top
+    var cellWidth = ceil(textPaint.measureText("M"))
+        private set
+    var cellHeight = ceil(textPaint.fontMetrics.bottom - textPaint.fontMetrics.top)
+        private set
+    private var baseline = -textPaint.fontMetrics.top
     private data class Glyph(
         val text: String, val wide: Boolean, val foreground: UInt,
         val bold: Boolean, val italic: Boolean, val faint: Boolean, val fakeBold: Boolean,
@@ -70,6 +83,16 @@ class TerminalView(context: Context) : View(context) {
     private val glyphs = LruCache<Glyph, Picture>(2048)
     var onInputChanged: () -> Unit = {}
     var onSelectionChanged: () -> Unit = {}
+
+    /** Called with the terminal's default background (0xRRGGBB) when a frame changes it (OSC 11). */
+    var onBackgroundChanged: (UInt) -> Unit = {}
+    private var reportedBackground = grid.background
+
+    /**
+     * Space kept free on the left and the right, so glyphs never touch the screen edge or sit under
+     * a curved bezel. The grid's column count is measured inside it; the background fills it.
+     */
+    val horizontalInset = Or2Dimens.TerminalInset.value * resources.displayMetrics.density
     private var inputConnection: TerminalInputConnection? = null
     val input = TerminalInput(
         { text -> clearSelection(); sessionCall { sendText(text) } },
@@ -107,6 +130,49 @@ class TerminalView(context: Context) : View(context) {
             return true
         }
     })
+    private var pinching = false
+
+    /** True from the start of a pinch until all fingers are up: the finger left over must not scroll. */
+    private var pinchedSinceDown = false
+
+    /** The continuous size a pinch is at; the applied size is this rounded to half steps. */
+    private var pinchSize = TerminalPrefs.DefaultFontSp
+    private val resizeAfterPinch = Runnable { resizeSession() }
+    private val scaleGestures = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+        override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+            pinching = true
+            pinchedSinceDown = true
+            pinchSize = fontSizeSp
+            scroller.forceFinished(true)
+            // The two fingers must never also be a scroll or a long-press selection.
+            val cancel = MotionEvent.obtain(0, 0, MotionEvent.ACTION_CANCEL, 0f, 0f, 0)
+            gestures.onTouchEvent(cancel)
+            cancel.recycle()
+            return true
+        }
+
+        override fun onScale(detector: ScaleGestureDetector): Boolean {
+            // scaleFactor is relative to the previous event, which is about 1.01 to 1.03 for a slow
+            // pinch: at a small font one half step is about 4 %, so rounding each event on its own
+            // would discard it. The continuous size accumulates; only the applied size is stepped.
+            pinchSize = (pinchSize * detector.scaleFactor).coerceIn(TerminalPrefs.MinFontSp, TerminalPrefs.MaxFontSp)
+            // Half-dp steps keep cell metrics from jittering while the fingers move.
+            val stepped = (pinchSize * 2).roundToInt() / 2f
+            if (stepped != fontSizeSp) {
+                setFontSize(stepped, resize = false)
+                removeCallbacks(resizeAfterPinch)
+                postDelayed(resizeAfterPinch, 120)
+            }
+            return true
+        }
+
+        override fun onScaleEnd(detector: ScaleGestureDetector) {
+            pinching = false
+            removeCallbacks(resizeAfterPinch)
+            resizeSession()
+            TerminalPrefs.save(context, fontSizeSp)
+        }
+    }).apply { isQuickScaleEnabled = false }
     private val session = TerminalSession()
     private var connected = false
     private var lastSize: GridSize? = null
@@ -127,6 +193,10 @@ class TerminalView(context: Context) : View(context) {
             if (grid.apply(frame)) {
                 requestedFull = false
                 cursorVisible = true
+                if (grid.background != reportedBackground) {
+                    reportedBackground = grid.background
+                    onBackgroundChanged(grid.background)
+                }
                 invalidate()
             } else {
                 requestSnapshot()
@@ -164,6 +234,23 @@ class TerminalView(context: Context) : View(context) {
     }
 
     internal fun sessionCall(block: SessionInterface.() -> Unit): Boolean = session.call(block)
+
+    fun hideKeyboard() {
+        context.getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(windowToken, 0)
+    }
+
+    /**
+     * The composer's send: [text] as typed, then Enter, through the same input path as the keys.
+     * Pending Ctrl/Alt latches do not apply to a composed message. Returns whether both reached
+     * the session: false when it is closed or gone, so the caller keeps the message.
+     */
+    fun sendLine(text: String): Boolean {
+        if (text.isEmpty()) return false
+        clearSelection()
+        input.discardComposition()
+        if (!sessionCall { sendText(text) }) return false
+        return sessionCall { sendKey(KeyInput(TerminalKey.Enter, KeyModifiers(false, false, false, false))) }
+    }
 
     fun showKeyboard() {
         requestFocus()
@@ -226,7 +313,34 @@ class TerminalView(context: Context) : View(context) {
         return true
     }
 
+    /** Changes the cell size: the grid is re-laid out and, unless [resize] is false, the session told. */
+    fun setFontSize(sp: Float, resize: Boolean = true) {
+        val clamped = sp.coerceIn(TerminalPrefs.MinFontSp, TerminalPrefs.MaxFontSp)
+        if (clamped == fontSizeSp) return
+        fontSizeSp = clamped
+        textPaint.typeface = baseTypeface
+        textPaint.isFakeBoldText = false
+        textPaint.textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, clamped, resources.displayMetrics)
+        cellWidth = ceil(textPaint.measureText("M"))
+        cellHeight = ceil(textPaint.fontMetrics.bottom - textPaint.fontMetrics.top)
+        baseline = -textPaint.fontMetrics.top
+        glyphs.evictAll()
+        scrollRemainder = 0f
+        clearSelection()
+        if (resize) resizeSession()
+        invalidate()
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) pinchedSinceDown = false
+        scaleGestures.onTouchEvent(event)
+        if (pinching || scaleGestures.isInProgress) return true
+        if (pinchedSinceDown) {
+            // The gesture detector never saw this finger go down (it was cancelled at the pinch's
+            // start), so everything up to the last finger lifting belongs to the pinch.
+            if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) pinchedSinceDown = false
+            return true
+        }
         if (event.actionMasked == MotionEvent.ACTION_DOWN) parent?.requestDisallowInterceptTouchEvent(true)
         if (selection != null && event.actionMasked == MotionEvent.ACTION_MOVE) {
             position(event.x, event.y)?.let { selection?.end = it }
@@ -236,7 +350,7 @@ class TerminalView(context: Context) : View(context) {
     }
 
     private fun position(x: Float, y: Float): CellPosition? =
-        grid.position(x, y, cellWidth, cellHeight, selection)
+        grid.position(x - horizontalInset, y, cellWidth, cellHeight, selection)
 
     fun beginSelection(position: CellPosition, word: Boolean = false) {
         if (!grid.hasGrid) return
@@ -270,6 +384,14 @@ class TerminalView(context: Context) : View(context) {
             sessionCall { scroll(ViewportScroll.Delta(rows)) }
             scrollRemainder -= rows * cellHeight
         }
+    }
+
+    /** One page up into the scrollback (the toolbar's history key). */
+    fun pageUp() {
+        clearSelection()
+        scroller.forceFinished(true)
+        val page = (grid.rows.size - 1).coerceAtLeast(1)
+        sessionCall { scroll(ViewportScroll.Delta(-page)) }
     }
 
     fun jumpToBottom() {
@@ -310,8 +432,11 @@ class TerminalView(context: Context) : View(context) {
         resizeSession()
     }
 
+    /** The grid the view's current size and cell metrics give, inside the horizontal inset. */
+    internal fun currentGridSize(): GridSize? = gridSize((width - 2 * horizontalInset).toInt(), height, cellWidth, cellHeight)
+
     private fun resizeSession() {
-        val size = gridSize(width, height, cellWidth, cellHeight) ?: return
+        val size = currentGridSize() ?: return
         if (size != lastSize && sessionCall { resize(size.columns, size.rows) }) lastSize = size
     }
 
@@ -325,6 +450,8 @@ class TerminalView(context: Context) : View(context) {
         canvas.clipRect(0f, 0f, width.toFloat(), height.toFloat())
         paint.color = grid.background.opaque()
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint) // Includes grid margins.
+        canvas.save()
+        canvas.translate(horizontalInset, 0f)
         (selection?.rows ?: grid.rows).forEachIndexed { rowIndex, row ->
             val y = rowIndex * cellHeight
             row.cells.forEachIndexed { column, cell ->
@@ -361,7 +488,7 @@ class TerminalView(context: Context) : View(context) {
             }
         }
         selection?.let { selected ->
-            paint.color = 0x663399ff
+            paint.color = Or2Colors.Accent.copy(alpha = 0.35f).toArgb()
             selected.rows.indices.forEach { row ->
                 selected.range(row)?.let { range ->
                     canvas.drawRect(range.first * cellWidth, row * cellHeight,
@@ -375,21 +502,23 @@ class TerminalView(context: Context) : View(context) {
                 val y = cursor.row.toInt() * cellHeight
                 textPaint.typeface = baseTypeface
                 textPaint.isFakeBoldText = false
-                textPaint.color = android.graphics.Color.WHITE
+                textPaint.color = Or2Colors.Text.toArgb()
                 textPaint.alpha = 255
                 val w = textPaint.measureText(input.composing).coerceAtLeast(compositionCells(input.composing) * cellWidth)
-                paint.color = 0xff23405b.toInt()
+                paint.color = Or2Colors.AccentMuted.toArgb()
                 canvas.drawRect(x, y, x + w, y + cellHeight, paint)
                 canvas.drawText(input.composing, x, y + baseline, textPaint)
-                paint.color = 0xff66ccff.toInt()
+                paint.color = Or2Colors.Accent.toArgb()
                 canvas.drawRect(x, y + cellHeight - 2, x + w, y + cellHeight, paint)
             }
         }
+        canvas.restore()
+        drawScrollIndicator(canvas)
         drawTimings.record(System.nanoTime() - start)
         if (showTimings) {
             paint.color = 0xdd000000.toInt()
             canvas.drawRect(0f, height - cellHeight, width.toFloat(), height.toFloat(), paint)
-            textPaint.color = android.graphics.Color.WHITE
+            textPaint.color = Or2Colors.Text.toArgb()
             textPaint.typeface = baseTypeface
             textPaint.isFakeBoldText = false
             textPaint.alpha = 255
@@ -397,6 +526,20 @@ class TerminalView(context: Context) : View(context) {
                 0f, height - cellHeight + baseline, textPaint)
         }
         canvas.restoreToCount(checkpoint)
+    }
+
+    /** A thin accent bar on the right edge showing where the viewport sits in the scrollback. */
+    private fun drawScrollIndicator(canvas: Canvas) {
+        val total = grid.scrollback.totalRows.toFloat()
+        val visible = grid.rows.size.toFloat()
+        if (visible <= 0f || total <= visible || height <= 0) return
+        val density = resources.displayMetrics.density
+        val barHeight = (height * visible / total).coerceAtLeast(24 * density)
+        val top = (height - barHeight) * (grid.scrollback.offset.toFloat() / (total - visible)).coerceIn(0f, 1f)
+        val right = width - density
+        paint.style = Paint.Style.FILL
+        paint.color = Or2Colors.Accent.copy(alpha = 0.85f).toArgb()
+        canvas.drawRoundRect(right - 3 * density, top, right, top + barHeight, 1.5f * density, 1.5f * density, paint)
     }
 
     private fun drawCell(canvas: Canvas, x: Float, y: Float, cell: ResolvedCell) {

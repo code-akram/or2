@@ -82,4 +82,5 @@ class UiPort(
         watchListeners += listener
         return UiWatch()
     }
+    override suspend fun focusHerdrPane(session: String?, paneId: String) = Unit
 }

@@ -1,16 +1,19 @@
 package io.github.code_akram.or2.inbox
 
 import androidx.activity.compose.setContent
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import io.github.code_akram.or2.MainActivity
 import io.github.code_akram.or2.connection.uiHost
 import io.github.code_akram.or2.data.Host
@@ -19,6 +22,7 @@ import io.github.code_akram.or2.ffi.HerdrAgent
 import io.github.code_akram.or2.ffi.HerdrTab
 import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HerdrWorkspace
+import io.github.code_akram.or2.ui.Or2Theme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -46,8 +50,11 @@ class InboxUiDeviceTest {
         state: InboxState, busy: Boolean = false, connectAll: () -> Unit = {}, connect: (Host) -> Unit = {},
         openHost: (Host) -> Unit = {}, openAgent: (InboxItem) -> Unit = {},
     ) = compose.runOnUiThread {
-        compose.activity.setContent { MaterialTheme { InboxScreen(state, busy, connectAll, connect, openHost, openAgent) } }
+        compose.activity.setContent { Or2Theme { InboxScreen(state, busy, connectAll, connect, openHost, openAgent) } }
     }
+
+    /** The host rows sit below the agents; scroll the list to a node that may be off screen. */
+    private fun scrollTo(tag: String) = compose.onNodeWithTag("inbox-list").performScrollToNode(hasTestTag(tag))
 
     private val box = uiHost(1, "Box")
 
@@ -55,21 +62,21 @@ class InboxUiDeviceTest {
     fun blockedAgentsComeFirstAndEachRowShowsHostAgentPlaceStatusAndCwd() {
         val groups = buildInbox(listOf(InboxSource(1, "Box", null, "default", view)))
         show(InboxState(listOf(row(box, LinkStatus.CONNECTED, "Connected", agents = 3)), groups))
-        compose.onNodeWithText("Inbox · 3 agents").assertIsDisplayed()
 
         fun top(tag: String) = compose.onNodeWithTag(tag).getUnclippedBoundsInRoot().top
         val order = listOf("inbox-group:BLOCKED", "inbox-group:WORKING", "inbox-group:IDLE").map(::top)
-        assertEquals(order.sortedBy { it.value }, order)
         assertTrue(order[0] < order[1] && order[1] < order[2])
         val blocked = groups[0].items.single()
         compose.onNodeWithTag(inboxItemTag(blocked)).assertIsDisplayed()
-        compose.onNodeWithText("Blocked · 1").assertIsDisplayed()
-        compose.onNodeWithText("alpha / editor", substring = true).assertExists()
+        compose.onNodeWithText("BLOCKED · 1").assertIsDisplayed()
+        // All three agents are in alpha / editor, so the place line is expected three times.
+        compose.onAllNodesWithText("alpha / editor", substring = true).assertCountEquals(3)
         compose.onNodeWithText("/work/w1:p3").assertIsDisplayed()
-        // One chip per agent, in display order.
-        val chips = compose.onAllNodesWithTag("status-chip")
-        assertEquals(3, chips.fetchSemanticsNodes().size)
+        // One status label per agent.
+        compose.onAllNodesWithTag("status-chip", useUnmergedTree = true).assertCountEquals(3)
         compose.onNodeWithText("Codex").assertIsDisplayed()
+        // Blocked rows come with the status in words as well as colour.
+        assertEquals("Blocked", groups[0].items.single().status.let(::statusLabel))
     }
 
     @Test
@@ -99,6 +106,7 @@ class InboxUiDeviceTest {
             ), emptyList()),
             connect = { connected = it }, openHost = { opened = it },
         )
+        scrollTo("inbox-connect:3")
         compose.onNodeWithText("Authentication rejected. Check the username and public-key authorization.").assertIsDisplayed()
         compose.onNodeWithTag("inbox-connect:1").assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(1L, connected!!.id) }
@@ -115,6 +123,7 @@ class InboxUiDeviceTest {
         var all = 0
         show(InboxState(listOf(row(box, LinkStatus.NOT_CONNECTED), row(uiHost(2, "Two"), LinkStatus.NOT_CONNECTED)), emptyList()),
             connectAll = { all++ })
+        scrollTo("inbox-connect-all")
         compose.onNodeWithTag("inbox-connect-all").performClick()
         compose.runOnIdle { assertEquals(1, all) }
 
@@ -125,9 +134,19 @@ class InboxUiDeviceTest {
     @Test
     fun emptyStatesExplainWhatToDo() {
         show(InboxState(emptyList(), emptyList()))
+        compose.onNodeWithTag("inbox-no-hosts").assertIsDisplayed()
         compose.onNodeWithText("No hosts show agents here.", substring = true).assertIsDisplayed()
         show(InboxState(listOf(row(box, LinkStatus.CONNECTED, note = "No running herdr sessions")), emptyList()))
-        compose.onNodeWithText("No running herdr sessions").assertIsDisplayed()
         compose.onNodeWithTag("inbox-empty").assertIsDisplayed()
+        compose.onNodeWithText("No agent events yet").assertIsDisplayed()
+        compose.onNodeWithText("No running herdr sessions").assertIsDisplayed()
+    }
+
+    @Test
+    fun herdrsOwnExplanationShowsInMutedTextOnTheHostRow() {
+        val note = "herdr is unavailable: the session's socket cannot be opened"
+        show(InboxState(listOf(row(box, LinkStatus.CONNECTED, note = note)), emptyList()))
+        compose.onNodeWithTag("inbox-herdr-note:1", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText(note).assertIsDisplayed()
     }
 }

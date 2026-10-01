@@ -5,7 +5,9 @@ use libghostty_vt::key::{Action, Encoder, Event, Key as PhysicalKey, Mods};
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::screen::{CellWide, Screen};
 use libghostty_vt::snapshot::Decoder;
-use libghostty_vt::style::{RgbColor, StyleColor, Underline as GhosttyUnderline};
+use libghostty_vt::style::{
+    Palette, PaletteIndex, RgbColor, StyleColor, Underline as GhosttyUnderline,
+};
 use libghostty_vt::terminal::ScrollViewport;
 use libghostty_vt::{RenderState, Terminal};
 
@@ -14,6 +16,56 @@ use crate::frame::{
 };
 use crate::input::{Key, KeyInput, Modifiers, ViewportScroll};
 use crate::term::TerminalSize;
+
+/// Default terminal colours: Catppuccin Mocha (MIT), the same palette the app UI uses. A remote
+/// program can still change any of them (OSC 4, 10 and 11) and reset back to these.
+pub const DEFAULT_FOREGROUND: RgbColor = RgbColor {
+    r: 0xcd,
+    g: 0xd6,
+    b: 0xf4,
+};
+pub const DEFAULT_BACKGROUND: RgbColor = RgbColor {
+    r: 0x1e,
+    g: 0x1e,
+    b: 0x2e,
+};
+
+/// The Catppuccin Mocha ANSI colours for palette indices 0 to 15 (the "terminal" mapping:
+/// bright colours repeat the normal ones, except black and white). Indices 16 and up keep
+/// libghostty's xterm cube and grey ramp.
+const MOCHA_ANSI: [(PaletteIndex, u32); 16] = [
+    (PaletteIndex::BLACK, 0x45475a),
+    (PaletteIndex::RED, 0xf38ba8),
+    (PaletteIndex::GREEN, 0xa6e3a1),
+    (PaletteIndex::YELLOW, 0xf9e2af),
+    (PaletteIndex::BLUE, 0x89b4fa),
+    (PaletteIndex::MAGENTA, 0xf5c2e7),
+    (PaletteIndex::CYAN, 0x94e2d5),
+    (PaletteIndex::WHITE, 0xbac2de),
+    (PaletteIndex::BRIGHT_BLACK, 0x585b70),
+    (PaletteIndex::BRIGHT_RED, 0xf38ba8),
+    (PaletteIndex::BRIGHT_GREEN, 0xa6e3a1),
+    (PaletteIndex::BRIGHT_YELLOW, 0xf9e2af),
+    (PaletteIndex::BRIGHT_BLUE, 0x89b4fa),
+    (PaletteIndex::BRIGHT_MAGENTA, 0xf5c2e7),
+    (PaletteIndex::BRIGHT_CYAN, 0x94e2d5),
+    (PaletteIndex::BRIGHT_WHITE, 0xa6adc8),
+];
+
+fn mocha_palette(base: Palette) -> Palette {
+    let mut palette = base;
+    for (index, rgb) in MOCHA_ANSI {
+        palette.set(
+            index,
+            RgbColor {
+                r: (rgb >> 16) as u8,
+                g: (rgb >> 8) as u8,
+                b: rgb as u8,
+            },
+        );
+    }
+    palette
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TerminalError {
@@ -75,12 +127,10 @@ impl TerminalEngine {
         size: TerminalSize,
         reply: impl Fn(&[u8]) + 'static,
     ) -> Result<Self, TerminalError> {
-        terminal.set_default_fg_color(Some(RgbColor {
-            r: 255,
-            g: 255,
-            b: 255,
-        }))?;
-        terminal.set_default_bg_color(Some(RgbColor { r: 0, g: 0, b: 0 }))?;
+        terminal.set_default_fg_color(Some(DEFAULT_FOREGROUND))?;
+        terminal.set_default_bg_color(Some(DEFAULT_BACKGROUND))?;
+        let base = terminal.default_color_palette()?;
+        terminal.set_default_color_palette(Some(mocha_palette(base)))?;
         terminal.on_pty_write(move |_, bytes| reply(bytes))?;
         Ok(Self {
             terminal,

@@ -1,11 +1,19 @@
 package io.github.code_akram.or2.terminal
 
+import androidx.compose.ui.graphics.toArgb
 import io.github.code_akram.or2.ffi.CellStyle
 import io.github.code_akram.or2.ffi.CellWidth
 import io.github.code_akram.or2.ffi.Scrollback
 import io.github.code_akram.or2.ffi.TerminalCursor
 import io.github.code_akram.or2.ffi.TerminalFrame
+import io.github.code_akram.or2.ui.Or2Colors
 import kotlin.math.floor
+
+/**
+ * The terminal's default background until the first frame: the theme's terminal colour, which is
+ * the core's own default (core/terminal.rs; a test compares it with a real frame).
+ */
+val DefaultBackground: UInt = (Or2Colors.TerminalBackground.toArgb() and 0xFFFFFF).toUInt()
 
 data class ResolvedCell(val text: String, val width: CellWidth, val style: CellStyle)
 data class ResolvedRow(val cells: List<ResolvedCell>, val wrapped: Boolean)
@@ -27,7 +35,7 @@ class TerminalGrid {
         private set
     var cursor: TerminalCursor? = null
         private set
-    var background = 0x101018u
+    var background = DefaultBackground
         private set
     var scrollback = Scrollback(0u, 0u)
         private set

@@ -313,7 +313,7 @@ class TerminalDeviceTest {
                 val view = activity.window.decorView.terminal()!!
                 downTime = SystemClock.uptimeMillis()
                 val event = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN,
-                    view.cellWidth * 2.5f, view.cellHeight * 1.5f, 0)
+                    view.cellWidth * 2.5f + view.horizontalInset, view.cellHeight * 1.5f, 0)
                 view.dispatchTouchEvent(event)
                 event.recycle()
             }
@@ -323,11 +323,11 @@ class TerminalDeviceTest {
                 assertNotNull(view.selection)
                 assertEquals("R界😀e\u0301I", view.selection!!.text()) // Entire word, before any drag.
                 val move = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_MOVE,
-                    view.cellWidth * 5.5f, view.cellHeight * 1.5f, 0)
+                    view.cellWidth * 5.5f + view.horizontalInset, view.cellHeight * 1.5f, 0)
                 view.dispatchTouchEvent(move)
                 move.recycle()
                 val up = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP,
-                    view.cellWidth * 5.5f, view.cellHeight * 1.5f, 0)
+                    view.cellWidth * 5.5f + view.horizontalInset, view.cellHeight * 1.5f, 0)
                 view.dispatchTouchEvent(up)
                 up.recycle()
                 assertEquals("R界😀e\u0301I", view.selection!!.text())
@@ -361,12 +361,12 @@ class TerminalDeviceTest {
                 originalHeight = view.height
                 view.showKeyboard()
             }
-            await(scenario) { it.height < originalHeight && it.grid.rows.size == gridSize(it.width, it.height, it.cellWidth, it.cellHeight)!!.rows.toInt() }
+            await(scenario) { it.height < originalHeight && it.grid.rows.size == it.currentGridSize()!!.rows.toInt() }
             scenario.onActivity { activity ->
                 val view = activity.window.decorView.terminal()!!
                 activity.getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(view.windowToken, 0)
             }
-            await(scenario) { it.height == originalHeight && it.grid.rows.size == gridSize(it.width, it.height, it.cellWidth, it.cellHeight)!!.rows.toInt() }
+            await(scenario) { it.height == originalHeight && it.grid.rows.size == it.currentGridSize()!!.rows.toInt() }
             scenario.recreate()
             await(scenario) { it.grid.hasGrid && it.rowText(0) == "or2 contract probe" }
         }

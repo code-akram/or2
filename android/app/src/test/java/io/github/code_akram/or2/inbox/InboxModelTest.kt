@@ -130,6 +130,10 @@ class InboxModelTest {
         assertEquals("No running herdr sessions", herdrNote(caps, null, emptyList()))
         assertEquals("herdr is not running", herdrNote(caps, null, listOf("default" to HerdrState.Unavailable(HerdrUnavailable.NotRunning, ""))))
         assertEquals("herdr protocol 9 is not supported", herdrNote(caps, null, listOf("default" to HerdrState.Unavailable(HerdrUnavailable.IncompatibleProtocol(9u), ""))))
+        // A failure shows the core's own explanation in the note (muted text on the host rows).
+        assertEquals("herdr is unavailable", herdrNote(caps, null, listOf("default" to HerdrState.Unavailable(HerdrUnavailable.Failed, " "))))
+        assertEquals("herdr is unavailable: the session's socket cannot be opened (is it owned by another user?)",
+            herdrNote(caps, null, listOf("default" to HerdrState.Unavailable(HerdrUnavailable.Failed, "the session's socket cannot be opened (is it owned by another user?)"))))
         // One live session is enough: no note.
         assertNull(herdrNote(caps, null, listOf("a" to HerdrState.Unavailable(HerdrUnavailable.NotRunning, ""), "b" to HerdrState.Live(view()))))
     }

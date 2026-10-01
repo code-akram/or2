@@ -685,10 +685,10 @@ mod tests {
     fn host_connect_request_validates_every_field_with_indices() {
         let key = ClientKey::generate_ed25519("k").to_stored();
         let trusted = vec![host_key().info().openssh];
-        let addresses = [("a.example", 22), ("10.0.0.2", 2222)];
-        let request = HostConnectRequest::new(&addresses, "akram", &key, &trusted).unwrap();
+        let addresses = [("a.example", 22), ("198.51.100.2", 2222)];
+        let request = HostConnectRequest::new(&addresses, "dev", &key, &trusted).unwrap();
         assert_eq!(request.addresses.len(), 2);
-        assert_eq!(request.addresses[1].host(), "10.0.0.2");
+        assert_eq!(request.addresses[1].host(), "198.51.100.2");
         assert_eq!(request.addresses[1].port(), 2222);
         assert_eq!(request.trusted_host_keys.len(), 1);
         assert!(!format!("{request:?}").contains("OPENSSH"));

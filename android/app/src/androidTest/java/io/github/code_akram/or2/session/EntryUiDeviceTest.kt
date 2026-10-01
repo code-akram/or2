@@ -1,127 +1,57 @@
 package io.github.code_akram.or2.session
 
+import io.github.code_akram.or2.assertTouchTargetAtLeast
 import android.view.View
 import android.view.ViewGroup
 import androidx.activity.compose.setContent
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.SemanticsProperties
-import androidx.compose.ui.test.SemanticsMatcher
-import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.assertIsEnabled
-import androidx.compose.ui.test.assertIsNotEnabled
-import androidx.compose.ui.test.assertIsNotSelected
-import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performScrollTo
-import androidx.compose.ui.test.performTextInput
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import io.github.code_akram.or2.MainActivity
 import io.github.code_akram.or2.app.AppScaffold
-import io.github.code_akram.or2.app.Destination
 import io.github.code_akram.or2.connection.HostConnections
 import io.github.code_akram.or2.connection.UiPort
 import io.github.code_akram.or2.connection.UiSession
 import io.github.code_akram.or2.connection.UiTrust
 import io.github.code_akram.or2.connection.uiHost
-import io.github.code_akram.or2.MainActivity
-import io.github.code_akram.or2.data.Host
-import io.github.code_akram.or2.data.HostEndpoint
-import io.github.code_akram.or2.data.HostRecord
-import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.ffi.*
-import io.github.code_akram.or2.hosts.HostsScreen
 import io.github.code_akram.or2.terminal.TerminalView
+import io.github.code_akram.or2.ui.Or2Theme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
-/** Render entry/trust states without connecting to any host or modifying the production database. */
+/** Render trust and terminal entry states without connecting to any host or modifying the production database. */
 class EntryUiDeviceTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
-
-    private val fixtureKey = KeyRecord("fixture-key", "Fixture key", "test", "public", "fingerprint", "", byteArrayOf(), byteArrayOf())
-
-    private fun keyChoice(key: KeyRecord) = compose.onNodeWithTag("host-key:${key.id}")
-        .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.RadioButton))
-
-    private fun fillHostFields() {
-        compose.onNodeWithText("Label").performScrollTo().performTextInput("Fixture")
-        compose.onNodeWithText("Hostname").performScrollTo().performTextInput("fixture.invalid")
-        compose.onNodeWithText("Username").performScrollTo().performTextInput("fixture-user")
-    }
-
-    @Test
-    fun newHostPreselectsTheOnlyKeyButEditingDoesNotChangeAnEmptyReference() {
-        var saved: Host? = null
-        val previous = Host(HostRecord(7, "Existing fixture", "fixture-user", null), listOf(HostEndpoint("fixture.invalid", 22)))
-        compose.runOnUiThread {
-            compose.activity.setContent {
-                MaterialTheme { HostsScreen(listOf(previous), listOf(fixtureKey), false, { host, _ -> saved = host }, {}, {}) }
-            }
-        }
-        compose.onNodeWithText("Add host").performClick()
-        keyChoice(fixtureKey).performScrollTo().assertIsSelected()
-        compose.onNodeWithText("Choose a key").assertDoesNotExist()
-        fillHostFields()
-        compose.onNodeWithText("Save").assertIsEnabled().performClick()
-        compose.runOnIdle { assertEquals(fixtureKey.id, saved!!.keyId) }
-        compose.onNodeWithText("Edit").performClick()
-        keyChoice(fixtureKey).performScrollTo().assertIsNotSelected()
-        compose.onNodeWithText("Choose a key").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("Save").assertIsNotEnabled()
-        compose.onNodeWithText("Cancel").performClick()
-    }
-
-    @Test
-    fun multipleKeysNeedAnExplicitChoiceAndExposeTheSelectedRadioState() {
-        var saved: Host? = null
-        // Duplicate labels must not make the test target a different choice.
-        val second = fixtureKey.copy(id = "second-key")
-        compose.runOnUiThread {
-            compose.activity.setContent {
-                MaterialTheme { HostsScreen(emptyList(), listOf(fixtureKey, second), false, { host, _ -> saved = host }, {}, {}) }
-            }
-        }
-        compose.onNodeWithText("Add host").performClick()
-        keyChoice(fixtureKey).performScrollTo().assertIsNotSelected()
-        keyChoice(second).performScrollTo().assertIsNotSelected()
-        fillHostFields()
-        compose.onNodeWithText("Choose a key").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("Save").assertIsNotEnabled()
-        keyChoice(second).performScrollTo().performClick().assertIsSelected()
-        keyChoice(fixtureKey).assertIsNotSelected()
-        compose.onNodeWithText("Choose a key").assertDoesNotExist()
-        compose.onNodeWithText("Save").assertIsEnabled().performClick()
-        compose.runOnIdle { assertEquals(second.id, saved!!.keyId) }
-    }
 
     @Test
     fun firstUseTrustIsExplicitAndRejectWorks() {
         var decision = ""
         val prompt = HostState.AwaitingHostKeyDecision(PublicKeyInfo("test", "public", "presented-fingerprint", ""), emptyList())
         compose.runOnUiThread {
-            compose.activity.setContent { MaterialTheme { HostTrustDialog(prompt, false, { decision = "approve" }, { decision = "reject" }) } }
+            compose.activity.setContent { Or2Theme { HostTrustDialog(prompt, false, { decision = "approve" }, { decision = "reject" }) } }
         }
         compose.onNodeWithText("Trust this host key?").assertIsDisplayed()
         compose.onNodeWithText("presented-fingerprint").assertIsDisplayed()
         assertEquals("", decision)
-        compose.onNodeWithText("Reject").performClick()
+        compose.onNodeWithTag("hostkey-reject").performClick()
         assertEquals("reject", decision)
     }
 
@@ -131,11 +61,17 @@ class EntryUiDeviceTest {
         val old = listOf(PublicKeyInfo("old-a", "a", "previous-a", ""), PublicKeyInfo("old-b", "b", "previous-b", ""))
         val prompt = HostState.AwaitingHostKeyDecision(PublicKeyInfo("new", "c", "presented-fingerprint", ""), old)
         compose.runOnUiThread {
-            compose.activity.setContent { MaterialTheme { HostTrustDialog(prompt, false, { decision = "approve" }, { decision = "reject" }) } }
+            compose.activity.setContent {
+                Or2Theme { HostTrustDialog(prompt, false, { decision = "approve" }, { decision = "reject" }, hostLabel = "Fixture host") }
+            }
         }
         compose.onNodeWithText("WARNING: HOST KEY CHANGED").assertIsDisplayed()
-        compose.onNodeWithText("old-a\nprevious-a").assertIsDisplayed()
-        compose.onNodeWithText("old-b\nprevious-b").assertIsDisplayed()
+        compose.onNodeWithText("Host: Fixture host").assertIsDisplayed()
+        // Algorithm and fingerprint are separate lines now; both previous keys are listed.
+        compose.onNodeWithText("old-a").assertIsDisplayed()
+        compose.onNodeWithText("previous-a").assertIsDisplayed()
+        compose.onNodeWithText("old-b").assertIsDisplayed()
+        compose.onNodeWithText("previous-b").assertIsDisplayed()
         compose.onNodeWithText("presented-fingerprint").assertIsDisplayed()
         compose.onNodeWithText("Replace trust and connect").performClick()
         assertEquals("approve", decision)
@@ -158,20 +94,19 @@ class EntryUiDeviceTest {
         compose.runOnUiThread {
             val terminal = holder.openTerminal(holder.host(1)!!, TerminalTarget.Shell)
             compose.activity.setContent {
-                AppScaffold(Destination.Inbox, terminalVisible = false, fullScreen = true, selectTab = {}) {
-                    SessionScreen(holder, terminal, listOf(terminal), back = {}, select = {})
+                AppScaffold(fullScreen = false) {
+                    SessionScreen(holder, terminal, listOf(terminal), minimise = {}, select = {})
                 }
             }
         }
-        compose.onNodeWithText("or2").assertIsDisplayed()
-        compose.onNodeWithText("• Inbox").assertIsDisplayed()
-        compose.onNodeWithText("Hosts").assertIsDisplayed()
-        compose.onNodeWithText("Keys").assertIsDisplayed()
+        compose.onNodeWithText("Fixture").assertIsDisplayed()
+        compose.onNodeWithTag("terminal-status").assertIsDisplayed()
         compose.onNodeWithText("The server refused a terminal or shell.", substring = true).assertIsDisplayed()
         compose.onNodeWithText("Close session").assertIsDisplayed()
         compose.onNodeWithContentDescription("Terminal").assertDoesNotExist()
-        compose.onNodeWithText("Keyboard").assertDoesNotExist()
-        compose.onNodeWithText("Esc").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Keyboard").assertDoesNotExist()
+        compose.onNodeWithTag("key:Esc").assertDoesNotExist()
+        compose.onNodeWithTag("terminal-card").assertDoesNotExist()
         compose.runOnIdle { assertEquals(0, session.frameTakes) }
         compose.onNodeWithText("Close session").performClick()
     }
@@ -185,14 +120,16 @@ class EntryUiDeviceTest {
             val shell = holder.openTerminal(holder.host(1)!!, TerminalTarget.Shell)
             val tmux = holder.openTerminal(holder.host(1)!!, TerminalTarget.Tmux("work"))
             compose.activity.setContent {
-                AppScaffold(Destination.Inbox, terminalVisible = false, fullScreen = true, selectTab = {}) {
-                    SessionScreen(holder, shell, listOf(shell, tmux), back = {}, select = { selected = it.id })
+                AppScaffold(fullScreen = false) {
+                    SessionScreen(holder, shell, listOf(shell, tmux), minimise = {}, select = { selected = it.id })
                 }
             }
         }
         compose.onNodeWithTag("terminal-switcher").assertIsDisplayed()
-        compose.onNodeWithText("• Fixture · shell").assertIsDisplayed()
-        compose.onNodeWithText("Fixture · tmux work").performClick()
+        compose.onNodeWithTag("terminal-tab:1").assertIsDisplayed()
+        compose.onNodeWithText("Current").assertIsDisplayed() // The shown terminal is marked.
+        compose.onNodeWithText("tmux work").assertIsDisplayed()
+        compose.onNodeWithTag("terminal-tab:2").performClick()
         compose.runOnIdle {
             assertEquals(2L, selected)
             assertTrue(port.sessions.none { it.second.destroyed })
@@ -214,10 +151,9 @@ class EntryUiDeviceTest {
             compose.activity.setContent {
                 val terminals by holder.terminals.collectAsState()
                 val terminal = terminals.firstOrNull()
-                val connected = terminal?.hasConnected?.collectAsState()?.value == true
-                AppScaffold(Destination.Inbox, terminalVisible = screen == "terminal" && connected, fullScreen = screen == "terminal", selectTab = {}) {
-                    if (screen == "terminal") SessionScreen(holder, terminal, terminals, back = { screen = "inbox" }, select = {})
-                    else Text("Inbox fixture")
+                AppScaffold(fullScreen = screen == "terminal") {
+                    if (screen == "terminal") SessionScreen(holder, terminal, terminals, minimise = { screen = "home" }, select = {})
+                    else Text("Home fixture")
                 }
             }
         }
@@ -234,19 +170,21 @@ class EntryUiDeviceTest {
             return view!!
         }
         var view = awaitTerminal()
-        compose.onNodeWithText("or2").assertDoesNotExist()
-        compose.onNodeWithText("Hosts").assertDoesNotExist()
-        compose.onNodeWithText("Keys").assertDoesNotExist()
+        compose.onNodeWithTag("terminal-title").assertIsDisplayed()
+        compose.onNodeWithText("Fixture: shell").assertIsDisplayed()
+        compose.onNodeWithText("SSH").assertIsDisplayed() // The transport badge.
+        // The header's round buttons are drawn small (18 dp) but are full 48 dp touch targets.
+        listOf("terminal-back", "terminal-panes").forEach {
+            compose.onNodeWithTag(it).assertTouchTargetAtLeast(48)
+        }
         compose.runOnIdle {
             val insets = ViewCompat.getRootWindowInsets(view)!!.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             assertEquals(compose.activity.window.decorView.width - insets.left - insets.right, view.width)
         }
         val retained = holder.terminals.value.single()
-        // Back leaves the terminal running: it is neither disconnected nor destroyed.
+        // Minimising leaves the terminal running: it is neither disconnected nor destroyed.
         compose.onNodeWithTag("terminal-back").performClick()
-        compose.onNodeWithText("or2").assertIsDisplayed()
-        compose.onNodeWithText("• Inbox").assertIsDisplayed()
-        compose.onNodeWithText("Inbox fixture").assertIsDisplayed()
+        compose.onNodeWithText("Home fixture").assertIsDisplayed()
         compose.runOnIdle {
             assertSame(retained, holder.terminals.value.single())
             assertEquals(SessionState.Connected, retained.state.value)
@@ -254,21 +192,18 @@ class EntryUiDeviceTest {
         }
         compose.runOnUiThread { screen = "terminal" }
         view = awaitTerminal()
-        compose.onNodeWithText("or2").assertDoesNotExist()
-        compose.onNodeWithText("Disconnect").performClick()
-        compose.onNodeWithText("Close").assertIsDisplayed()
+        // Disconnect from the panes sheet: the final frame stays until the session is closed.
+        compose.onNodeWithTag("terminal-panes").performClick()
+        compose.onNodeWithTag("terminal-disconnect").performClick()
+        compose.onNodeWithTag("terminal-close").assertIsDisplayed()
         compose.onNodeWithText("Disconnected", substring = true).assertIsDisplayed()
-        compose.onNodeWithText("or2").assertDoesNotExist()
-        compose.onNodeWithText("Keys").assertDoesNotExist()
         compose.runOnIdle {
             assertSame(view, compose.activity.window.decorView.terminal())
             assertEquals("LR", view.grid.rows.single().cells.joinToString("") { it.text })
             assertFalse(session.destroyed)
         }
-        compose.onNodeWithText("Close").performClick()
-        compose.onNodeWithText("or2").assertIsDisplayed()
-        compose.onNodeWithText("Keys").assertIsDisplayed()
-        compose.onNodeWithText("Inbox fixture").assertIsDisplayed()
+        compose.onNodeWithTag("terminal-close").performClick()
+        compose.onNodeWithText("Home fixture").assertIsDisplayed()
         compose.waitUntil(5_000) {
             var closed = false
             compose.runOnUiThread { closed = session.destroyed }
@@ -278,5 +213,6 @@ class EntryUiDeviceTest {
             assertEquals(1, session.closes)
             assertTrue(holder.terminals.value.isEmpty())
         }
+        assertNotNull(view)
     }
 }

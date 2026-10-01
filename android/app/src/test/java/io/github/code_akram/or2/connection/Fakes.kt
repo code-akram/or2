@@ -87,6 +87,10 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     var watchFailure: Exception? = null
     var watchStopFailure: Exception? = null
     var capabilityCalls = 0
+    /** `focus:<session>:<pane>` entries go to [events] in call order; a failure is thrown after the call is recorded. */
+    val focused = mutableListOf<Pair<String?, String>>()
+    val focusFailures = mutableMapOf<String, Exception>()
+    var focusGate: CompletableDeferred<Unit>? = null
     val terminals = mutableListOf<Triple<TerminalTarget, SessionListener, FakeSession>>()
     val watches = mutableListOf<Triple<String?, HerdrListener, FakeWatch>>()
 
@@ -113,6 +117,12 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         check(!destroyed) { "Host connection object has already been destroyed" }
         watchFailure?.let { throw it }
         return FakeWatch(events).also { it.stopFailure = watchStopFailure; watches += Triple(session, listener, it) }
+    }
+    override suspend fun focusHerdrPane(session: String?, paneId: String) {
+        events += "focus:$session:$paneId"
+        focusGate?.await()
+        focusFailures[paneId]?.let { throw it }
+        focused += session to paneId
     }
 }
 

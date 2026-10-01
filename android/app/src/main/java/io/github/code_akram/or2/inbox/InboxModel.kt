@@ -127,14 +127,16 @@ fun herdrNote(caps: HostCapabilities?, capsError: String?, watches: List<Pair<St
     if (caps == null) return "Checking the host…"
     if (caps.herdr == null) return "herdr is not installed"
     if (watches.isEmpty()) return "No running herdr sessions"
-    val unavailable = watches.mapNotNull { (_, state) -> (state as? HerdrState.Unavailable)?.reason }
+    val unavailable = watches.mapNotNull { (_, state) -> state as? HerdrState.Unavailable }
     return when {
-        unavailable.size == watches.size -> unavailable.first().let {
-            when (it) {
+        unavailable.size == watches.size -> unavailable.first().let { first ->
+            when (first.reason) {
                 HerdrUnavailable.NotRunning -> "herdr is not running"
-                is HerdrUnavailable.IncompatibleProtocol -> "herdr protocol ${it.protocol} is not supported"
+                is HerdrUnavailable.IncompatibleProtocol -> "herdr protocol ${first.reason.protocol} is not supported"
                 HerdrUnavailable.NotInstalled -> "herdr is not installed"
-                HerdrUnavailable.Failed -> "herdr is unavailable"
+                // The core's own explanation, when it has one, beats a bare "unavailable".
+                HerdrUnavailable.Failed -> first.message.trim().takeIf { it.isNotEmpty() }
+                    ?.let { "herdr is unavailable: $it" } ?: "herdr is unavailable"
             }
         }
         else -> null
@@ -181,6 +183,13 @@ private fun hostFlow(host: Host, active: ActiveHost?): Flow<Pair<InboxHostRow, L
         val note = if (link == LinkStatus.CONNECTED) herdrNote(caps, capsError, views.map { it.first.name to it.second }) else null
         InboxHostRow(host, link, hostStateMessage(state), note, sources.sumOf { it.view.agents.size }) to sources
     }
+}
+
+/** The state of every connection, keyed by host id; hosts without a connection are absent. */
+@OptIn(ExperimentalCoroutinesApi::class)
+fun HostConnections.hostStates(): Flow<Map<Long, HostState>> = hosts.flatMapLatest { active ->
+    if (active.isEmpty()) flowOf(emptyMap())
+    else combine(active.values.map { a -> a.state.map { a.host.id to it } }) { it.toMap() }
 }
 
 /** Link status of every connection, keyed by host id; hosts without a connection are absent. */

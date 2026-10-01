@@ -7,6 +7,16 @@ import io.github.code_akram.or2.ffi.importPrivateKey
 import java.io.InputStream
 import javax.crypto.Cipher
 
+/**
+ * A fingerprint for a list row: `SHA256:7vK2mQ9x…tB1MkA`, ellipsized in the middle so it stays on
+ * one line and still ends the way the full value does. The full value is in the key's own sheet.
+ */
+fun shortFingerprint(fingerprint: String, head: Int = 8, tail: Int = 6): String {
+    val start = fingerprint.indexOf(':') + 1
+    return if (fingerprint.length <= start + head + 1 + tail) fingerprint
+    else fingerprint.take(start + head) + "…" + fingerprint.takeLast(tail)
+}
+
 // Owns/closes the stream. Copy only after close succeeds, so a provider close error cannot
 // strand a newly allocated plaintext return value. Wipe staging on all exit paths.
 fun readPrivateKey(input: InputStream): ByteArray {

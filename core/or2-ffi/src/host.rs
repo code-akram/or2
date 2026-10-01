@@ -414,7 +414,7 @@ mod tests {
     fn request(addresses: Vec<HostAddress>) -> HostConnectRequest {
         HostConnectRequest {
             addresses,
-            username: "akram".into(),
+            username: "dev".into(),
             private_key: ClientKey::generate_ed25519("k").to_stored().to_vec(),
             trusted_host_keys: Vec::new(),
         }
@@ -428,7 +428,7 @@ mod tests {
             !text.contains("OPENSSH") && !text.contains("private_key"),
             "{text}"
         );
-        assert!(text.contains("akram") && text.contains("\"h\""));
+        assert!(text.contains("dev") && text.contains("\"h\""));
     }
 
     #[test]

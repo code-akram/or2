@@ -22,7 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.material3.MaterialTheme
+import io.github.code_akram.or2.ui.Or2Theme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
@@ -83,7 +83,7 @@ class TerminalProbeActivity : ComponentActivity() {
             key.privateKey.fill(0)
         }
         setContent {
-            MaterialTheme {
+            Or2Theme {
                 Column(Modifier.windowInsetsPadding(WindowInsets.safeDrawing)) {
                     Row(Modifier.horizontalScroll(rememberScrollState())) {
                         TextButton(onClick = { requestProbeFrame() }) { Text("Probe") }
@@ -130,7 +130,7 @@ class TerminalProbeActivity : ComponentActivity() {
     /** Mirrors the session screen's Compose siblings, with visible margins for clip checks. */
     fun showBoundsFixture() {
         setContent {
-            MaterialTheme {
+            Or2Theme {
                 Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)
                     .background(Color(0xff336699))) {
                     Text("Compose session title above terminal", color = Color.White,

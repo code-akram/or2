@@ -19,6 +19,14 @@ import javax.crypto.spec.GCMParameterSpec
 @OptIn(ExperimentalCoroutinesApi::class)
 class KeyOperationsTest {
     @Test
+    fun aFingerprintIsEllipsizedInTheMiddleForListRows() {
+        assertEquals("SHA256:7vK2mQ9x…tB1MkA", shortFingerprint("SHA256:7vK2mQ9xRpL3aTn0sWZ4cEdHfY8uJbNqXoGiVtB1MkA"))
+        assertEquals("SHA256:short", shortFingerprint("SHA256:short"))
+        assertEquals("no-prefix", shortFingerprint("no-prefix"))
+        assertEquals("abcdefgh…uvwxyz", shortFingerprint("abcdefghijklmnopqrstuvwxyz"))
+    }
+
+    @Test
     fun importedInputIsWipedOnSuccessAndTypedFailure() {
         val generated = generateEd25519Key("")
         try {

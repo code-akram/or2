@@ -55,7 +55,7 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunner = "io.github.code_akram.or2.Or2TestRunner"
         ndk { abiFilters += "arm64-v8a" }
     }
 
@@ -110,6 +110,11 @@ dependencies {
     implementation("androidx.room:room-runtime:2.8.3")
     ksp("androidx.room:room-compiler:2.8.3")
     implementation(platform("androidx.compose:compose-bom:2025.10.00"))
+    // room-testing 2.8.3 (androidTest) brings serialization-json 1.8.1, whose generated serializers
+    // call GeneratedSerializer methods that core 1.7.3 lacks; consistent resolution holds the
+    // androidTest runtime at the debug runtime's version, so align the group for debug builds only:
+    // the shipped release runtime keeps the version its own dependencies ask for (1.7.3).
+    debugImplementation(platform("org.jetbrains.kotlinx:kotlinx-serialization-bom:1.8.1"))
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
     implementation("net.java.dev.jna:jna:5.17.0@aar")

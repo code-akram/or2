@@ -5,36 +5,55 @@ import org.junit.Test
 
 class NavigationTest {
     @Test
-    fun theInboxIsTheStartAndTheBottomOfTheStack() {
+    fun homeIsTheStartAndTheBottomOfTheStack() {
         val start = NavStack()
-        assertEquals(Destination.Inbox, start.current)
+        assertEquals(Destination.Home, start.current)
         assertNull(start.back())
         val host = start.push(Destination.HostPage(7))
         val terminal = host.push(Destination.Terminal(3))
         assertEquals(Destination.Terminal(3), terminal.current)
-        assertEquals(Destination.Inbox, terminal.tab)
+        assertEquals(Destination.Home, terminal.tab)
         assertEquals(host, terminal.back())
         assertEquals(start, terminal.back()!!.back())
     }
 
     @Test
-    fun switchingTerminalsReplacesAndTabsStartAFreshStack() {
-        val stack = NavStack().top(Destination.Hosts).push(Destination.HostPage(1)).push(Destination.Terminal(1))
+    fun switchingTerminalsReplacesAndTopLevelScreensStartAFreshStack() {
+        val stack = NavStack().push(Destination.HostPage(1)).push(Destination.Terminal(1))
         val switched = stack.replaceTop(Destination.Terminal(2))
-        assertEquals(listOf(Destination.Hosts, Destination.HostPage(1), Destination.Terminal(2)), switched.entries)
-        assertEquals(Destination.Hosts, switched.tab)
-        assertEquals(NavStack(listOf(Destination.Keys)), switched.top(Destination.Keys))
+        assertEquals(listOf(Destination.Home, Destination.HostPage(1), Destination.Terminal(2)), switched.entries)
+        assertEquals(Destination.Home, switched.tab)
+        assertEquals(NavStack(listOf(Destination.Inbox)), switched.top(Destination.Inbox))
         assertSame(stack, stack.push(Destination.Terminal(1))) // The same screen twice is one entry.
     }
 
     @Test
-    fun theStackSurvivesSavedStateAndGarbageFallsBackToTheInbox() {
-        val stack = NavStack().top(Destination.Hosts).push(Destination.HostPage(42)).push(Destination.Terminal(9))
-        assertEquals("hosts|host:42|terminal:9", stack.encode())
+    fun backFromTheInboxGoesHomeAndOnlyHomeLeavesTheApp() {
+        val home = NavStack()
+        val inbox = home.push(Destination.Inbox) // Home opens the inbox on top of itself ...
+        assertEquals(home, inbox.backOrHome()) // ... so Back returns to Home, not out of the app.
+        assertNull(home.backOrHome())
+        // A stack saved by an older build can be rooted at the inbox: Back still goes Home.
+        val rooted = NavStack(listOf(Destination.Inbox))
+        assertEquals(home, rooted.backOrHome())
+        assertEquals(rooted, NavStack(listOf(Destination.Inbox, Destination.Keys)).backOrHome())
+        // The inbox's Home button starts a fresh stack at Home.
+        assertEquals(home, inbox.top(Destination.Home))
+    }
+
+    @Test
+    fun theStackSurvivesSavedStateAndGarbageFallsBackToHome() {
+        val stack = NavStack().push(Destination.HostForm(42)).push(Destination.HostPage(42)).push(Destination.Terminal(9))
+        assertEquals("home|hostform:42|host:42|terminal:9", stack.encode())
         assertEquals(stack, NavStack.decode(stack.encode()))
         assertEquals(NavStack(), NavStack.decode(""))
         assertEquals(NavStack(), NavStack.decode("nonsense|host:x"))
-        assertEquals(listOf(Destination.Inbox, Destination.Terminal(5)), NavStack.decode("terminal:5").entries)
-        assertEquals(Destination.Keys, NavStack.decode("keys").current)
+        assertEquals(listOf(Destination.Home, Destination.Terminal(5)), NavStack.decode("terminal:5").entries)
+        // Keys is pushed on a top-level screen, never the bottom of a stack.
+        assertEquals(listOf(Destination.Home, Destination.Keys), NavStack.decode("keys").entries)
+        assertEquals(NavStack(listOf(Destination.Inbox, Destination.Keys)), NavStack.decode("inbox|keys"))
+        // The M2 "hosts" tab is Home now.
+        assertEquals(listOf(Destination.Home, Destination.HostPage(1)), NavStack.decode("hosts|host:1").entries)
+        assertEquals(Destination.HostForm(0), NavStack.decode("home|hostform:0").current)
     }
 }

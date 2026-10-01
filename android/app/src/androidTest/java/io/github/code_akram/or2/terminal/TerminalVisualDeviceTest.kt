@@ -33,32 +33,27 @@ class TerminalVisualDeviceTest {
         fail("Terminal frame or Window metrics did not arrive")
     }
 
-    private fun assertFixedKeysFitWithoutScrolling(view: TerminalView) {
-        val rowBounds = checkNotNull(view.primaryKeyRowBounds) { "Essential keys row not laid out" }
-        val labels = listOf("Esc", "Tab", "Ctrl", "Alt", "←", "↓", "↑", "→")
-        assertEquals(labels.toSet(), view.primaryKeyBounds.keys)
-        assertTrue("Essential keys row must be visible", rowBounds.width() > 0 && rowBounds.height() > 0)
-        assertEquals("Essential row must fit viewport without scrolling", view.width.toFloat(), rowBounds.width(), 1f)
-        var right = rowBounds.left
+    /** Every toolbar key is laid out inside the pill, in order and not overlapping: nothing needs a scroll. */
+    private fun assertToolbarKeysFitWithoutScrolling(view: TerminalView) {
+        val toolbar = checkNotNull(view.toolbarBounds) { "Key toolbar not laid out" }
+        assertTrue("Toolbar must be visible", toolbar.width() > 0 && toolbar.height() > 0)
+        val density = view.resources.displayMetrics.density
+        val keys = listOf("Ctrl", "Esc", "Tab", "Arrows", "Panes", "Paste", "History", "Composer", "Keyboard")
+        val labels = if (view.selection == null) keys else listOf("Copy", "Clear") + keys
+        assertTrue("Toolbar keys $labels must all be laid out, found ${view.toolbarKeyBounds.keys}", view.toolbarKeyBounds.keys.containsAll(labels))
+        var right = toolbar.left
+        // With a selection the Copy and Clear keys join the row and it may scroll; the composer and
+        // keyboard toggles stay put either way.
+        val scrolls = view.selection != null
         labels.forEach { label ->
-            val bounds = view.primaryKeyBounds.getValue(label)
+            val bounds = view.toolbarKeyBounds.getValue(label)
             assertTrue("$label must be visible", bounds.width() > 0 && bounds.height() > 0)
-            assertTrue("$label ($bounds) must fit within $rowBounds", rowBounds.contains(bounds))
-            // Containment alone could pass for a clipped partial button. Each must occupy
-            // a full eighth of the row, including the right arrow, in both armed states.
-            assertEquals("$label must have a full cell", rowBounds.width() / 8, bounds.width(), 1f)
-            assertEquals("$label must follow the preceding key", right, bounds.left, 1f)
+            if (scrolls && label !in listOf("Composer", "Keyboard")) return@forEach
+            assertTrue("$label ($bounds) must fit within $toolbar without scrolling", toolbar.contains(bounds))
+            assertTrue("$label touch target must be at least 36 dp wide", bounds.width() >= 36 * density - 1)
+            assertTrue("$label touch target must be at least 48 dp tall", bounds.height() >= 48 * density - 1)
+            assertTrue("$label must follow the preceding key", bounds.left >= right - 1)
             right = bounds.right
-        }
-        assertEquals(rowBounds.right, right, 1f)
-        val actionRow = checkNotNull(view.actionRowBounds)
-        var next = actionRow.left
-        val actions = if (view.selection == null) listOf("Paste") else listOf("Copy", "Clear", "Paste")
-        actions.forEach { label ->
-            val bounds = view.actionBounds.getValue(label)
-            assertTrue("$label must remain visible", bounds.width() > 0 && actionRow.contains(bounds))
-            assertEquals("$label must be at the start, outside the extras scroller", next, bounds.left, 1f)
-            next = bounds.right
         }
     }
 
@@ -71,14 +66,14 @@ class TerminalVisualDeviceTest {
         scenario.onActivity { activity ->
             activity.window.decorView.getWindowVisibleDisplayFrame(bounds)
             val view = activity.terminalView()!!
-            assertFixedKeysFitWithoutScrolling(view) // Direct layout reads stay on the UI thread.
+            assertToolbarKeysFitWithoutScrolling(view) // Direct layout reads stay on the UI thread.
             val position = IntArray(2)
             view.getLocationOnScreen(position)
             bounds.top = position[1] // Exclude system status and debug toolbar; retain terminal + keys.
             if (name == "composition-armed-keys") {
                 val cursor = view.grid.cursor!!
                 // e + combining acute is one cell, CJK and emoji each occupy two.
-                compositionEdge = Point(position[0] - bounds.left + ((cursor.column.toInt() + 5) * view.cellWidth).toInt() - 1,
+                compositionEdge = Point(position[0] - bounds.left + (view.horizontalInset + (cursor.column.toInt() + 5) * view.cellWidth).toInt() - 1,
                     ((cursor.row.toInt() + 1) * view.cellHeight).toInt() - 1)
             }
         }
@@ -89,7 +84,7 @@ class TerminalVisualDeviceTest {
         val directory = File(instrumentation.targetContext.filesDir, "terminal-review").apply { mkdirs() }
         File(directory, "$name.png").outputStream().use { assertTrue(cropped.compress(Bitmap.CompressFormat.PNG, 100, it)) }
         compositionEdge?.let { edge ->
-            assertEquals("Composition underline must cover all five cells", 0xff66ccff.toInt(), cropped.getPixel(edge.x, edge.y))
+            assertEquals("Composition underline must cover all five cells", 0xff89b4fa.toInt(), cropped.getPixel(edge.x, edge.y))
         }
         cropped.recycle()
         screenshot.recycle()
@@ -152,7 +147,7 @@ class TerminalVisualDeviceTest {
                 activity.showBoundsFixture()
             }
             await(scenario) { _, view ->
-                val size = gridSize(view.width, view.height, view.cellWidth, view.cellHeight)
+                val size = view.currentGridSize()
                 size != null && view.width < oldWidth && view.grid.hasGrid &&
                     view.grid.columns == size.columns.toInt() && view.grid.rows.size == size.rows.toInt()
             }
@@ -163,12 +158,12 @@ class TerminalVisualDeviceTest {
                 scenario.onActivity { activity ->
                     val view = activity.terminalView()!!
                     oldDraws = view.drawTimings.count
-                    val size = gridSize(view.width, view.height, view.cellWidth, view.cellHeight)!!
+                    val size = view.currentGridSize()!!
                     val columns = size.columns.toInt()
                     val rows = size.rows.toInt()
                     // A retained grid can temporarily exceed the viewport during resize.
                     activity.display(terminalVisualFrame((columns + 4).toUShort(), (rows + 4).toUShort(), CursorShape.BAR)
-                        .copy(cursor = TerminalCursor((columns - 1).toUShort(), 1u, true, CursorShape.BLOCK, false, 0x66ccffu)))
+                        .copy(cursor = TerminalCursor((columns - 1).toUShort(), 1u, true, CursorShape.BLOCK, false, 0x89b4fau)))
                     if (selecting) {
                         view.beginSelection(CellPosition(0, 0))
                         view.selection!!.end = CellPosition(columns + 3, rows + 3)
