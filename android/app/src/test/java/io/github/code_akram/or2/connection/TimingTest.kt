@@ -74,6 +74,29 @@ class TimingTest {
         assertEquals(4, lines.size)
     }
 
+    @Test
+    fun aRetainedTerminalIsTimedAgainByEachActivationAndUnwatchedFramesAreIgnored() {
+        val lines = mutableListOf<String>()
+        var clock = 0L
+        val timing = Timing(lines::add) { clock }
+        timing.terminalFrame(5) // Frames drawn while nobody waits (the view reports every one).
+        timing.begin("reuse host=1 pane=p")
+        timing.watchTerminal(5, "reuse host=1 pane=p")
+        clock += 30
+        timing.terminalFrame(5)
+        // The app returns from the background: the same terminal is activated again.
+        clock += 1000
+        timing.begin("reopen host=1")
+        timing.watchTerminal(5, "reopen host=1")
+        clock += 20
+        timing.terminalFrame(5)
+        timing.terminalFrame(5)
+        assertEquals(
+            listOf("reuse host=1 pane=p begin ms=0", "reuse host=1 pane=p frame ms=30", "reopen host=1 begin ms=0", "reopen host=1 frame ms=20"),
+            lines,
+        )
+    }
+
     private fun TestScope.holder(timing: Timing, port: FakePort, listener: (HostListener) -> Unit) =
         HostConnections({ _, l -> listener(l); port }, FakeTrust(), StandardTestDispatcher(testScheduler), UnconfinedTestDispatcher(testScheduler), timing = timing)
 

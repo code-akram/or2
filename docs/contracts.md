@@ -2161,10 +2161,19 @@ pane id only (no label, address, user name, key or output):
 | Path | Events |
 |---|---|
 | `connect host=N` | `unlocked` (the biometric is done; ms=0), `authenticating`, `connected`, `capabilities` (the probe answered), `live` (the first herdr view of the host), or `failed` (closed before it connected, e.g. 20 s for an unreachable host) |
-| `tap host=N pane=P` (inbox tap) | `begin`, `focused` (herdr acknowledged the pane focus), `terminal-connected`, `frame` (the first frame was drawn) |
+| `tap host=N pane=P` (inbox tap) | `begin`, `focused` (herdr acknowledged the pane focus), `terminal-connected`, `frame` (a frame was drawn: see below) |
 | `reuse host=N pane=P` (an open terminal) | `begin`, `focused`, `frame` |
 | `reopen host=N` (return to the foreground) | as `tap` |
 | `resume host=N` (Resume card or automatic resume) | `begin`, `host-connected`, then the reopen's `focused`, `terminal-connected`, `frame` |
+
+**`frame`** is reported by the terminal view after a frame it applied has been drawn and committed
+(`onDraw`, then `ViewTreeObserver.registerFrameCommitCallback`), not when the frame was only asked
+for: rendering and scheduling delay are included. The view reports every such frame
+(`TerminalView.onFrameDrawn`; `Timing.terminalFrame` ignores it unless a path is watching that
+terminal), so a view that is retained (the app returns from the background, the same terminal is
+reused) ends each later activation's span too: `watchTerminal` arms it again, and a retained view
+shown again reports its next draw even when its content did not change (`AppliedFrames`, tests
+`AppliedFramesTest`, `TimingTest`). A blank draw before the first frame is not reported.
 
 For a new agent terminal the focus and the terminal start together, so `focused` and
 `terminal-connected` may come in either order. `connect` shows how long each host took from the

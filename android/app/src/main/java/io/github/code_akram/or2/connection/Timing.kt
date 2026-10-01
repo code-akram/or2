@@ -71,8 +71,12 @@ class Timing(
         mark(span, "terminal-connected")
     }
 
-    /** A watched terminal drew its first frame: the path is over. */
+    /**
+     * A terminal drew a frame (the view reports every one): for a watched terminal that ends the path,
+     * and it is armed again by the next [watchTerminal], so a retained view shown again is timed too.
+     */
     fun terminalFrame(id: Long) {
+        if (!enabled) return
         val span = synchronized(lock) { terminalSpans.remove(id) } ?: return
         end(span, "frame")
     }
