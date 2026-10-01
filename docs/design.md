@@ -88,11 +88,11 @@ outputs, not checked-in copies.
 
 The shared M1 contracts (transport, key material, host-key trust, session lifecycle and
 callbacks, changed-row frames, input) are defined in [contracts](contracts.md), which also
-separates what is implemented from lane work. FFI API version 2 exports `build_info`,
-`terminal_size`, key generation and import, the `Session` object with its `SessionListener`,
-and `contract_probe_session`, a test fixture that drives a real `Session` without a network.
-There is deliberately no `connect` export until the SSH session works; no success-returning
-stubs. See [build instructions](build.md) for the shared toolchain and verification commands.
+separates what is implemented from lane work. FFI API version 5 exports `build_info`,
+`terminal_size`, key generation and import, `connect_host` with the `HostConnection`, `Session`
+and `HerdrWatch` objects and their listeners, and two test fixtures (`contract_probe_session`,
+`contract_probe_host`) that drive the real objects without a network. There is no export that
+connects a single shell: terminals are channels of a host connection. See [build instructions](build.md) for the shared toolchain and verification commands.
 
 ### Transport
 
@@ -330,7 +330,7 @@ not configured by the scaffold; M1 development uses the debug APK.
 
 Scope: M2 plus the Rust half of M3's mosh. Lanes, ownership and interfaces are in
 [contracts: M2](contracts.md#m2-hosts-multiplexers-and-mosh). One SSH connection per host
-carries terminals, tmux/probe exec channels and herdr streamlocal channels (FFI API 4).
+carries terminals, tmux/probe exec channels and herdr streamlocal channels (FFI API 5).
 
 - [x] Lane 0: `remote`, `host`, `herdr::view` and tmux contract types; FFI API 4 surface;
   `contract_probe_host`; Kotlin JVM contract test.

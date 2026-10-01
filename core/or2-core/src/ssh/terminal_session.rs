@@ -62,8 +62,6 @@ pub(super) async fn drive(
                         pump.output(&mut driver, bytes, &mut incoming, &mut pending_event)?;
                     }
                     Event::Closed(reason) => break Ok(host_reason(reason, &mut closing).await),
-                    // M1-only events.
-                    Event::HostKey(..) | Event::Authenticating | Event::TransportEnded(_) => {}
                 },
                 command = driver.next_command() => match command {
                     Command::Disconnect => break Ok(CloseReason::Disconnected),

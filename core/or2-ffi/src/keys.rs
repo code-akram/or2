@@ -1,5 +1,5 @@
 //! Client key generation and import. Kotlin stores `ClientKeyMaterial.private_key` encrypted
-//! with a Keystore key and passes it back unchanged in `ConnectRequest.private_key`.
+//! with a Keystore key and passes it back unchanged in `HostConnectRequest.private_key`.
 
 use std::fmt;
 

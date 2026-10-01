@@ -13,6 +13,7 @@ use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -23,6 +24,7 @@ use or2_core::host::{
     HerdrSessionInfo, HostConnectRequest, HostError, HostHandle, HostObserver, HostState,
     TerminalTarget,
 };
+use or2_core::input::{Key, KeyInput, Modifiers};
 use or2_core::keys::ClientKey;
 use or2_core::remote::{OUTPUT_CAP, RemoteCommand, RemoteError, RemoteHost};
 use or2_core::session::{
@@ -166,12 +168,14 @@ struct Live {
 
 impl Live {
     fn new() -> Self {
-        let sshd = Sshd::new(false);
-        let key = ClientKey::generate_ed25519("");
-        sshd.authorize(&key);
+        Self::with_key(Sshd::new(false), &ClientKey::generate_ed25519(""))
+    }
+
+    fn with_key(sshd: Sshd, key: &ClientKey) -> Self {
+        sshd.authorize(key);
         let (observer, states, log) = host_observer();
         let host = connect_host(
-            request(&key, &[(lo(), sshd.port)], std::slice::from_ref(&sshd.host)),
+            request(key, &[(lo(), sshd.port)], std::slice::from_ref(&sshd.host)),
             observer,
         );
         assert_eq!(next(&states), HostState::Authenticating);
@@ -392,6 +396,54 @@ fn an_unauthorized_key_closes_with_authentication_rejected() {
         closed(&states),
         CloseReason::Failed(SessionFailure::AuthenticationRejected)
     );
+}
+
+#[test]
+fn an_rsa_client_key_authenticates_and_key_input_reaches_the_shell() {
+    require_sshd!();
+    // RSA exercises the signature hash negotiation against stock sshd; Ed25519 is the rest of
+    // this file.
+    let sshd = Sshd::new(false);
+    let path = sshd.directory.path().join("client");
+    let status = Command::new("ssh-keygen")
+        .args(["-q", "-t", "rsa", "-b", "2048", "-N", "", "-C", "", "-f"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let key = ClientKey::from_stored(&fs::read(path).unwrap()).unwrap();
+    let live = Live::with_key(sshd, &key);
+    let mut term = live.open("t", TerminalTarget::Shell, 79, 23);
+    term.quiet();
+    term.send("printf 'KEY-%s\\n' ");
+    let modifiers = Modifiers::default();
+    term.handle
+        .send_key(KeyInput::new(Key::Character("a".into()), modifiers).unwrap())
+        .unwrap();
+    term.handle
+        .send_key(KeyInput::new(Key::Enter, modifiers).unwrap())
+        .unwrap();
+    term.wait("KEY-a");
+    live.host.disconnect();
+    assert_eq!(term.closed(), CloseReason::Disconnected);
+    assert_eq!(closed(&live.states), CloseReason::Disconnected);
+}
+
+#[test]
+fn a_certificate_only_host_is_an_unsupported_host_key_not_a_trust_prompt() {
+    require_sshd!();
+    let sshd = Sshd::new(true);
+    let key = ClientKey::generate_ed25519("");
+    sshd.authorize(&key);
+    let (observer, states, _) = host_observer();
+    let _host = connect_host(
+        request(&key, &[(lo(), sshd.port)], std::slice::from_ref(&sshd.host)),
+        observer,
+    );
+    assert!(matches!(
+        closed(&states),
+        CloseReason::Failed(SessionFailure::UnsupportedHostKey(_))
+    ));
 }
 
 #[test]

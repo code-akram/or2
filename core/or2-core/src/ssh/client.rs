@@ -1,6 +1,5 @@
-//! What every SSH connection to a host shares, whether it carries one shell (M1) or a whole
-//! host (M2): the host-key handler, the transport relay, handshake failure mapping and public
-//! key authentication.
+//! What an SSH connection to a host needs: the host-key handler, the transport relay,
+//! handshake failure mapping and public key authentication.
 
 use std::sync::Arc;
 use std::time::Duration;

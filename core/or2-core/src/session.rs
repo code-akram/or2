@@ -28,8 +28,10 @@ use crate::term::TerminalSize;
 use crate::transport::{Endpoint, EndpointError};
 use crate::trust::{HostKey, HostKeyVerdict};
 
-/// Everything Rust needs to open one SSH shell. Kotlin assembles it per connection from Room
-/// and the Keystore; Rust keeps nothing after the session ends.
+/// A validated single-session request. The shipped connection is
+/// [`crate::host::HostConnectRequest`] (terminals are channels of a host connection); this is
+/// what the FFI's `contract_probe_session` fixture validates, with the same field rules, for the
+/// session contract tests.
 #[derive(Debug)]
 pub struct ConnectRequest {
     pub endpoint: Endpoint,

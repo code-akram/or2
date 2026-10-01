@@ -10,10 +10,11 @@ document and the tests together, and bumping `API_VERSION` in `or2-ffi` when an 
 
 All M1 contracts below are implemented and tested. M2 changes are specified in
 [M2: hosts, multiplexers and mosh](#m2-hosts-multiplexers-and-mosh); lane 0 has landed the
-M2 contract types and the FFI API 4 surface; lanes A1 (host driver behind `connect_host`: address
+M2 contract types and the FFI API 4 surface (`API_VERSION` 5 since the M1 `connect` was
+removed); lanes A1 (host driver behind `connect_host`: address
 racing, host connection, probe, tmux, terminal targets), A2 (herdr client), A3 (mosh core, no FFI
-export) and B (the Android app) have all landed, and the M1 `connect` export is gone (FFI
-`API_VERSION = 5`, see [Removing the M1 path](#removing-the-m1-path)).
+export) and B (the Android app) have all landed, and the M1 `connect` export is gone (see
+[The M1 path is gone](#the-m1-path-is-gone)).
 
 | Contract | Implemented and tested | Open |
 |---|---|---|
@@ -109,23 +110,23 @@ opens sockets.
 
 ## Session
 
-M1 exports (replaced in M2 by `connect_host` plus `HostConnection.open_terminal`):
-
-```rust
-#[uniffi::export]
-pub fn connect(request: ConnectRequest, listener: Box<dyn SessionListener>)
-    -> Result<Arc<Session>, ConnectError>;
-```
-
-It validates synchronously (`ConnectError`: `InvalidHost`, `InvalidPort`, `InvalidUsername`,
-`InvalidPrivateKey`, `InvalidTrustedHostKey { index }`, `EmptyDimension`) and returns at once;
-everything else arrives through the listener.
+A `Session` is one terminal. The app gets it from `HostConnection.open_terminal` (see
+[FFI API 5](#ffi-api-5-or2-ffi)); M1's `connect` export, which made one SSH connection per
+shell, is gone. `contract_probe_session(ConnectRequest, listener)` is the only other source (a
+test fixture, see [Contract probe](#contract-probe)); it validates synchronously
+(`ConnectError`: `InvalidHost`, `InvalidPort`, `InvalidUsername`, `InvalidPrivateKey`,
+`InvalidTrustedHostKey { index }`, `EmptyDimension`) and returns at once; everything else
+arrives through the listener.
 
 ```text
 Connecting ──▶ AwaitingHostKeyDecision ──▶ Authenticating ──▶ Connected
     │   └──────────────────────────────────────▲                  │
     └──────────────┴───────────────────────────┴──────────────────┴──▶ Closed { reason }
 ```
+
+A terminal on a host goes straight from `Connecting` to `Connected`: host-key and
+authentication states belong to the `HostConnection`. Only the probe session walks the full
+diagram.
 
 `CloseReason`: `Disconnected`, `RemoteExited { exit_status }`, or `Failed { failure }` with
 `SessionFailure`: `Unreachable`, `TimedOut`, `HostKeyRejected`, `UnsupportedHostKey`,
@@ -231,7 +232,7 @@ M2 replaces "one `connect` = one SSH connection = one shell" with **one SSH conn
 host** that carries everything for that host: terminal channels, exec channels for tmux and
 probing, and streamlocal channels to herdr. One connection means one biometric unlock and one
 host-key decision per host, and sub-second terminal opens once the host is connected. FFI API
-becomes **4**. The M1 sections above still govern frames, input, key material, trust and the
+became **4**, and **5** when the M1 `connect` export was removed. The M1 sections above still govern frames, input, key material, trust and the
 `Session` object; this section records what changes. Rust remains authoritative: when code and
 this text disagree, fix one of them in the same change.
 
@@ -251,25 +252,17 @@ All lanes have landed. `connect_host` is the host driver (A1), `herdr::run`, `wa
 `connect_host` and `HostConnection.open_terminal` exclusively. The M1 `connect` export was
 removed when A1 and B were integrated.
 
-### Removing the M1 path
+### The M1 path is gone
 
-The M1 `connect` path stays compiled until lane B has removed its Kotlin use. Deleting it
-touches these places, so none is left dead:
-
-- `or2-ffi/src/session.rs`: the `connect` export and its `ConnectRequest` record (bump
-  `API_VERSION`, regenerate the bindings), `ConnectContractTest.kt` and the app's production
-  connector.
-- `or2-core/src/ssh.rs`: `connect`, `start`, `drive`, `network`, `shell`,
-  `authenticated_shell` and the `From<HostKeyRequest>`/`From<TransportEnd>` impls for the M1
-  `Event`; `session::ConnectRequest` if nothing else uses it.
-- `or2-core/src/ssh/pump.rs`: the M1-only `Event` variants `HostKey`, `Authenticating` and
-  `TransportEnded`, and their no-op arms in `ssh/terminal_session.rs` (`drive`).
-- Tests: `ssh_tests.rs` (the M1 driver tests; the reply-budget test there imports
-  `super::pump::GeneratedReplies`, so move it next to `pump.rs` instead of dropping it) and
-  `tests/openssh.rs` (`host.rs` covers the host path). The prompt-time behaviour M1 tests
-  there (timer pause, EOF during the prompt) has host-path tests in
-  `ssh/connection_tests.rs`.
-- `docs/build.md`: the sentences that describe the M1 connector and `openssh.rs`.
+When A1 and B were integrated the M1 single-session path was removed, and `API_VERSION` became
+**5**: the `connect` export; `ssh::connect` and its single-session driver (`start`, `drive`,
+`network`, `shell`, `authenticated_shell`); the M1-only pump `Event` variants (`HostKey`,
+`Authenticating`, `TransportEnded`) and their no-op arms; `ssh_tests.rs` and
+`tests/openssh.rs`; `ConnectContractTest.kt` and the app's old connector. Their coverage moved:
+the reply-budget unit test sits next to `ssh/pump.rs`; the prompt-time timer and EOF behaviour
+is covered by `ssh/connection_tests.rs`; RSA client keys, key input and certificate-only hosts
+are covered by `tests/host.rs`. `ConnectRequest` (FFI record and `session::ConnectRequest`)
+stays because `contract_probe_session` takes it; it is no longer a connection request.
 
 ## Remote commands (`or2_core::remote`)
 
@@ -930,7 +923,9 @@ the `kill` binary, skips with a message without `mosh-server`, and `OR2_REQUIRE_
 skip a failure: set it in CI so the roaming and resize interop claim is never verified
 vacuously.
 
-## FFI API 4 (`or2-ffi`)
+## FFI API 5 (`or2-ffi`)
+
+API 5 is API 4 without the M1 `connect` export (the surface below is unchanged).
 
 ```rust
 #[derive(uniffi::Record)] pub struct HostAddress { pub host: String, pub port: u16 }

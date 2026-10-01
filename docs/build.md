@@ -73,8 +73,8 @@ android/gradlew -p android :app:assembleDebug :app:testDebugUnitTest :app:assemb
 
 Rust integration tests (`core/or2-core/tests/`): `host.rs` runs host connections against a
 disposable loopback `sshd` (trust, address racing, probe, exec caps and timeout, streamlocal (missing socket, forbidden
-forwarding), shell/tmux/herdr terminals, concurrency, close order, loss through a cuttable TCP relay);
-`openssh.rs` does the same for the M1 single-session path; both share `common/mod.rs`. The
+forwarding), shell/tmux/herdr terminals, RSA keys and key input, certificate-only hosts,
+concurrency, close order, loss through a cuttable TCP relay); it uses `common/mod.rs`. The
 sshd sessions get a private `TMUX_TMPDIR` (the test's tmux server lives in the fixture
 directory and is killed with it), a temporary `$HOME` and a fake `herdr` script there, so no
 real tmux or herdr server is ever contacted. `local.rs` runs the capability probe and tmux

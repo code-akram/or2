@@ -1,5 +1,4 @@
-//! The terminal pump shared by M1's one-session connection (`ssh::connect`) and by terminal
-//! channels on a host connection (`ssh::connection`).
+//! The terminal pump of a terminal channel on a host connection (`ssh::connection`).
 //!
 //! A terminal session is one thread that owns the libghostty `TerminalEngine` (it is `!Send`)
 //! and its [`SessionDriver`], plus one network task that owns the SSH channel. The task sends
@@ -14,11 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use russh::client;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
-use crate::session::{
-    CloseReason, Command, HostKeyPrompt, SessionDriver, SessionFailure, SessionState,
-};
+use crate::session::{CloseReason, Command, SessionDriver, SessionFailure, SessionState};
 use crate::term::TerminalSize;
 use crate::terminal::TerminalEngine;
 
@@ -30,15 +27,9 @@ pub(crate) const CHANNEL_CLOSE_GRACE: Duration = Duration::from_millis(250);
 
 /// From the network task to the session thread.
 pub(crate) enum Event {
-    /// M1 only: an untrusted host key awaits the user.
-    HostKey(HostKeyPrompt, oneshot::Sender<bool>),
-    /// M1 only.
-    Authenticating,
     /// The channel is open and running its program.
     Connected,
     Output(Vec<u8>),
-    /// M1 only: the transport ended (read EOF or error).
-    TransportEnded(SessionFailure),
     Closed(CloseReason),
 }
 
@@ -362,4 +353,44 @@ pub(crate) fn describe(error: &russh::Error) -> String {
 
 pub(crate) fn internal(error: impl std::fmt::Display) -> SessionFailure {
     SessionFailure::Internal(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_batches_coalesce_and_credit_includes_queued_and_in_flight_bytes() {
+        let replies = Rc::new(RefCell::new(GeneratedReplies::new()));
+        let collected = replies.clone();
+        let mut terminal = TerminalEngine::new(TerminalSize::new(79, 23).unwrap(), move |bytes| {
+            collected.borrow_mut().append(bytes)
+        })
+        .unwrap();
+        let (writes, mut queued) = mpsc::unbounded_channel();
+        let query = b"\x1b[6n".repeat(1000);
+        for _ in 0..10 {
+            terminal.write(&query);
+            replies.borrow_mut().flush(&writes).unwrap();
+        }
+        assert_eq!(queued.len(), 10); // One write per vt_write, not per query.
+        let Write::Reply(in_flight) = queued.try_recv().unwrap() else {
+            panic!("expected reply")
+        };
+        assert_eq!(in_flight.bytes, b"\x1b[1;1R".repeat(1000));
+        let budget = replies.borrow().budget.clone();
+        assert_eq!(budget.available_permits(), 65536 - 60000);
+        terminal.write(&query);
+        assert!(matches!(
+            replies.borrow_mut().flush(&writes),
+            Err(SessionFailure::Protocol(_))
+        ));
+        assert_eq!(queued.len(), 9);
+        assert_eq!(budget.available_permits(), 4); // Last incomplete batch stays below the cap.
+        drop(in_flight);
+        drop(queued);
+        drop(terminal);
+        drop(replies);
+        assert_eq!(budget.available_permits(), 65536);
+    }
 }

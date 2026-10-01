@@ -1,4 +1,4 @@
-//! Shared by the disposable OpenSSH integration tests (`openssh.rs`, `host.rs`). Only
+//! Shared by the disposable OpenSSH integration tests (`host.rs`). Only
 //! temporary keys/configuration and an ephemeral loopback listener are used; no home keys,
 //! system sshd or existing authorization are touched.
 #![allow(dead_code)]

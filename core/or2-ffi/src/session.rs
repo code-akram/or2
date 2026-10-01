@@ -14,6 +14,8 @@ use zeroize::Zeroizing;
 use crate::frame::TerminalFrame;
 use crate::keys::PublicKeyInfo;
 
+/// The request `contract_probe_session` validates (a test fixture; real connections use
+/// `HostConnectRequest`).
 #[derive(uniffi::Record)]
 pub struct ConnectRequest {
     pub host: String,
@@ -363,22 +365,6 @@ impl Session {
     pub(crate) fn new(handle: core::SessionHandle) -> Arc<Self> {
         Arc::new(Self { handle })
     }
-}
-
-/// Validates synchronously; networking and all callbacks run on Rust-owned threads.
-///
-/// M1 path: removed when lane B lands (Kotlin moves to `connect_host` plus
-/// `HostConnection.open_terminal`).
-#[uniffi::export]
-pub fn connect(
-    request: ConnectRequest,
-    listener: Box<dyn SessionListener>,
-) -> Result<Arc<Session>, ConnectError> {
-    let request = request.validate()?;
-    Ok(Session::new(or2_core::ssh::connect(
-        request,
-        Arc::new(ListenerObserver(listener)),
-    )))
 }
 
 #[uniffi::export]
