@@ -14,13 +14,15 @@ fun sessionMessage(state: SessionState): String = when (state) {
     is SessionState.Closed -> when (val reason = state.reason) {
         CloseReason.Disconnected -> "Disconnected"
         is CloseReason.RemoteExited -> "Remote shell exited" + (reason.exitStatus?.let { " (status $it)" } ?: "")
-        is CloseReason.Failed -> when (reason.failure) {
+        is CloseReason.Failed -> when (val failure = reason.failure) {
             is SessionFailure.Unreachable -> "Host unreachable. Check the address and network."
             SessionFailure.TimedOut -> "Connection timed out."
             SessionFailure.HostKeyRejected -> "Host key rejected. No connection was authorized."
             is SessionFailure.UnsupportedHostKey -> "Unsupported host key. Host certificates are not supported."
             SessionFailure.AuthenticationRejected -> "Authentication rejected. Check the username and public-key authorization."
             SessionFailure.ShellRejected -> "The server refused a terminal or shell."
+            is SessionFailure.NotInstalled -> "${failure.program} is not installed on the host."
+            is SessionFailure.CommandFailed -> "A command on the host failed. Retry or open a plain shell."
             is SessionFailure.ConnectionLost -> "Connection lost. Reconnect when the network is available."
             is SessionFailure.Protocol -> "SSH protocol error."
             is SessionFailure.Internal -> "Internal session error. Disconnect and retry."

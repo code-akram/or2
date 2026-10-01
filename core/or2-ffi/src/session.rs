@@ -113,15 +113,33 @@ pub enum CloseReason {
 /// `message` fields are diagnostics without secrets; do not match on them.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum SessionFailure {
-    Unreachable { message: String },
+    Unreachable {
+        message: String,
+    },
     TimedOut,
     HostKeyRejected,
-    UnsupportedHostKey { message: String },
+    UnsupportedHostKey {
+        message: String,
+    },
     AuthenticationRejected,
     ShellRejected,
-    ConnectionLost { message: String },
-    Protocol { message: String },
-    Internal { message: String },
+    /// A terminal target's program (`tmux`, `herdr`) is missing on the host.
+    NotInstalled {
+        program: String,
+    },
+    /// A command the terminal needed (for example a herdr pane focus) failed.
+    CommandFailed {
+        message: String,
+    },
+    ConnectionLost {
+        message: String,
+    },
+    Protocol {
+        message: String,
+    },
+    Internal {
+        message: String,
+    },
 }
 
 impl From<core::SessionState> for SessionState {
@@ -167,6 +185,8 @@ impl From<core::SessionFailure> for SessionFailure {
             F::UnsupportedHostKey(message) => Self::UnsupportedHostKey { message },
             F::AuthenticationRejected => Self::AuthenticationRejected,
             F::ShellRejected => Self::ShellRejected,
+            F::NotInstalled { program } => Self::NotInstalled { program },
+            F::CommandFailed(message) => Self::CommandFailed { message },
             F::ConnectionLost(message) => Self::ConnectionLost { message },
             F::Protocol(message) => Self::Protocol { message },
             F::Internal(message) => Self::Internal { message },

@@ -128,7 +128,8 @@ Connecting ──▶ AwaitingHostKeyDecision ──▶ Authenticating ──▶ 
 `CloseReason`: `Disconnected`, `RemoteExited { exit_status }`, or `Failed { failure }` with
 `SessionFailure`: `Unreachable`, `TimedOut`, `HostKeyRejected`, `UnsupportedHostKey`,
 `AuthenticationRejected`, `ShellRejected` (PTY or shell refused), `ConnectionLost`, `Protocol`,
-`Internal`. Messages are diagnostics without secrets, not for matching. Lane A maps transport
+`Internal` (M2 adds `NotInstalled { program }` and `CommandFailed`, for terminals on a host).
+Messages are diagnostics without secrets, not for matching. Lane A maps transport
 `io::Error`s to `Unreachable`, its connect timeout to `TimedOut`, russh auth failure to
 `AuthenticationRejected`, EOF with an exit status to `RemoteExited` and other loss after
 connecting to `ConnectionLost`.
@@ -256,8 +257,13 @@ without SSH:
 ```rust
 pub trait RemoteHost: Send + Sync + 'static {
     type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
-    /// Runs `command` without a PTY; collects stdout, stderr and the exit status.
+    /// The primitive: runs an already rendered command line, as sshd hands it to the login
+    /// shell, without a PTY; collects stdout, stderr and the exit status.
+    fn exec_rendered(&self, line: &str) -> impl Future<Output = Result<ExecOutput, RemoteError>> + Send;
+    /// Provided: `exec_rendered(command.render()?)`.
     fn exec(&self, command: &RemoteCommand) -> impl Future<Output = Result<ExecOutput, RemoteError>> + Send;
+    /// Provided: `exec_rendered(render_script(script)?)`, for fixed multi-line scripts.
+    fn exec_script(&self, script: &str) -> impl Future<Output = Result<ExecOutput, RemoteError>> + Send;
     /// Opens a byte stream to a Unix socket on the host (OpenSSH direct-streamlocal).
     fn open_unix(&self, path: &str) -> impl Future<Output = Result<Self::Stream, RemoteError>> + Send;
 }
@@ -272,11 +278,16 @@ pub trait RemoteHost: Send + Sync + 'static {
   (`'program' 'arg' …`); `Unquotable` also covers an environment name outside
   `[A-Za-z_][A-Za-z0-9_]*` and a program that is empty, starts with `-` or contains `=`
   (`env` would misread it). A round-trip test runs the rendered string through `sh`, bash,
-  zsh and fish (each skipped when not installed; fish is not installed on the runner that
-  landed lane 0) and checks the argv arrives exactly.
-  Fixed scripts (the capability probe) run as `sh -c '<script>'` (`remote::render_script`,
-  which rejects a script containing `'` or `\`; newlines are allowed). Untrusted values
-  (session names, pane ids) are only ever separate arguments.
+  zsh and fish and checks the argv arrives exactly. It starts zsh with `-f` and fish with
+  `--no-config`, so the user's startup files cannot change the output. A shell that is not
+  installed is skipped (fish is not installed on the runner that landed lane 0), unless
+  `OR2_REQUIRE_SHELLS` is set, which fails the test instead: set it in CI so the cross-shell
+  claim is never verified vacuously.
+  Fixed scripts (the capability probe) run as `sh -c '<script>'` through
+  `RemoteHost::exec_script` (`remote::render_script`, which rejects a script containing `'` or
+  `\`; newlines are allowed). `exec_script` and `exec` both reach `exec_rendered`, the one
+  method a `RemoteHost` implements, so a probe written over `RemoteHost` runs on `LocalHost`
+  too. Untrusted values (session names, pane ids) are only ever separate arguments.
 - Lane 0 put the tmux and probe result types in `or2_core::host` (`TmuxSession`,
   `HostCapabilities`, `HerdrSessionInfo`) next to the other host types; there is no separate
   `tmux` module yet (lane A1 adds the command code). The output cap and exec timeout are the
@@ -288,10 +299,11 @@ pub trait RemoteHost: Send + Sync + 'static {
   e.g. streamlocal forwarding disabled), `Io(String)`.
 - `LocalHost` (feature `test-support`, enabled for or2-core's own tests through a dev-dependency
   on itself; used by integration tests) implements `RemoteHost` with local processes and
-  `UnixStream`. `exec` runs the *rendered* string through `/bin/sh -c`, so quoting is exercised
-  exactly as on a host; it enforces the output cap and timeout (`LocalHost::with_timeout`
-  shortens the latter for tests, `exec_rendered` runs an already rendered line such as a
-  fixed script). Production code never uses it.
+  `UnixStream`. `exec_rendered` runs the *rendered* line through `/bin/sh -c`, so quoting is
+  exercised exactly as on a host; it enforces the output cap and timeout
+  (`LocalHost::with_timeout` shortens the latter for tests). Production code never uses it,
+  so the feature, not the production build, enables tokio's `process` support
+  (`test-support = ["tokio/process"]`).
 
 ### Capability probe
 
@@ -300,7 +312,10 @@ for the connection's lifetime (Rust has no storage), finds `tmux`, `herdr` and `
 `command -v`, then `$HOME/.local/bin`, `$HOME/.cargo/bin`, `/opt/homebrew/bin`,
 `/usr/local/bin`, `/usr/bin`, `/bin`, `$HOME/.nix-profile/bin`, `/run/current-system/sw/bin`.
 It also reports a UTF-8 locale (`C.UTF-8`, else the first `*.UTF-8`/`*.utf8` in `locale -a`,
-else `en_US.UTF-8`). Every later tmux/herdr/mosh command uses the absolute path found.
+else `en_US.UTF-8`). Every later tmux/herdr/mosh command uses the absolute path found: the
+host driver passes `HostCapabilities.herdr` to `herdr::run`, `herdr::watch` and
+`herdr::focus_pane` (as `mosh::bootstrap` takes `caps`), so no client repeats the PATH search.
+The probe is a fixed script run with `exec_script`.
 
 ## Host connection (`or2_core::host`)
 
@@ -338,7 +353,22 @@ Connecting ──▶ AwaitingHostKey ──▶ Authenticating ──▶ Connecte
   reply; a dropped reply means `Closed`. (The lane 0 brief listed `observer` and `reply`
   fields on the first two; that cannot return a handle without blocking.) Target and session
   names are validated in `HostHandle` before the pair is created, so a rejected request
-  creates no session and fires no callback.
+  creates no session and fires no callback. That includes a request that loses the race with
+  a closing host: if the command queue refuses the command, the handle recovers it and
+  *discards* its driver (`SessionDriver::discard`, `HerdrWatchDriver::discard`: closed
+  silently, observer released without a call), then returns `HostError::Closed`. Kotlin sees
+  the error and no callback, never a `Closed` on its own calling thread.
+- **Failing a terminal or watch.** A terminal the host driver cannot open closes with a
+  `SessionFailure`: `NotInstalled { program }` when the probe found no `tmux`/`herdr`,
+  `CommandFailed` when a helper command (the herdr `focus_pane` before a pane open) failed,
+  otherwise the matching M1 failure (`ShellRejected`, `ConnectionLost`, `Internal`). A watch
+  with no herdr reports `Unavailable { NotInstalled }`. `HostError::NotInstalled` and
+  `CommandFailed` therefore come out of the two queries only; Kotlin need not check
+  `capabilities()` before opening a terminal.
+- **Query bounds.** The driver must answer or drop every query reply. As a safety net the
+  handle gives up after `host::QUERY_TIMEOUT` (30 s, longer than the 10 s exec timeout) with
+  `HostError::CommandFailed`. Cancelling a Kotlin `suspend` call only drops the receiving end:
+  the driver's `reply.send` must tolerate `Err`, and the exec it started runs to its own end.
 - `HostDriver::transition(Closed)` stops accepting commands and then fails every command still
   queued: terminal drivers close with the host's reason (`Disconnected` for a user disconnect,
   else the host failure), herdr drivers close, query replies are dropped (`Closed`). Sessions
@@ -360,7 +390,10 @@ channel session). Everything in the M1 Session, Frames and Input sections applie
 one terminal engine per session on its own thread, resize latest-wins, the 64 KiB reply
 budget, concurrent read/write. Closing a session closes only its channel.
 
-`TerminalTarget`:
+`TerminalTarget` (the default herdr session is `session: None`; the entry of
+`HostCapabilities.herdr_sessions` with `is_default` is that session, so Kotlin passes `None`
+for it, never `Some(name)`, which runs `herdr --session <name>` and may differ. Otherwise the
+inbox would watch one session twice):
 
 | Target | Remote command (PTY, `TERM=xterm-256color`) |
 |---|---|
@@ -370,7 +403,10 @@ budget, concurrent read/write. Closing a session closes only its channel.
 
 Names are validated before anything runs (`InvalidName`): tmux names nonempty, at most 128
 bytes, no control characters, `\`, `:` or `.`; herdr session names `[A-Za-z0-9_-]{1,64}`; pane
-ids `[A-Za-z0-9:_-]{1,128}`. A missing program fails with `NotInstalled { program }`.
+ids `[A-Za-z0-9:_-]{1,128}`. A missing program closes the session with
+`SessionFailure::NotInstalled { program }` (FFI `SessionFailure.NotInstalled(program)`); a failed
+herdr pane focus closes it with `SessionFailure::CommandFailed` (FFI
+`SessionFailure.CommandFailed(message)`, a diagnostic).
 
 ### tmux
 
@@ -388,8 +424,10 @@ activity_unix: i64 }`, sorted by most recent activity.
   Deserialization ignores unknown fields; unknown enum values map to an `Unknown` variant
   rather than failing the whole message. Never hand-edit the generated file.
 - **Discovery:** `<herdr> session list --json` gives each session's name, `running` and
-  `socket_path`. Never hard-code socket paths. `HostCapabilities.herdr_sessions` reports them.
-- **Watch:** `herdr::watch(host, session, observer) -> HerdrWatchHandle`. Opens one long-lived
+  `socket_path`. Never hard-code socket paths. `HostCapabilities.herdr_sessions` reports name,
+  `running` and `is_default`; `socket_path` is not reported to Kotlin. `run` and `focus_pane`
+  rediscover it themselves with that command, using the herdr path they are given.
+- **Watch:** `herdr::watch(host, herdr, session, observer) -> HerdrWatchHandle`. Opens one long-lived
   streamlocal event channel and short-lived request channels. Bootstrap: `events.subscribe`
   and wait for its ack, then `session.snapshot`; events arriving during a read are
   invalidations, not patches: install the snapshot, then do serialized authoritative refreshes,
@@ -404,9 +442,10 @@ activity_unix: i64 }`, sorted by most recent activity.
 - **Rust API** (lane 0): `herdr::channel(observer) -> (HerdrWatchHandle, HerdrWatchDriver)`
   (the same split as `session`: the handle's `state()` and `stop()` never block, the driver
   delivers states in order and `Closed` exactly once, then releases the observer; dropping the
-  driver closes it; dropping every handle stops it). `herdr::watch(host, session, observer)`
-  is `channel` plus a task running `herdr::run(host, session, driver)` on the process
-  runtime; the host driver uses `channel` and `run` itself so the handle can be returned
+  driver closes it; dropping every handle stops it). `herdr::watch(host, herdr, session, observer)`
+  is `channel` plus a task running `herdr::run(host, herdr, session, driver)` on the process
+  runtime (`herdr` is the absolute path from the capability probe; a caller whose probe found
+  none reports `Unavailable { NotInstalled }` itself and does not call them); the host driver uses `channel` and `run` itself so the handle can be returned
   synchronously. A state equal to the current one is not redelivered; after a final
   `Unavailable` only `Closed` is accepted. `focus_pane` returns `HerdrError`
   (`NotIntegrated`, `Remote`, `Failed`). Until lane A2, `run` reports
@@ -423,7 +462,7 @@ activity_unix: i64 }`, sorted by most recent activity.
   `protocol: u32` is herdr's protocol number, `focused_pane_id` and pane/agent `label`, `name`,
   `agent`, `display_agent`, `cwd`, `title` are optional, `state_change_seq` is `u64`; the FFI
   records are `HerdrView`, `HerdrWorkspace`, `HerdrTab`, `HerdrPane`, `HerdrAgent`.
-- **Focus:** `herdr::focus_pane(host, session, pane_id)` sends one `pane.focus` request. It
+- **Focus:** `herdr::focus_pane(host, herdr, session, pane_id)` sends one `pane.focus` request. It
   changes what the user's herdr clients show; tests use isolated named sessions only.
 - Tests never touch the default herdr session or any session they did not create. Live tests
   start `herdr --session or2-test-<unique> server` and stop/delete it afterwards.
@@ -516,9 +555,11 @@ impl HostConnection {                     // all non-blocking unless async
   session and a stopped `or2-probe` one; tmux lists `main` (3 windows, 1 client) before
   `build`. Closing the host (user disconnect, or releasing the object) closes its terminals
   (`Disconnected`) and watches first, then reports the host's `Closed`.
-- API 4 enables UniFFI's `tokio` feature (new locked dependency `async-compat`) and gives
-  `or2-core` tokio's `process` feature (new locked dependency `signal-hook-registry`), both
-  MIT/Apache-2.0; `or2-ffi` also depends on tokio directly for the probe runtime.
+- API 4 enables UniFFI's `tokio` feature (new locked dependency `async-compat`) and adds
+  `SessionFailure.NotInstalled { program }` and `SessionFailure.CommandFailed { message }`;
+  `or2-ffi` also depends on tokio directly for the probe runtime. `or2-core`'s
+  `test-support` feature (not the shipped library) enables tokio's `process` feature (locked
+  dependency `signal-hook-registry`); both new dependencies are MIT/Apache-2.0.
 - `contract_probe_session` stays for the M1 session tests; it now runs on the same kind of
   probe thread (behaviour unchanged).
 

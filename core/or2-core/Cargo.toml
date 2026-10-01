@@ -5,15 +5,16 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-# `LocalHost`: a `RemoteHost` over local processes and Unix sockets, for tests only.
-test-support = []
+# `LocalHost`: a `RemoteHost` over local processes and Unix sockets, for tests only. Process
+# support stays out of the shipped library.
+test-support = ["tokio/process"]
 
 [dependencies]
 libghostty-vt.workspace = true
 rand.workspace = true
 russh.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 zeroize.workspace = true
 
 [dev-dependencies]

@@ -27,7 +27,17 @@ class RecordingListener(private val throwAfterRecording: Boolean = false) : Sess
     var overlapped = false
         private set
 
-    override fun onStateChanged(state: SessionState) = record { states.add(state) }
+    /** Optional log shared across recorders: "tag:StateName", appended as each state arrives. */
+    @Volatile
+    var timeline: MutableList<String>? = null
+
+    @Volatile
+    var timelineTag = "session"
+
+    override fun onStateChanged(state: SessionState) = record {
+        timeline?.add("$timelineTag:${state::class.simpleName}")
+        states.add(state)
+    }
 
     override fun onFrameReady() = record { frameReady.add(Unit) }
 

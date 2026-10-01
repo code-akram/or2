@@ -15,8 +15,10 @@
 //! Operations that return a handle at once ([`HostHandle::open_terminal`],
 //! [`HostHandle::watch_herdr`]) create the handle/driver pair themselves and send the *driver*
 //! to the host driver in the command; a host that cannot honour the request closes that driver
-//! with a failure. Queries ([`HostHandle::capabilities`], [`HostHandle::list_tmux_sessions`])
-//! carry a oneshot reply.
+//! with a failure ([`session::SessionFailure::NotInstalled`] for a missing program,
+//! [`session::SessionFailure::CommandFailed`] for a failed helper command). Queries
+//! ([`HostHandle::capabilities`], [`HostHandle::list_tmux_sessions`]) carry a oneshot reply and
+//! are bounded by [`QUERY_TIMEOUT`].
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -33,6 +35,11 @@ use crate::trust::HostKey;
 
 /// At most this many addresses per host.
 pub const MAX_ADDRESSES: usize = 8;
+
+/// A query that the host driver neither answers nor drops fails with
+/// [`HostError::CommandFailed`] after this long. Longer than the 10 s exec timeout a driver
+/// normally answers within.
+pub const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Everything Rust needs to connect to one host. Kotlin assembles it per connection from Room
 /// and the Keystore; Rust keeps nothing after the connection ends. Trust belongs to the host,
@@ -207,7 +214,9 @@ impl TerminalTarget {
     }
 }
 
-/// What the host offers, found by one probe per connection. Programs are absolute paths.
+/// What the host offers, found by one probe per connection. Programs are absolute paths; pass
+/// them to `herdr::run`/`watch`/`focus_pane` and the tmux and mosh commands. A missing program
+/// is `None`, and whoever would use it reports `NotInstalled`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostCapabilities {
     pub tmux: Option<String>,
@@ -218,6 +227,10 @@ pub struct HostCapabilities {
     pub herdr_sessions: Vec<HerdrSessionInfo>,
 }
 
+/// A herdr session on the host. The default session is listed under its own name with
+/// `is_default`; open or watch it with `session: None`, never `Some(name)`, which runs
+/// `herdr --session <name>` and need not be the same session. The socket path stays inside the
+/// herdr client, which rediscovers it with `session list --json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HerdrSessionInfo {
     pub name: String,
@@ -262,7 +275,9 @@ pub enum HostCommand {
     /// Explicit disconnect, or every handle was dropped.
     Disconnect,
     /// Open a PTY channel for `target` and run `driver` (a session in `Connecting`) on it.
-    /// On failure close `driver` with a [`CloseReason::Failed`].
+    /// On failure close `driver` with a [`CloseReason::Failed`]: `NotInstalled { program }` when
+    /// the probe found no `tmux`/`herdr`, `CommandFailed` when a helper command (herdr pane
+    /// focus) failed, else the matching failure.
     OpenTerminal {
         target: TerminalTarget,
         size: TerminalSize,
@@ -274,11 +289,25 @@ pub enum HostCommand {
     ListTmux {
         reply: oneshot::Sender<Result<Vec<TmuxSession>, HostError>>,
     },
-    /// Run [`herdr::run`] (or an equivalent) on `driver`. The session name is validated.
+    /// Run [`herdr::run`] (or an equivalent) on `driver`, with the herdr path from the probe.
+    /// The session name is validated. With no herdr found, move `driver` to
+    /// `Unavailable { NotInstalled }` and wait for its stop.
     WatchHerdr {
         session: Option<String>,
         driver: HerdrWatchDriver,
     },
+}
+
+impl HostCommand {
+    /// Releases a command that was never delivered: its drivers close silently, because no
+    /// handle for them was ever returned and Kotlin must not hear about them.
+    fn discard(self) {
+        match self {
+            Self::OpenTerminal { driver, .. } => driver.discard(),
+            Self::WatchHerdr { driver, .. } => driver.discard(),
+            _ => {}
+        }
+    }
 }
 
 struct Shared {
@@ -371,8 +400,7 @@ impl HostHandle {
         let (reply, response) = oneshot::channel();
         self.require_connected()?;
         self.send(HostCommand::Capabilities { reply })?;
-        // A dropped reply means the connection ended before the answer.
-        response.await.unwrap_or(Err(HostError::Closed))
+        await_reply(response, QUERY_TIMEOUT).await
     }
 
     /// tmux sessions, most recently active first; empty when no tmux server runs.
@@ -380,7 +408,7 @@ impl HostHandle {
         let (reply, response) = oneshot::channel();
         self.require_connected()?;
         self.send(HostCommand::ListTmux { reply })?;
-        response.await.unwrap_or(Err(HostError::Closed))
+        await_reply(response, QUERY_TIMEOUT).await
     }
 
     /// Watches a herdr session (`None` is the default session). The watch ends with the
@@ -408,7 +436,27 @@ impl HostHandle {
     }
 
     fn send(&self, command: HostCommand) -> Result<(), HostError> {
-        self.commands.send(command).map_err(|_| HostError::Closed)
+        self.commands.send(command).map_err(|rejected| {
+            // The host closed since the state check. Dropping the command would close its
+            // driver loudly, on this thread, for a handle nobody receives.
+            rejected.0.discard();
+            HostError::Closed
+        })
+    }
+}
+
+/// A dropped reply means the connection ended before the answer; no answer within `timeout`
+/// is a failed command. Dropping this future (a cancelled query) only drops the receiver: the
+/// host driver's `reply.send` must tolerate `Err` and its exec runs to its own end.
+async fn await_reply<T>(
+    response: oneshot::Receiver<Result<T, HostError>>,
+    timeout: std::time::Duration,
+) -> Result<T, HostError> {
+    match tokio::time::timeout(timeout, response).await {
+        Ok(reply) => reply.unwrap_or(Err(HostError::Closed)),
+        Err(_) => Err(HostError::CommandFailed {
+            message: "the host did not answer in time".into(),
+        }),
     }
 }
 
@@ -890,6 +938,50 @@ mod tests {
             })
         );
         drop(answers.join().unwrap());
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_query_times_out_but_a_dropped_one_is_closed() {
+        let timeout = std::time::Duration::from_millis(50);
+        let (reply, response) = oneshot::channel::<Result<u8, HostError>>();
+        assert!(matches!(
+            await_reply(response, timeout).await,
+            Err(HostError::CommandFailed { .. })
+        ));
+        // The sender outlived the wait; answering a cancelled query is an error to tolerate.
+        assert!(reply.send(Ok(1)).is_err());
+
+        let (reply, response) = oneshot::channel::<Result<u8, HostError>>();
+        drop(reply);
+        assert_eq!(await_reply(response, timeout).await, Err(HostError::Closed));
+        let (reply, response) = oneshot::channel::<Result<u8, HostError>>();
+        reply.send(Ok(7)).unwrap();
+        assert_eq!(await_reply(response, timeout).await, Ok(7));
+    }
+
+    #[test]
+    fn a_request_rejected_after_the_host_closed_fires_no_callback() {
+        let (_recorder, handle, mut driver) = setup(false);
+        connect(&mut driver);
+        // The window: the state still reads Connected, but the command queue is closed.
+        driver.commands.close();
+        let sessions = Arc::new(SessionRecorder::default());
+        let watches = Arc::new(WatchRecorder::default());
+        assert_eq!(
+            handle
+                .open_terminal(TerminalTarget::Shell, size(), sessions.clone())
+                .err(),
+            Some(HostError::Closed)
+        );
+        assert_eq!(
+            handle.watch_herdr(None, watches.clone()).err(),
+            Some(HostError::Closed)
+        );
+        assert!(lock(&sessions.0).is_empty(), "no session callback");
+        assert!(lock(&watches.0).is_empty(), "no watch callback");
+        // The discarded drivers released their observers.
+        assert_eq!(Arc::strong_count(&sessions), 1);
+        assert_eq!(Arc::strong_count(&watches), 1);
     }
 
     #[tokio::test]

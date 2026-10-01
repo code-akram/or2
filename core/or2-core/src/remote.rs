@@ -51,12 +51,38 @@ impl ExecOutput {
 pub trait RemoteHost: Send + Sync + 'static {
     type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
 
-    /// Runs `command` without a PTY; collects stdout, stderr and the exit status. Output is
-    /// capped at [`OUTPUT_CAP`] per stream and the run at [`EXEC_TIMEOUT`].
+    /// Runs an already rendered command line, exactly as sshd would hand it to the login
+    /// shell, without a PTY; collects stdout, stderr and the exit status. Output is capped at
+    /// [`OUTPUT_CAP`] per stream and the run at [`EXEC_TIMEOUT`]. Callers use [`exec`] or
+    /// [`exec_script`]; this is the one primitive an implementation provides.
+    ///
+    /// [`exec`]: RemoteHost::exec
+    /// [`exec_script`]: RemoteHost::exec_script
+    fn exec_rendered(
+        &self,
+        line: &str,
+    ) -> impl Future<Output = Result<ExecOutput, RemoteError>> + Send;
+
+    /// Renders `command` ([`RemoteCommand::render`]) and runs it with [`exec_rendered`].
+    ///
+    /// [`exec_rendered`]: RemoteHost::exec_rendered
     fn exec(
         &self,
         command: &RemoteCommand,
-    ) -> impl Future<Output = Result<ExecOutput, RemoteError>> + Send;
+    ) -> impl Future<Output = Result<ExecOutput, RemoteError>> + Send {
+        async move { self.exec_rendered(&command.render()?).await }
+    }
+
+    /// Runs a fixed script as `sh -c '<script>'` ([`render_script`], so newlines are fine and
+    /// `'` and `\` are not) with [`exec_rendered`]. Never pass untrusted text.
+    ///
+    /// [`exec_rendered`]: RemoteHost::exec_rendered
+    fn exec_script(
+        &self,
+        script: &str,
+    ) -> impl Future<Output = Result<ExecOutput, RemoteError>> + Send {
+        async move { self.exec_rendered(&render_script(script)?).await }
+    }
 
     /// Opens a byte stream to a Unix socket on the host (OpenSSH direct-streamlocal).
     fn open_unix(
@@ -179,8 +205,8 @@ mod local {
 
     use super::*;
 
-    /// A [`RemoteHost`] over local processes and Unix sockets, for tests. `exec` runs the
-    /// *rendered* command through `/bin/sh -c`, so quoting is exercised exactly as on a real
+    /// A [`RemoteHost`] over local processes and Unix sockets, for tests. `exec_rendered` runs
+    /// the *rendered* line through `/bin/sh -c`, so quoting is exercised exactly as on a real
     /// host. Production code never uses it.
     #[derive(Debug, Clone)]
     pub struct LocalHost {
@@ -204,9 +230,29 @@ mod local {
         pub fn with_timeout(timeout: Duration) -> Self {
             Self { timeout }
         }
+    }
 
-        /// Runs an already rendered command line, e.g. [`render_script`] output.
-        pub async fn exec_rendered(&self, rendered: &str) -> Result<ExecOutput, RemoteError> {
+    fn io_error(error: std::io::Error) -> RemoteError {
+        RemoteError::Io(error.to_string())
+    }
+
+    async fn read_capped(reader: impl AsyncRead + Unpin) -> Result<Vec<u8>, RemoteError> {
+        let mut out = Vec::new();
+        reader
+            .take(OUTPUT_CAP as u64 + 1)
+            .read_to_end(&mut out)
+            .await
+            .map_err(io_error)?;
+        if out.len() > OUTPUT_CAP {
+            return Err(RemoteError::OutputTooLarge);
+        }
+        Ok(out)
+    }
+
+    impl RemoteHost for LocalHost {
+        type Stream = UnixStream;
+
+        async fn exec_rendered(&self, rendered: &str) -> Result<ExecOutput, RemoteError> {
             let mut child = Command::new("/bin/sh")
                 .arg("-c")
                 .arg(rendered)
@@ -233,31 +279,6 @@ mod local {
             tokio::time::timeout(self.timeout, run)
                 .await
                 .map_err(|_| RemoteError::TimedOut)?
-        }
-    }
-
-    fn io_error(error: std::io::Error) -> RemoteError {
-        RemoteError::Io(error.to_string())
-    }
-
-    async fn read_capped(reader: impl AsyncRead + Unpin) -> Result<Vec<u8>, RemoteError> {
-        let mut out = Vec::new();
-        reader
-            .take(OUTPUT_CAP as u64 + 1)
-            .read_to_end(&mut out)
-            .await
-            .map_err(io_error)?;
-        if out.len() > OUTPUT_CAP {
-            return Err(RemoteError::OutputTooLarge);
-        }
-        Ok(out)
-    }
-
-    impl RemoteHost for LocalHost {
-        type Stream = UnixStream;
-
-        async fn exec(&self, command: &RemoteCommand) -> Result<ExecOutput, RemoteError> {
-            self.exec_rendered(&command.render()?).await
         }
 
         async fn open_unix(&self, path: &str) -> Result<UnixStream, RemoteError> {
@@ -377,12 +398,16 @@ mod tests {
             .find(|candidate| candidate.is_file())
     }
 
+    /// Runs `rendered` with `shell -c`, skipping the user's startup files (`zsh -f`, `fish
+    /// --no-config`): they are machine state and may print.
     fn run_in_shell(shell: &Path, rendered: &str) -> Vec<u8> {
-        let output = StdCommand::new(shell)
-            .arg("-c")
-            .arg(rendered)
-            .output()
-            .unwrap();
+        let mut command = StdCommand::new(shell);
+        match shell.file_name().and_then(|name| name.to_str()) {
+            Some("zsh") => command.arg("-f"),
+            Some("fish") => command.arg("--no-config"),
+            _ => &mut command,
+        };
+        let output = command.arg("-c").arg(rendered).output().unwrap();
         assert!(
             output.status.success(),
             "{} -c {rendered}: {}",
@@ -405,10 +430,16 @@ mod tests {
 
         let mut shells = vec![PathBuf::from("/bin/sh")];
         let mut found = vec!["sh".to_owned()];
+        // With OR2_REQUIRE_SHELLS set (CI), a missing shell fails instead of skipping, so the
+        // cross-shell quoting claim is never verified vacuously.
+        let required = std::env::var_os("OR2_REQUIRE_SHELLS").is_some();
         for name in ["bash", "zsh", "fish"] {
-            if let Some(path) = find_in_path(name) {
-                shells.push(path);
-                found.push(name.to_owned());
+            match find_in_path(name) {
+                Some(path) => {
+                    shells.push(path);
+                    found.push(name.to_owned());
+                }
+                None => assert!(!required, "OR2_REQUIRE_SHELLS is set but {name} is missing"),
             }
         }
         eprintln!("quoting round-trip shells: {}", found.join(", "));
@@ -469,6 +500,16 @@ mod tests {
         let script = render_script("echo \"$((1 + 2))\"").unwrap();
         let out = host.exec_rendered(&script).await.unwrap();
         assert_eq!(out.stdout, b"3\n");
+        // A multi-line script runs through the trait, no `LocalHost` inherent method needed.
+        let out = host
+            .exec_script("a=1\nb=2\necho \"$((a + b))\"")
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, b"3\n");
+        assert_eq!(
+            host.exec_script("echo 'quoted'").await,
+            Err(RemoteError::Unquotable)
+        );
     }
 
     #[tokio::test]

@@ -48,9 +48,17 @@ open class CallbackRecorder<T : Any> {
     var overlapped = false
         private set
 
+    /** Optional log shared across recorders: "tag:ItemName", appended as each item arrives. */
+    @Volatile
+    var timeline: MutableList<String>? = null
+
+    @Volatile
+    var timelineTag = ""
+
     protected fun record(item: T) {
         if (active.incrementAndGet() != 1) overlapped = true
         callbackThreads.add(Thread.currentThread())
+        timeline?.add("$timelineTag:${item::class.simpleName}")
         items.add(item)
         active.decrementAndGet()
     }
@@ -197,6 +205,12 @@ class HostContractTest {
             assertEquals(listOf("default", "or2-probe"), capabilities.herdrSessions.map { it.name })
             assertEquals(listOf(true, false), capabilities.herdrSessions.map { it.running })
             assertEquals(listOf(true, false), capabilities.herdrSessions.map { it.isDefault })
+            // The default session is opened with a null name, never its listed name.
+            val default = capabilities.herdrSessions.single { it.isDefault }
+            val defaultWatch = HerdrRecorder()
+            host.watchHerdr(null, defaultWatch).use {
+                assertEquals(default.name, defaultWatch.await<HerdrState.Live>().view.workspaces[0].label)
+            }
 
             val tmux = runBlocking { host.listTmuxSessions() }
             assertEquals(listOf("main", "build"), tmux.map { it.name })
@@ -326,11 +340,14 @@ class HostContractTest {
 
     @Test
     fun disconnectingTheHostClosesItsTerminalsAndWatchesFirst() {
-        val recorder = HostRecorder()
+        // One timeline for all three sources, so the order itself is asserted.
+        val timeline: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
+        val recorder = HostRecorder().apply { this.timeline = timeline; timelineTag = "host" }
         val host = connectedHost(recorder)
         val (session, sessionListener) = openShell(host)
+        sessionListener.timeline = timeline
         sessionListener.awaitState<SessionState.Connected>()
-        val herdrRecorder = HerdrRecorder()
+        val herdrRecorder = HerdrRecorder().apply { this.timeline = timeline; timelineTag = "herdr" }
         val watch = host.watchHerdr(null, herdrRecorder)
         herdrRecorder.await<HerdrState.Live>()
         herdrRecorder.await<HerdrState.Live>()
@@ -339,6 +356,10 @@ class HostContractTest {
         assertEquals(CloseReason.Disconnected, sessionListener.awaitState<SessionState.Closed>().reason)
         assertEquals(HerdrState.Closed, herdrRecorder.await<HerdrState.Closed>())
         assertEquals(CloseReason.Disconnected, recorder.await<HostState.Closed>().reason)
+        val closes = synchronized(timeline) { timeline.filter { it.endsWith(":Closed") } }
+        assertEquals("host:Closed", closes.last())
+        assertEquals(setOf("session:Closed", "herdr:Closed"), closes.dropLast(1).toSet())
+        assertEquals(3, closes.size)
         assertEquals(HostState.Closed(CloseReason.Disconnected), host.state())
         assertEquals(HerdrState.Closed, watch.state())
         assertThrows(SessionException.Closed::class.java) { session.sendText("late") }

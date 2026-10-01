@@ -184,6 +184,14 @@ impl HerdrWatchDriver {
     pub fn close(&mut self) {
         let _ = self.transition(HerdrState::Closed);
     }
+
+    /// Releases a driver whose handle was never returned to anyone: closes silently, without
+    /// calling the observer.
+    pub fn discard(mut self) {
+        *lock(&self.state) = HerdrState::Closed;
+        self.stop.close();
+        self.observer = None;
+    }
 }
 
 impl Drop for HerdrWatchDriver {
@@ -193,28 +201,34 @@ impl Drop for HerdrWatchDriver {
 }
 
 /// Starts a watch of `session` (`None` is herdr's default session) on the process-wide
-/// runtime. The host connection driver instead creates the [`channel`] itself and calls
-/// [`run`], so the handle can be returned synchronously.
+/// runtime. `herdr` is the absolute path from the capability probe; a caller whose probe
+/// found no herdr reports `Unavailable { NotInstalled }` itself instead of calling this. The
+/// host connection driver creates the [`channel`] itself and calls [`run`], so the handle can
+/// be returned synchronously.
 pub fn watch<H: RemoteHost>(
     host: Arc<H>,
+    herdr: String,
     session: Option<String>,
     observer: Arc<dyn HerdrObserver>,
 ) -> HerdrWatchHandle {
     let (handle, driver) = channel(observer);
-    crate::ssh::runtime().spawn(run(host, session, driver));
+    crate::ssh::runtime().spawn(run(host, herdr, session, driver));
     handle
 }
 
-/// Drives `driver` until it is stopped, then closes it.
+/// Drives `driver` until it is stopped, then closes it. `herdr` is the absolute path from the
+/// capability probe. The session's socket is not an input: the client finds it with
+/// `<herdr> session list --json` (`socket_path`), so it never leaves the herdr module.
 ///
 /// Not integrated: reports `Unavailable { Failed }` and waits for the stop. Never a pretend
 /// `Live`.
 pub async fn run<H: RemoteHost>(
     host: Arc<H>,
+    herdr: String,
     session: Option<String>,
     mut driver: HerdrWatchDriver,
 ) {
-    let _ = (host, session);
+    let _ = (host, herdr, session);
     let _ = driver.transition(HerdrState::Unavailable {
         reason: HerdrUnavailable::Failed,
         message: "herdr client not integrated".into(),
@@ -223,16 +237,17 @@ pub async fn run<H: RemoteHost>(
     driver.close();
 }
 
-/// Focuses `pane_id` in `session` with one `pane.focus` request. It changes what the user's
-/// herdr clients show.
+/// Focuses `pane_id` in `session` with one `pane.focus` request. `herdr` is the absolute path
+/// from the capability probe. It changes what the user's herdr clients show.
 ///
 /// Not integrated: always fails with [`HerdrError::NotIntegrated`].
 pub async fn focus_pane<H: RemoteHost>(
     host: &H,
+    herdr: &str,
     session: Option<&str>,
     pane_id: &str,
 ) -> Result<(), HerdrError> {
-    let _ = (host, session, pane_id);
+    let _ = (host, herdr, session, pane_id);
     Err(HerdrError::NotIntegrated)
 }
 
@@ -375,7 +390,12 @@ mod tests {
     #[tokio::test]
     async fn the_unintegrated_watch_fails_honestly_and_closes_on_stop() {
         let recorder = Arc::new(Recorder::default());
-        let handle = watch(Arc::new(LocalHost::new()), None, recorder.clone());
+        let handle = watch(
+            Arc::new(LocalHost::new()),
+            "/usr/bin/herdr".into(),
+            None,
+            recorder.clone(),
+        );
         for _ in 0..200 {
             if handle.state() != HerdrState::Starting {
                 break;
@@ -390,8 +410,9 @@ mod tests {
             }
         );
         handle.stop();
+        // The state flips before the observer runs, so wait on the recorder.
         for _ in 0..200 {
-            if handle.state() == HerdrState::Closed {
+            if lock(&recorder.0).len() == 2 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -404,7 +425,7 @@ mod tests {
     #[tokio::test]
     async fn focus_is_not_integrated() {
         assert_eq!(
-            focus_pane(&LocalHost::new(), Some("work"), "p1").await,
+            focus_pane(&LocalHost::new(), "/usr/bin/herdr", Some("work"), "p1").await,
             Err(HerdrError::NotIntegrated)
         );
     }

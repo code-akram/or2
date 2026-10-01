@@ -468,6 +468,20 @@ mod tests {
             }
         );
         assert_eq!(
+            crate::session::SessionFailure::from(SessionFailure::NotInstalled {
+                program: "tmux".into()
+            }),
+            crate::session::SessionFailure::NotInstalled {
+                program: "tmux".into()
+            }
+        );
+        assert_eq!(
+            crate::session::SessionFailure::from(SessionFailure::CommandFailed("x".into())),
+            crate::session::SessionFailure::CommandFailed {
+                message: "x".into()
+            }
+        );
+        assert_eq!(
             HostError::from(core::HostError::NotInstalled {
                 program: "tmux".into()
             }),

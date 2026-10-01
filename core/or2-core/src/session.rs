@@ -135,6 +135,12 @@ pub enum SessionFailure {
     AuthenticationRejected,
     /// The server refused the PTY or shell request.
     ShellRejected,
+    /// The terminal's program (`tmux`, `herdr`) is not installed on the host.
+    NotInstalled {
+        program: String,
+    },
+    /// A command the terminal needed (for example a herdr pane focus) failed.
+    CommandFailed(String),
     ConnectionLost(String),
     Protocol(String),
     Internal(String),
@@ -387,6 +393,14 @@ impl SessionDriver {
     /// Closes unless already closed.
     pub fn close(&mut self, reason: CloseReason) {
         let _ = self.transition(SessionState::Closed(reason));
+    }
+
+    /// Releases a driver whose handle was never returned to anyone: closes silently, without
+    /// calling the observer.
+    pub fn discard(mut self) {
+        *lock(&self.shared.state) = SessionState::Closed(CloseReason::Disconnected);
+        self.commands.close();
+        self.observer = None;
     }
 
     pub fn publish(&mut self, frame: Frame) -> Result<(), PublishError> {

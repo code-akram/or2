@@ -15,13 +15,15 @@ class SessionMessagesTest {
             SessionFailure.UnsupportedHostKey("diagnostic"), SessionFailure.AuthenticationRejected,
             SessionFailure.ShellRejected, SessionFailure.ConnectionLost("diagnostic"),
             SessionFailure.Protocol("diagnostic"), SessionFailure.Internal("diagnostic"),
+            SessionFailure.NotInstalled("tmux"), SessionFailure.CommandFailed("diagnostic"),
         )
         val messages = failures.map { sessionMessage(SessionState.Closed(CloseReason.Failed(it))) }
-        assertEquals(9, messages.toSet().size)
+        assertEquals(11, messages.toSet().size)
         assertTrue(messages.none { "diagnostic" in it })
         assertTrue(messages[0].contains("network"))
         assertTrue(messages[4].contains("username"))
         assertTrue(messages[5].contains("shell"))
+        assertEquals("tmux is not installed on the host.", messages[9])
         assertEquals("Disconnected", sessionMessage(SessionState.Closed(CloseReason.Disconnected)))
         assertEquals("Remote shell exited (status 23)", sessionMessage(SessionState.Closed(CloseReason.RemoteExited(23u))))
         assertEquals("Remote shell exited", sessionMessage(SessionState.Closed(CloseReason.RemoteExited(null))))
