@@ -1323,3 +1323,111 @@ branch. Until then, deviations to know about:
   app-private preferences. On return, if that session is alive it is shown directly
   (`request_full_frame`); if only its host is connected, the same target is reopened (herdr pane
   focused first); otherwise Home shows a "Resume" card that does both after unlocking.
+
+### M3-B Android status and decisions (branch `m3/b`)
+
+Built against API 8 through `contract_probe_host` and fakes; nothing here depends on the Rust mosh
+implementation beyond the FFI surface. Where the text above left a choice open, this is what the
+code does.
+
+- **Who owns the connections.** The process owns the one `HostConnections` (`Or2Application`,
+  created lazily, so a service restart can never lose it); `ConnectionService` owns *when the
+  process stays alive and what the user sees*: the foreground state, the ongoing notification,
+  the network callback and "Disconnect all". This is the deviation from "service owns the
+  `HostConnections`": the object stays in the Application, because the activity needs it before
+  any service exists and after the service stopped (closed terminals keep their final frame
+  there). The service starts when something opens and stops when nothing is open, which is the
+  same lifetime.
+  - Open means: a host connection that has not closed, or a terminal that has not closed (a mosh
+    session whose SSH connection was lost still counts, and its host stays listed). Closed hosts
+    and terminals the user has not dismissed hold nothing open.
+  - `ServiceStarter` (Application, watching `HostConnections.serviceSnapshots()`) calls
+    `startForegroundService` whenever something is open and the service is not running
+    (`ServiceRunState`, cleared by the controller *before* it asks to stop, so a connection that
+    opens a moment later starts a fresh service). Starting from the background (not allowed)
+    is swallowed: connections only begin in the foreground.
+  - `ServiceController` (JVM-testable, extracted from the `Service`) posts the first notification
+    in `onStartCommand` at once, updates it on every change, and stops on the first idle
+    snapshot. `START_NOT_STICKY`: a killed process has no connections to restore.
+  - Notification (channel `connections`, importance low, ongoing): title `Connected to <host>` or
+    `Connected to N hosts`, text `N open sessions`, one inbox line per host (`Alpha · 2 sessions`),
+    action "Disconnect all" (`HostConnections.disconnectAll()`: every open terminal, then every
+    live host; closed states stay visible as after any disconnect, and the service stops when all
+    report `Closed`). Tapping the notification opens the app.
+  - Manifest: `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE` (with the
+    `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` property), `POST_NOTIFICATIONS`, `ACCESS_NETWORK_STATE`,
+    `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` (lint `BatteryLife` is suppressed on the one request:
+    the Play policy does not apply to F-Droid).
+- **Notification permission:** asked once (persisted flag `notifications_asked`), the first time
+  the user starts a connection, then the connect proceeds whatever the answer.
+- **Battery optimisation:** `onStop` with a session open marks the explanation due (persisted;
+  never when the app is already exempt, and a configuration change is not "going to the
+  background"); the next time the app returns, a dialog explains and offers "Allow"
+  (`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) or "Not now". It is recorded as asked when shown,
+  whatever the answer, so it never nags again. A system dialog cannot be shown while the app is
+  leaving, which is why it waits for the return.
+- **Network callback:** registered with the service on the main looper and removed with it.
+  `NetworkChanges` tracks the default network's handle: a different network, or the same one
+  after it was lost, is a change; the callback's first report of the network that was already the
+  default is not. Changes within 500 ms collapse into one `network_changed()` (500 ms after the
+  last event).
+- **Room v3:** `hosts.transport TEXT NOT NULL DEFAULT 'AUTO'` (`TransportPref`: `AUTO`, `SSH`,
+  `MOSH`), `Migration(2, 3)` is one additive `ALTER TABLE ... ADD COLUMN` (never destructive),
+  schema exported as `3.json`. Tests: JVM (`MigrationSqlTest`: v2 and v1 databases migrate and
+  equal a fresh v3, data and cascades intact) and device (`MigrationDeviceTest`:
+  `MigrationTestHelper` for 2 to 3 and 1 to 3, then the DAO round trip). A transport change on a
+  host does not end its connection (`connectionAffectedBy` ignores it); it applies to terminals
+  opened afterwards. The host form has the Auto / SSH / Mosh segmented control with one muted
+  sentence under it.
+- **Transport choice** (`chooseTransport`): `SSH` and `MOSH` are explicit and never
+  second-guessed. `AUTO` uses mosh when the connection's capability probe found `mosh-server`
+  and mosh has not already failed on this connection; before the probe has answered it uses SSH.
+  The transport a target had before (reattach) wins under AUTO, except that mosh still needs
+  `mosh-server`.
+- **AUTO fallback:** a mosh terminal opened under AUTO that closes `Failed { TimedOut }` or
+  `Failed { NotInstalled }` *before it ever connected* is reopened over SSH on the *same*
+  `ActiveTerminal` (the id, Home thumbnail and navigation stay; the failed state is never shown;
+  the old native session is closed). This is remembered for the connection
+  (`ActiveHost.moshFallbackNote`), so later AUTO terminals on it go straight to SSH, and every one
+  shows the note in muted mono under the header (`Mosh could not reach the host over UDP. Using
+  SSH for this connection.`). A new connection starts without the memory. Any other failure, a
+  failure after the terminal connected, a user disconnect, and an explicit `Mosh` preference never
+  fall back. If the SSH retry cannot even be started (the host closed meanwhile) the mosh failure
+  is shown as it was.
+- **Badge and link health:** `ActiveTerminal.transport` is what the session object reports; the
+  header badge and the Home thumbnail's pill follow it (so they change on a fallback).
+  `ActiveTerminal.linkHealth` holds the latest `on_link_health`; when `since_heard_ms > 5000`
+  (exactly 5000 is still healthy) the badge is greyed (muted text on `surfaceTrack`, still
+  reading `Mosh`) and `Last heard N s ago` shows under the header in the attention colour;
+  recovery clears both. The health resets on a fallback.
+- **Reconnect offer:** when the app returns to the foreground, stored hosts that are in the inbox,
+  have a key and whose SSH connection *was lost* (connected once, then closed `Failed`; a deliberate
+  disconnect, a remote exit and a connect that never worked are not losses) are offered in a
+  dialog: "Reconnect" runs the existing grouped unlock (`connectGrouped`: one biometric per
+  distinct key; the dialog says how many), "Not now" does nothing. No key is retained. When the
+  user was on the terminal screen of one of those hosts when the app left, accepting also
+  resumes that terminal once the host is connected.
+- **Reattach:** `ReattachMemory` keeps `LastTerminal(hostId, target, transport)` in the app's
+  private preferences (`or2-app`, key `last_terminal`, URL-encoded parts). It is written once a
+  terminal screen is showing a *connected* terminal (and again if its transport changes). It is
+  forgotten when the user ends it: Disconnect or Close of the session, Disconnect of its host,
+  deleting the host, "Disconnect all", or the remote shell exiting. Losing the network or the
+  connection never forgets it.
+  - Decision (`decideReattach`), in order: nothing remembered or its host is deleted, nothing;
+    a live session for that host and target, **show it**; the host connected, **reopen the same
+    target**; otherwise **Resume**.
+  - On return to the foreground *after the terminal screen was showing when the app left*, "show"
+    goes through `TerminalActivations.reuse` (a herdr pane is focused first, as every M2 way into an
+    agent terminal is) and then calls `request_full_frame`; "reopen" goes through
+    `TerminalActivations.reopen` (herdr pane focused first, the capability probe awaited for up to
+    3 s so AUTO can still choose mosh, the remembered transport passed along). When only a Resume
+    is left, a terminal screen for a session that is gone gives way to Home. After the app
+    process died, a saved terminal destination that is not open any more is replaced by Home.
+  - Home shows a **Resume** card (`Alpha: herdr w1:p2`, `Mosh`) whenever the decision is reopen or
+    resume. Tapping it reopens at once when the host is connected; otherwise it unlocks and
+    connects through the usual grouped unlock and opens the terminal when the host reaches
+    `Connected` (`resumeStep`; it gives up when the unlock is cancelled or the connect fails).
+- **Not done / left for acceptance on the phone:** the notification, service start from the
+  foreground, the permission and battery dialogs and the network callback are exercised by
+  `ConnectionServiceDeviceTest` and by unit tests of their logic but need the phone to see; real
+  mosh behaviour (M3-A) is not exercised here.

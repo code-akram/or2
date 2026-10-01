@@ -2,7 +2,7 @@
 
 The Compose app loads `or2-ffi` through generated UniFFI Kotlin/JNA bindings. Host settings
 (with their ordered address lists), encrypted key records and trusted host keys live in Room
-(schema version 2, exported to `android/app/schemas/`). `or2-core` remains free of Android,
+(schema version 3, exported to `android/app/schemas/`). `or2-core` remains free of Android,
 UniFFI and persistence dependencies. The production connector calls `connect_host` and opens
 terminals with `HostConnection.open_terminal`; the contract probes (`contract_probe_session`,
 `contract_probe_host`) are used only by tests. The terminal screen embeds the Canvas terminal
@@ -228,7 +228,14 @@ Arch with `assembleDebugAndroidTest` while the phone is unavailable.
 stale-destination rejection, and foreign-key cleanup. `MigrationDeviceTest` migrates a populated
 v1 database (keys, hosts, trusted keys) through Room's `MigrationTestHelper`, validating against
 `2.json`, opens it with the production database builder, and checks that the phone's SQLite is
-at least 3.35 (the migration uses `DROP COLUMN`; no JVM test can check the platform's version). `VaultDeviceTest` creates and
+at least 3.35 (the migration uses `DROP COLUMN`; no JVM test can check the platform's version); it
+also migrates populated v2 and v1 databases to v3 (`hosts.transport`, validated against `3.json`) and
+round-trips the transport through the DAO. `ConnectionServiceDeviceTest` runs the foreground service
+over a scripted connection (`Or2Application.connectorOverride`, never set in production): it starts
+with a host, posts the ongoing notification with "Disconnect all", counts a session, and stops once
+everything is closed (it grants `POST_NOTIFICATIONS` to the app through `UiAutomation` first).
+`TransportChromeDeviceTest` covers the header badge, the "Last heard N s ago" text past five seconds
+and the AUTO-fallback note. `VaultDeviceTest` creates and
 deletes a disposable Keystore alias: it verifies hardware security level, per-use strong
 biometric policy, non-exportability and rejection without authentication (skips if strong
 biometrics are not enrolled). `EntryUiDeviceTest` displays first-use/changed-key dialogs using
