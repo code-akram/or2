@@ -150,7 +150,7 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
     // flow label stay (a link-local host is reachable only through its interface).
     let mut address = peer;
     address.set_port(params.port);
-    let reason = run_session(
+    let ended = run_session(
         Plan {
             transport: datagrams,
             peer: address,
@@ -163,19 +163,26 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
         &mut driver,
     )
     .await;
-    if owes_cleanup(driver.state() == SessionState::Connected, &reason) {
+    if owes_cleanup(
+        driver.state() == SessionState::Connected,
+        &ended.reason,
+        ended.server_gone,
+    ) {
         cleanup(&host, pid).await;
     }
-    driver.close(reason);
+    driver.close(ended.reason);
 }
 
-/// Whether a session that ended with `reason` must stop its server: one that never connected
-/// (UDP blocked, disconnected first), and one that failed after connecting (an internal
-/// error: nobody can reattach, the key lived only in memory). `mosh-server` would otherwise
-/// wait for a client for as long as it lives. A server that ended by itself, or by the
-/// shutdown handshake, is gone already.
-fn owes_cleanup(connected: bool, reason: &CloseReason) -> bool {
-    !connected || matches!(reason, CloseReason::Failed(_))
+/// Whether a session that ended with `reason` must stop its server over SSH: one that never
+/// connected (UDP blocked, disconnected first), one that failed after connecting (an internal
+/// error: nobody can reattach, the key lived only in memory), and one the user disconnected
+/// whose goodbye the server never confirmed (`server_gone` false: the handshake timed out,
+/// say after the outbound UDP path broke, so the server may still be running). `mosh-server`
+/// would otherwise wait for a client for as long as it lives. A server the peer itself
+/// confirmed gone (it acknowledged the goodbye, or announced its own end) needs nothing.
+fn owes_cleanup(connected: bool, reason: &CloseReason, server_gone: bool) -> bool {
+    !server_gone
+        && (!connected || matches!(reason, CloseReason::Failed(_) | CloseReason::Disconnected))
 }
 
 /// The probe, then (for tmux and herdr) the target's command, then `mosh-server new` running
@@ -271,26 +278,31 @@ mod tests {
     }
 
     #[test]
-    fn a_session_stops_its_server_unless_it_ended_well_after_connecting() {
+    fn a_session_stops_its_server_unless_the_peer_confirmed_its_end() {
         // Never connected: whatever the end.
         for reason in [
             CloseReason::Disconnected,
             CloseReason::Failed(SessionFailure::TimedOut),
             CloseReason::RemoteExited { exit_status: None },
         ] {
-            assert!(owes_cleanup(false, &reason), "{reason:?}");
+            assert!(owes_cleanup(false, &reason, false), "{reason:?}");
         }
         // Connected: a failure leaves a server nobody can reattach to, so it is stopped.
-        assert!(owes_cleanup(true, &failed()));
+        assert!(owes_cleanup(true, &failed(), false));
         assert!(owes_cleanup(
             true,
-            &CloseReason::Failed(SessionFailure::TimedOut)
+            &CloseReason::Failed(SessionFailure::TimedOut),
+            false
         ));
-        // Connected, and the end was the user's (the shutdown handshake) or the server's own.
-        assert!(!owes_cleanup(true, &CloseReason::Disconnected));
+        // Connected, disconnected by the user, but the goodbye was never acknowledged (it
+        // timed out): the server may be running, so it is stopped over SSH.
+        assert!(owes_cleanup(true, &CloseReason::Disconnected, false));
+        // The peer confirmed the end: the user's goodbye acknowledged, or the server's own.
+        assert!(!owes_cleanup(true, &CloseReason::Disconnected, true));
         assert!(!owes_cleanup(
             true,
-            &CloseReason::RemoteExited { exit_status: None }
+            &CloseReason::RemoteExited { exit_status: None },
+            true
         ));
     }
 

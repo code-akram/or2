@@ -1340,8 +1340,16 @@ session `Failed { Internal { "mosh terminals land with M3-A" } }` is gone.
    TimedOut }` after `HostOptions::mosh_connect_timeout`, 15 s in production; any other failure;
    a disconnect) **and whenever it ends `Failed` after `Connected`** (an internal error such as
    a screen fault: the key lived only in memory, so nobody can reattach, and `mosh-server` has
-   no idle timeout). A `Disconnected` after `Connected` is the shutdown handshake's job, and
-   `RemoteExited` means the server is gone. The decision is `owes_cleanup(connected, reason)`.
+   no idle timeout), **and whenever a user `Disconnected` after `Connected` was not confirmed
+   by the peer**. The shutdown handshake ends the server only if the server acknowledges it:
+   the driver reports an `Ended { reason, server_gone }` where `server_gone` is true only when
+   the peer acknowledged the goodbye or announced its own end (`RemoteExited`); a goodbye that
+   timed out (`GOODBYE_TIMEOUT`) or never got an answer (say the outbound UDP path broke while
+   SSH stayed up) keeps the user-facing reason `Disconnected` but leaves `server_gone` false,
+   and the bounded `terminate` over SSH then runs (`Session::finished()` is not proof: it is
+   also true when the handshake merely gave up). The decision is
+   `owes_cleanup(connected, reason, server_gone)`. This covers a terminal disconnect, the
+   release of its last handle and a host disconnect.
    **Bounds.** `terminate` is bounded by `CLEANUP_BUDGET` (5 s, or the host's exec timeout when
    that is shorter), not by the exec timeout alone, so closing has a known worst case:
    `ABANDON_GRACE` (2 s) + `GOODBYE_TIMEOUT` (1 s) + `CLEANUP_BUDGET` (5 s) =

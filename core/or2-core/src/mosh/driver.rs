@@ -134,8 +134,8 @@ fn spawn<T: DatagramTransport>(
         .name("or2-mosh".into())
         .spawn(move || {
             runtime.block_on(async move {
-                let reason = run_session(plan, &mut driver).await;
-                driver.close(reason);
+                let ended = run_session(plan, &mut driver).await;
+                driver.close(ended.reason);
             })
         })
         .expect("create mosh session thread");
@@ -158,16 +158,37 @@ pub(crate) struct Plan<T: DatagramTransport> {
     pub(crate) connect_timeout: Duration,
 }
 
+/// How a session ended: the reason the user sees, and whether the server is KNOWN to have
+/// ended too.
+#[derive(Debug)]
+pub(crate) struct Ended {
+    pub(crate) reason: CloseReason,
+    /// The peer itself confirmed the end (it acknowledged our goodbye, or announced its own).
+    /// A goodbye that timed out or failed leaves this false although the reason is still
+    /// `Disconnected`: the server may be running, and a caller that can reach it another way
+    /// (the SSH connection that started it) must stop it.
+    pub(crate) server_gone: bool,
+}
+
+impl Ended {
+    fn unconfirmed(reason: CloseReason) -> Self {
+        Self {
+            reason,
+            server_gone: false,
+        }
+    }
+}
+
 /// Runs the session on `driver` until it ends and says why. Does NOT close the driver: the
 /// caller does, after whatever cleanup it owes (`driver.state()` is still `Connected` if the
 /// session ever was, so a caller can tell a start that never connected).
 pub(crate) async fn run_session<T: DatagramTransport>(
     plan: Plan<T>,
     driver: &mut SessionDriver,
-) -> CloseReason {
+) -> Ended {
     match run(plan, driver).await {
-        Ok(reason) => reason,
-        Err(failure) => CloseReason::Failed(failure),
+        Ok(ended) => ended,
+        Err(failure) => Ended::unconfirmed(CloseReason::Failed(failure)),
     }
 }
 
@@ -178,7 +199,7 @@ fn internal(error: impl std::fmt::Display) -> SessionFailure {
 async fn run<T: DatagramTransport>(
     plan: Plan<T>,
     driver: &mut SessionDriver,
-) -> Result<CloseReason, SessionFailure> {
+) -> Result<Ended, SessionFailure> {
     let Plan {
         transport,
         peer,
@@ -208,12 +229,12 @@ async fn run<T: DatagramTransport>(
                 Err(_) => return Err(SessionFailure::TimedOut),
             },
             command = driver.next_command() => match command {
-                Command::Disconnect => return Ok(CloseReason::Disconnected),
+                Command::Disconnect => return Ok(Ended::unconfirmed(CloseReason::Disconnected)),
                 Command::Resize(new) => size = new,
                 // Nothing to send to yet, and host keys do not exist.
                 _ => {}
             },
-            () = shutdown.notified() => return Ok(CloseReason::Disconnected),
+            () = shutdown.notified() => return Ok(Ended::unconfirmed(CloseReason::Disconnected)),
         }
     };
     let mut session = Session::new(&key, link.peer_is_ipv6(), screen);
@@ -309,7 +330,10 @@ async fn run<T: DatagramTransport>(
                     // Acknowledge the server's goodbye, then we are done.
                     let tick = session.tick().map_err(internal)?;
                     send(&link, &mut session, &tick.datagrams);
-                    return Ok(CloseReason::RemoteExited { exit_status: None });
+                    return Ok(Ended {
+                        reason: CloseReason::RemoteExited { exit_status: None },
+                        server_gone: true,
+                    });
                 }
             }
             () = submits.due() => {
@@ -322,8 +346,8 @@ async fn run<T: DatagramTransport>(
             }
             command = driver.next_command() => {
                 if matches!(command, Command::Disconnect) {
-                    goodbye(&mut link, &mut session, &mut buffer).await;
-                    return Ok(CloseReason::Disconnected);
+                    let server_gone = goodbye(&mut link, &mut session, &mut buffer).await;
+                    return Ok(Ended { reason: CloseReason::Disconnected, server_gone });
                 }
                 if let Some(command) = submits.admit(command) {
                     apply_input(command, driver, &mut session, connected, &mut submits)?;
@@ -346,8 +370,8 @@ async fn run<T: DatagramTransport>(
             }
             () = roam.notified() => session.request_rebind(),
             () = shutdown.notified() => {
-                goodbye(&mut link, &mut session, &mut buffer).await;
-                return Ok(CloseReason::Disconnected);
+                let server_gone = goodbye(&mut link, &mut session, &mut buffer).await;
+                return Ok(Ended { reason: CloseReason::Disconnected, server_gone });
             }
             () = sleep(wait) => {}
             () = sleep_until(deadline), if !connected => {
@@ -493,16 +517,19 @@ fn send<T: DatagramTransport>(
 }
 
 /// Tells the server the client is leaving, as mosh does, so its session ends instead of lingering
-/// on the host. Bounded: a server that is already gone must not hold the disconnect.
+/// on the host. Bounded: a server that is already gone must not hold the disconnect. True only
+/// if the peer confirmed the end; a timeout or an error is false (see [`Ended::server_gone`]).
 async fn goodbye<T: DatagramTransport>(
     link: &mut Link<T>,
     session: &mut Session<GhosttyScreen>,
     buffer: &mut [u8],
-) {
+) -> bool {
     session.shutdown();
     let deadline = Instant::now() + GOODBYE_TIMEOUT;
     while !session.finished() && Instant::now() < deadline {
-        let Ok(tick) = session.tick() else { return };
+        let Ok(tick) = session.tick() else {
+            return false;
+        };
         send(link, session, &tick.datagrams);
         let wait = Duration::from_millis(session.wait_time_ms().clamp(1, 50));
         tokio::select! {
@@ -515,6 +542,7 @@ async fn goodbye<T: DatagramTransport>(
             () = sleep_until(deadline) => {}
         }
     }
+    session.shutdown_confirmed()
 }
 
 fn publish_if_changed(

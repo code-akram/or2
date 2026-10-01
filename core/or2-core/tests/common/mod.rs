@@ -526,12 +526,16 @@ impl Drop for MoshReaper {
 pub struct TestUdp {
     pub sockets: Arc<Mutex<Vec<Arc<AtomicUsize>>>>,
     pub blackhole: bool,
+    /// While set, every datagram the client sends is silently dropped (a broken outbound
+    /// path; what the server sends still arrives). Shared by every socket, flipped at any time.
+    pub mute: Arc<AtomicBool>,
 }
 
 pub struct TestSocket {
     inner: tokio::net::UdpSocket,
     received: Arc<AtomicUsize>,
     blackhole: bool,
+    mute: Arc<AtomicBool>,
 }
 
 impl DatagramSocket for TestSocket {
@@ -544,6 +548,9 @@ impl DatagramSocket for TestSocket {
     }
 
     fn try_send(&self, datagram: &[u8]) -> std::io::Result<usize> {
+        if self.mute.load(Ordering::SeqCst) {
+            return Ok(datagram.len());
+        }
         DatagramSocket::try_send(&self.inner, datagram)
     }
 
@@ -572,6 +579,7 @@ impl DatagramTransport for TestUdp {
             inner,
             received,
             blackhole: self.blackhole,
+            mute: self.mute.clone(),
         })
     }
 }

@@ -938,8 +938,8 @@ async fn the_shutdown_signal_disconnects_with_the_goodbye_handshake() {
     // The session future is not `Send` (libghostty): its own thread, as in production.
     let session = std::thread::spawn(move || {
         crate::ssh::runtime().block_on(async move {
-            let reason = run_session(plan, &mut driver).await;
-            (reason, driver.state())
+            let ended = run_session(plan, &mut driver).await;
+            (ended, driver.state())
         })
     });
     server.hear(Duration::from_secs(5)).await.unwrap();
@@ -951,10 +951,11 @@ async fn the_shutdown_signal_disconnects_with_the_goodbye_handshake() {
         .await;
     assert!(!goodbye.is_empty());
     server.say_goodbye().await;
-    let (reason, state_then) = tokio::task::spawn_blocking(move || session.join().unwrap())
+    let (ended, state_then) = tokio::task::spawn_blocking(move || session.join().unwrap())
         .await
         .unwrap();
-    assert_eq!(reason, CloseReason::Disconnected);
+    assert_eq!(ended.reason, CloseReason::Disconnected);
+    assert!(ended.server_gone, "the server acknowledged the goodbye");
     assert_eq!(
         state_then,
         SessionState::Connected,
@@ -966,7 +967,7 @@ async fn the_shutdown_signal_disconnects_with_the_goodbye_handshake() {
     let (_handle, mut driver) = channel(Arc::new(Recorder(Mutex::new(mpsc::channel().0))));
     let shutdown = Arc::new(Notify::new());
     shutdown.notify_one();
-    let reason = run_session(
+    let ended = run_session(
         Plan {
             transport: Arc::new(DirectUdp),
             peer: SocketAddr::new(LOCALHOST, server.port()),
@@ -979,6 +980,43 @@ async fn the_shutdown_signal_disconnects_with_the_goodbye_handshake() {
         &mut driver,
     )
     .await;
-    assert_eq!(reason, CloseReason::Disconnected);
+    assert_eq!(ended.reason, CloseReason::Disconnected);
+    assert!(!ended.server_gone, "no server was ever reached");
     assert_eq!(driver.state(), SessionState::Connecting);
+}
+
+/// A goodbye the server never acknowledges is still a user `Disconnected`, but it is not
+/// confirmed: the caller must stop the server another way.
+#[tokio::test]
+async fn an_unanswered_goodbye_closes_disconnected_without_confirming_the_server_is_gone() {
+    let mut server = FakeServer::new(KEY).await;
+    let (sender, states) = mpsc::channel();
+    let (_handle, mut driver) = channel(Arc::new(Recorder(Mutex::new(sender))));
+    let shutdown = Arc::new(Notify::new());
+    let plan = Plan {
+        transport: Arc::new(DirectUdp),
+        peer: SocketAddr::new(LOCALHOST, server.port()),
+        params: params(server.port(), KEY, 20, 5),
+        health: None,
+        roam: Arc::new(Notify::new()),
+        shutdown: shutdown.clone(),
+        connect_timeout: CONNECT_TIMEOUT,
+    };
+    let session = std::thread::spawn(move || {
+        crate::ssh::runtime().block_on(async move { run_session(plan, &mut driver).await })
+    });
+    server.hear(Duration::from_secs(5)).await.unwrap();
+    server.say(b"hi").await;
+    assert_eq!(state(&states).await, SessionState::Connected);
+    shutdown.notify_one();
+    // The server hears the goodbye and stays silent.
+    let goodbye = server
+        .hear_until(|heard| heard.iter().any(|h| h.new_num == SHUTDOWN_NUM))
+        .await;
+    assert!(!goodbye.is_empty());
+    let ended = tokio::task::spawn_blocking(move || session.join().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(ended.reason, CloseReason::Disconnected);
+    assert!(!ended.server_gone, "an unanswered goodbye proves nothing");
 }

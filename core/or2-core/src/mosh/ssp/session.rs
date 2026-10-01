@@ -193,6 +193,13 @@ impl<S: Screen> Session<S> {
             || self.sender.shutdown_timed_out(self.now())
     }
 
+    /// True only if the peer itself confirmed the end: it acknowledged our shutdown, or
+    /// announced its own. [`Session::finished`] is also true when we merely stopped waiting
+    /// (the retries ran out), which proves nothing about the server.
+    pub fn shutdown_confirmed(&self) -> bool {
+        self.peer_shut_down || self.sender.shutdown_acknowledged()
+    }
+
     /// True once the server has announced the end of the session (its shell exited).
     pub fn peer_shut_down(&self) -> bool {
         self.peer_shut_down

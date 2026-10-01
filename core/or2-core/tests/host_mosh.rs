@@ -838,3 +838,64 @@ fn mosh_runs_the_herdr_command_and_a_failed_pane_focus_starts_no_server() {
     assert!(live.servers().is_empty(), "no server for a failed focus");
     live.host.disconnect();
 }
+
+/// How a mosh terminal whose goodbye cannot reach the server is ended.
+enum Ending {
+    TerminalDisconnect,
+    LastHandleRelease,
+    HostDisconnect,
+}
+
+/// The client's outbound UDP path breaks while SSH stays up: the shutdown handshake is never
+/// acknowledged. The session still closes `Disconnected`, and the server must be stopped over
+/// the live SSH connection (the goodbye proves nothing when it was not confirmed).
+fn a_failed_goodbye_stops_the_server_over_ssh(ending: Ending) {
+    let live = Live::new();
+    let mut term = live.mosh("m", TerminalTarget::Shell);
+    term.quiet();
+    term.send("echo up-$((6*7))\n");
+    term.wait("up-42");
+    assert_eq!(live.servers().len(), 1);
+    live.udp.mute.store(true, Ordering::SeqCst);
+    match ending {
+        Ending::TerminalDisconnect => {
+            term.handle.disconnect();
+            assert_eq!(term.closed(), CloseReason::Disconnected);
+            assert!(matches!(live.host.state(), HostState::Connected { .. }));
+        }
+        Ending::LastHandleRelease => {
+            let Term { handle, states, .. } = term;
+            drop(handle);
+            assert_eq!(
+                states.recv_timeout(WAIT).expect("a session state change"),
+                SessionState::Closed(CloseReason::Disconnected)
+            );
+            assert!(matches!(live.host.state(), HostState::Connected { .. }));
+        }
+        Ending::HostDisconnect => {
+            live.host.disconnect();
+            assert_eq!(term.closed(), CloseReason::Disconnected);
+            assert_eq!(live.host_closed(), CloseReason::Disconnected);
+        }
+    }
+    // Asserted here, not left to the fixture's reaper.
+    live.wait_no_servers("the server to be stopped over SSH after an unconfirmed goodbye");
+}
+
+#[test]
+fn a_failed_goodbye_still_stops_the_server_on_a_terminal_disconnect() {
+    require!();
+    a_failed_goodbye_stops_the_server_over_ssh(Ending::TerminalDisconnect);
+}
+
+#[test]
+fn a_failed_goodbye_still_stops_the_server_on_the_release_of_the_last_handle() {
+    require!();
+    a_failed_goodbye_stops_the_server_over_ssh(Ending::LastHandleRelease);
+}
+
+#[test]
+fn a_failed_goodbye_still_stops_the_server_on_a_host_disconnect() {
+    require!();
+    a_failed_goodbye_stops_the_server_over_ssh(Ending::HostDisconnect);
+}
