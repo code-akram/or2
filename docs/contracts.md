@@ -329,7 +329,7 @@ budget, concurrent read/write. Closing a session closes only its channel.
 | `Herdr { session, pane_id }` | if `pane_id`: `herdr::focus_pane` first; then `<herdr>` (default session) or `<herdr> --session <name>` |
 
 Names are validated before anything runs (`InvalidName`): tmux names nonempty, at most 128
-bytes, no control characters, `\\`, `:` or `.`; herdr session names `[A-Za-z0-9_-]{1,64}`; pane
+bytes, no control characters, `\`, `:` or `.`; herdr session names `[A-Za-z0-9_-]{1,64}`; pane
 ids `[A-Za-z0-9:_-]{1,128}`. A missing program fails with `NotInstalled { program }`.
 
 ### tmux
