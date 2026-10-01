@@ -117,20 +117,30 @@ async fn probe_prefers_command_v_and_reports_missing_programs_without_failing() 
     fs::create_dir_all(&path_dir).unwrap();
     script(&path_dir.join("tmux"), "exit 0");
     let host = hermetic(dir.path());
+    // The fixed directories include /usr/bin and /usr/local/bin, which may hold a real
+    // herdr or mosh-server on the machine running the tests, so a program missing from
+    // `$HOME` and `PATH` cannot be asserted missing. Fakes under `$HOME/.local/bin` (searched
+    // before the system directories) keep the answer independent of the machine.
+    script(&host.home.join(".local/bin/mosh-server"), "exit 0");
+    script(
+        &host.home.join(".local/bin/herdr"),
+        "echo '{\"sessions\":[]}'",
+    );
     let caps = probe(&host).await.unwrap();
     assert_eq!(
         caps.tmux.as_deref(),
         Some(path_dir.join("tmux").to_str().unwrap()),
         "command -v wins over the fixed directories"
     );
-    // herdr and mosh-server may exist in /usr/bin on this runner, but the probe never
-    // reports a relative or empty path, and a missing herdr means no sessions listing.
-    for program in [&caps.herdr, &caps.mosh_server].into_iter().flatten() {
-        assert!(program.starts_with('/'));
-    }
-    if caps.herdr.is_none() {
-        assert!(caps.herdr_sessions.is_empty());
-    }
+    assert_eq!(
+        caps.mosh_server.as_deref(),
+        Some(host.home.join(".local/bin/mosh-server").to_str().unwrap())
+    );
+    assert_eq!(
+        caps.herdr.as_deref(),
+        Some(host.home.join(".local/bin/herdr").to_str().unwrap())
+    );
+    assert!(caps.herdr_sessions.is_empty());
 }
 
 #[tokio::test]
@@ -208,6 +218,11 @@ fn private_tmux(dir: &Path, real: &Path) -> (PathBuf, PathBuf) {
 #[tokio::test]
 async fn tmux_listing_handles_no_server_odd_names_and_activity_order() {
     let Some(real) = tmux_binary() else {
+        // OR2_REQUIRE_TMUX (CI) fails instead of skipping, so the test is never vacuous.
+        assert!(
+            std::env::var_os("OR2_REQUIRE_TMUX").is_none(),
+            "OR2_REQUIRE_TMUX is set but tmux is absent"
+        );
         eprintln!("SKIP: tmux is absent");
         return;
     };

@@ -19,6 +19,33 @@ pub fn sshd_available() -> bool {
     Path::new("/usr/bin/sshd").exists()
 }
 
+/// Whether the sshd tests can run. A missing `/usr/bin/sshd` skips them (printing `SKIP`)
+/// unless `OR2_REQUIRE_SSHD` is set, which fails instead: set it in CI so the suite is never
+/// vacuously green.
+pub fn sshd_ready() -> bool {
+    ready("sshd", "OR2_REQUIRE_SSHD", sshd_available())
+}
+
+/// Like [`sshd_ready`] for `tmux` (`OR2_REQUIRE_TMUX`).
+pub fn tmux_ready() -> bool {
+    ready(
+        "tmux",
+        "OR2_REQUIRE_TMUX",
+        Command::new("tmux").arg("-V").output().is_ok(),
+    )
+}
+
+fn ready(program: &str, require: &str, available: bool) -> bool {
+    if !available {
+        assert!(
+            std::env::var_os(require).is_none(),
+            "{require} is set but {program} is absent"
+        );
+        eprintln!("SKIP: {program} is absent");
+    }
+    available
+}
+
 pub struct Sshd {
     pub directory: tempfile::TempDir,
     child: Child,

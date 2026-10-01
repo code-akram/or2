@@ -13,13 +13,11 @@ use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
-
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use common::{Grid, Sshd, sshd_available};
+use common::{Grid, Sshd, sshd_ready, tmux_ready};
 use or2_core::herdr::{HerdrObserver, HerdrState};
 use or2_core::host::{
     HerdrSessionInfo, HostConnectRequest, HostError, HostHandle, HostObserver, HostState,
@@ -34,19 +32,19 @@ use or2_core::ssh::{HostOptions, SshRemote, connect_host, connect_tapped};
 use or2_core::term::TerminalSize;
 use or2_core::transport::DirectTcp;
 
+/// Skips the test without `/usr/bin/sshd`, or fails when `OR2_REQUIRE_SSHD` is set.
 macro_rules! require_sshd {
     () => {
-        if !sshd_available() {
-            eprintln!("SKIP: /usr/bin/sshd is absent");
+        if !sshd_ready() {
             return;
         }
     };
 }
 
+/// Skips the test without `tmux`, or fails when `OR2_REQUIRE_TMUX` is set.
 macro_rules! require_tmux {
     () => {
-        if Command::new("tmux").arg("-V").output().is_err() {
-            eprintln!("SKIP: tmux is absent");
+        if !tmux_ready() {
             return;
         }
     };
@@ -271,22 +269,31 @@ impl Term {
     }
 }
 
+const FAKE_SESSIONS: &str = r#"{"sessions":[{"default":true,"name":"default","running":true,"socket_path":"/nonexistent/herdr.sock","future":1},{"default":false,"name":"or2-test-x","running":false,"socket_path":"/nonexistent/x.sock"}]}"#;
+
 /// A fake `herdr` in the sshd sessions' `$HOME/.local/bin`: `session list --json` prints two
 /// sessions, anything else prints its arguments and exits 3.
 fn install_fake_herdr(sshd: &Sshd) -> String {
+    install_fake_herdr_listing(sshd, FAKE_SESSIONS)
+}
+
+/// [`install_fake_herdr`] with its `session list --json` output chosen.
+fn install_fake_herdr_listing(sshd: &Sshd, sessions: &str) -> String {
     let bin = sshd.home().join(".local/bin");
     fs::create_dir_all(&bin).unwrap();
     let path = bin.join("herdr");
     fs::write(
         &path,
-        r#"#!/bin/sh
+        format!(
+            r#"#!/bin/sh
 if [ "$1" = session ] && [ "$2" = list ]; then
-  echo '{"sessions":[{"default":true,"name":"default","running":true,"socket_path":"/nonexistent/herdr.sock","future":1},{"default":false,"name":"or2-test-x","running":false,"socket_path":"/nonexistent/x.sock"}]}'
+  echo '{sessions}'
   exit 0
 fi
 echo "FAKE-HERDR $*"
 exit 3
-"#,
+"#
+        ),
     )
     .unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -455,9 +462,34 @@ fn capability_probe_finds_programs_locale_and_herdr_sessions_once_per_connection
         "{}",
         first.utf8_locale
     );
-    // Cached for the connection: removing herdr changes nothing.
+    // Programs and locale are cached for the connection: a herdr that vanishes is still the
+    // answer, and its failing listing keeps the last known sessions.
     fs::remove_file(&herdr).unwrap();
     assert_eq!(block_on(live.host.capabilities()).unwrap(), first);
+    // The session list is read again on every query, so a session started or stopped after
+    // connecting shows up (`running` is not a connect-time snapshot).
+    install_fake_herdr_listing(
+        &live.sshd,
+        r#"{"sessions":[{"default":true,"name":"default","running":false},{"default":false,"name":"or2-test-y","running":true}]}"#,
+    );
+    let later = block_on(live.host.capabilities()).unwrap();
+    assert_eq!(later.herdr, first.herdr);
+    assert_eq!(later.tmux, first.tmux);
+    assert_eq!(
+        later.herdr_sessions,
+        [
+            HerdrSessionInfo {
+                name: "default".into(),
+                running: false,
+                is_default: true
+            },
+            HerdrSessionInfo {
+                name: "or2-test-y".into(),
+                running: true,
+                is_default: false
+            },
+        ]
+    );
     live.host.disconnect();
 }
 
@@ -480,13 +512,9 @@ fn remote_with(sshd: &Sshd, options: HostOptions) -> (HostHandle, SshRemote) {
 fn exec_collects_streams_status_quotes_for_the_login_shell_and_enforces_its_caps() {
     require_sshd!();
     let sshd = Sshd::new(false);
-    let (host, remote) = remote_with(
-        &sshd,
-        HostOptions {
-            exec_timeout: Duration::from_millis(700),
-            ..HostOptions::default()
-        },
-    );
+    // The production timeout: a loaded runner or a slow rc file must not time out the
+    // 1 MiB transfers below. The short timeout has its own connection further down.
+    let (host, remote) = remote_with(&sshd, HostOptions::default());
     let out = block_on(remote.exec_script("echo out; echo err >&2; exit 3")).unwrap();
     assert_eq!(out.status, Some(3));
     assert_eq!(out.stdout, b"out\n");
@@ -515,7 +543,16 @@ fn exec_collects_streams_status_quotes_for_the_login_shell_and_enforces_its_caps
             "{redirect:?}"
         );
     }
+    host.disconnect();
+
     // The timeout fails the exec, and the connection carries on.
+    let (host, remote) = remote_with(
+        &sshd,
+        HostOptions {
+            exec_timeout: Duration::from_millis(700),
+            ..HostOptions::default()
+        },
+    );
     let started = Instant::now();
     assert_eq!(
         block_on(remote.exec_script("sleep 3")),
@@ -1017,6 +1054,14 @@ fn tmux_lists_sessions_attaches_creates_and_detaches_on_a_private_socket() {
 fn herdr_terminals_run_the_probed_herdr_with_the_session_and_report_a_failed_focus() {
     require_sshd!();
     let live = Live::new();
+    // The probe also searches /usr/bin and /usr/local/bin, so a herdr installed there is
+    // found whatever `$HOME` is. This test needs a host without one (and the fake below to
+    // be the one the probe finds), and must never start a real herdr.
+    if block_on(live.host.capabilities()).unwrap().herdr.is_some() {
+        eprintln!("SKIP: herdr is installed in a standard directory on this machine");
+        live.host.disconnect();
+        return;
+    }
     // Without herdr on the host the terminal reports it instead of opening a channel.
     let (handle, states) = live.open_raw(
         "missing",

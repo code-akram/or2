@@ -6,12 +6,11 @@ mod common;
 
 use std::fs;
 use std::net::Ipv4Addr;
-use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use common::{Grid, Sshd};
+use common::{Grid, Sshd, sshd_ready};
 use or2_core::input::{Key, KeyInput, Modifiers};
 use or2_core::keys::ClientKey;
 use or2_core::session::{
@@ -59,8 +58,7 @@ impl SessionObserver for Observer {
 
 #[test]
 fn openssh_shell_types_resizes_encodes_keys_and_reports_output_in_frames() {
-    if !Path::new("/usr/bin/sshd").exists() {
-        eprintln!("SKIP: /usr/bin/sshd is absent");
+    if !sshd_ready() {
         return;
     }
     let fixture = Sshd::new(false);
@@ -123,8 +121,7 @@ fn openssh_shell_types_resizes_encodes_keys_and_reports_output_in_frames() {
 
 #[test]
 fn certificate_only_host_is_an_unsupported_host_key_not_a_trust_prompt() {
-    if !Path::new("/usr/bin/sshd").exists() {
-        eprintln!("SKIP: /usr/bin/sshd is absent");
+    if !sshd_ready() {
         return;
     }
     let fixture = Sshd::new(true);
