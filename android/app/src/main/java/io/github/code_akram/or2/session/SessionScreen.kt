@@ -24,6 +24,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -33,10 +34,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -139,56 +142,63 @@ fun TerminalCard(
 ) {
     val stale = linkStaleLabel(linkHealth)
     var dragY by remember { mutableFloatStateOf(0f) }
+    var headerHeight by remember { mutableIntStateOf(0) }
     val threshold = with(LocalDensity.current) { 96.dp.toPx() }
-    Column(
+    Box(
         modifier.fillMaxSize().padding(top = 2.dp).offset { IntOffset(0, dragY.roundToInt()) }
             .clip(Or2Shapes.TerminalCard).background(background).testTag("terminal-card"),
     ) {
-        Column(Modifier.pointerInput(Unit) {
-            detectVerticalDragGestures(
-                onDragEnd = { if (dragY > threshold) minimise() else dragY = 0f },
-                onDragCancel = { dragY = 0f },
-                onVerticalDrag = { change, amount -> change.consume(); dragY = (dragY + amount).coerceAtLeast(0f) },
-            )
-        }.testTag("terminal-header")) {
-            // The grab handle overlaps the top of the 48 dp header row, so the header costs no extra height.
-            Box(Modifier.fillMaxWidth()) {
-                Box(
-                    Modifier.align(Alignment.TopCenter).padding(top = 6.dp)
-                        .size(width = Or2Dimens.TerminalHandleWidth, height = Or2Dimens.SheetHandleHeight)
-                        .clip(Or2Shapes.Pill).background(Or2Colors.Subtle),
+        Column(Modifier.fillMaxSize()) {
+            Column(Modifier.onSizeChanged { headerHeight = it.height }.pointerInput(Unit) {
+                detectVerticalDragGestures(
+                    onDragEnd = { if (dragY > threshold) minimise() else dragY = 0f },
+                    onDragCancel = { dragY = 0f },
+                    onVerticalDrag = { change, amount -> change.consume(); dragY = (dragY + amount).coerceAtLeast(0f) },
                 )
-                Row(
-                    Modifier.fillMaxWidth().heightIn(min = Or2Dimens.HeaderButtonTouch).padding(horizontal = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    RoundHeaderButton(Or2Icons.Minimize, "Minimise to home", Or2Colors.Attention, minimise, Modifier.testTag("terminal-back"))
-                    RoundHeaderButton(Or2Icons.Sidebar, "Panes and sessions", Or2Colors.Done, openSwitcher, Modifier.testTag("terminal-panes"))
-                    Text(
-                        title, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, maxLines = 1,
-                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(horizontal = 4.dp).testTag("terminal-title"),
+            }.testTag("terminal-header")) {
+                // The grab handle overlaps the top of the 48 dp header row, so the header costs no extra height.
+                Box(Modifier.fillMaxWidth()) {
+                    Box(
+                        Modifier.align(Alignment.TopCenter).padding(top = 6.dp)
+                            .size(width = Or2Dimens.TerminalHandleWidth, height = Or2Dimens.SheetHandleHeight)
+                            .clip(Or2Shapes.Pill).background(Or2Colors.Subtle),
                     )
-                    TransportBadge(transport, Modifier.padding(end = 12.dp).testTag("terminal-transport"), small = true, stale = stale != null)
+                    Row(
+                        Modifier.fillMaxWidth().heightIn(min = Or2Dimens.HeaderButtonTouch).padding(horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RoundHeaderButton(Or2Icons.Minimize, "Minimise to home", Or2Colors.Attention, minimise, Modifier.testTag("terminal-back"))
+                        RoundHeaderButton(Or2Icons.Sidebar, "Panes and sessions", Or2Colors.Done, openSwitcher, Modifier.testTag("terminal-panes"))
+                        Text(
+                            title, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(horizontal = 4.dp).testTag("terminal-title"),
+                        )
+                        TransportBadge(transport, Modifier.padding(end = 12.dp).testTag("terminal-transport"), small = true, stale = stale != null)
+                    }
                 }
             }
+            if (state !is SessionState.Connected) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
+                    Text(sessionMessage(state), style = Or2Type.MonoSmall,
+                        color = if (state is SessionState.Closed) Or2Colors.Attention else Or2Colors.TextMuted,
+                        modifier = Modifier.weight(1f).testTag("terminal-status"))
+                    if (state is SessionState.Closed) TextAction("Close", endSession, modifier = Modifier.testTag("terminal-close"))
+                }
+            }
+            content()
         }
-        if (stale != null) {
-            Text(stale, style = Or2Type.MonoSmall, color = Or2Colors.Attention,
-                modifier = Modifier.padding(horizontal = Or2Dimens.Gutter).testTag("terminal-link"))
-        }
-        if (note != null) {
-            Text(note, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted,
-                modifier = Modifier.padding(horizontal = Or2Dimens.Gutter).testTag("terminal-note"))
-        }
-        if (state !is SessionState.Connected) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
-                Text(sessionMessage(state), style = Or2Type.MonoSmall,
-                    color = if (state is SessionState.Closed) Or2Colors.Attention else Or2Colors.TextMuted,
-                    modifier = Modifier.weight(1f).testTag("terminal-status"))
-                if (state is SessionState.Closed) TextAction("Close", endSession, modifier = Modifier.testTag("terminal-close"))
+        // Under the header but over the terminal, not above it: these lines come and go (a flapping
+        // link toggles the stale text), and a line more or less above the terminal would resize its
+        // grid and make the remote redraw each time.
+        if (stale != null || note != null) {
+            Column(
+                Modifier.align(Alignment.TopStart).offset { IntOffset(0, headerHeight) }.fillMaxWidth()
+                    .background(background.copy(alpha = 0.85f)).padding(horizontal = Or2Dimens.Gutter),
+            ) {
+                if (stale != null) Text(stale, style = Or2Type.MonoSmall, color = Or2Colors.Attention, modifier = Modifier.testTag("terminal-link"))
+                if (note != null) Text(note, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.testTag("terminal-note"))
             }
         }
-        content()
     }
 }
 
@@ -212,14 +222,20 @@ private fun RoundHeaderButton(icon: ImageVector, description: String, color: Col
  */
 @Composable
 fun TransportBadge(transport: Transport, modifier: Modifier = Modifier, small: Boolean = false, stale: Boolean = false) {
-    if (stale) {
-        Badge(transport.label, modifier, container = Or2Colors.SurfaceTrack, content = Or2Colors.TextMuted, small = small)
-        return
-    }
-    when (transport) {
-        Transport.SSH -> Badge(transport.label, modifier, container = Or2Colors.SurfaceTrack, content = Or2Colors.Text.copy(alpha = 0.7f), small = small)
-        Transport.MOSH -> Badge(transport.label, modifier, container = Or2Colors.Teal, content = Or2Colors.Background, small = small)
-    }
+    val (container, content) = transportBadgeColors(transport, stale)
+    // The grey is not the only signal: the badge says it for assistive services (and the UI tests) too.
+    val described = if (stale) modifier.semantics { stateDescription = STALE_BADGE_DESCRIPTION } else modifier
+    Badge(transport.label, described, container = container, content = content, small = small)
+}
+
+/** What a greyed badge reports as its state. */
+const val STALE_BADGE_DESCRIPTION = "No word from the server"
+
+/** The badge's fill and text: teal for a healthy `Mosh`, the `SSH` look for SSH and for any stale link. */
+fun transportBadgeColors(transport: Transport, stale: Boolean): Pair<Color, Color> = when {
+    stale -> Or2Colors.SurfaceTrack to Or2Colors.TextMuted
+    transport == Transport.SSH -> Or2Colors.SurfaceTrack to Or2Colors.Text.copy(alpha = 0.7f)
+    else -> Or2Colors.Teal to Or2Colors.Background
 }
 
 /** A terminal that has not connected yet, or closed before it did: no terminal, no keys. */
