@@ -3,8 +3,8 @@
 The Compose app loads `or2-ffi` through generated UniFFI Kotlin/JNA bindings. Host settings,
 encrypted key records and trusted host keys live in Room. `or2-core` remains free of Android,
 UniFFI and persistence dependencies. The production connector calls the real `connect`
-export (FFI API 4 also exports `connect_host`, not yet used by the app); the contract probes are
-used only by tests. The session screen embeds the Canvas terminal with IME and keys-row input,
+export (the M1 single-session path, kept until lane B lands; FFI API 4's `connect_host` is real
+since lane A1 but not yet used by the app); the contract probes are used only by tests. The session screen embeds the Canvas terminal with IME and keys-row input,
 keeping the final displayed frame visible through `Closed`.
 
 ## Shared user-local toolchain
@@ -69,6 +69,16 @@ cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets --all-fea
 android/gradlew -p android :app:assembleDebug :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:lintDebug
 ```
 
+Rust integration tests (`core/or2-core/tests/`): `host.rs` runs host connections against a
+disposable loopback `sshd` (trust, address racing, probe, exec caps and timeout, streamlocal,
+shell/tmux/herdr terminals, concurrency, close order, loss through a cuttable TCP relay);
+`openssh.rs` does the same for the M1 single-session path; both share `common/mod.rs`. The
+sshd sessions get a private `TMUX_TMPDIR` (the test's tmux server lives in the fixture
+directory and is killed with it), a temporary `$HOME` and a fake `herdr` script there, so no
+real tmux or herdr server is ever contacted. `local.rs` runs the capability probe and tmux
+commands through `LocalHost` with a restricted `PATH`. Tests skip (printing `SKIP`) when
+`/usr/bin/sshd` or `tmux` is absent.
+
 Gradle builds the host library, generates Kotlin under `app/build/generated/uniffi/kotlin`,
 and cross-builds the release Rust library into `app/build/generated/uniffi/jniLibs/arm64-v8a`.
 The app has minSdk 34, compile/targetSdk 36, and no Google Play Services/FCM dependencies.
@@ -93,7 +103,12 @@ prompts, disconnect-versus-destruction, display disposal, factory cancellation, 
 wipe timing. `SessionHolderNativeTest` uses the real production connector and a disposable
 loopback OpenSSH fixture for first-use trust, trusted reconnect, changed-key rejection and
 retained closed handles; it skips when `/usr/bin/sshd` is unavailable. No home SSH files or
-system sshd settings are read or modified. Key-operation tests use
+system sshd settings are read or modified. `HostConnectNativeTest` drives the production
+`connectHost` through the same fixture: address racing past a dead first address, host-key
+approval, suspend `capabilities()`/`listTmuxSessions()`, two shell terminals on one connection
+(echo, resize, exit status), trusted reconnect, changed-key reject, authentication failure
+and close ordering (terminals before the host). The fixture gives its sshd sessions a private
+`TMUX_TMPDIR`, so nothing in it can reach the user's tmux server. Key-operation tests use
 real key exports and AES-GCM on the JVM (not Android Keystore). Device tests
 load the packaged arm64 `.so` with Android JNA. Both cover the bootstrap geometry and errors,
 key generation/import errors, and a `contract_probe_session` lifecycle whose listener callbacks

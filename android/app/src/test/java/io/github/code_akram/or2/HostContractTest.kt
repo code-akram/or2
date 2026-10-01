@@ -21,6 +21,8 @@ import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.connectHost
 import io.github.code_akram.or2.ffi.contractProbeHost
 import io.github.code_akram.or2.ffi.generateEd25519Key
+import java.net.InetAddress
+import java.net.ServerSocket
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -157,16 +159,28 @@ class HostContractTest {
     }
 
     @Test
-    fun connectHostClosesHonestlyUntilTheHostDriverLands() {
+    fun connectHostReallyConnectsAndReportsEveryUnreachableAddressFromARustThread() {
         val listener = HostRecorder()
         val testThread = Thread.currentThread()
-        connectHost(request(), listener).use { host ->
+        // Loopback ports nothing listens on: the real driver races both and both are refused.
+        val dead = List(2) { ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { it.localPort } }
+        val addresses = dead.map { HostAddress("127.0.0.1", it.toUShort()) }
+        connectHost(request(addresses = addresses), listener).use { host ->
             val closed = listener.await<HostState.Closed>()
-            assertTrue(closed.reason is CloseReason.Failed)
-            assertTrue((closed.reason as CloseReason.Failed).failure is SessionFailure.Internal)
+            val failure = (closed.reason as CloseReason.Failed).failure
+            assertTrue("expected Unreachable, got $failure", failure is SessionFailure.Unreachable)
+            val message = (failure as SessionFailure.Unreachable).message
+            assertTrue(message, "address 0" in message && "address 1" in message)
             assertEquals(closed, host.state())
+            // A closed host refuses everything, quietly.
+            assertThrows(HostException.Closed::class.java) {
+                host.openTerminal(TerminalTarget.Shell, 80u, 24u, RecordingListener())
+            }
+            assertThrows(HostException.Closed::class.java) { runBlocking { host.capabilities() } }
         }
+        listener.assertQuiet()
         assertFalse(testThread in listener.callbackThreads)
+        assertFalse(listener.overlapped)
     }
 
     @Test

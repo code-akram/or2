@@ -320,7 +320,7 @@ carries terminals, tmux/probe exec channels and herdr streamlocal channels (FFI 
 
 - [x] Lane 0: `remote`, `host`, `herdr::view` and tmux contract types; FFI API 4 surface;
   `contract_probe_host`; Kotlin JVM contract test.
-- [ ] Lane A1: host driver over russh with multiplexed channels, address racing, capability
+- [x] Lane A1: host driver over russh with multiplexed channels, address racing, capability
   probe, tmux listing and attach, terminal targets, `connect_host`; OpenSSH interop tests.
 - [ ] Lane A2: generated herdr types, discovery, subscribe/snapshot/reconcile watch, focus;
   fixture and live isolated-session tests.
