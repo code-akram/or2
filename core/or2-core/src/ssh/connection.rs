@@ -32,6 +32,7 @@ use std::time::Duration;
 use russh::client::{self as russh_client, Handle};
 use tokio::io::DuplexStream;
 use tokio::sync::{OnceCell, mpsc, oneshot, watch};
+use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 
 use super::client::{
@@ -135,6 +136,9 @@ pub(super) struct SshHost {
     pub(super) focus: herdr::FocusGate,
     /// The mosh servers this connection still has to stop (see [`mosh_session::ServerDebt`]).
     pub(super) servers: mosh_session::ServerDebt,
+    /// The session-channel opens still waiting for the server's answer (see
+    /// [`SshHost::start_open`]). `None` once the connection is over.
+    opens: Mutex<Option<JoinSet<()>>>,
 }
 
 /// Every established SSH connection of the process, for [`network_changed`]. Weak: a closed
@@ -213,11 +217,57 @@ impl SshHost {
         self.handle.is_closed()
     }
 
-    /// A new session channel, for a terminal.
-    pub(super) async fn open_channel(
-        &self,
-    ) -> Result<russh::Channel<russh_client::Msg>, russh::Error> {
-        self.handle.channel_open_session().await
+    /// Starts opening a session channel. The open belongs to the connection, not to the caller:
+    /// it runs as a task of [`SshHost::opens`] until the server answers, however long that takes
+    /// and whatever the caller does meanwhile. A caller that gave up (its timeout, a stop, a
+    /// cancelled future) and dropped the [`PendingOpen`] leaves the task to close the channel the
+    /// server confirms later; a raw russh channel does not close itself when dropped, and a
+    /// leaked one counts against the server's `MaxSessions` for the connection's lifetime. The
+    /// task ends with its answer, or with the connection ([`SshHost::end_opens`]).
+    pub(super) fn start_open(self: &Arc<Self>) -> PendingOpen {
+        let (answer, reply) = oneshot::channel();
+        let host = Arc::clone(self);
+        let mut opens = self.opens.lock().unwrap_or_else(PoisonError::into_inner);
+        // After the connection ended nothing is spawned: the dropped sender reads as `Disconnect`.
+        if let Some(set) = opens.as_mut() {
+            // Finished tasks are reaped as new ones come.
+            while set.try_join_next().is_some() {}
+            set.spawn_on(
+                async move {
+                    let opened = host.handle.channel_open_session().await;
+                    // `host` is still held: a failed send means nobody waits any more.
+                    if let Err(Ok(channel)) = answer.send(opened) {
+                        let _ = timeout(CHANNEL_CLOSE_GRACE, channel.close()).await;
+                    }
+                },
+                runtime().handle(),
+            );
+        }
+        PendingOpen(reply)
+    }
+
+    /// The connection is over: stop every open still waiting (their callers see `Disconnect`),
+    /// and refuse new ones. Also breaks the reference each task holds to this host.
+    pub(super) fn end_opens(&self) {
+        let set = self
+            .opens
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        drop(set); // Dropping a `JoinSet` aborts its tasks.
+    }
+
+    /// How many opens are still waiting for the server.
+    #[cfg(test)]
+    pub(super) fn outstanding_opens(&self) -> usize {
+        self.opens
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+            .map_or(0, |set| {
+                while set.try_join_next().is_some() {}
+                set.len()
+            })
     }
 
     /// Runs `line` on `channel` without a PTY and collects it until the channel closes. No
@@ -269,6 +319,23 @@ impl SshHost {
                 // Success, EOF, window adjusts.
                 Some(_) => {}
             }
+        }
+    }
+}
+
+/// A session channel being opened by the connection ([`SshHost::start_open`]). Dropping it is
+/// safe at any moment: the connection closes the channel if the server confirms it later.
+pub(super) struct PendingOpen(
+    oneshot::Receiver<Result<russh::Channel<russh_client::Msg>, russh::Error>>,
+);
+
+impl PendingOpen {
+    /// Resolves with the server's answer. Cancel-safe: the answer is kept for the next call.
+    pub(super) async fn wait(&mut self) -> Result<russh::Channel<russh_client::Msg>, russh::Error> {
+        match (&mut self.0).await {
+            Ok(opened) => opened,
+            // The connection ended and took the open with it.
+            Err(_) => Err(russh::Error::Disconnect),
         }
     }
 }
@@ -982,6 +1049,15 @@ async fn network<T: Transport>(
     }
 }
 
+/// Ends the connection's outstanding channel opens when dropped.
+struct EndOpens(Arc<SshHost>);
+
+impl Drop for EndOpens {
+    fn drop(&mut self) {
+        self.0.end_opens();
+    }
+}
+
 /// Handshake, authentication, then waits for the SSH session to end or for `stop`.
 async fn hold(
     request: HostConnectRequest,
@@ -1015,8 +1091,12 @@ async fn hold(
         sessions: probe::SessionsCache::new(),
         focus: herdr::FocusGate::new(),
         servers: mosh_session::ServerDebt::default(),
+        opens: Mutex::new(Some(JoinSet::new())),
     });
     register(&host);
+    // However this function ends, also when the host driver aborts it, the opens that are still
+    // waiting end with the connection.
+    let _opens = EndOpens(Arc::clone(&host));
     if events
         .send(HostEvent::Connected {
             address_index,

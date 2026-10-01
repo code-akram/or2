@@ -307,6 +307,7 @@ struct Shared {
     keep_socket: bool,
     channel_events: Mutex<Option<sync::Sender<(&'static str, russh::ChannelId)>>>,
     focus_hangs: AtomicBool,
+    open_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 struct Server {
@@ -340,6 +341,21 @@ impl server::Handler for Server {
     ) -> Result<(), Self::Error> {
         let channel_id = channel.id();
         drop(channel);
+        let gate = self.shared.open_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let shared = self.shared.clone();
+            if let Some(tx) = shared.channel_events.lock().unwrap().as_ref() {
+                let _ = tx.send(("pending", channel_id));
+            }
+            tokio::spawn(async move {
+                let _ = gate.await;
+                reply.accept().await;
+                if let Some(tx) = shared.channel_events.lock().unwrap().as_ref() {
+                    let _ = tx.send(("accepted", channel_id));
+                }
+            });
+            return Ok(());
+        }
         if self.shared.refuse_channels.load(Ordering::SeqCst) {
             reply
                 .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
@@ -625,6 +641,7 @@ impl Fixture {
             keep_socket,
             channel_events: Mutex::new(None),
             focus_hangs: AtomicBool::new(false),
+            open_gate: Mutex::new(None),
         });
         let (listener, port) = runtime().block_on(async {
             let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -1451,8 +1468,8 @@ fn a_stalled_outbound_path_cannot_hold_an_exec_or_the_probe_past_the_exec_timeou
     let ssh = fixture.ssh();
     // Two channels confirmed while the path still works: one for the exec under test, one to
     // fill russh's outbound queue.
-    let exec_channel = runtime().block_on(ssh.open_channel()).unwrap();
-    let filler_channel = runtime().block_on(ssh.open_channel()).unwrap();
+    let exec_channel = runtime().block_on(ssh.start_open().wait()).unwrap();
+    let filler_channel = runtime().block_on(ssh.start_open().wait()).unwrap();
 
     stall.stall();
     let filler = runtime().spawn(async move {
@@ -1698,4 +1715,111 @@ fn a_terminal_given_up_while_its_focus_waits_closes_the_channel_opened_beside_it
     }
     assert_eq!(closes, 1, "the session channel must be closed exactly once");
     fixture.handle.disconnect();
+}
+
+fn late_open_confirmation_closes(within_grace: bool) {
+    let fixture = Fixture::connected_with(Duration::from_secs(5), PROBE_WITH_HERDR);
+    runtime().block_on(fixture.handle.capabilities()).unwrap();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    fixture.shared.focus_hangs.store(true, Ordering::SeqCst);
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *fixture.shared.open_gate.lock().unwrap() = Some(gate);
+    let (tx, states) = sync::channel();
+    let terminal = fixture
+        .handle
+        .open_terminal_with(
+            TerminalTarget::Herdr {
+                session: None,
+                pane_id: Some("w2:p1".into()),
+            },
+            TerminalTransport::Ssh,
+            TerminalSize::new(80, 24).unwrap(),
+            Arc::new(SessionRecorder(tx)),
+        )
+        .unwrap();
+    let mut pending = None;
+    let mut focus = false;
+    while pending.is_none() || !focus {
+        match events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            ("pending", id) => pending = Some(id),
+            ("focus", _) => focus = true,
+            _ => {}
+        }
+    }
+    let id = pending.unwrap();
+    terminal.disconnect();
+    if within_grace {
+        release.send(()).unwrap();
+        assert_eq!(session_closed(&states), CloseReason::Disconnected);
+    } else {
+        // The terminal's Closed event proves its bounded cleanup has finished. Only now
+        // deliver the confirmation, on a host connection that remains alive.
+        assert_eq!(session_closed(&states), CloseReason::Disconnected);
+        release.send(()).unwrap();
+    }
+    let mut closed_channel = false;
+    while !closed_channel {
+        match events.recv_timeout(Duration::from_millis(700)) {
+            Ok(("close", closed)) if closed == id => closed_channel = true,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    // A fresh public query demonstrates that the shared host is usable after cancellation.
+    runtime()
+        .block_on(fixture.handle.list_tmux_sessions())
+        .unwrap();
+    fixture.handle.disconnect();
+    assert!(
+        closed_channel,
+        "confirmation after cleanup left session channel {id:?} unclosed (within_grace={within_grace})"
+    );
+}
+
+#[test]
+fn an_open_confirmed_within_the_grace_of_a_given_up_terminal_is_closed() {
+    late_open_confirmation_closes(true);
+}
+
+#[test]
+fn an_open_confirmed_after_a_given_up_terminal_closed_is_still_closed() {
+    late_open_confirmation_closes(false);
+}
+
+#[test]
+fn an_open_the_server_never_confirms_ends_with_the_connection() {
+    let mut fixture = Fixture::connected_with(Duration::from_secs(5), PROBE_WITH_HERDR);
+    let ssh = fixture.ssh();
+    runtime().block_on(fixture.handle.capabilities()).unwrap();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    fixture.shared.focus_hangs.store(true, Ordering::SeqCst);
+    // The confirmation is held back for good.
+    let (_release, gate) = tokio::sync::oneshot::channel::<()>();
+    *fixture.shared.open_gate.lock().unwrap() = Some(gate);
+    let (tx, states) = sync::channel();
+    let terminal = fixture
+        .handle
+        .open_terminal_with(
+            TerminalTarget::Herdr {
+                session: None,
+                pane_id: Some("w2:p1".into()),
+            },
+            TerminalTransport::Ssh,
+            TerminalSize::new(80, 24).unwrap(),
+            Arc::new(SessionRecorder(tx)),
+        )
+        .unwrap();
+    while events.recv_timeout(Duration::from_secs(5)).unwrap().0 != "pending" {}
+    terminal.disconnect();
+    assert_eq!(session_closed(&states), CloseReason::Disconnected);
+    // The terminal is gone, the connection owns the open that is still outstanding.
+    assert_eq!(ssh.outstanding_opens(), 1);
+    fixture.handle.disconnect();
+    wait_for(|| ssh.outstanding_opens() == 0);
+    // And nothing is started on a connection that is over.
+    let mut late = ssh.start_open();
+    assert!(runtime().block_on(late.wait()).is_err());
+    assert_eq!(ssh.outstanding_opens(), 0);
 }

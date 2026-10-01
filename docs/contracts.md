@@ -641,10 +641,23 @@ lives on. The program's own exit is `RemoteExited { exit_status }`. Channel setu
 timeout (10 s): a server that never answers closes the session with `TimedOut`, after
 closing the channel. A refused channel open (`MaxSessions`, see above) is `ShellRejected`,
 never `ConnectionLost`.
-A user disconnect that arrives while the focus is still pending closes a channel that was accepted
-meanwhile (the open's result is kept outside the join of the two, which a raw russh channel would
-otherwise leave unclosed: it holds a `MaxSessions` slot), exactly once; test
-`a_terminal_given_up_while_its_focus_waits_closes_the_channel_opened_beside_it`.
+A terminal's channel open belongs to the **host connection**, not to the terminal
+(`SshHost::start_open`): it runs as a task of the connection's own task set until the server
+answers, and the terminal only waits for its answer (a timeout gives up at once). A user
+disconnect that arrives while the open (or the focus beside it) is still pending first waits up to
+`CHANNEL_CLOSE_GRACE` (250 ms) for the answer, so a channel confirmed in that moment is closed
+before the session reports `Closed`; the grace is only that ordering courtesy, not the bound on
+the cleanup. Whenever the confirmation arrives later, however late, the connection's task finds
+nobody waiting and closes the channel itself (an error answer needs nothing), so no session
+channel leaks onto the live connection and holds a `MaxSessions` slot. The tasks end with their
+answer or with the connection (the connection's `hold` drops the set when it ends, also when the
+host driver aborts it, and a connection that is over starts none), so none outlive the host.
+The channel is closed exactly once and the terminal's `Closed` is unchanged. Tests
+`a_terminal_given_up_while_its_focus_waits_closes_the_channel_opened_beside_it`,
+`an_open_confirmed_within_the_grace_of_a_given_up_terminal_is_closed`,
+`an_open_confirmed_after_a_given_up_terminal_closed_is_still_closed` and
+`an_open_the_server_never_confirms_ends_with_the_connection`. (An exec's open,
+`exec_rendered`, is still bounded by its own deadline, which is not covered by this.)
 
 ### tmux
 

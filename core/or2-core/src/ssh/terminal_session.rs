@@ -239,13 +239,16 @@ async fn channel_task(
             None => Ok(()),
         }
     };
-    // The open is driven outside the join and its result kept outside it too: a stop that drops
-    // the join while the focus or the open is still pending must still close a channel that is
-    // accepted meanwhile (a raw channel does not close itself when dropped, and a leaked one
-    // counts against the server's `MaxSessions`).
+    // The open belongs to the host connection (`SshHost::start_open`): whatever this task does
+    // with it, a channel the server confirms after we gave up is closed by the connection, not
+    // leaked on it (a raw channel does not close itself when dropped, and a leaked one counts
+    // against the server's `MaxSessions`). Its result is kept outside the join, so a stop that
+    // drops the join while the focus or the open is still pending still finds an answer that
+    // arrived meanwhile.
+    let mut pending = host.start_open();
     let opening = std::sync::Mutex::new(None);
     let mut open_step = std::pin::pin!(async {
-        let opened = timeout(limit, host.open_channel()).await;
+        let opened = timeout(limit, pending.wait()).await;
         *opening.lock().unwrap() = Some(opened);
     });
     let joined = tokio::select! {
@@ -255,9 +258,9 @@ async fn channel_task(
     let focused = match joined {
         Some(focused) => focused,
         None => {
-            // The server may have accepted the channel with the confirmation still in flight to
-            // us: dropping the open now would leave that channel open on the server. Let it
-            // finish for a moment, then close what it produced.
+            // The confirmation may be in flight to us: give it a moment so the channel is closed
+            // before this session reports `Closed`. One that arrives later is closed by the
+            // connection when `pending` goes (below).
             if opening.lock().unwrap().is_none() {
                 let _ = timeout(CHANNEL_CLOSE_GRACE, open_step.as_mut()).await;
             }
