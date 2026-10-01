@@ -1929,5 +1929,10 @@ standby setting, mobile data only, screen off while waiting, target the always-o
    max `since_heard_ms`.
 4. Return: time to first full frame, number of prompts (target 0), focused pane matches
    (verified through herdr).
-5. Variants: Wi-Fi→mobile mid-wait; airplane mode 2 min; process killed (`am kill`/force) →
-   `resume_mosh` path. Three runs each, report p50 and max.
+5. Variants: Wi-Fi→mobile mid-wait; airplane mode 2 min; process killed (`am kill`/force) → the
+   implemented recovery: a fresh SSH reconnect (one grouped unlock) and the Resume path (auto-resume
+   through the recents list, or Home's Resume card after a cold start), which reopens the remembered
+   target over a new mosh session, with the old `mosh-server` stopped by its recorded pid over the new
+   connection (`resume_mosh`, resuming the dead client's session from a stored ticket, was rejected and is
+   not implemented). Record the time to the first frame, the prompts, and that the orphan is gone. Three
+   runs each, report p50 and max.
