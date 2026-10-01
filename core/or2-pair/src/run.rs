@@ -47,6 +47,11 @@ pub struct Env<'a> {
     pub window: Duration,
     /// Called once the code is printed and the listener is up (tests use it to find the code).
     pub on_ready: Option<&'a dyn Fn(&Ready)>,
+    /// Whether this platform installs keys at all. Where it does not (every target that is not
+    /// Unix: there is no implementation that checks owners, links and permissions with handles)
+    /// the run behaves like `--no-listen` whatever was asked: it binds no socket, opens no key
+    /// file, prints the code and then exact manual instructions.
+    pub install_keys: bool,
 }
 
 /// What a test needs to play the phone.
@@ -175,8 +180,11 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
         });
     }
 
+    // Where keys are not installed there is nothing to listen for.
+    let listen = !options.no_listen && env.install_keys;
+
     // Fail before doing anything: with nobody to confirm there is no point in showing a code.
-    if !options.no_listen && !options.check_only && !env.can_ask {
+    if listen && !options.check_only && !env.can_ask {
         return Err(RunError::NotInteractive);
     }
 
@@ -194,6 +202,7 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
         net: env.net,
         program_dirs: &env.program_dirs,
         platform: env.platform,
+        manual_keys: !env.install_keys,
     });
     for check in &found {
         writeln!(out, "  {}  {}", check.level.tag(), check.text)?;
@@ -233,7 +242,7 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
     let mut expires = None;
     let mut otp = None;
     let mut pair = Vec::new();
-    if !options.no_listen {
+    if listen {
         let bind: Vec<IpAddr> = if options.bind.is_empty() {
             addresses::bindable(&addresses)
         } else {
@@ -341,11 +350,15 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
     writeln!(out, "{text}")?;
 
     let Some(mut listener) = listener else {
-        writeln!(
-            out,
-            "\nNo listener (--no-listen). After scanning, the phone shows its public key: add it to {} on this host.",
-            authorized_keys::path(&env.account.home).display()
-        )?;
+        if env.install_keys {
+            writeln!(
+                out,
+                "\nNo listener (--no-listen). After scanning, the phone shows its public key: add it to {} on this host.",
+                authorized_keys::path(&env.account.home).display()
+            )?;
+        } else {
+            out.write_all(manual_instructions(env.platform, &user, options.no_listen).as_bytes())?;
+        }
         return Ok(Exit::CodeOnly);
     };
 
@@ -376,6 +389,34 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
     };
     let served = exchange::serve(listener.as_mut(), &session, expires);
     report(&served.outcome, served.stats, &user, &env.account.home, out)
+}
+
+/// What to do by hand where `or2-pair` installs no key. Only the login is used (never a home or
+/// profile directory looked up on the machine): the paths are the ones the platform's SSH server
+/// documents.
+fn manual_instructions(platform: Platform, user: &str, asked_for_no_listener: bool) -> String {
+    let mut text = String::from("\n");
+    if !asked_for_no_listener {
+        text.push_str(
+            "or2-pair does not listen on this platform: it would have to add the phone's key to authorized_keys, and it has no safe way to check that file's owner, links and permissions here. It changed nothing.\n",
+        );
+    } else {
+        text.push_str("No listener (--no-listen).\n");
+    }
+    text.push_str(
+        "After scanning, the app shows its public key (one line). Add it to the SSH server's authorized keys by hand:\n",
+    );
+    if platform == Platform::Windows {
+        let _ = writeln!(
+            text,
+            "  - ordinary account:  C:\\Users\\{user}\\.ssh\\authorized_keys  (create the .ssh folder and the file if they are missing)\n  - member of the Administrators group: C:\\ProgramData\\ssh\\administrators_authorized_keys instead (OpenSSH for Windows ignores the per-user file for administrators); then restrict it:\n      icacls \"C:\\ProgramData\\ssh\\administrators_authorized_keys\" /inheritance:r /grant \"Administrators:F\" /grant \"SYSTEM:F\""
+        );
+    } else {
+        text.push_str(
+            "  ~/.ssh/authorized_keys of the account the phone connects as (mode 600, with ~/.ssh mode 700)\n",
+        );
+    }
+    text
 }
 
 fn report(

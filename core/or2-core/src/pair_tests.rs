@@ -465,34 +465,64 @@ fn debug_output_never_contains_the_password() {
 #[test]
 fn the_macs_match_an_independent_hmac_sha256() {
     // Computed with an independent HMAC-SHA256 implementation: key 00..0f, nonce 20..3f.
-    //   request: b"or2-pair/2 request\0" + nonce + key line
-    //   verdict: b"or2-pair/2 verdict\0" + nonce + verdict + b"\0" + fingerprint
+    //   request: b"or2-pair/3 request\0" + nonce + key line
+    //   verdict: b"or2-pair/3 verdict\0" + [ok] + lp(reason) + lp(nonce) + lp(fingerprint)
+    //   with lp(x) = big-endian u16 length of x, then x
     let nonce: Vec<u8> = (0x20..0x40).collect();
     assert_eq!(
         STANDARD.encode(otp().request_mac(&nonce, PHONE_KEY)),
-        "GXFsEhPKDjfbcGDW2luobqgfqHl0in72mdIkjsvqdBs="
+        "XLn9M1XO1Mx6S7YuGYz9NfVoz9LYtdTtPq0L4MbcUsw="
     );
-    for (verdict, fingerprint, expected) in [
+    for (ok, reason, fingerprint, expected) in [
         (
-            "ok",
+            true,
+            "",
             "SHA256:abc",
-            "WPGNtlx7j2NcwyFtA9JBpfzZ5BS7mvl5M0RiuZHBTTQ=",
+            "+eZyKeIYHHI/zf3VGTkfgL6oZO1bDySyNjDL31Z0iak=",
         ),
         (
+            false,
             "declined",
             "SHA256:abc",
-            "8IHSpWxrZKDvlQ55TCMJH7rVDOB0x92+ka74nKUP6xs=",
+            "kv1uJPEuHGLlwbkD7ehkR0JRChE2ST3oeztTcxBO18Q=",
         ),
         (
+            false,
             "authentication",
             "",
-            "l+J+3fQZQE0YYmLKhykrjoufySvWuuKr9uU+qKnJPtU=",
+            "fCheMVf7/YA4f+s7BLO3+5kR3hvTNzHOTqD2oCz9ksY=",
         ),
     ] {
         assert_eq!(
-            STANDARD.encode(otp().verdict_mac(&nonce, verdict, fingerprint)),
+            STANDARD.encode(otp().verdict_mac(&nonce, ok, reason, fingerprint)),
             expected,
-            "{verdict} {fingerprint}"
+            "{ok} {reason} {fingerprint}"
+        );
+    }
+}
+
+#[test]
+fn no_two_outcomes_share_a_verdict_mac() {
+    // Review of 6afa42e: v2 gave `ok:true` and `ok:false,reason:"ok"` the same MAC. Every
+    // distinct (ok, reason, nonce, fingerprint) tuple, including ones that would collide under a
+    // separator-only encoding, must now have its own.
+    let nonce = [9u8; 32];
+    let mut seen = std::collections::HashSet::new();
+    for (ok, reason, fingerprint) in [
+        (true, "", "SHA256:abc"),
+        (false, "ok", "SHA256:abc"),
+        (false, "", "SHA256:abc"),
+        (false, "declined", "SHA256:abc"),
+        (false, "declinedSHA256:abc", ""),
+        (false, "declined\0SHA256:abc", ""),
+        (false, "declined\0", "SHA256:abc"),
+        (false, "", "declined\0SHA256:abc"),
+        (true, "", "ok\0SHA256:abc"),
+        (true, "ok", "SHA256:abc"),
+    ] {
+        assert!(
+            seen.insert(otp().verdict_mac(&nonce, ok, reason, fingerprint)),
+            "{ok} {reason:?} {fingerprint:?}"
         );
     }
 }
@@ -501,10 +531,10 @@ fn the_macs_match_an_independent_hmac_sha256() {
 fn the_request_and_verdict_domains_are_distinct() {
     // No key text makes a request MAC equal a verdict MAC (and vice versa): the domains differ.
     let nonce = [9u8; 32];
-    let verdict = otp().verdict_mac(&nonce, "ok", "SHA256:abc");
-    let request = otp().request_mac(&nonce, "ok\0SHA256:abc");
+    let verdict = otp().verdict_mac(&nonce, true, "", "SHA256:abc");
+    let request = otp().request_mac(&nonce, "\x01\0\0\0\x20SHA256:abc");
     assert_ne!(verdict, request);
-    assert!(!otp().verify_verdict(&nonce, "ok", "SHA256:abc", &request));
+    assert!(!otp().verify_verdict(&nonce, true, "", "SHA256:abc", &request));
 }
 
 #[test]
@@ -516,9 +546,10 @@ fn a_wiped_password_no_longer_matches() {
     assert_ne!(wiped.request_mac(&nonce, PHONE_KEY), before);
     assert!(!wiped.verify_verdict(
         &nonce,
-        "ok",
+        true,
+        "",
         "SHA256:x",
-        &otp().verdict_mac(&nonce, "ok", "SHA256:x")
+        &otp().verdict_mac(&nonce, true, "", "SHA256:x")
     ));
 }
 
@@ -615,7 +646,7 @@ fn host(script: Host, hello: String) -> (DuplexStream, tokio::task::JoinHandle<O
 const NONCE_B64: &str = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=";
 
 fn hello() -> String {
-    format!("{{\"v\":2,\"nonce\":\"{NONCE_B64}\"}}\n")
+    format!("{{\"v\":3,\"nonce\":\"{NONCE_B64}\"}}\n")
 }
 
 /// The nonce of [`hello`].
@@ -625,7 +656,12 @@ fn nonce() -> Vec<u8> {
 
 /// A verdict line as the real host writes it: `None` for success, `Some(reason)` for a refusal.
 fn signed(reason: Option<&str>, nonce: &[u8], fingerprint: &str) -> String {
-    let mac = otp().verdict_mac(nonce, reason.unwrap_or("ok"), fingerprint);
+    let mac = otp().verdict_mac(
+        nonce,
+        reason.is_none(),
+        reason.unwrap_or_default(),
+        fingerprint,
+    );
     match reason {
         None => format!("{{\"ok\":true,\"mac\":\"{}\"}}\n", STANDARD.encode(mac)),
         Some(reason) => format!(
@@ -653,7 +689,7 @@ async fn a_good_exchange_sends_the_key_and_a_mac_the_host_can_verify() {
     assert_eq!(result, Ok(()));
     let seen = seen.unwrap();
     assert!(seen.mac_ok);
-    assert_eq!(seen.request["v"], 2);
+    assert_eq!(seen.request["v"], 3);
     assert_eq!(seen.request["key"], PHONE_KEY);
     assert_eq!(seen.request["device"], "Pixel");
     // The password itself is nowhere in the request.
@@ -725,6 +761,52 @@ async fn a_responder_that_does_not_know_the_password_cannot_forge_a_verdict() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_success_proof_cannot_be_relabelled_as_a_refusal_or_the_reverse() {
+    // Review of 6afa42e: with the v2 MAC, `ok:true` and `ok:false,reason:"ok"` shared a MAC, so a
+    // proxy could turn a signed success into a "refusal" (and the phone spent its code although the
+    // key was installed). The verdict encoding is now unambiguous and the shape must match it.
+    let fingerprint = fingerprint_of(PHONE_KEY).unwrap();
+    let success = signed(None, &nonce(), &fingerprint);
+    let mac = success
+        .split("\"mac\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap()
+        .to_owned();
+    let refusal = signed(Some("declined"), &nonce(), &fingerprint);
+    let refusal_mac = refusal
+        .split("\"mac\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap()
+        .to_owned();
+    let forgeries = [
+        // The reproduced substitution: a success's MAC under a refusal with reason "ok".
+        format!("{{\"ok\":false,\"reason\":\"ok\",\"mac\":\"{mac}\"}}\n"),
+        // The same with no reason at all, and with the empty reason.
+        format!("{{\"ok\":false,\"mac\":\"{mac}\"}}\n"),
+        format!("{{\"ok\":false,\"reason\":\"\",\"mac\":\"{mac}\"}}\n"),
+        // A refusal's MAC under a success that carries the refusal's reason, or any reason.
+        format!("{{\"ok\":true,\"reason\":\"declined\",\"mac\":\"{refusal_mac}\"}}\n"),
+        format!("{{\"ok\":true,\"reason\":\"ok\",\"mac\":\"{mac}\"}}\n"),
+        // A refusal's MAC under another reason.
+        format!("{{\"ok\":false,\"reason\":\"busy\",\"mac\":\"{refusal_mac}\"}}\n"),
+    ];
+    for forged in forgeries {
+        let forged: &'static str = Box::leak(forged.into_boxed_str());
+        let (result, _) = run(Host::Raw(forged), hello()).await;
+        assert_eq!(result, Err(PairError::HostNotAuthenticated), "{forged}");
+    }
+    // Fields that were not MAC'd are not tolerated either.
+    let extra: &'static str =
+        Box::leak(format!("{{\"ok\":true,\"mac\":\"{mac}\",\"extra\":1}}\n").into_boxed_str());
+    let (result, _) = run(Host::Raw(extra), hello()).await;
+    assert_eq!(result, Err(PairError::Protocol));
+    let (result, _) = run(Host::Raw(signed_for_phone(None)), hello()).await;
+    assert_eq!(result, Ok(()));
+}
+
+#[tokio::test(start_paused = true)]
 async fn each_refusal_reason_has_its_own_error() {
     for (reason, refusal) in [
         ("declined", Refusal::Declined),
@@ -741,7 +823,7 @@ async fn each_refusal_reason_has_its_own_error() {
     }
     // A refusal with no reason at all is signed over the empty verdict.
     let fingerprint = fingerprint_of(PHONE_KEY).unwrap();
-    let mac = STANDARD.encode(otp().verdict_mac(&nonce(), "", &fingerprint));
+    let mac = STANDARD.encode(otp().verdict_mac(&nonce(), false, "", &fingerprint));
     let bare: &'static str =
         Box::leak(format!("{{\"ok\":false,\"mac\":\"{mac}\"}}\n").into_boxed_str());
     let (result, _) = run(Host::Raw(bare), hello()).await;
@@ -751,12 +833,13 @@ async fn each_refusal_reason_has_its_own_error() {
 #[tokio::test(start_paused = true)]
 async fn a_bad_hello_is_a_protocol_error() {
     for text in [
-        // An older host (exchange version 1, no authenticated verdict) and a newer one.
+        // Older hosts (version 1 had no authenticated verdict, 2 an ambiguous one) and a newer one.
         "{\"v\":1,\"nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}\n".to_owned(),
-        "{\"v\":3,\"nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}\n".to_owned(),
-        "{\"v\":2,\"nonce\":\"AAAA\"}\n".to_owned(),
-        "{\"v\":2,\"nonce\":\"!!!\"}\n".to_owned(),
-        "{\"v\":2}\n".to_owned(),
+        "{\"v\":2,\"nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}\n".to_owned(),
+        "{\"v\":4,\"nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}\n".to_owned(),
+        "{\"v\":3,\"nonce\":\"AAAA\"}\n".to_owned(),
+        "{\"v\":3,\"nonce\":\"!!!\"}\n".to_owned(),
+        "{\"v\":3}\n".to_owned(),
         "not json\n".to_owned(),
         "\n".to_owned(),
         // Longer than the bound, never ending.

@@ -5,6 +5,11 @@
 //! all come from here, from the operating system's account database for the *effective* user,
 //! never from `$HOME`/`$USER` (which `sudo` and friends leave pointing at someone else) and never
 //! from a flag. `--user` may only repeat this name; it cannot choose another account.
+//!
+//! This exists on Unix only. Elsewhere there is no lookup at all (the login and profile
+//! directory of such a process are plain environment variables, not an account database), so
+//! nothing there decides whose key file to write, and `or2-pair` writes none there: see
+//! [`Account::login_only`].
 
 use std::path::PathBuf;
 
@@ -15,8 +20,8 @@ pub struct Account {
     pub name: String,
     /// Whose `.ssh/authorized_keys` receives the key.
     pub home: PathBuf,
-    /// The numeric user id files in the home must belong to (always 0 where the platform has
-    /// none, i.e. Windows).
+    /// The numeric user id files in the home must belong to (0 where the platform has none; no
+    /// file is written there).
     pub uid: u32,
 }
 
@@ -91,23 +96,16 @@ impl Account {
         }
     }
 
-    /// Windows has no account database in reach of this tool: the profile directory and user
-    /// name of the logged-in user. The ownership checks of `authorized_keys` are Unix-only.
-    #[cfg(not(unix))]
-    pub fn current() -> Result<Self, AccountError> {
-        let var = |name: &str| {
-            std::env::var_os(name)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| AccountError::Unknown(format!("{name} is not set")))
-        };
-        let name = var("USERNAME")?
-            .into_string()
-            .map_err(|_| AccountError::Unknown("the user name is not UTF-8".into()))?;
-        Ok(Self {
-            name,
-            home: PathBuf::from(var("USERPROFILE")?),
-            uid: 0,
-        })
+    /// An account of which only the login is known, on a target where `or2-pair` installs no
+    /// keys (so no home is needed and none is guessed). The login is whatever the person passed
+    /// with `--user`; it is shown and shipped in the code and decides nothing about any file:
+    /// [`crate::authorized_keys::add`] refuses an account without a home.
+    pub fn login_only(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            home: PathBuf::new(),
+            uid: effective_uid(),
+        }
     }
 
     /// Whether `requested` (the `--user` flag) names this account.

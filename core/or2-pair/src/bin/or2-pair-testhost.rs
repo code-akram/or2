@@ -112,6 +112,7 @@ fn main() -> ExitCode {
         now: &now,
         window: Duration::from_secs(window),
         on_ready: Some(&on_ready),
+        install_keys: cfg!(unix),
     };
     let result = run(&options, &env, &mut std::io::stderr());
     match result {

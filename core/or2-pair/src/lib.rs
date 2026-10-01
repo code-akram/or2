@@ -51,10 +51,13 @@ pub fn system_interfaces() -> Vec<Iface> {
         .collect()
 }
 
-/// Who this process pairs for: the effective user, from the account database. A build with the
-/// `test-support` feature (never the installed binary) lets the tests of the built binary point
-/// it at a throwaway account with `OR2_PAIR_TEST_USER` and `OR2_PAIR_TEST_HOME`.
-fn resolve_account() -> Result<Account, AccountError> {
+/// Who this process pairs for: the effective user, from the account database (Unix). A build
+/// with the `test-support` feature (never the installed binary) lets the tests of the built
+/// binary point it at a throwaway account with `OR2_PAIR_TEST_USER` and `OR2_PAIR_TEST_HOME`.
+///
+/// Elsewhere there is no account lookup (no key is installed there): the login is the one given
+/// with `--user`, and nothing else about the account is guessed.
+fn resolve_account(options: &args::Options) -> Result<Account, AccountError> {
     #[cfg(feature = "test-support")]
     if let (Some(user), Some(home)) = (
         std::env::var_os("OR2_PAIR_TEST_USER"),
@@ -62,12 +65,28 @@ fn resolve_account() -> Result<Account, AccountError> {
     ) {
         return Ok(Account::new(user.to_string_lossy(), home));
     }
-    Account::current()
+    #[cfg(unix)]
+    {
+        let _ = options;
+        Account::current()
+    }
+    #[cfg(not(unix))]
+    {
+        options
+            .user
+            .as_deref()
+            .map(Account::login_only)
+            .ok_or_else(|| {
+                AccountError::Unknown(
+                    "on this platform or2-pair cannot look up the account; say which login the phone should use with --user <login>".into(),
+                )
+            })
+    }
 }
 
 /// Runs the tool for real: this process's environment, the system's sockets, the terminal.
 pub fn run_main(options: &args::Options) -> Result<Exit, RunError> {
-    let account = resolve_account()?;
+    let account = resolve_account(options)?;
     let path: Option<OsString> = std::env::var_os("PATH");
     let hostname = gethostname::gethostname().to_string_lossy().into_owned();
     let color = std::io::stdout().is_terminal()
@@ -95,6 +114,7 @@ pub fn run_main(options: &args::Options) -> Result<Exit, RunError> {
         now: &now,
         window: exchange::WINDOW,
         on_ready: None,
+        install_keys: cfg!(unix),
     };
     run::run(options, &env, &mut std::io::stdout().lock())
 }

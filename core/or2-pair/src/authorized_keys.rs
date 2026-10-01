@@ -4,10 +4,11 @@
 //!   handles that were checked, never by path again: `~/.ssh` and the file are opened with
 //!   `O_NOFOLLOW` (a symbolic link is refused, not followed), their owner must be the account,
 //!   the file must be a regular file with no other hard link, and the read, the backup and the
-//!   append all go through those same handles, so a path swapped in between changes nothing
-//!   (Unix; Windows refuses symbolic links and junctions by path, which is weaker),
-//! - `~/.ssh` is created with mode 0700 and the file with 0600 when missing (permissions are
-//!   Unix-only; on Windows the inherited ACLs apply),
+//!   append all go through those same handles, so a path swapped in between changes nothing,
+//! - **only on Unix.** There is no implementation for any other target: [`add`] always fails
+//!   there and [`writable`] always says no, so `or2-pair` never writes a key file where it cannot
+//!   check owners, links and permissions with handles (see `run::Env::install_keys`),
+//! - `~/.ssh` is created with mode 0700 and the file with 0600 when missing,
 //! - the file is backed up before it is touched (`authorized_keys.or2-backup-<stamp>`, mode
 //!   0600), once per run, only when it exists and is not empty,
 //! - a key already present (same algorithm and key data, whatever its options or comment) is
@@ -142,6 +143,7 @@ fn refuse(message: impl Into<String>) -> io::Error {
 }
 
 /// The line to append, with a newline first when the file does not end in one.
+#[cfg(unix)]
 fn text_to_append(existing: &[u8], key: &KeyLine, device: &str, now: DateTime) -> String {
     let mut text = String::new();
     if existing.last().is_some_and(|last| *last != b'\n') {
@@ -152,6 +154,7 @@ fn text_to_append(existing: &[u8], key: &KeyLine, device: &str, now: DateTime) -
     text
 }
 
+#[cfg(unix)]
 fn backup_name(now: DateTime, attempt: u32) -> String {
     let suffix = if attempt == 0 {
         String::new()
@@ -163,6 +166,10 @@ fn backup_name(now: DateTime, attempt: u32) -> String {
 
 /// Appends the key to the account's `authorized_keys`, as the module docs describe.
 pub fn add(account: &Account, key: &KeyLine, device: &str, now: DateTime) -> io::Result<Added> {
+    // An account whose home is unknown (`Account::login_only`) has nothing to write to.
+    if account.home.as_os_str().is_empty() {
+        return Err(refuse("the account has no known home directory"));
+    }
     add_hooked(account, key, device, now, &|| {})
 }
 
@@ -179,10 +186,20 @@ use unix::add_hooked;
 #[cfg(unix)]
 pub use unix::writable;
 
+/// Why nothing is written on a target without the Unix implementation.
 #[cfg(not(unix))]
-use portable::add_hooked;
+pub const UNSUPPORTED: &str = "or2-pair does not write authorized_keys on this platform: it cannot check the file's owner, links and permissions safely here";
+
 #[cfg(not(unix))]
-pub use portable::writable;
+fn add_hooked(_: &Account, _: &KeyLine, _: &str, _: DateTime, _: &dyn Fn()) -> io::Result<Added> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, UNSUPPORTED))
+}
+
+/// Never writable where there is no implementation: nothing is opened or looked at.
+#[cfg(not(unix))]
+pub fn writable(_: &Account) -> Writable {
+    Writable::No(UNSUPPORTED.to_owned())
+}
 
 #[cfg(unix)]
 mod unix {
@@ -312,6 +329,38 @@ mod unix {
         })
     }
 
+    /// Opens an existing or new *file* below `dir` for `check_file` to judge: never following a
+    /// link and never blocking on what it finds. A FIFO opened for writing would block until a
+    /// reader turned up (and a device or socket can fail oddly), so the open is non-blocking, the
+    /// descriptor is `fstat`ed, and anything that is not a regular file is refused *before* the
+    /// non-blocking flag is cleared and the handle used. Only the verified descriptor is kept.
+    fn open_file(
+        dir: RawFd,
+        name: &str,
+        full: &Path,
+        flags: libc::c_int,
+        mode: libc::mode_t,
+    ) -> io::Result<OwnedFd> {
+        let not_regular = || refuse(format!("{} is not a regular file", full.display()));
+        let fd = match open_nofollow(dir, name, full, flags | libc::O_NONBLOCK, mode) {
+            Ok(fd) => fd,
+            // Opening a FIFO for writing with no reader, or a socket or device, fails with ENXIO:
+            // say what it is rather than the errno.
+            Err(error) if error.raw_os_error() == Some(libc::ENXIO) => return Err(not_regular()),
+            Err(error) => return Err(error),
+        };
+        if kind(&fstat(fd.as_raw_fd())?) != libc::S_IFREG {
+            return Err(not_regular());
+        }
+        // A regular file: ordinary blocking I/O from here.
+        // SAFETY: `fd` is open.
+        let status = retry(-1, || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) })?;
+        retry(-1, || unsafe {
+            libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, status & !libc::O_NONBLOCK)
+        })?;
+        Ok(fd)
+    }
+
     fn kind(stat: &libc::stat) -> libc::mode_t {
         stat.st_mode & libc::S_IFMT
     }
@@ -430,12 +479,12 @@ mod unix {
         // a path planted in between is refused rather than written through.
         let append = libc::O_RDWR | libc::O_APPEND;
         let (file, created) =
-            match open_nofollow(dir.as_raw_fd(), "authorized_keys", &file_path, append, 0) {
+            match open_file(dir.as_raw_fd(), "authorized_keys", &file_path, append, 0) {
                 Ok(fd) => (fd, false),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     let make = append | libc::O_CREAT | libc::O_EXCL;
                     let fd =
-                        open_nofollow(dir.as_raw_fd(), "authorized_keys", &file_path, make, 0o600)?;
+                        open_file(dir.as_raw_fd(), "authorized_keys", &file_path, make, 0o600)?;
                     fchmod(fd.as_raw_fd(), 0o600)?;
                     (fd, true)
                 }
@@ -532,7 +581,7 @@ mod unix {
                     Writable::No(format!("{} is not writable", account.home.display()))
                 });
             };
-            match open_nofollow(
+            match open_file(
                 dir.as_raw_fd(),
                 "authorized_keys",
                 &file_path,
@@ -582,102 +631,8 @@ mod unix {
     }
 }
 
-#[cfg(not(unix))]
-mod portable {
-    use std::fs::{self, OpenOptions};
-    use std::io::Write;
-
-    use super::*;
-
-    fn private_options() -> OpenOptions {
-        OpenOptions::new()
-    }
-
-    fn not_a_link(path: &Path) -> io::Result<()> {
-        match fs::symlink_metadata(path) {
-            Ok(meta) if meta.file_type().is_symlink() => Err(refuse(format!(
-                "{} is a symbolic link; or2-pair will not follow it",
-                path.display()
-            ))),
-            Ok(_) | Err(_) => Ok(()),
-        }
-    }
-
-    pub(super) fn add_hooked(
-        account: &Account,
-        key: &KeyLine,
-        device: &str,
-        now: DateTime,
-        after_open: &dyn Fn(),
-    ) -> io::Result<Added> {
-        let dir = ssh_dir(&account.home);
-        let file = path(&account.home);
-        not_a_link(&dir)?;
-        if !dir.exists() {
-            fs::create_dir(&dir)?;
-        }
-        not_a_link(&file)?;
-        let existing = match fs::read(&file) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
-        };
-        after_open();
-        if existing
-            .as_deref()
-            .is_some_and(|bytes| contains(bytes, key))
-        {
-            return Ok(Added::AlreadyPresent);
-        }
-        let backup = match existing.as_deref() {
-            Some(bytes) if !bytes.is_empty() => Some(write_backup(&dir, bytes, now)?),
-            _ => None,
-        };
-        let mut out = private_options().create(true).append(true).open(&file)?;
-        let text = text_to_append(existing.as_deref().unwrap_or_default(), key, device, now);
-        out.write_all(text.as_bytes())?;
-        out.sync_all()?;
-        Ok(Added::Added {
-            created: existing.is_none(),
-            backup,
-        })
-    }
-
-    fn write_backup(dir: &Path, contents: &[u8], now: DateTime) -> io::Result<PathBuf> {
-        for attempt in 0..100 {
-            let backup = dir.join(backup_name(now, attempt));
-            match private_options().write(true).create_new(true).open(&backup) {
-                Ok(mut out) => {
-                    out.write_all(contents)?;
-                    out.sync_all()?;
-                    return Ok(backup);
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        Err(io::Error::other("could not find a free backup name"))
-    }
-
-    pub fn writable(account: &Account) -> Writable {
-        let home = &account.home;
-        let file = path(home);
-        if let Err(error) = not_a_link(&ssh_dir(home)).and_then(|()| not_a_link(&file)) {
-            Writable::No(error.to_string())
-        } else if file.exists() {
-            match OpenOptions::new().append(true).open(&file) {
-                Ok(_) => Writable::Yes,
-                Err(error) => Writable::No(format!("{} is not writable ({error})", file.display())),
-            }
-        } else if ssh_dir(home).exists() || home.exists() {
-            Writable::Yes
-        } else {
-            Writable::No(format!("{} is not writable", home.display()))
-        }
-    }
-}
-
-#[cfg(test)]
+// The key-file implementation, and so its tests, are Unix-only.
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
 
@@ -818,6 +773,81 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(ssh_dir(home.path())).unwrap();
         fs::create_dir(path(home.path())).unwrap();
+        assert!(add(home.path(), &key(ED25519), "phone", at()).is_err());
+    }
+
+    /// A 0600 FIFO where `authorized_keys` should be, in a disposable home.
+    #[cfg(unix)]
+    fn home_with_a_fifo() -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        let name =
+            std::ffi::CString::new(path(home.path()).as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `name` is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        home
+    }
+
+    /// Runs `work` on its own thread and fails the test, instead of hanging it, when it blocks.
+    #[cfg(unix)]
+    fn within_seconds<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(work());
+        });
+        receive
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the call blocked on a FIFO instead of refusing it")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_as_authorized_keys_is_refused_by_the_check_without_blocking() {
+        // Review of 6afa42e: a blocking O_WRONLY open of a FIFO with no reader hung `--check`.
+        let home = home_with_a_fifo();
+        let root = home.path().to_owned();
+        let result = within_seconds(move || writable(&root));
+        assert!(
+            matches!(&result, Writable::No(why) if why.contains("not a regular file")),
+            "{result:?}"
+        );
+        // With a reader on the other end the open would not have blocked; the answer is the same.
+        let reader = {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(path(home.path()))
+                .unwrap()
+        };
+        let root = home.path().to_owned();
+        let result = within_seconds(move || writable(&root));
+        assert!(
+            matches!(&result, Writable::No(why) if why.contains("not a regular file")),
+            "{result:?}"
+        );
+        drop(reader);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_as_authorized_keys_is_refused_by_add_without_blocking_or_writing() {
+        let home = home_with_a_fifo();
+        let root = home.path().to_owned();
+        let error = within_seconds(move || add(&root, &key(ED25519), "phone", at())).unwrap_err();
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+        assert_eq!(fs::read_dir(ssh_dir(home.path())).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn other_special_files_are_refused_too() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        std::os::unix::net::UnixListener::bind(path(home.path())).unwrap();
+        let root = home.path().to_owned();
+        let result = within_seconds(move || writable(&root));
+        assert!(matches!(result, Writable::No(_)), "{result:?}");
         assert!(add(home.path(), &key(ED25519), "phone", at()).is_err());
     }
 

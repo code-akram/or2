@@ -1,6 +1,9 @@
 //! The whole CLI flow against the or2-core client, in process, over loopback, in a temporary
 //! home: what `or2-pair` prints, listens on and writes, and what the phone sees.
 
+// The listener installs keys, which only Unix does; elsewhere `tests/manual_keys.rs` applies.
+#![cfg(unix)]
+
 mod common;
 
 use std::io;
@@ -794,6 +797,7 @@ fn run_as(
         now: &now,
         window,
         on_ready: None,
+        install_keys: true,
     };
     run(options, &env, out)
 }

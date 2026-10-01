@@ -5,7 +5,9 @@ weaken the trust model: the host key is trusted because you scanned it from your
 the phone's SSH key reaches `authorized_keys` only after you confirm it at the host's keyboard.
 Prefer to type everything yourself? See [Set up a host manually](manual-setup.md).
 
-Works for a Mac, a Linux box or a Windows machine with OpenSSH Server. The phone and the host
+Works for a Mac or a Linux box. On Windows (with OpenSSH Server) `or2-pair` prints the code but does
+**not** listen or change any file: you add the phone's key by hand (see
+[Windows](#windows-add-the-key-by-hand)). The phone and the host
 must reach each other: the same Wi-Fi or LAN, or a shared overlay network such as ZeroTier or
 Tailscale. If they cannot, see [Phone not on the same network](#the-phone-is-not-on-the-same-network).
 
@@ -135,9 +137,20 @@ Settings > Network > Firewall.
 group or others (StrictModes). `or2-pair` warns in its checks and, rather than add a key sshd
 would ignore, refuses at the prompt (the phone says the host could not add the key) with the
 path, the mode and the fix: `chmod go-w ~ && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys`.
-Fix it and run `or2-pair` again. On Windows, an administrator's keys live in
-`C:\ProgramData\ssh\administrators_authorized_keys`, which `or2-pair` does not touch: add the key
-there yourself (`--no-listen`).
+Fix it and run `or2-pair` again.
+
+### Windows: add the key by hand
+
+`or2-pair` on Windows needs `--user <your login>` (it does not look the account up), prints the pairing
+code and then says what to do, because it has no safe way yet to check the key file's owner, links and
+permissions there. It never listens and never changes a file. Scan the code (or paste it), let the app show
+its public key, and add that one line yourself:
+
+- an ordinary account: `C:\Users\<login>\.ssh\authorized_keys` (create the `.ssh` folder and the file if
+  they are missing);
+- a member of the Administrators group: `C:\ProgramData\ssh\administrators_authorized_keys` instead,
+  because OpenSSH for Windows ignores the per-user file for administrators. Then restrict it:
+  `icacls "C:\ProgramData\ssh\administrators_authorized_keys" /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F"`.
 
 ### "The host's answer could not be verified"
 
@@ -145,7 +158,7 @@ The phone only believes an answer that proves the host knows the one-time code. 
 that when the code is old (an earlier run, a screenshot, a restart of `or2-pair`), when it is for
 another host, or when something else answered. Run `or2-pair` again and scan the new code; the
 phone's code is not used up, and `or2-pair` stays open and counts the refused connection. An
-older `or2-pair` or app (pairing protocol 1, before this check) is refused the same way: update both.
+older `or2-pair` or app (pairing protocol 1 or 2; the current one is 3) is refused the same way: update both.
 
 ### The host has no ED25519 key
 
@@ -166,8 +179,8 @@ RSA 4096 key may produce a code that is large; addresses are dropped from the en
 - The listener serves one attempt, then closes (or after 120 seconds). An attempt is a request
   whose proof verifies, which only the phone that scanned the code can make. A port scan, a stray
   byte or a wrong code is refused and does not end your pairing (`or2-pair` counts them in its
-  final message); each connection has 8 seconds to say its piece, and an address that is refused
-  five times is ignored.
+  final message); each connection has 8 seconds to say its piece, and an address that keeps being refused
+  is slowed down for a couple of seconds at a time (never banned; it never costs you the code).
 - The phone never writes to `authorized_keys` on its own: you confirm the key's fingerprint at the
   host's keyboard. Without a terminal to ask in (standard input is not a TTY), `or2-pair` refuses
   to listen.

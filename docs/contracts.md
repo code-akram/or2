@@ -2305,8 +2305,9 @@ weakening M1's trust model. Manual host entry stays available.
 ## Host side: `or2-pair` CLI
 
 A small Rust binary in a new workspace crate `core/or2-pair` (the one justified new crate: it is
-a separate host-side tool, not part of the app library). Builds for macOS, Linux and Windows
-(OpenSSH for Windows). Installed with `cargo install`, a Homebrew formula building from source,
+a separate host-side tool, not part of the app library). Pairs on macOS and Linux (every Unix); on
+Windows it builds (`x86_64-pc-windows-gnu` is checked) but **does not listen or write any key file**: see
+"Platforms without key installation" below. Installed with `cargo install`, a Homebrew formula building from source,
 or release binaries later. GPL-3.0-or-later; dependencies exactly pinned (e.g. `qrcode` for
 terminal QR rendering).
 
@@ -2325,7 +2326,7 @@ terminal QR rendering).
    never 0.0.0.0 on a public interface) for at most 120 s. Exchange (newline-delimited JSON):
    server → `{"v":1,"nonce":<base64 32B>}`; phone → `{"v":1,"key":"<openssh public key line>",
    "device":"<label>","mac":<base64 HMAC-SHA256(otp, nonce || key)>}` (superseded: see "The exchange" below,
-   version 2 with domain-separated MACs and an authenticated verdict); server verifies the HMAC
+   version 3 with domain-separated MACs and an authenticated, unambiguously encoded verdict); server verifies the HMAC
    in constant time, prints the key's SHA-256 fingerprint and the device label, and asks
    `Authorize this key for <user>? [y/N]`. On `y` it appends
    `no-agent-forwarding,no-X11-forwarding <key> or2-<device>-<date>` to `authorized_keys`
@@ -2395,25 +2396,35 @@ or where the code differs from it, this section is the contract.
 ### The exchange
 
 ```text
-host  -> {"v":2,"nonce":"<base64, 32 bytes>"}
-phone -> {"v":2,"key":"<algo> <base64>","device":"<label>","mac":"<base64 request MAC>"}
+host  -> {"v":3,"nonce":"<base64, 32 bytes>"}
+phone -> {"v":3,"key":"<algo> <base64>","device":"<label>","mac":"<base64 request MAC>"}
 host  -> {"ok":true,"mac":"<base64 verdict MAC>"}
        | {"ok":false,"reason":"key|declined|timeout|failed|busy","mac":"<base64 verdict MAC>"}
        | {"ok":false,"reason":"request|authentication"}            (unsigned, see below)
 
-request MAC = HMAC-SHA256(otp, "or2-pair/2 request" 0x00 || nonce || key)
-verdict MAC = HMAC-SHA256(otp, "or2-pair/2 verdict" 0x00 || nonce || verdict 0x00 || fingerprint)
+request MAC = HMAC-SHA256(otp, "or2-pair/3 request" 0x00 || nonce || key)
+verdict MAC = HMAC-SHA256(otp, "or2-pair/3 verdict" 0x00 || ok || lp(reason) || lp(nonce) || lp(fingerprint))
+    ok = one byte, 1 for success, 0 for a refusal;  lp(x) = big-endian u16 length || x
 ```
 
-**Protocol version 2 (this section supersedes version 1, which had no host proof).** The exchange version
-(`v`, not the URI's `or2-pair:1`; the code format did not change) is 2 in all three messages: a phone that
-meets a `v` other than 2 in the hello reports `Protocol` ("the host does not speak this pairing protocol"),
-and a host refuses a request whose `v` is not 2 as `request`. An older phone or host therefore fails
-cleanly; update both.
+**Protocol version 3 (this section supersedes versions 1 and 2).** Version 1 had no host proof. Version 2
+authenticated the verdict but encoded it as `verdict 0x00 || fingerprint` with `verdict` being `ok` or the
+reason, so `ok:true` and `ok:false,reason:"ok"` shared one MAC and a path attacker, knowing no password, could
+turn a signed success into a "refusal" (the phone then reported a refused, spent code although the key had been
+installed). Version 3 MACs a canonical tuple: the success flag as its own byte, then the reason, the nonce and
+the fingerprint each length-prefixed, so no two outcomes share an encoding. The phone also rejects a reply
+whose fields are not exactly what was MAC'd: a success that carries a `reason`, a refusal whose `reason` is
+anything but what was signed (an absent reason is the empty one), any unknown field (`Protocol`), and any
+that fails the MAC (`HostNotAuthenticated`). The exchange version (`v`, not the URI's `or2-pair:1`; the code
+format did not change) is 3 in all three messages: a phone that meets a `v` other than 3 in the hello reports
+`Protocol` ("the host does not speak this pairing protocol"), and a host refuses a request whose `v` is not 3
+as `request`. An older phone or host therefore fails cleanly; update both. The test vectors in
+`or2_core::pair` and `or2_pair::exchange` were computed with an independent implementation (Python's `hmac` and
+`struct`).
 
 `otp` here is the 16 decoded bytes; `key` is the exact text of the field, as sent (the phone sends
 `<algorithm> <base64>` and drops the key's comment); `device` is not under the MAC (the host's person sees
-and confirms the key's fingerprint, which is). `verdict` is `ok` or the refusal reason; `fingerprint` is the
+and confirms the key's fingerprint, which is). `reason` is the refusal reason (empty for a success); `fingerprint` is the
 `SHA256:…` fingerprint of the key the phone sent (empty when the host could not parse it). The domain tags
 differ, so a request MAC can never be replayed as a verdict, nor a verdict from another exchange (other
 nonce) or about another key. Lines are bounded (256 bytes for the hello, 512 for the reply, 2048 for the
@@ -2453,16 +2464,26 @@ only its own slot and an honest phone is served at once (the previous one-at-a-t
 hold every phone behind it for 8-10 s, longer than the phone's 10 s wait for the greeting). What an
 unauthenticated peer can cost is bounded: each connection has 8 s in total (`PRE_AUTH`) to deliver its one
 request line (at most 2048 bytes); at most 16 connections are handled at once and 4 per peer address (the
-phone races up to four endpoints), further ones are closed unanswered rather than left queued; a peer address
-whose requests were refused 5 times is no longer greeted; every thread looks at a stop flag between short
-reads, so the listener ends promptly. Only the first verified request is taken: a second verified request
+phone races up to four endpoints), further ones are closed unanswered rather than left queued; every thread
+looks at a stop flag between short reads, so the listener ends promptly. **A refusal history slows a peer
+address, it never bans it.** Each peer address has a score: +1 per refused request (junk, a wrong proof;
+silence and dropped connections do not count), forgiven at 1 per 2 s of quiet, capped at 32. The first 5
+are free. Every refusal past that earns a pause of 250 ms doubled per further refusal, capped at **2 s**,
+in which that address's new connections are closed unanswered; the pause and the score drain by themselves.
+The earlier rule (five refusals, ignored for the rest of the window) let anyone sharing the phone's source
+address (a NAT or proxy, another app on the phone) lock the honest phone out of its whole window without the
+code. Now such a peer can slow the pairing only while it keeps probing, and the same code works a couple of
+seconds after it stops; it never obtains a key and never spends the code. A peer that probes continuously
+at the pause's edge can still make an honest phone behind the same address fail to connect repeatedly (the
+phone reports "connection lost" and can retry); that residual denial needs sustained traffic from the same
+address and the 120 s window still bounds it. The records are swept when 256 addresses accumulate. Only the first verified request is taken: a second verified request
 while the first is being confirmed is answered `{"ok":false,"reason":"busy"}` (the phone reports it as a
 generic refusal). The confirmation and the write run on the listener's own thread.
 
 **The account.** The login in the code, the name in the prompt and the home whose `~/.ssh/authorized_keys`
 is written are one value (`or2_pair::account::Account`), resolved from the operating system's account
-database for the **effective user** of the process (`getpwuid_r(geteuid())`; Windows: `USERNAME` and
-`USERPROFILE`). `$HOME` and `$USER` are ignored, so `sudo` with a retained `HOME` cannot split them.
+database for the **effective user** of the process (`getpwuid_r(geteuid())`; Unix only, see "Platforms
+without key installation" for the rest). `$HOME` and `$USER` are ignored, so `sudo` with a retained `HOME` cannot split them.
 `--user` may only repeat that name: any other value is refused before anything is checked, printed or
 bound (`--user X is not the account this runs as (Y)`). There is no privileged "pair for another user"
 mode; run `or2-pair` as that user. The prompt also shows the file that will change. On the phone, the
@@ -2491,11 +2512,40 @@ and the file are opened relative to it with `O_NOFOLLOW` (and `O_DIRECTORY` for 
 again. A symbolic link at either name is refused with a message, not followed. `~/.ssh` and the file must
 belong to the account (the home to the account or root, as sshd allows), the file must be a regular file with
 no other hard link, and a missing file is created with `O_CREAT|O_EXCL` (mode 0600, forced after the umask).
+The file is opened `O_NONBLOCK|O_NOFOLLOW` and `fstat`ed **before** anything else: a FIFO, socket or device
+is refused as "not a regular file" without blocking (a blocking write open of a FIFO with no reader hung
+`--check`), and only for a regular file is `O_NONBLOCK` cleared and the same descriptor used from then on.
+`--check` and the real run share this open.
 The file is read, backed up (the backup is created exclusively, also relative to the `~/.ssh` handle) and
 appended to (one `write` on an `O_APPEND` handle; a failed write truncates back to the old length) through
 those same handles, under an advisory `flock`, so a path replaced after the checks changes nothing. Files over
-8 MiB are not read. On Windows only symbolic links and junctions are refused, by path; ownership and ACL
-checks are not done there.
+8 MiB are not read. There is no implementation of this for any other platform (see below).
+
+**Platforms without key installation (every target that is not Unix, in practice Windows).** An earlier
+version wrote `authorized_keys` on Windows by path (symbolic links and junctions refused, no owner, hard-link or
+ACL check, a separate read, backup and reopen) and took the account from the login and profile environment
+variables of the process; the fix check of 6afa42e found both unsound (a replaced path or a hard link could
+redirect the confirmed append; the two variables can name different accounts). Until a Windows path with
+checked handles, owner and ACL checks exists and is tested, **a non-Unix build installs nothing**:
+
+- `Env::install_keys` is `false` (`cfg!(unix)` in the binary). The run behaves like `--no-listen` whatever was
+  asked: no socket is bound, no one-time password is made, nothing is asked at the keyboard, no key file is
+  opened, inspected or backed up; `--check` reports that `authorized_keys` is not checked. It prints the code
+  (without `pair`/`otp`) and then exact manual instructions, and exits 0 (`Exit::CodeOnly`). On Windows the
+  instructions give both files: `C:\Users\<login>\.ssh\authorized_keys` for an ordinary account and
+  `C:\ProgramData\ssh\administrators_authorized_keys` for a member of the Administrators group (OpenSSH for
+  Windows ignores the per-user file for them), with the `icacls` command that restricts the latter to
+  Administrators and SYSTEM. The phone's `--no-listen` flow shows the public key to paste.
+- No account is looked up. `--user <login>` is **required** and only names the login shipped in the code
+  (`Account::login_only`: no home, no uid, nothing that decides whose file is touched). The sources never read
+  `USERNAME`, `USERPROFILE`, `HOMEDRIVE` or `HOMEPATH` (a test greps for them).
+- `authorized_keys::add` fails (`Unsupported`) and `writable` says no on such a target, and `add` refuses an
+  account without a home on every target, so a mistake elsewhere cannot write through an empty path. The
+  Unix-only tests (`exchange`, `authorized_keys`, the loopback integration tests) are not built there;
+  `tests/manual_keys.rs` runs everywhere.
+- Verified here: `cargo clippy -p or2-pair --lib --bins --all-features --target x86_64-pc-windows-gnu -D warnings`
+  passes. The test suite cannot be built for that target in this environment (the `or2-core` dev-dependency
+  needs a MinGW C compiler for `aws-lc-sys`), and no Windows host has run the binary.
 
 **StrictModes is enforced, not just warned about.** sshd ignores `authorized_keys` when the file, `~/.ssh`
 or the home directory is writable by group or others (mode `& 022`). `or2-pair` checks the same three
@@ -2594,4 +2644,4 @@ parser and exchange, the flow, then a real `connect_host` to a disposable sshd w
 (Connected with no prompt) and the paired key. `PairUiDeviceTest` compiles (the camera needs the phone).
 
 Open: the camera path itself (CameraX binding, autofocus, a QR on a real monitor) and the permission dialog
-have not been run on a phone; a Windows host has not been run at all.
+have not been run on a phone; a Windows host has not been run at all (and installs no key, see above).
