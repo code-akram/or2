@@ -1292,6 +1292,22 @@ fn herdr_terminals_run_the_probed_herdr_with_the_session_and_report_a_failed_foc
         message.contains("not running") || message.contains("socket"),
         "{message}"
     );
+    // The standalone focus (what the app awaits when it reuses an agent terminal) fails the
+    // same way over the real connection, as a command failure naming the cause, and refuses
+    // malformed names before anything runs.
+    let Err(HostError::CommandFailed { message }) =
+        block_on(host.focus_herdr_pane(None, "w1:p1".into()))
+    else {
+        panic!("a fake herdr without a socket cannot focus")
+    };
+    assert!(
+        message.contains("not running") || message.contains("socket"),
+        "{message}"
+    );
+    assert_eq!(
+        block_on(host.focus_herdr_pane(Some("a b".into()), "w1:p1".into())),
+        Err(HostError::InvalidName)
+    );
     let _ = herdr;
     host.disconnect();
 }

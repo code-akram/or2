@@ -67,7 +67,7 @@ impl Default for Timing {
 const MAX_REJECTED_SUBSCRIPTIONS: u32 = 3;
 
 /// herdr's code for a request that names a pane that does not exist (any more).
-const PANE_NOT_FOUND: &str = "pane_not_found";
+pub(super) const PANE_NOT_FOUND: &str = "pane_not_found";
 
 /// The `protocol` reported for a herdr that predates `session list --json`: older than any
 /// protocol number, which are positive.

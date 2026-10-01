@@ -11,7 +11,7 @@ document and the tests together, and bumping `API_VERSION` in `or2-ffi` when an 
 All M1 contracts below are implemented and tested. M2 changes are specified in
 [M2: hosts, multiplexers and mosh](#m2-hosts-multiplexers-and-mosh); lane 0 has landed the
 M2 contract types and the FFI API 4 surface (`API_VERSION` 5 since the M1 `connect` was
-removed); lanes A1 (host driver behind `connect_host`: address
+removed, 6 with `focus_herdr_pane`); lanes A1 (host driver behind `connect_host`: address
 racing, host connection, probe, tmux, terminal targets), A2 (herdr client), A3 (mosh core, no FFI
 export) and B (the Android app) have all landed, and the M1 `connect` export is gone (see
 [The M1 path is gone](#the-m1-path-is-gone)).
@@ -111,7 +111,7 @@ opens sockets.
 ## Session
 
 A `Session` is one terminal. The app gets it from `HostConnection.open_terminal` (see
-[FFI API 5](#ffi-api-5-or2-ffi)); M1's `connect` export, which made one SSH connection per
+[FFI API 6](#ffi-api-6-or2-ffi)); M1's `connect` export, which made one SSH connection per
 shell, is gone. `contract_probe_session(ConnectRequest, listener)` is the only other source (a
 test fixture, see [Contract probe](#contract-probe)); it validates synchronously
 (`ConnectError`: `InvalidHost`, `InvalidPort`, `InvalidUsername`, `InvalidPrivateKey`,
@@ -240,7 +240,7 @@ this text disagree, fix one of them in the same change.
 
 | Lane | Owns | Depends on |
 |---|---|---|
-| 0: contract gate | `or2-core` `host`, `remote`, `herdr::view`, `tmux` types; `or2-ffi` API 4 surface; `contract_probe_host`; Kotlin JVM contract test | this document |
+| 0: contract gate | `or2-core` `host`, `remote`, `herdr::view`, `tmux` types; `or2-ffi` API 4 surface (now 6); `contract_probe_host`; Kotlin JVM contract test | this document |
 | A1: host connection | `ssh.rs` refactor into the host driver, address racing, exec, capability probe, tmux, terminal targets, `connect_host` | lane 0 |
 | A2: herdr | `herdr` client: generated types, discovery, bootstrap/reconcile, projection, `watch` and `focus_pane` | lane 0 (`RemoteHost`) |
 | A3: mosh core | vendored mosh-rs, `DatagramTransport`, `Screen` over libghostty, bootstrap, mosh session driver; **no FFI export** | lane 0 (`RemoteHost`) |
@@ -439,8 +439,8 @@ Connecting ──▶ AwaitingHostKey ──▶ Authenticating ──▶ Connecte
   `HostCommand::OpenTerminal { target, size, driver: SessionDriver }` and
   `HostCommand::WatchHerdr { session, driver: HerdrWatchDriver }`. The host driver opens the
   channel (or starts `herdr::run`) and drives it; if it cannot, it closes that driver with a
-  `Failed` reason. Only the queries (`Capabilities`, `ListTmux`) carry a tokio `oneshot`
-  reply; a dropped reply means `Closed`. (The lane 0 brief listed `observer` and `reply`
+  `Failed` reason. Only the queries (`Capabilities`, `ListTmux`, and API 6's `FocusHerdrPane`) carry a tokio
+  `oneshot` reply; a dropped reply means `Closed`. (The lane 0 brief listed `observer` and `reply`
   fields on the first two; that cannot return a handle without blocking.) Target and session
   names are validated in `HostHandle` before the pair is created, so a rejected request
   creates no session and fires no callback. That includes a request that loses the race with
@@ -452,8 +452,8 @@ Connecting ──▶ AwaitingHostKey ──▶ Authenticating ──▶ Connecte
   `SessionFailure`: `NotInstalled { program }` when the probe found no `tmux`/`herdr`,
   `CommandFailed` when a helper command (the herdr `focus_pane` before a pane open) failed,
   otherwise the matching M1 failure (`ShellRejected`, `ConnectionLost`, `Internal`). A watch
-  with no herdr reports `Unavailable { NotInstalled }`. `HostError::NotInstalled` and
-  `CommandFailed` therefore come out of the two queries only; Kotlin need not check
+  with no herdr reports `Unavailable { NotInstalled }`. `HostError::NotInstalled`,
+  `CommandFailed` (and `PaneNotFound`) therefore come out of the queries only; Kotlin need not check
   `capabilities()` before opening a terminal.
 - **Query bounds.** The driver must answer or drop every query reply. As a safety net the
   handle gives up after `host::QUERY_TIMEOUT` (30 s, longer than the 10 s exec timeout) with
@@ -550,6 +550,10 @@ inbox would watch one session twice):
 | `Shell` | the login shell (`request_shell`) |
 | `Tmux { session_name }` | `<tmux> -u new-session -A -s <name>` (attach or create) |
 | `Herdr { session, pane_id }` | if `pane_id`: `herdr::focus_pane` first; then `<herdr>` (default session) or `<herdr> --session <name>` |
+
+The pane focus in the last row happens once, when the terminal opens. It does not pin the
+terminal to the pane: to reuse an agent terminal the app calls `focus_herdr_pane` (FFI section,
+"Agent terminals and focus").
 
 Names are validated before anything runs (`InvalidName`): tmux names nonempty, at most 128
 bytes, no control characters, `\`, `:` or `.`; herdr session names `[A-Za-z0-9_-]{1,64}`; pane
@@ -707,7 +711,7 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
   found none reports `Unavailable { NotInstalled }` itself and does not call it); the host driver
   uses `channel` and `run` itself so the handle can be returned synchronously. A state equal to
   the current one is not redelivered; after a final `Unavailable` only `Closed` is accepted.
-  `focus_pane` returns `HerdrError` (`Remote`, `Failed`; lane A2 removed lane 0's
+  `focus_pane` returns `HerdrError` (`Remote`, `PaneNotFound`, `Failed`; lane A2 removed lane 0's
   `NotIntegrated`, which has no meaning any more). The retry, resubscribe and coalescing
   intervals live in `herdr::watch::Timing` (crate-private; unit tests shorten them or run under
   a paused clock; integration tests reach it through the `#[doc(hidden)]`
@@ -726,8 +730,9 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
   (not `terminal_title`).
 - **Focus:** `herdr::focus_pane(host, herdr, session, pane_id)` rediscovers the socket and sends
   one `pane.focus` request on a short-lived stream (10 s bound). It changes what the user's
-  herdr clients show; tests use isolated named sessions only. An error response (for example
-  `pane_not_found`) is `HerdrError::Failed`.
+  herdr clients show; tests use isolated named sessions only. An error response with the code
+  `pane_not_found` is `HerdrError::PaneNotFound` (the pane is gone); any other error response
+  is `HerdrError::Failed`. The host exposes it as `HostHandle::focus_herdr_pane` (FFI API 6).
 - **Tests.** Unit tests run the watch against `herdr::testing::FakeHost`, a scripted
   `RemoteHost` (a fake herdr over in-memory streams) under tokio's paused clock, with sanitized
   fixtures in `herdr/fixtures/` (captured from isolated test sessions; the agent, unknown-value
@@ -993,9 +998,10 @@ the `kill` binary, skips with a message without `mosh-server`, and `OR2_REQUIRE_
 skip a failure: set it in CI so the roaming and resize interop claim is never verified
 vacuously.
 
-## FFI API 5 (`or2-ffi`)
+## FFI API 6 (`or2-ffi`)
 
-API 5 is API 4 without the M1 `connect` export (the surface below is unchanged).
+API 5 was API 4 without the M1 `connect` export; **API 6 adds `HostConnection.focus_herdr_pane`
+and `HostError.PaneNotFound`** (the rest of the surface below is unchanged).
 
 ```rust
 #[derive(uniffi::Record)] pub struct HostAddress { pub host: String, pub port: u16 }
@@ -1027,9 +1033,13 @@ impl HostConnection {                     // all non-blocking unless async
     async fn list_tmux_sessions(&self) -> Result<Vec<TmuxSession>, HostError>;
     fn watch_herdr(&self, session: Option<String>, listener: Box<dyn HerdrListener>)
         -> Result<Arc<HerdrWatch>, HostError>;
+    /// API 6. Focuses `pane_id` in herdr `session` (`None` = the default session); resolves
+    /// once herdr acknowledged. See "Agent terminals and focus" below.
+    async fn focus_herdr_pane(&self, session: Option<String>, pane_id: String)
+        -> Result<(), HostError>;
 }
 // HostError: NotConnected, Closed, NoHostKeyPrompt, HostKeyMismatch, EmptyDimension,
-//            InvalidName, NotInstalled { program }, CommandFailed { reason }
+//            InvalidName, NotInstalled { program }, PaneNotFound (API 6), CommandFailed { reason }
 // HostCapabilities { tmux: Option<String>, herdr: Option<String>, mosh_server: Option<String>,
 //                    utf8_locale: String, herdr_sessions: Vec<HerdrSessionInfo { name, running, is_default }> }
 
@@ -1039,6 +1049,25 @@ impl HostConnection {                     // all non-blocking unless async
 #[derive(uniffi::Object)] pub struct HerdrWatch;   // fn state(&self) -> HerdrState; fn stop(&self);
 ```
 
+- **Agent terminals and focus (API 6).** herdr's focus is shared state of the session: a
+  terminal running `herdr` (`TerminalTarget.Herdr`) shows whichever pane is focused *now*, other
+  herdr clients can move the focus, and the target's `pane_id` only focuses the pane once, at
+  open (A to B to A in one session leaves a reused "A" terminal showing B, and a reply typed for
+  A would reach B). **The app must therefore call `focus_herdr_pane(session, pane_id)` and
+  await its success every time an agent-target terminal is activated or reused**: tapping an
+  inbox row whose terminal is already open, choosing it in the switcher, or navigating back to
+  it. Only then show the terminal and enable input for it. For a first open the target's
+  `pane_id` already focuses before `herdr` starts (`open_terminal` unchanged).
+  `focus_herdr_pane` validates names like `TerminalTarget` (`InvalidName`; session
+  `[A-Za-z0-9_-]{1,64}`, pane `[A-Za-z0-9:_-]{1,128}`), needs a connected host
+  (`NotConnected`/`Closed`), uses the probed herdr path (`NotInstalled { "herdr" }` without
+  one), and sends one `pane.focus` on a short-lived socket stream. A pane herdr no longer has
+  (`pane_not_found`) is the explicit **`PaneNotFound`**: the agent is gone, so refresh the inbox
+  and do not show the terminal for it. A session that is not running, a missing socket or any
+  other herdr error is `CommandFailed { reason }` (a diagnostic). Cancelling the coroutine only
+  drops the reply; a focus already sent still happens. `contract_probe_host` answers
+  deterministically: the probe view's panes `w1:p1`, `w1:p2` and `w2:p1` succeed (and become the
+  focused pane of watches started afterwards), any other id is `PaneNotFound`.
 - `CommandFailed` carries `reason`, not `message`: a UniFFI error variant field named
   `message` generates a Kotlin property that clashes with `Throwable.message`. `EmptyDimension`
   is raised by the FFI layer (core takes a validated `TerminalSize`), like `SessionError`'s.

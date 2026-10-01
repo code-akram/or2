@@ -36,7 +36,7 @@ class NativeDeviceTest {
     @Test
     fun loadsPackagedArm64LibraryAndRoundTripsThroughUniFfi() {
         val info = buildInfo()
-        assertEquals(5u, info.apiVersion)
+        assertEquals(6u, info.apiVersion)
         assertEquals(34u, info.minimumAndroidSdk)
         assertEquals(Renderer.CANVAS, info.renderer)
         val size = terminalSize(97u, 31u)

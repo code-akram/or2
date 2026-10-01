@@ -10,7 +10,7 @@
 //! `contract_probe_host` does the same for a host connection (API 4): see its documentation.
 
 use std::future::Future;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use or2_core::frame::{
     Cell, CellStyle, CellWidth, Cursor, CursorShape, Frame, Rgb, Row, Scrollback, Underline,
@@ -196,7 +196,9 @@ fn publish(driver: &mut SessionDriver, frame: Frame) {
 ///
 /// The host uses the production trust check against the request's trusted keys with the same
 /// per-process host key as `contract_probe_session`, then reports `Connected { 0 }`.
-/// `capabilities` and `list_tmux_sessions` return fixed data. `open_terminal` returns a
+/// `capabilities` and `list_tmux_sessions` return fixed data. `focus_herdr_pane` succeeds for the
+/// probe view's panes (`w1:p1`, `w1:p2`, `w2:p1`) and is `PaneNotFound` for any other id; the
+/// focused pane then shows as `focused` in the views of watches started afterwards. `open_terminal` returns a
 /// session served by the M1 probe script without host-key states (`Connecting` to
 /// `Connected`; row 0 names the target). `watch_herdr` goes `Live`, updates once and closes on
 /// `stop()`. Closing the host closes its terminals and watches first.
@@ -295,6 +297,7 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
 
     let (stop_sender, stop) = watch::channel(None);
     let mut tasks = JoinSet::new();
+    let focused = Arc::new(Mutex::new(PROBE_PANES[0].to_owned()));
     loop {
         match driver.next_command().await {
             HostCommand::Capabilities { reply } => {
@@ -315,11 +318,20 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                     stop.clone(),
                 ));
             }
+            HostCommand::FocusHerdrPane { pane_id, reply, .. } => {
+                let _ = reply.send(if PROBE_PANES.contains(&pane_id.as_str()) {
+                    *focused.lock().unwrap() = pane_id;
+                    Ok(())
+                } else {
+                    Err(core_host::HostError::PaneNotFound)
+                });
+            }
             HostCommand::WatchHerdr {
                 session,
                 driver: watcher,
             } => {
-                tasks.spawn(run_herdr_watch(watcher, session, stop.clone()));
+                let focus = focused.lock().unwrap().clone();
+                tasks.spawn(run_herdr_watch(watcher, session, focus, stop.clone()));
             }
             HostCommand::Disconnect => break,
             HostCommand::ApproveHostKey { .. } | HostCommand::RejectHostKey => {}
@@ -346,10 +358,14 @@ async fn run_terminal(
 async fn run_herdr_watch(
     mut driver: HerdrWatchDriver,
     session: Option<String>,
+    focus: String,
     mut stop: watch::Receiver<Option<CloseReason>>,
 ) {
     let label = session.unwrap_or_else(|| "default".into());
-    for view in [probe_view(&label, 1, false), probe_view(&label, 2, true)] {
+    for view in [
+        probe_view(&label, 1, false, &focus),
+        probe_view(&label, 2, true, &focus),
+    ] {
         driver
             .transition(HerdrState::Live { view })
             .expect("-> Live");
@@ -361,8 +377,12 @@ async fn run_herdr_watch(
     driver.close();
 }
 
-/// One blocked, one working and one idle agent; `resolved` turns the blocked one into working.
-fn probe_view(label: &str, version: u64, resolved: bool) -> HerdrView {
+/// The panes of [`probe_view`]; the first is focused until `focus_herdr_pane` moves it.
+const PROBE_PANES: [&str; 3] = ["w1:p1", "w1:p2", "w2:p1"];
+
+/// One blocked, one working and one idle agent; `resolved` turns the blocked one into working;
+/// `focus` is the focused pane.
+fn probe_view(label: &str, version: u64, resolved: bool, focus: &str) -> HerdrView {
     let first = if resolved {
         AgentStatus::Working
     } else {
@@ -380,7 +400,7 @@ fn probe_view(label: &str, version: u64, resolved: bool) -> HerdrView {
             status,
             cwd: Some(format!("/home/probe/{name}")),
             title: None,
-            focused: pane == "w1:p1",
+            focused: pane == focus,
             state_change_seq: seq,
         }
     };
@@ -403,7 +423,7 @@ fn probe_view(label: &str, version: u64, resolved: bool) -> HerdrView {
     HerdrView {
         version,
         protocol: 22,
-        focused_pane_id: Some("w1:p1".into()),
+        focused_pane_id: Some(focus.into()),
         workspaces: vec![
             Workspace {
                 workspace_id: "w1".into(),

@@ -154,7 +154,7 @@ key generation/import errors, and a `contract_probe_session` lifecycle whose lis
 arrive on Rust threads (see [contracts](contracts.md)). On the JVM, `SessionContractTest` also
 covers host-key prompts, frames, input echoes, resize, scroll and disconnect,
 `HostContractTest` covers the host connection API against `contract_probe_host` (host-key
-decision, suspend queries, terminals, herdr watch, disconnect ordering, validation errors), and
+decision, suspend queries, terminals, herdr watch and `focusHerdrPane`, disconnect ordering, validation errors), and
 `KeyContractTest` checks generated and imported keys against `ssh-keygen` using throwaway keys
 in a temporary directory; it is skipped (reported as such) when `ssh-keygen` is not on `PATH`.
 The runtime Rust library does not enable the host-only `bindgen` feature. russh's `aws-lc-sys`

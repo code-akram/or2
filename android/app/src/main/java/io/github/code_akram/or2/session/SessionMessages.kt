@@ -51,6 +51,7 @@ fun hostErrorMessage(error: HostException): String = when (error) {
     is HostException.EmptyDimension -> "Terminal dimensions must be nonzero."
     is HostException.InvalidName -> "That name is not valid here. Use letters, digits, dashes and underscores."
     is HostException.NotInstalled -> "${error.program} is not installed on the host."
+    is HostException.PaneNotFound -> "That agent's pane no longer exists in herdr. Refresh the inbox."
     is HostException.CommandFailed -> "A command on the host failed. Retry, or reconnect."
 }
 

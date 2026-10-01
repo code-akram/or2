@@ -937,8 +937,12 @@ async fn focus_failures_are_reported() {
     let host = host_with(&two_panes());
     host.fail_focus("pane_not_found", "pane w9:p9 not found");
     let error = focus_pane(&host, HERDR, None, "w9:p9").await.unwrap_err();
+    assert_eq!(error, HerdrError::PaneNotFound);
+    // Any other herdr error stays a generic failure carrying herdr's code.
+    host.fail_focus("invalid_request", "bad pane");
+    let error = focus_pane(&host, HERDR, None, "w9:p9").await.unwrap_err();
     assert!(
-        matches!(&error, HerdrError::Failed(m) if m.contains("pane_not_found")),
+        matches!(&error, HerdrError::Failed(m) if m.contains("invalid_request")),
         "{error:?}"
     );
 

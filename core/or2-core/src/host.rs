@@ -265,6 +265,10 @@ pub enum HostError {
     InvalidName,
     #[error("{program} is not installed on the host")]
     NotInstalled { program: String },
+    /// `focus_herdr_pane`: herdr no longer has that pane (the agent's pane was closed since
+    /// the caller last saw it). Refresh the inbox; do not open or reuse a terminal for it.
+    #[error("the herdr pane no longer exists")]
+    PaneNotFound,
     /// A command ran but failed; the message is a diagnostic without secrets.
     #[error("command failed: {message}")]
     CommandFailed { message: String },
@@ -292,6 +296,14 @@ pub enum HostCommand {
     },
     ListTmux {
         reply: oneshot::Sender<Result<Vec<TmuxSession>, HostError>>,
+    },
+    /// Focus `pane_id` in herdr `session` with the herdr path from the probe
+    /// ([`herdr::focus_pane`]). Reply `NotInstalled { program: "herdr" }` with no herdr found,
+    /// `PaneNotFound` when herdr says the pane is gone, `CommandFailed` for other failures.
+    FocusHerdrPane {
+        session: Option<String>,
+        pane_id: String,
+        reply: oneshot::Sender<Result<(), HostError>>,
     },
     /// Run [`herdr::run`] (or an equivalent) on `driver`, with the herdr path from the probe.
     /// The session name is validated. With no herdr found, move `driver` to
@@ -425,6 +437,32 @@ impl HostHandle {
         let (reply, response) = oneshot::channel();
         self.require_connected()?;
         self.send(HostCommand::ListTmux { reply })?;
+        await_reply(response, QUERY_TIMEOUT).await
+    }
+
+    /// Focuses `pane_id` in herdr `session` (`None` is the default session): herdr's focus is
+    /// shared state of the session, so a terminal that shows the herdr client for an agent
+    /// pane must have that pane focused whenever it is opened OR reused. Resolves once herdr
+    /// has acknowledged the focus. Names are validated like [`TerminalTarget`]'s
+    /// (`InvalidName`); a vanished pane is [`HostError::PaneNotFound`], a host without herdr
+    /// `NotInstalled`.
+    pub async fn focus_herdr_pane(
+        &self,
+        session: Option<String>,
+        pane_id: String,
+    ) -> Result<(), HostError> {
+        let (reply, response) = oneshot::channel();
+        self.require_connected()?;
+        if !session.as_deref().is_none_or(is_valid_herdr_session_name)
+            || !is_valid_herdr_pane_id(&pane_id)
+        {
+            return Err(HostError::InvalidName);
+        }
+        self.send(HostCommand::FocusHerdrPane {
+            session,
+            pane_id,
+            reply,
+        })?;
         await_reply(response, QUERY_TIMEOUT).await
     }
 
@@ -889,6 +927,10 @@ mod tests {
             handle.watch_herdr(None, watches.clone()).err(),
             Some(HostError::NotConnected)
         );
+        assert_eq!(
+            handle.focus_herdr_pane(None, "w1:p1".into()).await,
+            Err(HostError::NotConnected)
+        );
         driver.transition(HostState::Authenticating).unwrap();
         assert_eq!(handle.capabilities().await, Err(HostError::NotConnected));
         connect_from_authenticating(&mut driver);
@@ -906,8 +948,29 @@ mod tests {
             Some(HostError::InvalidName)
         );
         assert!(lock(&sessions.0).is_empty(), "no session was created");
+        // The focus validates like terminal targets, before anything is enqueued.
+        for (session, pane) in [
+            (Some("a b"), "w1:p1"),
+            (Some(""), "w1:p1"),
+            (None, ""),
+            (None, "w1 p1"),
+            (None, "w1.p1"),
+        ] {
+            assert_eq!(
+                handle
+                    .focus_herdr_pane(session.map(str::to_owned), pane.into())
+                    .await,
+                Err(HostError::InvalidName),
+                "{session:?} {pane:?}"
+            );
+        }
+        assert!(driver.commands.try_recv().is_err(), "nothing was enqueued");
         driver.close(CloseReason::Disconnected);
         assert_eq!(handle.capabilities().await, Err(HostError::Closed));
+        assert_eq!(
+            handle.focus_herdr_pane(None, "w1:p1".into()).await,
+            Err(HostError::Closed)
+        );
         assert_eq!(handle.list_tmux_sessions().await, Err(HostError::Closed));
     }
 
@@ -960,6 +1023,32 @@ mod tests {
                 program: "tmux".into()
             })
         );
+        drop(answers.join().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_herdr_focus_carries_its_names_and_is_answered_through_its_reply() {
+        let (_recorder, handle, mut driver) = setup(false);
+        connect(&mut driver);
+        let answers = std::thread::spawn(move || {
+            for answer in [Ok(()), Err(HostError::PaneNotFound)] {
+                let HostCommand::FocusHerdrPane {
+                    session,
+                    pane_id,
+                    reply,
+                } = driver.blocking_next_command()
+                else {
+                    panic!("unexpected command")
+                };
+                assert_eq!(session.as_deref(), Some("work"));
+                assert_eq!(pane_id, "w1:p2");
+                reply.send(answer).unwrap();
+            }
+            driver
+        });
+        let focus = || handle.focus_herdr_pane(Some("work".into()), "w1:p2".into());
+        assert_eq!(focus().await, Ok(()));
+        assert_eq!(focus().await, Err(HostError::PaneNotFound));
         drop(answers.join().unwrap());
     }
 

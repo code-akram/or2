@@ -102,6 +102,10 @@ pub trait HerdrObserver: Send + Sync {
 pub enum HerdrError {
     #[error(transparent)]
     Remote(#[from] RemoteError),
+    /// herdr answered `pane_not_found`: the pane named in a request no longer exists (an agent
+    /// pane that was closed since the caller last saw it).
+    #[error("the herdr pane no longer exists")]
+    PaneNotFound,
     /// herdr is missing, its session is not running, or it answered with an error.
     #[error("herdr failed: {0}")]
     Failed(String),
@@ -269,7 +273,7 @@ pub async fn run<H: RemoteHost>(
 
 /// Focuses `pane_id` in `session` with one `pane.focus` request on a short-lived stream.
 /// `herdr` is the absolute path from the capability probe. It changes what the user's herdr
-/// clients show.
+/// clients show. A pane that no longer exists is [`HerdrError::PaneNotFound`].
 pub async fn focus_pane<H: RemoteHost>(
     host: &H,
     herdr: &str,
@@ -295,6 +299,9 @@ pub async fn focus_pane<H: RemoteHost>(
     .map(|_| ())
     .map_err(|error| match error {
         wire::WireError::Remote(error) => HerdrError::Remote(error),
+        wire::WireError::Herdr { code, .. } if code == watch::PANE_NOT_FOUND => {
+            HerdrError::PaneNotFound
+        }
         other => HerdrError::Failed(other.to_string()),
     })
 }

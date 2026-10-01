@@ -44,9 +44,9 @@ class SessionMessagesTest {
     @Test
     fun hostErrorsAndStatesAreDistinctAndFreeOfDiagnostics() {
         val errors = listOf(HostException.NotConnected(), HostException.Closed(), HostException.NoHostKeyPrompt(), HostException.HostKeyMismatch(),
-            HostException.EmptyDimension(), HostException.InvalidName(), HostException.NotInstalled("tmux"), HostException.CommandFailed("diagnostic"))
+            HostException.EmptyDimension(), HostException.InvalidName(), HostException.NotInstalled("tmux"), HostException.CommandFailed("diagnostic"), HostException.PaneNotFound())
         val messages = errors.map(::hostErrorMessage)
-        assertEquals(8, messages.toSet().size)
+        assertEquals(9, messages.toSet().size)
         assertTrue(messages.none { "diagnostic" in it })
         assertEquals("tmux is not installed on the host.", messages[6])
         assertEquals("Connecting\u2026", hostStateMessage(HostState.Connecting))

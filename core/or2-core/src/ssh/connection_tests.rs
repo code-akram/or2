@@ -213,6 +213,8 @@ struct Shared {
     /// What the capability probe prints.
     probe: Mutex<&'static str>,
     herdr_list: Mutex<HerdrList>,
+    /// The panes herdr was asked to focus, in order (`w9:p9` does not exist).
+    focused: Mutex<Vec<String>>,
     /// The capability probe starts (and is counted) but never finishes.
     probe_hangs: AtomicBool,
     /// Refuse session channels like an sshd at `MaxSessions`.
@@ -293,6 +295,20 @@ impl server::Handler for Server {
         let request = String::from_utf8_lossy(data);
         if request.contains("events.subscribe") {
             session.data(channel, HERDR_ACK.as_bytes().to_vec())?;
+        } else if request.contains("pane.focus") {
+            let pane = request
+                .split("\"pane_id\":\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or("")
+                .to_owned();
+            let reply = if pane == "w9:p9" {
+                "{\"id\":\"or2_focus\",\"error\":{\"code\":\"pane_not_found\",\"message\":\"no such pane\"}}\n"
+            } else {
+                "{\"id\":\"or2_focus\",\"result\":{\"type\":\"ok\"}}\n"
+            };
+            self.shared.focused.lock().unwrap().push(pane);
+            session.data(channel, reply.as_bytes().to_vec())?;
         } else if request.contains("session.snapshot") {
             session.data(
                 channel,
@@ -482,6 +498,7 @@ impl Fixture {
             probes: AtomicUsize::new(0),
             probe: Mutex::new(probe),
             herdr_list: Mutex::new(HerdrList::Fixture),
+            focused: Mutex::new(Vec::new()),
             probe_hangs: AtomicBool::new(false),
             refuse_channels: AtomicBool::new(false),
             stall_auth: AtomicBool::new(false),
@@ -1426,4 +1443,51 @@ fn a_host_that_never_connected_has_no_peer_address() {
     let handle = connect_host(request(&[("127.0.0.1", dead_port())], &[]), observer);
     let _ = closed(&states);
     assert_eq!(handle.peer_addr(), None);
+}
+
+#[test]
+fn focusing_a_herdr_pane_goes_through_the_probed_herdr_and_reports_a_vanished_pane() {
+    let fixture = Fixture::connected_with(Duration::from_secs(5), PROBE_WITH_HERDR);
+    let focus = |session: Option<&str>, pane: &str| {
+        runtime().block_on(
+            fixture
+                .handle
+                .focus_herdr_pane(session.map(str::to_owned), pane.to_owned()),
+        )
+    };
+    assert_eq!(focus(None, "w1:p2"), Ok(()));
+    assert_eq!(focus(Some("work"), "w1:p1"), Ok(()));
+    assert_eq!(
+        *fixture.shared.focused.lock().unwrap(),
+        ["w1:p2", "w1:p1"],
+        "herdr was asked to focus exactly these panes, in order"
+    );
+    // A pane that has gone is its own error, not a generic failure.
+    assert_eq!(focus(None, "w9:p9"), Err(HostError::PaneNotFound));
+    // A session herdr lists as not running cannot be focused.
+    assert!(matches!(
+        focus(Some("idle"), "w1:p1"),
+        Err(HostError::CommandFailed { .. })
+    ));
+    // Malformed names never reach the host.
+    let before = fixture.shared.focused.lock().unwrap().len();
+    assert_eq!(focus(Some("a b"), "w1:p1"), Err(HostError::InvalidName));
+    assert_eq!(focus(None, "w1 p1"), Err(HostError::InvalidName));
+    assert_eq!(fixture.shared.focused.lock().unwrap().len(), before);
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+    assert_eq!(focus(None, "w1:p1"), Err(HostError::Closed));
+}
+
+#[test]
+fn focusing_a_herdr_pane_needs_herdr() {
+    let fixture = Fixture::connected(Duration::from_secs(5));
+    assert_eq!(
+        runtime().block_on(fixture.handle.focus_herdr_pane(None, "w1:p1".into())),
+        Err(HostError::NotInstalled {
+            program: "herdr".into()
+        })
+    );
+    assert!(fixture.shared.focused.lock().unwrap().is_empty());
+    fixture.handle.disconnect();
 }

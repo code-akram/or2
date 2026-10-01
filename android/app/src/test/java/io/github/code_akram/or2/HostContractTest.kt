@@ -87,7 +87,7 @@ class HerdrRecorder : CallbackRecorder<HerdrState>(), HerdrListener {
 }
 
 /**
- * The host connection contract (FFI API 4) across the real FFI, driven by `contractProbeHost`:
+ * The host connection contract (FFI API 6) across the real FFI, driven by `contractProbeHost`:
  * a scripted host with fixed answers and no network.
  */
 class HostContractTest {
@@ -201,6 +201,7 @@ class HostContractTest {
                 host.openTerminal(TerminalTarget.Shell, 80u, 24u, RecordingListener())
             }
             assertThrows(HostException.NotConnected::class.java) { host.watchHerdr(null, HerdrRecorder()) }
+            assertThrows(HostException.NotConnected::class.java) { runBlocking { host.focusHerdrPane(null, "w1:p1") } }
             assertThrows(HostException.HostKeyMismatch::class.java) {
                 host.approveHostKey(clientKey.publicKey.fingerprint)
             }
@@ -353,6 +354,36 @@ class HostContractTest {
     }
 
     @Test
+    fun focusingAHerdrPaneIsAwaitedReportsAVanishedPaneAndIsVisibleToLaterWatches() {
+        val host = connectedHost()
+        // A reused agent terminal is refocused first: success is awaited before the terminal is shown.
+        runBlocking { host.focusHerdrPane("work", "w1:p2") }
+        // A pane that has gone is its own error, not a generic command failure.
+        assertThrows(HostException.PaneNotFound::class.java) { runBlocking { host.focusHerdrPane(null, "w9:p9") } }
+        // Names are validated like terminal targets, before anything runs.
+        for (session in listOf("", "a b", "a.b", "x".repeat(65))) {
+            assertThrows(session, HostException.InvalidName::class.java) { runBlocking { host.focusHerdrPane(session, "w1:p1") } }
+        }
+        for (pane in listOf("", "w1 p1", "w1.p1", "p".repeat(129))) {
+            assertThrows(pane, HostException.InvalidName::class.java) { runBlocking { host.focusHerdrPane(null, pane) } }
+        }
+        // The probe host keeps the focus it was given: a watch started afterwards sees it.
+        val recorder = HerdrRecorder()
+        val watch = host.watchHerdr(null, recorder)
+        val view = recorder.await<HerdrState.Live>().view
+        assertEquals("w1:p2", view.focusedPaneId)
+        assertEquals(listOf(false, true, false), view.agents.map { it.focused })
+        watch.stop()
+        recorder.await<HerdrState.Live>()
+        recorder.await<HerdrState.Closed>()
+        // The last successful focus stands after a refused one; the host stays usable.
+        runBlocking { host.focusHerdrPane(null, "w2:p1") }
+        assertEquals(HostState.Connected(0u), host.state())
+        host.disconnect()
+        host.close()
+    }
+
+    @Test
     fun disconnectingTheHostClosesItsTerminalsAndWatchesFirst() {
         // One timeline for all three sources, so the order itself is asserted.
         val timeline: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
@@ -384,6 +415,7 @@ class HostContractTest {
             host.openTerminal(TerminalTarget.Shell, 80u, 24u, RecordingListener())
         }
         assertThrows(HostException.Closed::class.java) { host.watchHerdr(null, HerdrRecorder()) }
+        assertThrows(HostException.Closed::class.java) { runBlocking { host.focusHerdrPane(null, "w1:p1") } }
         assertThrows(HostException.Closed::class.java) { host.rejectHostKey() }
         host.disconnect() // Idempotent.
         recorder.assertQuiet()

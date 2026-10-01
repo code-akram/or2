@@ -536,6 +536,21 @@ fn dispatch(
                 }
             });
         }
+        HostCommand::FocusHerdrPane {
+            session,
+            pane_id,
+            reply,
+        } => {
+            let host = Arc::clone(host);
+            let (mut closing, tracker) = (closing.clone(), tracker.clone());
+            runtime().spawn(async move {
+                let _tracker = tracker;
+                tokio::select! {
+                    result = focus_herdr_pane(&host, session, pane_id) => { let _ = reply.send(result); }
+                    _ = closed_reason(&mut closing) => {}
+                }
+            });
+        }
         HostCommand::WatchHerdr { session, driver } => {
             let host = Arc::clone(host);
             let (mut closing, tracker) = (closing.clone(), tracker.clone());
@@ -596,6 +611,29 @@ async fn list_tmux(host: &SshHost) -> Result<Vec<TmuxSession>, HostError> {
         .map_err(|error| match error {
             TmuxError::Remote(error) => host_error(error),
             TmuxError::Failed(message) => HostError::CommandFailed { message },
+        })
+}
+
+/// `HostHandle::focus_herdr_pane`: one `pane.focus` through the probed herdr path.
+async fn focus_herdr_pane(
+    host: &SshHost,
+    session: Option<String>,
+    pane_id: String,
+) -> Result<(), HostError> {
+    let capabilities = host.capabilities().await.map_err(host_error)?;
+    let Some(path) = &capabilities.herdr else {
+        return Err(HostError::NotInstalled {
+            program: "herdr".into(),
+        });
+    };
+    herdr::focus_pane(host, path, session.as_deref(), &pane_id)
+        .await
+        .map_err(|error| match error {
+            herdr::HerdrError::PaneNotFound => HostError::PaneNotFound,
+            herdr::HerdrError::Remote(error) => host_error(error),
+            error @ herdr::HerdrError::Failed(_) => HostError::CommandFailed {
+                message: error.to_string(),
+            },
         })
 }
 

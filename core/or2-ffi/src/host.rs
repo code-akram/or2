@@ -1,4 +1,4 @@
-//! Host connection contract for Kotlin (FFI API 4): request, state, errors, terminal targets,
+//! Host connection contract for Kotlin (FFI API 6): request, state, errors, terminal targets,
 //! queries, the `HostConnection` object and the `HostListener` callback. See
 //! docs/contracts.md for threading and ownership rules.
 
@@ -156,6 +156,9 @@ pub enum HostError {
     InvalidName,
     #[error("{program} is not installed on the host")]
     NotInstalled { program: String },
+    /// `focus_herdr_pane`: the pane no longer exists in herdr.
+    #[error("the herdr pane no longer exists")]
+    PaneNotFound,
     /// `reason` is a diagnostic without secrets; do not match on it. (Not `message`: that
     /// would clash with `Throwable.message` in the generated Kotlin exception.)
     #[error("command failed: {reason}")]
@@ -171,6 +174,7 @@ impl From<core::HostError> for HostError {
             core::HostError::HostKeyMismatch => Self::HostKeyMismatch,
             core::HostError::InvalidName => Self::InvalidName,
             core::HostError::NotInstalled { program } => Self::NotInstalled { program },
+            core::HostError::PaneNotFound => Self::PaneNotFound,
             core::HostError::CommandFailed { message } => Self::CommandFailed { reason: message },
         }
     }
@@ -365,6 +369,21 @@ impl HostConnection {
             .collect())
     }
 
+    /// Focuses `pane_id` in herdr `session` (`None` is the default session) and resolves once
+    /// herdr has acknowledged it. herdr's focus is shared by every client of the session, and a
+    /// terminal running `herdr` shows whatever is focused, so the app must call this (and await
+    /// success) whenever an agent-target terminal is activated or reused, not only when it is
+    /// first opened. `InvalidName` for a malformed session or pane id, `NotInstalled` without
+    /// herdr, `PaneNotFound` when the pane has gone (refresh the inbox instead of showing the
+    /// terminal), `CommandFailed` otherwise. Cancelling the coroutine drops the reply only.
+    pub async fn focus_herdr_pane(
+        &self,
+        session: Option<String>,
+        pane_id: String,
+    ) -> Result<(), HostError> {
+        Ok(self.handle.focus_herdr_pane(session, pane_id).await?)
+    }
+
     /// Watches a herdr session (`None` is the default session); it ends with the connection.
     pub fn watch_herdr(
         &self,
@@ -495,6 +514,10 @@ mod tests {
         assert_eq!(
             HostError::from(core::HostError::InvalidName),
             HostError::InvalidName
+        );
+        assert_eq!(
+            HostError::from(core::HostError::PaneNotFound),
+            HostError::PaneNotFound
         );
         assert_eq!(
             core::TerminalTarget::from(TerminalTarget::Herdr {
