@@ -19,6 +19,9 @@ use crate::remote::{RemoteError, RemoteHost};
 /// message and stays far below this.
 pub const MAX_LINE: usize = 16 * 1024 * 1024;
 
+/// Spare capacity a reader keeps after a line, in bytes; a burst's larger buffer is given back.
+const KEEP_CAPACITY: usize = 64 * 1024;
+
 /// The error code herdr sends, then closes the connection, when an event subscriber fell too
 /// far behind.
 pub const EVENTS_LOST: &str = "events_lost";
@@ -118,6 +121,8 @@ pub struct LineReader<S> {
     stream: S,
     buf: Vec<u8>,
     scanned: usize,
+    /// The longest line accepted; [`MAX_LINE`] unless a test lowers it.
+    limit: usize,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> LineReader<S> {
@@ -126,6 +131,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> LineReader<S> {
             stream,
             buf: Vec::new(),
             scanned: 0,
+            limit: MAX_LINE,
         }
     }
 
@@ -146,13 +152,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> LineReader<S> {
         loop {
             if let Some(offset) = self.buf[self.scanned..].iter().position(|b| *b == b'\n') {
                 let end = self.scanned + offset;
+                // A read can deliver a newline and far more than the limit at once.
+                if end > self.limit {
+                    return Err(WireError::TooLong);
+                }
                 let mut line: Vec<u8> = self.buf.drain(..=end).collect();
                 line.pop();
                 self.scanned = 0;
+                // A long-lived stream must not keep the buffer of its largest burst.
+                self.buf.shrink_to(KEEP_CAPACITY);
                 return Ok(Some(line));
             }
             self.scanned = self.buf.len();
-            if self.buf.len() > MAX_LINE {
+            if self.buf.len() > self.limit {
                 return Err(WireError::TooLong);
             }
             self.buf.reserve(4096);
@@ -305,6 +317,40 @@ mod tests {
         server.write_all(b"partial").await.unwrap();
         drop(server);
         assert_eq!(reader.next_line().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_line_over_the_limit_is_rejected_even_when_its_newline_arrived_with_it() {
+        let (client, mut server) = duplex(1024);
+        let mut reader = LineReader::new(client);
+        reader.limit = 64;
+        let mut line = vec![b'x'; 100];
+        line.push(b'\n');
+        server.write_all(&line).await.unwrap();
+        assert_eq!(reader.next_line().await, Err(WireError::TooLong));
+
+        let (client, mut server) = duplex(1024);
+        let mut reader = LineReader::new(client);
+        reader.limit = 64;
+        let mut line = vec![b'y'; 64];
+        line.push(b'\n');
+        server.write_all(&line).await.unwrap();
+        assert_eq!(reader.next_line().await.unwrap().unwrap().len(), 64);
+    }
+
+    #[tokio::test]
+    async fn the_buffer_of_a_burst_is_given_back() {
+        let (client, mut server) = duplex(1 << 21);
+        let mut reader = LineReader::new(client);
+        let mut line = vec![b'z'; 1 << 20];
+        line.push(b'\n');
+        server.write_all(&line).await.unwrap();
+        assert_eq!(reader.next_line().await.unwrap().unwrap().len(), 1 << 20);
+        assert!(
+            reader.buf.capacity() <= 2 * KEEP_CAPACITY,
+            "{}",
+            reader.buf.capacity()
+        );
     }
 
     #[tokio::test]
