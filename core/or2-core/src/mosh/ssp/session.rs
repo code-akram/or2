@@ -7,7 +7,7 @@
 // sockets through `DatagramTransport` (roaming is a `Tick::rebind` request and `note_rebound`).
 // Prediction, overlays, rendering to escape bytes and the blocking pump are removed. Every Bytes
 // event of a diff is fed in order (upstream fed only the last). The server's resize reports are
-// returned as events but not applied: whoever drives the session owns the geometry (`resize`).
+// returned as events but not applied: whoever drives the session owns the geometry (`resize`). A state is acknowledged only once its diff is applied (`handle_datagram`).
 
 //! The whole client protocol, assembled, without I/O: the crypto session, the packet clock, the
 //! transport state machine and the state sync, around a [`ClientTerminal`].
@@ -339,6 +339,45 @@ impl<S: Screen> Session<S> {
             Received::Unresolvable => return Ok(Vec::new()),
         };
         let has_data = !diff.is_empty();
+        let parsed = if has_data {
+            parse_host_diff(&diff)
+        } else {
+            Ok(Vec::new())
+        };
+
+        // EVERY state gets a screen, including one whose diff changed nothing on it: the server
+        // is free to compute a later diff from that state, and a client that only remembered the
+        // states that painted something would have to drop it.
+        let old_num = inst.old_num.unwrap_or(0);
+        let throwaway = inst.throwaway_num.unwrap_or(0);
+        let applied = match &parsed {
+            Ok(events) => {
+                let mut painted = Vec::new();
+                for event in events {
+                    if let HostEvent::Bytes(bytes) = event {
+                        painted.extend_from_slice(bytes);
+                    }
+                    // Resize and EchoAck are not applied here: see `resize`, and there is no
+                    // prediction to retire.
+                }
+                // The diff belongs to the state it was computed FROM, not to whatever is newest.
+                self.terminal
+                    .apply_diff(old_num, num, &painted, throwaway)?
+            }
+            Err(_) => false,
+        };
+        if !applied {
+            // The screen has no state `num` (its base is gone, or the diff is garbled), so it
+            // must not be acknowledged: the server would keep diffing from a state we never
+            // built and the screen would stay stale. Forget it, and acknowledge what we DO hold
+            // so the server's next diff starts from there.
+            self.receiver.forget(num);
+            self.sender.set_ack_num(self.receiver.latest(), true, now);
+            return match parsed {
+                Ok(_) => Ok(Vec::new()),
+                Err(error) => Err(error.into()),
+            };
+        }
         // Acknowledge the HIGHEST state held, never this one: an out-of-order arrival is older
         // than something we already have, and naming it would ask the server to resend what is
         // already on screen.
@@ -346,31 +385,10 @@ impl<S: Screen> Session<S> {
             self.sender
                 .set_ack_num(self.receiver.latest(), has_data, now);
         }
-        let events = if has_data {
-            parse_host_diff(&diff)?
-        } else {
-            Vec::new()
-        };
-
-        // EVERY state gets a screen, including one whose diff changed nothing on it: the server
-        // is free to compute a later diff from that state, and a client that only remembered the
-        // states that painted something would have to drop it.
-        let mut painted = Vec::new();
-        for event in &events {
-            if let HostEvent::Bytes(bytes) = event {
-                painted.extend_from_slice(bytes);
-            }
-            // Resize and EchoAck are not applied here: see `resize`, and there is no prediction
-            // to retire.
-        }
-        // The diff belongs to the state it was computed FROM, not to whatever is newest now.
-        let old_num = inst.old_num.unwrap_or(0);
-        let throwaway = inst.throwaway_num.unwrap_or(0);
-        self.terminal
-            .apply_diff(old_num, num, &painted, throwaway)?;
         if let Some(throwaway) = inst.throwaway_num {
             self.terminal.forget_before(throwaway);
         }
+        let events = parsed?;
         Ok(events)
     }
 }
@@ -476,6 +494,110 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(30));
         let tick = session.tick().unwrap();
         assert_eq!(tick.datagrams.len(), 1);
+    }
+
+    /// The server's half, enough to hand the client host diffs.
+    struct Server {
+        crypto: CryptoSession,
+        packets: PacketState,
+        fragmenter: Fragmenter,
+    }
+
+    impl Server {
+        fn new() -> Self {
+            let key = Base64Key::from_printable("AAAAAAAAAAAAAAAAAAAAAA").expect("valid key");
+            Self {
+                crypto: CryptoSession::new(&key),
+                packets: PacketState::default(),
+                fragmenter: Fragmenter::default(),
+            }
+        }
+
+        /// A datagram whose diff appends `text`, from state `old` to state `new`.
+        fn say(&mut self, old: u64, new: u64, text: &str) -> Vec<u8> {
+            use prost::Message as _;
+
+            use super::super::statesync::{HostBytes, HostInstruction, HostMessage};
+            let diff = HostMessage {
+                instruction: vec![HostInstruction {
+                    hostbytes: Some(HostBytes {
+                        hoststring: Some(text.as_bytes().to_vec()),
+                    }),
+                    ..Default::default()
+                }],
+            }
+            .encode_to_vec();
+            self.send(old, new, diff)
+        }
+
+        fn send(&mut self, old: u64, new: u64, diff: Vec<u8>) -> Vec<u8> {
+            let inst = super::super::transport::Instruction::new(old, new, 0, 0, diff, vec![]);
+            let fragments = self.fragmenter.fragment(&inst, 1000).unwrap();
+            assert_eq!(fragments.len(), 1);
+            let outgoing = self.packets.new_packet(0, fragments[0].to_bytes());
+            self.crypto
+                .encrypt(
+                    outgoing.seq,
+                    Direction::ToClient,
+                    &outgoing.packet.to_plaintext(),
+                )
+                .unwrap()
+        }
+    }
+
+    #[test]
+    fn a_state_whose_base_is_gone_is_not_acknowledged() {
+        let mut session = offline_session();
+        let mut server = Server::new();
+        // The server's states arrive in order and its throwaway never moves, as when our
+        // acknowledgements are lost on the way back: the client holds more than it may keep.
+        for num in 1..=40 {
+            let datagram = server.say(num - 1, num, ".");
+            session.handle_datagram(&datagram).unwrap();
+        }
+        assert_eq!(session.sender.ack_num(), 40);
+        let gone = (1..40)
+            .find(|num| !session.terminal.holds(*num))
+            .expect("the cap gave a state up");
+        assert!(session.receiver.latest() == 40);
+
+        // A diff from the given-up state names a screen the client no longer has.
+        let datagram = server.say(gone, 41, "!");
+        assert!(session.handle_datagram(&datagram).unwrap().is_empty());
+        // It was not applied, so it is not held and not acknowledged: the server learns what
+        // the client really has and diffs from that.
+        assert_eq!(session.terminal.latest(), 40);
+        assert_eq!(session.receiver.latest(), 40);
+        assert_eq!(session.sender.ack_num(), 40);
+        assert!(!session.terminal.live().text.contains('!'));
+
+        // Its retransmission from a state that is held is taken as new, not as a duplicate.
+        let datagram = server.say(40, 41, "!");
+        session.handle_datagram(&datagram).unwrap();
+        assert_eq!(session.terminal.latest(), 41);
+        assert_eq!(session.sender.ack_num(), 41);
+        assert!(session.terminal.live().text.ends_with('!'));
+    }
+
+    #[test]
+    fn a_garbled_diff_is_not_acknowledged() {
+        let mut session = offline_session();
+        let mut server = Server::new();
+        let datagram = server.say(0, 1, "a");
+        session.handle_datagram(&datagram).unwrap();
+
+        let datagram = server.send(1, 2, vec![0xff; 12]);
+        assert!(matches!(
+            session.handle_datagram(&datagram),
+            Err(Fault::Dropped(MoshError::BadInstruction))
+        ));
+        assert_eq!(session.receiver.latest(), 1);
+        assert_eq!(session.sender.ack_num(), 1);
+
+        let datagram = server.say(1, 2, "b");
+        session.handle_datagram(&datagram).unwrap();
+        assert_eq!(session.sender.ack_num(), 2);
+        assert_eq!(session.terminal.live().text, "ab");
     }
 
     #[test]

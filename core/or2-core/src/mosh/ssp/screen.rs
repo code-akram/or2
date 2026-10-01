@@ -5,7 +5,7 @@
 // See THIRD_PARTY_NOTICES.md. or2 changes: rewritten around what or2 needs. The cell, colour and
 // overlay types, `DiffScreen` and the vt100 screen are gone (prediction is off and the display is
 // libghostty). `Screen` no longer requires `Clone`: copies are `snapshot`/`restore`, which can fail
-// and which libghostty implements with its terminal snapshot encoding.
+// and which libghostty implements with its terminal snapshot encoding. `adopt_view_of` carries the viewer's scroll position across a restore.
 
 //! What a state number resolves to: a screen.
 //!
@@ -50,4 +50,12 @@ pub trait Screen: Sized {
 
     /// A live screen equal to the one `snapshot` was taken from.
     fn restore(snapshot: &Self::Snapshot) -> Result<Self, ScreenError>;
+
+    /// Called on a screen restored from a snapshot just before it replaces the live one:
+    /// carry over what belongs to the person looking at the screen rather than to the terminal
+    /// state a snapshot records (for libghostty, where the viewport is scrolled to), so that
+    /// swapping the engine does not move them. The default carries nothing.
+    fn adopt_view_of(&mut self, _replaced: &Self) -> Result<(), ScreenError> {
+        Ok(())
+    }
 }

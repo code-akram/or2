@@ -74,6 +74,16 @@ impl Screen for GhosttyScreen {
     fn restore(snapshot: &Vec<u8>) -> Result<Self, ScreenError> {
         Self::wrap(TerminalEngine::from_snapshot(snapshot, |_| {}))
     }
+
+    /// A snapshot restores to the bottom of the scrollback; the reader who had scrolled back
+    /// stays where they were.
+    fn adopt_view_of(&mut self, replaced: &Self) -> Result<(), ScreenError> {
+        let offset = replaced.engine.viewport_offset().map_err(error)?;
+        if offset.is_some() {
+            self.engine.set_viewport_offset(offset).map_err(error)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -179,6 +189,69 @@ mod tests {
         assert!(before.total_rows > 3);
         let mut copy = GhosttyScreen::restore(&screen.snapshot().unwrap()).unwrap();
         assert_eq!(copy.engine().frame().unwrap().scrollback(), before);
+    }
+
+    #[test]
+    fn the_scrollback_a_snapshot_carries_is_bounded() {
+        // A paced stream (a log tail) leaves history in libghostty for as long as it runs. The
+        // library caps it, which is what bounds the cost of a snapshot per received state:
+        // about 70 KB and 0.2 ms at the cap on the development machine (release build).
+        let mut screen = GhosttyScreen::new(size(80, 24)).unwrap();
+        for line in 0..30_000 {
+            screen.feed(
+                format!("line {line} some text to fill the width of the row a little\r\n")
+                    .as_bytes(),
+            );
+        }
+        let snapshot = screen.snapshot().unwrap();
+        assert!(
+            snapshot.len() < 1 << 20,
+            "a snapshot of an endless stream is {} bytes",
+            snapshot.len()
+        );
+        let total = screen.engine().frame().unwrap().scrollback().total_rows;
+        assert!(total > 24, "history exists: {total}");
+        assert!(total < 20_000, "history is capped: {total}");
+    }
+
+    #[test]
+    fn replacing_the_live_screen_keeps_where_the_reader_scrolled_to() {
+        use crate::input::ViewportScroll;
+
+        let mut terminal = ClientTerminal::new(GhosttyScreen::new(size(20, 3)).unwrap());
+        let history: String = (0..50).map(|line| format!("line {line}\r\n")).collect();
+        terminal.apply_diff(0, 1, history.as_bytes(), 0).unwrap();
+        terminal.apply_diff(1, 2, b"more\r\n", 0).unwrap();
+        // The reader scrolls back into history on the live screen.
+        terminal
+            .live()
+            .engine()
+            .scroll(ViewportScroll::Delta(-10))
+            .unwrap();
+        let scrolled = terminal.live().engine().viewport_offset().unwrap();
+        assert!(scrolled.is_some());
+        let before = terminal.live().engine().frame().unwrap().scrollback();
+
+        // The server diffs from the older state 1 (our ack for 2 was late): the live screen is
+        // rebuilt from a snapshot, which on its own would drop the viewport to the bottom.
+        assert!(terminal.apply_diff(1, 3, b"other\r\n", 0).unwrap());
+        assert_eq!(terminal.latest(), 3);
+        assert_eq!(
+            terminal.live().engine().viewport_offset().unwrap(),
+            scrolled
+        );
+        let after = terminal.live().engine().frame().unwrap().scrollback();
+        assert_eq!(after.offset, before.offset);
+
+        // A reader at the bottom stays there.
+        terminal
+            .live()
+            .engine()
+            .scroll(ViewportScroll::Bottom)
+            .unwrap();
+        assert!(terminal.apply_diff(3, 4, b"x", 0).unwrap());
+        assert!(terminal.apply_diff(3, 5, b"y", 0).unwrap());
+        assert_eq!(terminal.live().engine().viewport_offset().unwrap(), None);
     }
 
     #[test]

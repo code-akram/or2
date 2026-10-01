@@ -5,7 +5,7 @@
 // See THIRD_PARTY_NOTICES.md. or2 changes: no predictions or overlays, no repaint/diff output and no
 // separate "displayed" screen. The newest state is one live screen that is mutated in place (so the
 // emulator keeps its own dirty tracking and scrollback); older states are held as snapshots and
-// restored on demand. Copies can fail, so the operations that make them return `ScreenError`.
+// restored on demand, at most `MAX_SAVED_STATES` of them, and a restored screen keeps the viewer's scroll position (`Screen::adopt_view_of`). Copies can fail, so the operations that make them return `ScreenError`.
 
 //! The client's own copy of the screen (`completeterminal.cc`).
 //!
@@ -25,6 +25,13 @@
 use std::collections::HashMap;
 
 use super::screen::{Screen, ScreenError};
+
+/// How many older states are held as snapshots at most. A snapshot carries the screen and its
+/// scrollback (about 1 KB for a bare screen, tens of KB with a full history), and the receiver
+/// would otherwise let a server whose acknowledgements never arrive push this to its own limit
+/// of 1024 states. A diff from a state beyond the cap is refused (`Ok(false)`) and the session
+/// asks the server to start over from a state that is held.
+pub const MAX_SAVED_STATES: usize = 32;
 
 /// The client's terminal: the newest state live, the others held as snapshots.
 pub struct ClientTerminal<S: Screen> {
@@ -53,9 +60,9 @@ impl<S: Screen> ClientTerminal<S> {
 
     /// Apply a host diff that takes state `old_num` to `new_num`.
     ///
-    /// `Ok(false)` when `old_num` names a screen no longer held, which the transport layer
-    /// already filters; keeping the check here means a diff can never be applied to the wrong
-    /// screen. States below `keep_from` (the instruction's `throwaway_num`) will never be diffed
+    /// `Ok(false)` when `old_num` names a screen not held (never seen, thrown away, or evicted
+    /// by the [`MAX_SAVED_STATES`] cap): the diff was NOT applied, and the caller must not
+    /// acknowledge it. A diff can never be applied to the wrong screen. States below `keep_from` (the instruction's `throwaway_num`) will never be diffed
     /// from again, so the base is not snapshotted for them.
     pub fn apply_diff(
         &mut self,
@@ -66,7 +73,8 @@ impl<S: Screen> ClientTerminal<S> {
     ) -> Result<bool, ScreenError> {
         if old_num == self.live_num && new_num > self.live_num {
             if old_num >= keep_from {
-                self.saved.insert(old_num, self.live.snapshot()?);
+                let snapshot = self.live.snapshot()?;
+                self.keep(old_num, snapshot);
             }
             self.live.feed(bytes);
             self.live_num = new_num;
@@ -84,15 +92,37 @@ impl<S: Screen> ClientTerminal<S> {
         if new_num > self.live_num {
             // The old live state may still be needed; the new one takes its place.
             if self.live_num >= keep_from {
-                self.saved.insert(self.live_num, self.live.snapshot()?);
+                let snapshot = self.live.snapshot()?;
+                self.keep(self.live_num, snapshot);
             }
+            // The reader keeps their place in the scrollback across the swap.
+            base.adopt_view_of(&self.live)?;
             self.live = base;
             self.live_num = new_num;
         } else if new_num >= keep_from {
             // Out of order: an older state than the one we are showing.
-            self.saved.insert(new_num, base.snapshot()?);
+            let snapshot = base.snapshot()?;
+            self.keep(new_num, snapshot);
         }
         Ok(true)
+    }
+
+    /// Whether a diff from state `num` can be applied: it is the live state or a held snapshot.
+    pub fn holds(&self, num: u64) -> bool {
+        num == self.live_num || self.saved.contains_key(&num)
+    }
+
+    /// Hold a snapshot, within [`MAX_SAVED_STATES`]. When full, the MIDDLE entry goes, as the
+    /// sender does with its own history: the server diffs from a state it believes we hold,
+    /// which is the oldest it is still waiting on (acknowledgements are not arriving) or a
+    /// recent one (they are), never one in between.
+    fn keep(&mut self, num: u64, snapshot: S::Snapshot) {
+        self.saved.insert(num, snapshot);
+        if self.saved.len() > MAX_SAVED_STATES {
+            let mut nums: Vec<u64> = self.saved.keys().copied().collect();
+            nums.sort_unstable();
+            self.saved.remove(&nums[nums.len() / 2]);
+        }
     }
 
     /// Record the shape the session now has, so every state, including ones restored later,
@@ -276,6 +306,28 @@ pub(super) mod tests {
         t.apply_diff(1, 2, b"b", 2).unwrap();
         // State 0 and 1 were below the throwaway when they were left: only the live one is held.
         assert_eq!(t.held_states(), 1);
+    }
+
+    #[test]
+    fn held_snapshots_are_capped_keeping_the_oldest_and_the_newest() {
+        let mut t = terminal();
+        // A server whose acknowledgements never arrive: the throwaway never moves.
+        for num in 1..=200u64 {
+            assert!(t.apply_diff(num - 1, num, b".", 0).unwrap());
+        }
+        assert_eq!(t.held_states(), 1 + MAX_SAVED_STATES);
+        assert!(
+            t.holds(0),
+            "the oldest state, which the server may still diff from"
+        );
+        assert!(t.holds(199), "the newest snapshot");
+        assert!(t.holds(200), "the live state");
+        assert!(!t.holds(100), "a state in between was given up");
+        // Diffing from a given-up state is refused, not applied to something else.
+        let before = t.live().text.clone();
+        assert!(!t.apply_diff(100, 201, b"!", 0).unwrap());
+        assert_eq!(t.latest(), 200);
+        assert_eq!(t.live().text, before);
     }
 
     #[test]

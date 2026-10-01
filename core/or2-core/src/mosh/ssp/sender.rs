@@ -2,7 +2,7 @@
 // Vendored from mosh-rs (https://github.com/wilsonglasser/mosh-rs), commit
 // 90b37125f5e4a598be91dec37d23921b6865276e, src/sender.rs. Upstream: GPL-3.0-or-later, copyright
 // Wilson Glasser; the protocol logic follows mosh (Keith Winstein and contributors, GPL-3.0-or-later).
-// See THIRD_PARTY_NOTICES.md. or2 changes: module paths only (comments about prediction kept; or2 has prediction off), then rustfmt.
+// See THIRD_PARTY_NOTICES.md. or2 changes: module paths only (comments about prediction kept; or2 has prediction off), `TransportReceiver::forget`, then rustfmt.
 //! The transport state machine (`transportsender-impl.h`,
 //! `networktransport-impl.h`): what turns instructions into a session
 //! that keeps itself alive.
@@ -501,6 +501,17 @@ impl TransportReceiver {
     /// The highest contiguous state held, which is what gets acked.
     pub fn latest(&self) -> u64 {
         *self.received.last().expect("never empty")
+    }
+
+    /// Un-receive a state whose diff could not be applied, so it is neither acknowledged nor
+    /// treated as a duplicate when the peer sends it again. State 0 never goes.
+    pub fn forget(&mut self, num: u64) {
+        if num != 0 {
+            self.received.retain(|n| *n != num);
+            if self.received.is_empty() {
+                self.received.push(0);
+            }
+        }
     }
 
     /// Decide what an arriving instruction turned out to be.

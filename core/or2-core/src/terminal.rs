@@ -111,6 +111,26 @@ impl TerminalEngine {
         Ok(())
     }
 
+    /// Where the viewport is scrolled to, as a row offset from the top of the scrollback, or
+    /// `None` while it follows the active area. A snapshot does not record it.
+    pub fn viewport_offset(&self) -> Result<Option<usize>, TerminalError> {
+        if self.terminal.viewport_active()? {
+            return Ok(None);
+        }
+        Ok(Some(self.terminal.scrollbar()?.offset as usize))
+    }
+
+    /// Puts the viewport where [`TerminalEngine::viewport_offset`] reported it, `None` being
+    /// the bottom. The next frame is a full one.
+    pub fn set_viewport_offset(&mut self, offset: Option<usize>) -> Result<(), TerminalError> {
+        self.terminal.scroll_viewport(match offset {
+            Some(row) => ScrollViewport::Row(row),
+            None => ScrollViewport::Bottom,
+        });
+        self.full = true;
+        Ok(())
+    }
+
     pub fn request_full_frame(&mut self) {
         self.full = true;
     }
