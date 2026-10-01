@@ -8,7 +8,9 @@
 //! shutdown handshake so the server exits). Whoever starts the server also owes its cleanup:
 //! a start that fails, times out or is disconnected before `Connected`, and any session that
 //! ends `Failed` (before or after `Connected`), calls `mosh::terminate` before the session
-//! reports its end.
+//! reports its end. A stop that cannot run because the SSH server has no free session channel
+//! (OpenSSH's `MaxSessions`) is not forgotten: the host keeps it as a [`ServerDebt`] and
+//! retries, with bounds, when capacity returns.
 //!
 //! **Time.** Closing is bounded so the host can wait for it: after a user disconnect of the
 //! host a session needs at most [`ABANDON_GRACE`] (a running bootstrap), [`GOODBYE_TIMEOUT`]
@@ -21,18 +23,19 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::{Notify, mpsc, oneshot};
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 use super::connection::{Closing, SshHost, closed_reason};
 use super::runtime;
 use super::terminal_session::{not_installed, program, remote_failure};
 use crate::host::{TerminalTarget, UserCancel};
 use crate::mosh::{self, GOODBYE_TIMEOUT, MoshParams, Plan, run_session};
+use crate::remote::{RemoteError, RemoteHost};
 use crate::session::{CloseReason, Command, SessionDriver, SessionFailure, SessionState};
 use crate::term::TerminalSize;
 use crate::transport::DatagramTransport;
@@ -45,6 +48,13 @@ const ABANDON_GRACE: Duration = Duration::from_secs(2);
 /// round trips (channel, exec, answer), with room for a slow link, and short enough for a
 /// disconnect not to hang on a wedged host.
 const CLEANUP_BUDGET: Duration = Duration::from_secs(5);
+/// How often an owed stop is tried again while the host has no free channel for it, and how
+/// many times: long enough for terminals to close and free a channel, short enough that a
+/// host that never frees one is given up on (and reported, see [`ServerDebt::stranded`]).
+const DEBT_PACING: Pacing = Pacing {
+    interval: Duration::from_secs(1),
+    attempts: 20,
+};
 /// The longest a mosh session takes to close once the user has disconnected the host: a
 /// bootstrap abandoned, the shutdown handshake and the cleanup, each at its own bound (they
 /// never all apply to one session, so this is generous). The host driver waits this long for
@@ -150,7 +160,7 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
     let pid = params.server_pid;
     if abandoned {
         // The server exists and nobody will ever connect to it.
-        cleanup(&host, pid).await;
+        stop_server(&host, pid, DEBT_PACING).await;
         driver.close(CloseReason::Disconnected);
         return;
     }
@@ -177,7 +187,7 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
         &ended.reason,
         ended.server_gone,
     ) {
-        cleanup(&host, pid).await;
+        stop_server(&host, pid, DEBT_PACING).await;
     }
     driver.close(ended.reason);
 }
@@ -245,12 +255,162 @@ async fn abandon(prepare: &mut Prepare<'_>) -> Result<Option<MoshParams>, Sessio
         .unwrap_or(Err(SessionFailure::TimedOut))
 }
 
-/// Stops a server that no client will use. Best effort and bounded ([`CLEANUP_BUDGET`]): the
-/// host connection may be gone (then the server stays until someone stops it, as documented).
-async fn cleanup(host: &SshHost, pid: Option<u32>) {
-    if let Some(pid) = pid {
-        let budget = CLEANUP_BUDGET.min(host.exec_timeout());
-        let _ = timeout(budget, mosh::terminate(host, pid)).await;
+/// How an owed stop is retried.
+#[derive(Clone, Copy)]
+struct Pacing {
+    interval: Duration,
+    attempts: u32,
+}
+
+/// What a mosh cleanup needs from the host: a way to run `terminate`, and the host's ledger of
+/// stops it still owes.
+pub(super) trait StopHost: RemoteHost {
+    /// The servers this host still has to stop, and those it gave up on.
+    fn debt(&self) -> &ServerDebt;
+    /// The connection is gone: nothing can be stopped over it any more.
+    fn is_closed(&self) -> bool;
+    /// How long one request to the server may take.
+    fn exec_timeout(&self) -> Duration;
+}
+
+impl StopHost for SshHost {
+    fn debt(&self) -> &ServerDebt {
+        &self.servers
+    }
+
+    fn is_closed(&self) -> bool {
+        SshHost::is_closed(self)
+    }
+
+    fn exec_timeout(&self) -> Duration {
+        SshHost::exec_timeout(self)
+    }
+}
+
+/// The servers a host owes a stop. A stop needs a fresh SSH exec channel, and a server that
+/// refuses one (OpenSSH's `MaxSessions` of 10, all taken by terminals) must not make the stop
+/// disappear with the session that wanted it: the server's pid stays here, and is tried again
+/// when capacity returns, until it is stopped, the connection is gone, or the attempts run out.
+/// A stop that cannot be done any more is **stranded**: kept for [`ServerDebt::stranded`] so
+/// the failure is reported, not silent (the server stays on the host until someone stops it).
+#[derive(Default)]
+pub(super) struct ServerDebt {
+    state: Mutex<DebtState>,
+}
+
+#[derive(Default)]
+struct DebtState {
+    owed: Vec<u32>,
+    stranded: Vec<u32>,
+}
+
+impl ServerDebt {
+    fn state(&self) -> std::sync::MutexGuard<'_, DebtState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn owe(&self, pid: u32) {
+        let mut state = self.state();
+        if !state.owed.contains(&pid) {
+            state.owed.push(pid);
+        }
+    }
+
+    fn is_owed(&self, pid: u32) -> bool {
+        self.state().owed.contains(&pid)
+    }
+
+    fn owed(&self) -> Vec<u32> {
+        self.state().owed.clone()
+    }
+
+    fn settled(&self, pid: u32) {
+        self.state().owed.retain(|owed| *owed != pid);
+    }
+
+    fn strand(&self, pid: u32) {
+        let mut state = self.state();
+        state.owed.retain(|owed| *owed != pid);
+        if !state.stranded.contains(&pid) {
+            state.stranded.push(pid);
+        }
+    }
+
+    /// The pids of servers whose stop was given up on (the connection was lost, or no channel
+    /// came free in time): they are still running on the host.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn stranded(&self) -> Vec<u32> {
+        self.state().stranded.clone()
+    }
+}
+
+/// The outcome of one try at stopping a server.
+enum Stop {
+    Done,
+    /// No channel, or the host was too slow: worth another try.
+    Later,
+    /// The connection is gone: nothing more can be done over it.
+    Gone,
+}
+
+/// One try, bounded ([`CLEANUP_BUDGET`], or the host's exec timeout when shorter).
+async fn try_stop(host: &impl StopHost, pid: u32) -> Stop {
+    let budget = CLEANUP_BUDGET.min(host.exec_timeout());
+    match timeout(budget, mosh::terminate(host, pid)).await {
+        Ok(Ok(())) => Stop::Done,
+        Ok(Err(RemoteError::Closed)) => Stop::Gone,
+        _ if host.is_closed() => Stop::Gone,
+        _ => Stop::Later,
+    }
+}
+
+/// Stops a server that no client will use, bounded ([`CLEANUP_BUDGET`]). If that fails because
+/// the host has no free channel (or answered too slowly) the stop is not dropped: the pid goes
+/// into the host's [`ServerDebt`] and a background task retries every `pacing.interval`, up to
+/// `pacing.attempts` times. If the host connection is already gone the server stays until
+/// someone stops it, as documented, and the pid is recorded as stranded.
+async fn stop_server<H: StopHost>(host: &Arc<H>, pid: Option<u32>, pacing: Pacing) {
+    let Some(pid) = pid else { return };
+    match try_stop(&**host, pid).await {
+        Stop::Done => {}
+        Stop::Gone => host.debt().strand(pid),
+        Stop::Later => {
+            host.debt().owe(pid);
+            let host = Arc::clone(host);
+            runtime().spawn(async move {
+                for _ in 0..pacing.attempts {
+                    sleep(pacing.interval).await;
+                    // Settled meanwhile (the host's closing pass, or another owed stop).
+                    if !host.debt().is_owed(pid) {
+                        return;
+                    }
+                    match try_stop(&*host, pid).await {
+                        Stop::Done => return host.debt().settled(pid),
+                        Stop::Gone => break,
+                        Stop::Later => {}
+                    }
+                }
+                host.debt().strand(pid);
+            });
+        }
+    }
+}
+
+/// The host's last chance before it closes after a user disconnect: its terminals are closed,
+/// so channels are free. One try for every stop still owed, bounded by [`CLEANUP_BUDGET`] in
+/// all; what still fails is stranded.
+pub(super) async fn settle_debts<H: StopHost>(host: &H) {
+    let _ = timeout(CLEANUP_BUDGET, async {
+        for pid in host.debt().owed() {
+            match try_stop(host, pid).await {
+                Stop::Done => host.debt().settled(pid),
+                Stop::Later | Stop::Gone => host.debt().strand(pid),
+            }
+        }
+    })
+    .await;
+    for pid in host.debt().owed() {
+        host.debt().strand(pid);
     }
 }
 
@@ -339,6 +499,171 @@ mod tests {
             &CloseReason::RemoteExited { exit_status: None },
             true
         ));
+    }
+
+    /// A host whose exec channels are refused while `refuse` is above zero (each refusal
+    /// counts it down), like an sshd at `MaxSessions`; `closed` makes it a lost connection.
+    #[derive(Default)]
+    struct FakeHost {
+        refuse: std::sync::atomic::AtomicU32,
+        closed: AtomicBool,
+        runs: std::sync::atomic::AtomicU32,
+        debt: ServerDebt,
+    }
+
+    impl RemoteHost for FakeHost {
+        type Stream = tokio::io::DuplexStream;
+
+        async fn exec_rendered(
+            &self,
+            _line: &str,
+        ) -> Result<crate::remote::ExecOutput, RemoteError> {
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(RemoteError::Closed);
+            }
+            let left = self.refuse.load(Ordering::SeqCst);
+            if left > 0 {
+                self.refuse.store(left - 1, Ordering::SeqCst);
+                return Err(RemoteError::Rejected("ResourceShortage".into()));
+            }
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::remote::ExecOutput {
+                status: Some(0),
+                stdout: crate::remote::SecretBytes::new(),
+                stderr: crate::remote::SecretBytes::new(),
+            })
+        }
+
+        async fn open_unix(&self, _path: &str) -> Result<Self::Stream, RemoteError> {
+            Err(RemoteError::Closed)
+        }
+    }
+
+    impl StopHost for FakeHost {
+        fn debt(&self) -> &ServerDebt {
+            &self.debt
+        }
+
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::SeqCst)
+        }
+
+        fn exec_timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    const FAST: Pacing = Pacing {
+        interval: Duration::from_millis(10),
+        attempts: 5,
+    };
+
+    async fn until(what: &str, mut condition: impl FnMut() -> bool) {
+        for _ in 0..300 {
+            if condition() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    #[tokio::test]
+    async fn a_stop_with_a_free_channel_runs_at_once_and_owes_nothing() {
+        let host = Arc::new(FakeHost::default());
+        stop_server(&host, Some(4242), FAST).await;
+        assert_eq!(host.runs.load(Ordering::SeqCst), 1);
+        assert!(host.debt.owed().is_empty());
+        assert!(host.debt.stranded().is_empty());
+        // No pid, nothing to stop.
+        stop_server(&host, None, FAST).await;
+        assert_eq!(host.runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_stop_refused_for_want_of_a_channel_is_kept_and_retried_until_it_runs() {
+        let host = Arc::new(FakeHost::default());
+        host.refuse.store(3, Ordering::SeqCst);
+        stop_server(&host, Some(4242), FAST).await;
+        // The first try was refused: the debt is recorded, the stop has not run.
+        assert_eq!(host.runs.load(Ordering::SeqCst), 0);
+        until("the retries to stop the server", || {
+            host.runs.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        until("the debt to be settled", || host.debt.owed().is_empty()).await;
+        assert!(host.debt.stranded().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stop_that_never_finds_a_channel_is_given_up_on_and_reported() {
+        let host = Arc::new(FakeHost::default());
+        host.refuse.store(u32::MAX, Ordering::SeqCst);
+        stop_server(&host, Some(4242), FAST).await;
+        until("the retries to run out", || {
+            !host.debt.stranded().is_empty()
+        })
+        .await;
+        assert_eq!(host.debt.stranded(), [4242]);
+        assert!(host.debt.owed().is_empty());
+        assert_eq!(host.runs.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_stop_over_a_lost_connection_is_stranded_at_once() {
+        let host = Arc::new(FakeHost::default());
+        host.closed.store(true, Ordering::SeqCst);
+        stop_server(&host, Some(4242), FAST).await;
+        assert_eq!(host.debt.stranded(), [4242]);
+        assert!(host.debt.owed().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_connection_lost_between_retries_strands_the_stop() {
+        let host = Arc::new(FakeHost::default());
+        host.refuse.store(u32::MAX, Ordering::SeqCst);
+        stop_server(&host, Some(7), FAST).await;
+        host.closed.store(true, Ordering::SeqCst);
+        until("the stop to be stranded", || {
+            !host.debt.stranded().is_empty()
+        })
+        .await;
+        assert_eq!(host.debt.stranded(), [7]);
+    }
+
+    #[tokio::test]
+    async fn the_closing_pass_settles_what_is_owed_and_strands_what_still_fails() {
+        let host = Arc::new(FakeHost::default());
+        host.refuse.store(1, Ordering::SeqCst);
+        stop_server(
+            &host,
+            Some(1),
+            Pacing {
+                interval: Duration::from_secs(60),
+                attempts: 1,
+            },
+        )
+        .await;
+        assert_eq!(host.debt.owed(), [1]);
+        // Channels are free now: the last try before the host closes stops the server.
+        settle_debts(&*host).await;
+        assert_eq!(host.runs.load(Ordering::SeqCst), 1);
+        assert!(host.debt.owed().is_empty() && host.debt.stranded().is_empty());
+
+        host.refuse.store(2, Ordering::SeqCst);
+        stop_server(
+            &host,
+            Some(2),
+            Pacing {
+                interval: Duration::from_secs(60),
+                attempts: 1,
+            },
+        )
+        .await;
+        host.refuse.store(u32::MAX, Ordering::SeqCst);
+        settle_debts(&*host).await;
+        assert_eq!(host.debt.stranded(), [2]);
+        assert!(host.debt.owed().is_empty());
     }
 
     #[test]

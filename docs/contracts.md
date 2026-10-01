@@ -1368,6 +1368,20 @@ session `Failed { Internal { "mosh terminals land with M3-A" } }` is gone.
    server over it, and the session's `Closed` still precedes the host's, also on a slow link.
    Past the budget the host closes anyway (a wedged session must not hold it open). A loss of
    the host releases the tracker at once, as before.
+   **Cleanup debt (channel exhaustion).** `terminate` needs a fresh SSH exec channel, and an
+   sshd at `MaxSessions` (OpenSSH's default 10, all taken by terminals on a healthy
+   connection) refuses it. The stop is then **not** forgotten with the session: the server's
+   pid goes into the host object's `ServerDebt`, and a background task retries it every second
+   (bounded: 20 attempts, each bounded by `CLEANUP_BUDGET`) while the connection is up, so it
+   goes through as soon as a terminal closes and frees a channel. On a user disconnect of the
+   host, once its terminals have closed, the host makes one last bounded try (`CLEANUP_BUDGET`)
+   at everything still owed before it tears the connection down. A stop that cannot be done
+   (connection lost, no channel in time) is **stranded**: recorded in the host object
+   (`ServerDebt::stranded`; `SshRemote::stranded_servers` for tests), not silently dropped; it
+   is not surfaced through the FFI, and the server stays on the host until someone stops it.
+   The retry task holds the host object (memory only) for at most the attempts' span. The
+   exec inside `mosh::bootstrap` that stops a server whose answer was unusable is not covered
+   (rare, and it ran with a channel a moment before).
    **Known leak windows.** If the host connection is already gone `terminate` fails quietly and
    the server stays until someone stops it. That is not only a narrow window: a host lost after
    the bootstrap but before the first datagram (the very case AUTO's fallback targets, UDP
@@ -1377,7 +1391,8 @@ session `Failed { Internal { "mosh terminals land with M3-A" } }` is gone.
    storage, so there is nobody to retry. Likewise a session that ends `Failed` after the host
    is lost, and a pid lost by a cut bootstrap. Accepted for M3: the server's shell is the one
    the user would have been given anyway, and Android's reconnect (M3-B) uses a new server.
-   **M3-B hand-off:** a `Failed { TimedOut }` close does not promise the server was stopped; a
+   **M3-B hand-off:** a `Failed { TimedOut }` close does not promise the server was stopped
+   (a stop may still be waiting for a channel, see "Cleanup debt"); a
    transport fallback to SSH after it is still right, and the UI must not claim cleanup.
    A deliberately retained pid for a later best-effort terminate over a fresh host connection
    is possible (the app would have to hold it) and is not done.
@@ -1468,7 +1483,13 @@ link, with a `mosh-server` wrapper that waits first), takes longer than the term
 and still closes the session before the host with the server stopped; a disconnect during the
 probe executes no `mosh-server` at all; host loss while the session is still connecting leaves
 it to time out (`TimedOut`, not the host's `ConnectionLost`; the server then leaks, as
-documented above). The mosh-server processes are
+documented above); an unconfirmed goodbye (a `TestUdp` whose outbound path is muted while SSH
+stays up) still stops the server over SSH after a terminal disconnect, the release of the last
+handle and a host disconnect; a lost host's later `disconnect()` and release close its surviving
+mosh session, and a disconnect racing the loss does too; with all ten SSH session channels
+taken, the server of a mosh session that timed out is stopped once channels free up (on
+terminal close, or in the host disconnect's last try), asserted by the server's disappearance,
+not by the fixture's reaper. The mosh-server processes are
 found by the fixture's private `TMUX_TMPDIR` in their environment and killed by exact pid when
 the test ends however it ends. `connection_tests.rs`: `NotInstalled` for every target
 without opening a channel or focusing a pane. `mosh::driver` tests: throttle, health through the

@@ -976,3 +976,76 @@ fn a_host_disconnect_racing_the_loss_of_the_connection_still_closes_mosh_session
         live.wait_no_servers("the server to exit after the raced disconnect");
     }
 }
+/// With every SSH session channel taken (OpenSSH's `MaxSessions` of 10), stopping the server
+/// of a mosh session that timed out has no channel to run on. The debt is kept and settled when
+/// capacity returns; the server disappears without the fixture's reaper.
+fn a_full_channel_limit_scenario(host_disconnect: bool) {
+    let live = Live::with(
+        TestUdp {
+            blackhole: true,
+            ..TestUdp::default()
+        },
+        HostOptions {
+            mosh_connect_timeout: Duration::from_secs(3),
+            ..HostOptions::default()
+        },
+    );
+    let mosh = live.open_raw(
+        "m",
+        TerminalTarget::Shell,
+        TerminalTransport::Mosh,
+        (80, 24),
+    );
+    // The bootstrap's exec has finished (and released its channel) once the first socket
+    // is open.
+    wait_until(WAIT, "the session's first socket", || {
+        !live.udp.sockets.lock().unwrap().is_empty()
+    });
+    let terminals: Vec<Term> = (0..10)
+        .map(|index| {
+            live.open(
+                &format!("s{index}"),
+                TerminalTarget::Shell,
+                TerminalTransport::Ssh,
+            )
+        })
+        .collect();
+    assert_eq!(mosh.closed(), CloseReason::Failed(SessionFailure::TimedOut));
+    assert!(matches!(live.host.state(), HostState::Connected { .. }));
+    assert_eq!(
+        live.servers().len(),
+        1,
+        "no channel was free to stop the server yet"
+    );
+    if host_disconnect {
+        // The user disconnects the host: its terminals close, and the host makes one last try
+        // at what it owes before the connection goes.
+        live.host.disconnect();
+        for terminal in &terminals {
+            assert_eq!(terminal.closed(), CloseReason::Disconnected);
+        }
+        assert_eq!(live.host_closed(), CloseReason::Disconnected);
+    } else {
+        // Capacity returns as the terminals close: the owed stop goes through.
+        for terminal in &terminals {
+            terminal.handle.disconnect();
+        }
+    }
+    live.wait_no_servers("the owed cleanup to stop the server once channels are free");
+    if !host_disconnect {
+        assert!(matches!(live.host.state(), HostState::Connected { .. }));
+        live.host.disconnect();
+    }
+}
+
+#[test]
+fn a_full_ssh_channel_limit_does_not_leak_the_server_of_a_timed_out_mosh_session() {
+    require!();
+    a_full_channel_limit_scenario(false);
+}
+
+#[test]
+fn a_host_disconnect_settles_a_stop_that_was_waiting_for_a_channel() {
+    require!();
+    a_full_channel_limit_scenario(true);
+}

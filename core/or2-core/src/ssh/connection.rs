@@ -122,6 +122,8 @@ pub(super) struct SshHost {
     capabilities: OnceCell<HostCapabilities>,
     /// The last herdr session list read successfully (the probe's own list until then).
     sessions: probe::SessionsCache,
+    /// The mosh servers this connection still has to stop (see [`mosh_session::ServerDebt`]).
+    pub(super) servers: mosh_session::ServerDebt,
 }
 
 /// Every established SSH connection of the process, for [`network_changed`]. Weak: a closed
@@ -164,6 +166,11 @@ impl SshHost {
     /// channel setup.
     pub(super) fn exec_timeout(&self) -> Duration {
         self.exec_timeout
+    }
+
+    /// Whether the SSH connection is gone.
+    pub(super) fn is_closed(&self) -> bool {
+        self.handle.is_closed()
     }
 
     /// A new session channel, for a terminal.
@@ -423,6 +430,14 @@ fn start_tapped_with<T: Transport, D: DatagramTransport>(
 pub struct SshRemote(Arc<SshHost>);
 
 #[cfg(any(test, feature = "test-support"))]
+impl SshRemote {
+    /// The pids of `mosh-server`s whose stop was given up on (still running on the host).
+    pub fn stranded_servers(&self) -> Vec<u32> {
+        self.0.servers.stranded()
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
 impl RemoteHost for SshRemote {
     type Stream = russh::ChannelStream<russh_client::Msg>;
 
@@ -587,6 +602,11 @@ async fn drive<T: Transport, D: DatagramTransport>(
     )
     .await;
     if reason == CloseReason::Disconnected && !network_ended {
+        // Every terminal has closed, so channels are free: stops that were waiting for one get
+        // their last try while the connection is still up.
+        if let Some(host) = &connected {
+            mosh_session::settle_debts(&**host).await;
+        }
         shutdown.send_replace(true);
         // Let the SSH disconnect flush, but never wait indefinitely for a peer.
         let _ = timeout(Duration::from_millis(400), &mut network).await;
@@ -909,6 +929,7 @@ async fn hold(
         exec_timeout: options.exec_timeout,
         capabilities: OnceCell::new(),
         sessions: probe::SessionsCache::new(),
+        servers: mosh_session::ServerDebt::default(),
     });
     register(&host);
     if events
