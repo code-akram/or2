@@ -258,12 +258,15 @@ impl RemoteCommand {
     }
 
     /// The program followed by its arguments, for a caller that hands them to another program
-    /// as its own argument vector (mosh-server's command). Environment assignments are not part
-    /// of it.
-    pub fn argv(&self) -> Vec<String> {
-        std::iter::once(self.program.clone())
-            .chain(self.args.iter().cloned())
-            .collect()
+    /// as its own argument vector (mosh-server's command). `None` for a command with
+    /// environment assignments, which an argument vector cannot carry: dropping them would make
+    /// the command run differently than over [`render`](Self::render), without a sign.
+    pub fn argv(&self) -> Option<Vec<String>> {
+        self.env.is_empty().then(|| {
+            std::iter::once(self.program.clone())
+                .chain(self.args.iter().cloned())
+                .collect()
+        })
     }
 
     /// `'program' 'arg' …`, or `env 'K=V' … 'program' 'arg' …` with assignments. Every token is
@@ -553,6 +556,20 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         output.stdout
+    }
+
+    #[test]
+    fn argv_is_the_program_and_its_arguments_and_refuses_an_environment() {
+        assert_eq!(
+            printf(&["a b", "c"]).argv(),
+            Some(vec![
+                "printf".into(),
+                "[%s]".into(),
+                "a b".into(),
+                "c".into()
+            ])
+        );
+        assert_eq!(RemoteCommand::new("sh").env("A", "1").argv(), None);
     }
 
     #[test]

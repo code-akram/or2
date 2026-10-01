@@ -378,8 +378,9 @@ pub trait SessionListener: Send + Sync {
     fn on_state_changed(&self, state: SessionState) -> Result<(), ListenerError>;
     /// A frame is ready for `Session.take_frame`. Not repeated until it is taken.
     fn on_frame_ready(&self) -> Result<(), ListenerError>;
-    /// mosh only, at most once a second and only when a value changes; never called for SSH
-    /// terminals. Delivered between `Connected` and `Closed`.
+    /// mosh only, at most once a second and only when what the UI shows changes (the first
+    /// sample, the link turning stale past 5 s of silence, each further second while stale,
+    /// recovery); never called for SSH terminals. Delivered between `Connected` and `Closed`.
     fn on_link_health(&self, health: LinkHealth) -> Result<(), ListenerError>;
 }
 

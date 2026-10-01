@@ -694,55 +694,71 @@ fn sample(heard: u64) -> LinkHealth {
 }
 
 #[test]
-fn health_is_passed_on_at_most_once_a_second_and_only_when_a_value_changes() {
+fn health_is_reported_when_what_the_ui_shows_changes_and_at_most_once_a_second() {
     let mut throttle = HealthThrottle::default();
     let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
     // The first sample always goes out.
-    assert_eq!(throttle.offer(start, sample(300)), Some(sample(300)));
-    // Too soon, whatever it says; and a suppressed sample is not remembered.
+    assert_eq!(throttle.offer(at(0), sample(300)), Some(sample(300)));
+    // A healthy link says nothing more, however its numbers move.
+    for (ms, heard) in [(1000, 301), (2000, 900), (30_000, 4999), (31_000, 5000)] {
+        assert_eq!(throttle.offer(at(ms), sample(heard)), None, "{heard}");
+    }
+    // Turning stale is reported, once the second since the last report has passed; and a
+    // suppressed sample is not remembered.
+    assert_eq!(throttle.offer(at(31_500), sample(5001)), Some(sample(5001)));
+    assert_eq!(throttle.offer(at(32_000), sample(6000)), None, "too soon");
+    // Stale: one report per further whole second of silence.
     assert_eq!(
-        throttle.offer(start + Duration::from_millis(400), sample(900)),
-        None
+        throttle.offer(at(32_500), sample(5900)),
+        None,
+        "same second"
     );
+    assert_eq!(throttle.offer(at(32_600), sample(6100)), Some(sample(6100)));
     assert_eq!(
-        throttle.offer(start + Duration::from_millis(999), sample(5000)),
-        None
+        throttle.offer(at(33_700), sample(6400)),
+        None,
+        "same second"
     );
-    // Due and unchanged: nothing to say.
-    assert_eq!(
-        throttle.offer(start + Duration::from_secs(1), sample(300)),
-        None
-    );
-    assert_eq!(
-        throttle.offer(start + Duration::from_secs(30), sample(300)),
-        None
-    );
-    // Due and changed, in either field.
-    assert_eq!(
-        throttle.offer(start + Duration::from_secs(31), sample(6000)),
-        Some(sample(6000))
-    );
+    assert_eq!(throttle.offer(at(34_000), sample(7000)), Some(sample(7000)));
+    // Recovery is reported, and then silence again.
+    assert_eq!(throttle.offer(at(35_000), sample(400)), Some(sample(400)));
+    assert_eq!(throttle.offer(at(36_000), sample(1400)), None);
+    // The acknowledgement alone is not what the UI shows.
     let ack_only = LinkHealth {
-        since_heard_ms: 6000,
+        since_heard_ms: 400,
         since_ack_ms: 9000,
     };
+    assert_eq!(throttle.offer(at(40_000), ack_only), None);
+}
+
+#[test]
+fn a_healthy_link_is_looked_at_again_when_it_would_turn_stale() {
+    let mut throttle = HealthThrottle::default();
+    let now = Instant::now();
+    assert!(throttle.offer(now, sample(300)).is_some());
+    // 300 ms of silence: stale after 4.7 s more, not a wake-up a second.
     assert_eq!(
-        throttle.offer(start + Duration::from_secs(32), ack_only),
-        Some(ack_only)
+        throttle.next_check(now, sample(300)),
+        now + Duration::from_millis(4701)
     );
-    // The interval counts from the last report, not from the last offer.
+    // Close to the edge it waits at least the minimum, and never less than the report
+    // interval from the last report.
+    let later = now + Duration::from_millis(2000);
     assert_eq!(
-        throttle.offer(start + Duration::from_millis(32_500), sample(1)),
-        None
+        throttle.next_check(later, sample(4990)),
+        later + Duration::from_millis(100)
     );
+    let soon = now + Duration::from_millis(200);
     assert_eq!(
-        throttle.offer(start + Duration::from_millis(33_000), sample(1)),
-        Some(sample(1))
+        throttle.next_check(soon, sample(4990)),
+        now + Duration::from_secs(1)
     );
-    // Back to a value reported earlier counts as a change when it differs from the last one.
+    // Stale: every second.
+    let stale = now + Duration::from_secs(10);
     assert_eq!(
-        throttle.offer(start + Duration::from_secs(40), sample(6000)),
-        Some(sample(6000))
+        throttle.next_check(stale, sample(9000)),
+        stale + Duration::from_secs(1)
     );
 }
 
@@ -773,7 +789,7 @@ impl SessionObserver for HealthRecorder {
 }
 
 #[tokio::test]
-async fn a_connected_session_reports_link_health_through_its_observer_about_once_a_second() {
+async fn a_connected_session_reports_link_health_only_when_it_turns_stale_and_while_it_is() {
     let mut server = FakeServer::new(KEY).await;
     let (sender, states) = mpsc::channel();
     let recorder = Arc::new(HealthRecorder {
@@ -799,24 +815,84 @@ async fn a_connected_session_reports_link_health_through_its_observer_about_once
     );
     server.say(b"hi").await;
     assert_eq!(state(&states).await, SessionState::Connected);
-    tokio::time::sleep(Duration::from_millis(3300)).await;
-    let reports = recorder.health.lock().unwrap().clone();
-    assert!(
-        (2..=4).contains(&reports.len()),
-        "about one report a second, got {}",
-        reports.len()
+    // The first report is the healthy link; then nothing while it stays healthy.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    {
+        let reports = recorder.health.lock().unwrap();
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert!(reports[0].1.since_heard_ms < STALE_AFTER_MS);
+    }
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    assert_eq!(
+        recorder.health.lock().unwrap().len(),
+        1,
+        "a healthy link is not reported again"
     );
+    // The server stays silent: the link turns stale (past five seconds) and is then reported
+    // once a second with the growing silence.
+    tokio::time::sleep(Duration::from_millis(3400)).await;
+    let reports = recorder.health.lock().unwrap().clone();
+    assert!((3..=5).contains(&reports.len()), "{reports:?}");
     assert!(reports.iter().all(|(_, _, connected)| *connected));
-    for pair in reports.windows(2) {
+    for pair in reports[1..].windows(2) {
         assert!(
             pair[1].0.duration_since(pair[0].0) >= Duration::from_millis(900),
             "at most once a second"
         );
-        assert_ne!(pair[0].1, pair[1].1, "only when a value changes");
+        assert!(pair[1].1.since_heard_ms / 1000 > pair[0].1.since_heard_ms / 1000);
     }
-    // A server that stays silent shows as growing staleness.
-    let (first, last) = (reports[0].1, reports[reports.len() - 1].1);
-    assert!(last.since_heard_ms > first.since_heard_ms);
+    assert!(reports[1].1.since_heard_ms > STALE_AFTER_MS);
+    // Hearing the server again is a recovery, reported.
+    server.say(b"back").await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let reports = recorder.health.lock().unwrap().clone();
+    assert!(
+        reports.last().unwrap().1.since_heard_ms < STALE_AFTER_MS,
+        "{reports:?}"
+    );
+    handle.disconnect();
+}
+
+/// The `start_with` hook is not the session observer's throttled report: it sees every
+/// sample, about once a second, before the server has been heard as well.
+#[tokio::test]
+async fn the_health_observer_hook_sees_every_sample_including_before_connected() {
+    struct Hook(Mutex<Vec<StdInstant>>);
+    impl HealthObserver for Hook {
+        fn link_health(&self, _health: LinkHealth) {
+            self.0.lock().unwrap().push(StdInstant::now());
+        }
+    }
+    let mut server = FakeServer::new(KEY).await;
+    let hook = Arc::new(Hook(Mutex::new(Vec::new())));
+    let (sender, states) = mpsc::channel();
+    let recorder = Arc::new(HealthRecorder {
+        states: Mutex::new(sender),
+        health: Mutex::new(Vec::new()),
+        connected: std::sync::atomic::AtomicBool::new(false),
+    });
+    let (handle, _control) = spawn(
+        DirectUdp,
+        params(server.port(), KEY, 20, 5),
+        LOCALHOST,
+        recorder.clone(),
+        Some(hook.clone()),
+        CONNECT_TIMEOUT,
+    )
+    .unwrap();
+    server.hear(Duration::from_secs(5)).await.unwrap();
+    // Not connected yet: the hook still hears about the link every second.
+    tokio::time::sleep(Duration::from_millis(2400)).await;
+    assert!(
+        (1..=3).contains(&hook.0.lock().unwrap().len()),
+        "{} samples before Connected",
+        hook.0.lock().unwrap().len()
+    );
+    assert!(recorder.health.lock().unwrap().is_empty());
+    server.say(b"hi").await;
+    assert_eq!(state(&states).await, SessionState::Connected);
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    assert!(hook.0.lock().unwrap().len() >= 3);
     handle.disconnect();
 }
 

@@ -16,6 +16,7 @@ mod common;
 use std::fmt::Debug;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -163,6 +164,51 @@ struct Live {
     states: mpsc::Receiver<HostState>,
     log: Log,
     udp: TestUdp,
+    slow: Option<SlowServer>,
+}
+
+/// A `mosh-server` in front of the real one on the sshd sessions' `PATH`: it records that it
+/// was started, waits, then runs the real one. A bootstrap that takes a while.
+struct SlowServer {
+    directory: tempfile::TempDir,
+}
+
+impl SlowServer {
+    fn new(wait: &str) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let bin = directory.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .chain([PathBuf::from("/usr/bin")])
+            .map(|dir| dir.join("mosh-server"))
+            .find(|path| path.is_file())
+            .expect("a real mosh-server");
+        let script = bin.join("mosh-server");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nsleep {wait}\nexec '{}' \"$@\"\n",
+                directory.path().join("started").display(),
+                real.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        Self { directory }
+    }
+
+    /// The session environment that puts the wrapper first on `PATH`.
+    fn environment(&self) -> String {
+        format!(
+            "PATH={}:{}",
+            self.directory.path().join("bin").display(),
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
+        )
+    }
+
+    fn started(&self) -> bool {
+        self.directory.path().join("started").exists()
+    }
 }
 
 impl Live {
@@ -171,7 +217,23 @@ impl Live {
     }
 
     fn with(udp: TestUdp, options: HostOptions) -> Self {
-        let sshd = Sshd::new(false);
+        Self::build(udp, options, None)
+    }
+
+    /// A host whose `mosh-server` waits `wait` (a `sleep` argument) before it starts.
+    fn with_slow_bootstrap(wait: &str) -> Self {
+        Self::build(
+            TestUdp::default(),
+            HostOptions::default(),
+            Some(SlowServer::new(wait)),
+        )
+    }
+
+    fn build(udp: TestUdp, options: HostOptions, slow: Option<SlowServer>) -> Self {
+        let sshd = match &slow {
+            Some(slow) => Sshd::with_environment(false, "", &slow.environment()),
+            None => Sshd::new(false),
+        };
         let reaper = MoshReaper::new(&sshd);
         let key = ClientKey::generate_ed25519("");
         sshd.authorize(&key);
@@ -204,6 +266,7 @@ impl Live {
             states,
             log,
             udp,
+            slow,
         }
     }
 
@@ -537,6 +600,113 @@ fn a_user_disconnect_of_the_host_while_a_mosh_session_connects_terminates_its_se
     assert_eq!(term.closed(), CloseReason::Disconnected);
     assert_eq!(live.host_closed(), CloseReason::Disconnected);
     live.wait_no_servers("the abandoned mosh-server to be terminated");
+}
+
+/// Over a slow link a bootstrap that is still running when the user disconnects the host
+/// finishes within the abandon grace, and stopping the server it started then takes a few round
+/// trips: more than the 3 s that terminals get, so the host has to wait for the mosh session
+/// (its servers must not leak and its `Closed` still comes first).
+#[test]
+fn a_host_disconnect_during_a_slow_bootstrap_waits_for_the_server_to_be_stopped() {
+    require!();
+    let live = Live::with_slow_bootstrap("1");
+    let slow = live.slow.as_ref().unwrap();
+    // The probe is cached by an SSH terminal, so only the bootstrap is in flight.
+    let ssh = live.open("s", TerminalTarget::Shell, TerminalTransport::Ssh);
+    live.proxy.slow(Duration::from_millis(500));
+    let term = live.open_raw(
+        "m",
+        TerminalTarget::Shell,
+        TerminalTransport::Mosh,
+        (80, 24),
+    );
+    wait_until(WAIT, "the bootstrap to start", || slow.started());
+    let disconnected = Instant::now();
+    live.host.disconnect();
+    assert_eq!(term.closed(), CloseReason::Disconnected);
+    assert_eq!(ssh.closed(), CloseReason::Disconnected);
+    assert_eq!(live.host_closed(), CloseReason::Disconnected);
+    assert!(
+        disconnected.elapsed() > Duration::from_millis(3200),
+        "the scenario needs a cleanup longer than the terminals' grace, took {:?}",
+        disconnected.elapsed()
+    );
+    let log = live.log.lock().unwrap().clone();
+    let position = |entry: &str| log.iter().position(|item| item == entry).unwrap();
+    assert!(
+        position("m:Closed") < position("host:Closed"),
+        "the session closes before the host: {log:?}"
+    );
+    // The server the abandoned bootstrap started was stopped before the host closed.
+    live.proxy.slow(Duration::ZERO);
+    assert!(
+        live.servers().is_empty(),
+        "the abandoned mosh-server was terminated before the host closed"
+    );
+}
+
+/// A disconnect that arrives while the probe or pane focus is still running starts nothing:
+/// no `mosh-server` is executed for a session nobody will use.
+#[test]
+fn a_disconnect_before_the_bootstrap_starts_executes_no_mosh_server() {
+    require!();
+    let live = Live::with_slow_bootstrap("1");
+    let slow = live.slow.as_ref().unwrap();
+    live.proxy.slow(Duration::from_millis(150));
+    let term = live.open_raw(
+        "m",
+        TerminalTarget::Shell,
+        TerminalTransport::Mosh,
+        (80, 24),
+    );
+    term.handle.disconnect();
+    assert_eq!(term.closed(), CloseReason::Disconnected);
+    // Long enough for an exec that was started anyway to touch its marker.
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        !slow.started(),
+        "mosh-server was executed after the disconnect"
+    );
+    assert!(live.servers().is_empty());
+    live.proxy.slow(Duration::ZERO);
+    live.host.disconnect();
+}
+
+/// Losing the host while the session is still waiting for its first datagram does not end it
+/// (it never needed the connection again); it ends by its own timeout. The server cannot be
+/// stopped then (contracts.md, "M3-A implementation"), which is the documented limit.
+#[test]
+fn losing_the_host_while_a_mosh_session_connects_leaves_it_to_time_out() {
+    require!();
+    let live = Live::with(
+        TestUdp {
+            blackhole: true,
+            ..TestUdp::default()
+        },
+        HostOptions {
+            mosh_connect_timeout: Duration::from_millis(1500),
+            ..HostOptions::default()
+        },
+    );
+    let term = live.open_raw(
+        "m",
+        TerminalTarget::Shell,
+        TerminalTransport::Mosh,
+        (80, 24),
+    );
+    // The bootstrap is over once the session has opened its first socket.
+    wait_until(WAIT, "the session's first socket", || {
+        !live.udp.sockets.lock().unwrap().is_empty()
+    });
+    live.proxy.cut();
+    let CloseReason::Failed(SessionFailure::ConnectionLost(_)) = live.host_closed() else {
+        panic!("expected the host to be lost")
+    };
+    assert_eq!(
+        term.closed(),
+        CloseReason::Failed(SessionFailure::TimedOut),
+        "the session's own end, not the host's"
+    );
 }
 
 #[test]

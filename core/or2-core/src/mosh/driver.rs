@@ -41,9 +41,15 @@ use super::ssp::session::{Fault, LinkHealth, Session};
 /// How long to wait for the server's first datagram before failing the session.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a disconnect waits for the server to acknowledge the shutdown before giving up.
-const GOODBYE_TIMEOUT: Duration = Duration::from_secs(1);
-/// How often [`HealthObserver::link_health`] is called.
+pub(crate) const GOODBYE_TIMEOUT: Duration = Duration::from_secs(1);
+/// How often [`HealthObserver::link_health`] is called, and the least time between two reports
+/// to the session's observer.
 const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
+/// Silence from the server past which the link counts as stale (the grey-out threshold the UI
+/// uses), in milliseconds.
+pub(crate) const STALE_AFTER_MS: u64 = 5000;
+/// The least time between two looks at a healthy link that is about to turn stale.
+const MIN_HEALTH_CHECK: Duration = Duration::from_millis(100);
 /// How long to wait before trying to open another socket after one failed.
 const REBIND_RETRY: Duration = Duration::from_secs(1);
 /// How long opening another socket may take, name resolution included, before it is given up
@@ -221,7 +227,10 @@ async fn run<T: DatagramTransport>(
     let mut connected = false;
     let mut published = u64::MAX;
     let mut next_rebind = Instant::now();
-    let mut next_health = Instant::now() + HEALTH_INTERVAL;
+    // The `HealthObserver` hook of `start_with` gets every sample, before `Connected` too.
+    let mut next_observer = Instant::now() + HEALTH_INTERVAL;
+    // The session observer's reports start when the session connects (see `HealthThrottle`).
+    let mut next_report: Option<Instant> = None;
     let mut throttle = HealthThrottle::default();
     // The socket being opened for a rebind, and when to give up on it.
     let mut opening: Option<Opening<T>> = None;
@@ -235,19 +244,33 @@ async fn run<T: DatagramTransport>(
             opening = Some(Box::pin(link.next_socket()));
             opening_deadline = Instant::now() + REBIND_TIMEOUT;
         }
-        if connected && Instant::now() >= next_health {
+        if let Some(observer) = &health
+            && Instant::now() >= next_observer
+        {
+            observer.link_health(session.link_health());
+            next_observer = Instant::now() + HEALTH_INTERVAL;
+        }
+        if let Some(due) = next_report
+            && Instant::now() >= due
+        {
+            let now = Instant::now();
             let sample = session.link_health();
-            if let Some(observer) = &health {
-                observer.link_health(sample);
+            if let Some(report) = throttle.offer(now, sample) {
+                driver.publish_link_health(report);
             }
-            if let Some(sample) = throttle.offer(Instant::now(), sample) {
-                driver.publish_link_health(sample);
-            }
-            next_health = Instant::now() + HEALTH_INTERVAL;
+            next_report = Some(throttle.next_check(now, sample));
         }
 
-        // Wake at least once a second so health keeps flowing through quiet spells.
-        let wait = Duration::from_millis(session.wait_time_ms().max(1)).min(HEALTH_INTERVAL);
+        // Wake for the next health duty only: an idle, healthy session sleeps until its own
+        // protocol timers or the moment its link would turn stale.
+        let mut wait = Duration::from_millis(session.wait_time_ms().max(1));
+        if health.is_some() {
+            wait = wait.min(next_observer.saturating_duration_since(Instant::now()));
+        }
+        if let Some(due) = next_report {
+            wait = wait.min(due.saturating_duration_since(Instant::now()));
+        }
+        let wait = wait.max(Duration::from_millis(1));
         tokio::select! {
             received = poll_fn(|cx| link.poll_recv(cx, &mut buffer)) => {
                 let mut taken = 0;
@@ -260,6 +283,7 @@ async fn run<T: DatagramTransport>(
                                     link.authenticated(std::time::Instant::now());
                                     if !connected {
                                         connected = true;
+                                        next_report = Some(Instant::now());
                                         driver
                                             .transition(SessionState::Connected)
                                             .map_err(internal)?;
@@ -333,25 +357,52 @@ async fn run<T: DatagramTransport>(
     }
 }
 
-/// Passes link health on to the observer at most once a second and only when a value changed.
-/// The driver samples once a second already; this keeps the guarantee whatever the sampling,
-/// and nothing is reported while the numbers stand still.
+/// Decides which link-health samples reach the session's observer: at most one a second, and
+/// only when what the UI shows changes. That is the first sample, the link turning stale
+/// (`since_heard_ms` past [`STALE_AFTER_MS`]), each further whole second of silence while it is
+/// stale, and its recovery. A healthy link is never reported again: its millisecond-exact
+/// numbers change on every sample and would wake the app once a second per session for
+/// nothing. `since_ack_ms` alone does not count.
 #[derive(Default)]
 pub(crate) struct HealthThrottle {
-    last: Option<(Instant, LinkHealth)>,
+    /// When the last report went out, and what it said (see [`HealthThrottle::condition`]).
+    last: Option<(Instant, Option<u64>)>,
 }
 
 impl HealthThrottle {
-    /// `sample` if it is due, else `None`. A sample that is suppressed for being too soon is
-    /// not remembered: the next one is compared with what was last reported.
+    /// What a report is about: `None` for a healthy link, else the whole seconds of silence.
+    fn condition(sample: LinkHealth) -> Option<u64> {
+        (sample.since_heard_ms > STALE_AFTER_MS).then_some(sample.since_heard_ms / 1000)
+    }
+
+    /// `sample` if it is due, else `None`. A sample that is suppressed is not remembered: the
+    /// next one is compared with what was last reported.
     pub(crate) fn offer(&mut self, now: Instant, sample: LinkHealth) -> Option<LinkHealth> {
+        let condition = Self::condition(sample);
         if let Some((at, last)) = &self.last
-            && (now.saturating_duration_since(*at) < HEALTH_INTERVAL || *last == sample)
+            && (now.saturating_duration_since(*at) < HEALTH_INTERVAL || *last == condition)
         {
             return None;
         }
-        self.last = Some((now, sample));
+        self.last = Some((now, condition));
         Some(sample)
+    }
+
+    /// When to offer the next sample: a second on while stale, and for a healthy link when it
+    /// would turn stale if nothing more were heard (an earlier datagram only moves that later,
+    /// and the look finds it healthy again). Never before the interval since the last report.
+    pub(crate) fn next_check(&self, now: Instant, sample: LinkHealth) -> Instant {
+        let natural = match Self::condition(sample) {
+            Some(_) => now + HEALTH_INTERVAL,
+            None => {
+                let left = STALE_AFTER_MS + 1 - sample.since_heard_ms.min(STALE_AFTER_MS);
+                now + Duration::from_millis(left).max(MIN_HEALTH_CHECK)
+            }
+        };
+        match &self.last {
+            Some((at, _)) => natural.max(*at + HEALTH_INTERVAL),
+            None => natural,
+        }
     }
 }
 

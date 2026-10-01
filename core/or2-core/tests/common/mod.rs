@@ -8,7 +8,7 @@ use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -107,6 +107,13 @@ impl Sshd {
     /// [`Sshd::new`] with extra `sshd_config` lines appended (for example
     /// `AllowStreamLocalForwarding no`).
     pub fn with_config(certificate_only: bool, extra: &str) -> Self {
+        Self::with_environment(certificate_only, extra, "")
+    }
+
+    /// [`Sshd::with_config`] with `environment` (`NAME=value` words) added to what every
+    /// session of this sshd runs with. Only the first `SetEnv` line of a config counts, hence
+    /// a parameter rather than another line in `extra`.
+    pub fn with_environment(certificate_only: bool, extra: &str, environment: &str) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path();
         let host = ClientKey::generate_ed25519("");
@@ -116,7 +123,7 @@ impl Sshd {
         let tmux_dir = path.join("tmux");
         fs::create_dir(&tmux_dir).unwrap();
         let mut config = format!(
-            "ListenAddress {}\nHostKey {}\nAuthorizedKeysFile {}\nPidFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPrintMotd no\nPrintLastLog no\nSetEnv HOME={} HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR={} TMUX_TMPDIR={}\nLogLevel VERBOSE\n",
+            "ListenAddress {}\nHostKey {}\nAuthorizedKeysFile {}\nPidFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPrintMotd no\nPrintLastLog no\nSetEnv HOME={} HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR={} TMUX_TMPDIR={} {environment}\nLogLevel VERBOSE\n",
             Ipv4Addr::LOCALHOST,
             path.join("host").display(),
             path.join("authorized").display(),
@@ -316,6 +323,9 @@ pub struct Proxy {
     /// Bytes relayed client to server and server to client so far.
     pub to_server: Arc<AtomicUsize>,
     pub to_client: Arc<AtomicUsize>,
+    /// Milliseconds every relayed chunk is held before it is forwarded, in each direction: a
+    /// slow link. Zero (the default) forwards at once; it can be changed while connected.
+    pub latency_ms: Arc<AtomicU64>,
 }
 
 impl Proxy {
@@ -329,6 +339,8 @@ impl Proxy {
         let to_server = Arc::new(AtomicUsize::new(0));
         let to_client = Arc::new(AtomicUsize::new(0));
         let counters = (to_server.clone(), to_client.clone());
+        let latency_ms = Arc::new(AtomicU64::new(0));
+        let latency = latency_ms.clone();
         std::thread::spawn(move || {
             while !stopping.load(Ordering::SeqCst) {
                 let Ok((client, _)) = listener.accept() else {
@@ -337,7 +349,7 @@ impl Proxy {
                 };
                 client.set_nonblocking(false).unwrap();
                 let upstream = TcpStream::connect((Ipv4Addr::LOCALHOST, target)).unwrap();
-                for (mut from, mut to, count) in [
+                for (mut from, mut sink, count) in [
                     (
                         client.try_clone().unwrap(),
                         upstream.try_clone().unwrap(),
@@ -349,17 +361,37 @@ impl Proxy {
                         counters.1.clone(),
                     ),
                 ] {
+                    let latency = latency.clone();
+                    // The reader stamps each chunk; the writer releases it `latency` after
+                    // that stamp, so the delay does not add up over a burst of chunks.
+                    let (stamped, due) = std::sync::mpsc::channel::<(Instant, Vec<u8>)>();
+                    std::thread::spawn(move || {
+                        for (stamp, chunk) in due {
+                            let held = Duration::from_millis(latency.load(Ordering::SeqCst));
+                            if let Some(wait) =
+                                (stamp + held).checked_duration_since(Instant::now())
+                            {
+                                std::thread::sleep(wait);
+                            }
+                            if std::io::Write::write_all(&mut sink, &chunk).is_err() {
+                                break;
+                            }
+                        }
+                        let _ = sink.shutdown(Shutdown::Both);
+                    });
                     std::thread::spawn(move || {
                         let mut buffer = [0u8; 16 * 1024];
                         while let Ok(length) = std::io::Read::read(&mut from, &mut buffer) {
                             if length == 0
-                                || std::io::Write::write_all(&mut to, &buffer[..length]).is_err()
+                                || stamped
+                                    .send((Instant::now(), buffer[..length].to_vec()))
+                                    .is_err()
                             {
                                 break;
                             }
                             count.fetch_add(length, Ordering::SeqCst);
                         }
-                        let _ = to.shutdown(Shutdown::Both);
+                        // Dropping `stamped` lets the writer drain what is queued, then close.
                     });
                 }
                 kept.lock().unwrap().extend([client, upstream]);
@@ -371,7 +403,14 @@ impl Proxy {
             stop,
             to_server,
             to_client,
+            latency_ms,
         }
+    }
+
+    /// Holds every chunk for `delay` from now on (each way, so a round trip costs twice).
+    pub fn slow(&self, delay: Duration) {
+        self.latency_ms
+            .store(delay.as_millis() as u64, Ordering::SeqCst);
     }
 
     pub fn cut(&self) {

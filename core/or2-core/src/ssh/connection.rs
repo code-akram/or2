@@ -15,7 +15,10 @@
 //! down, and only then reports the host's `Closed`: terminals and watches close before the
 //! host, matching the contract probe. The wait is bounded ([`SESSIONS_CLOSE_GRACE`]) because
 //! a terminal thread stuck in a slow observer callback must not hold the host open forever;
-//! a session that outlasts it can still deliver its `Closed` after the host's. A user
+//! a session that outlasts it can still deliver its `Closed` after the host's. Mosh sessions
+//! have their own, longer bound ([`mosh_session::CLOSE_BUDGET`]): closing one can mean stopping
+//! its server over this very connection, which takes round trips, and the connection must
+//! stay up until that is done. A user
 //! disconnect closes terminals with
 //! `Disconnected` and sends each channel's close first; loss closes them with the failure the
 //! connection ended with. Queries still running are dropped, so their callers see `Closed`.
@@ -79,6 +82,10 @@ impl Default for HostOptions {
 /// How long closing waits for terminals and watches to deliver their `Closed`. Past it the
 /// host closes anyway: the "sessions before host" order holds unless a session is wedged.
 const SESSIONS_CLOSE_GRACE: Duration = Duration::from_secs(3);
+/// How long a keepalive that [`network_changed`] queues may wait for the connection to take it.
+/// Past it the connection is not draining (a blocked write): the keepalive is dropped, so calls
+/// during a flapping network do not pile up tasks.
+const KEEPALIVE_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a watch whose capability probe failed waits before probing again.
 const WATCH_RETRY: Duration = Duration::from_secs(10);
 
@@ -140,7 +147,7 @@ pub(super) fn network_changed() {
     };
     for host in hosts {
         runtime().spawn(async move {
-            let _ = host.handle.send_keepalive(true).await;
+            let _ = timeout(KEEPALIVE_QUEUE_TIMEOUT, host.handle.send_keepalive(true)).await;
         });
     }
 }
@@ -479,6 +486,8 @@ async fn drive<T: Transport, D: DatagramTransport>(
     // Every terminal thread and watch task holds a clone; `drained.recv()` returns `None`
     // once they are all gone.
     let (tracker, mut drained) = mpsc::channel::<()>(1);
+    // The same for mosh sessions, which are waited for longer (see `mosh_session::CLOSE_BUDGET`).
+    let (mosh_tracker, mut mosh_drained) = mpsc::channel::<()>(1);
     let mut connected: Option<Arc<SshHost>> = None;
     let mut peer_addr: Option<SocketAddr> = None;
     let mut decision = None;
@@ -539,6 +548,7 @@ async fn drive<T: Transport, D: DatagramTransport>(
                                 datagrams: &datagrams,
                                 peer: peer_addr,
                                 connect_timeout: options.mosh_connect_timeout,
+                                tracker: &mosh_tracker,
                             };
                             dispatch(command, host, &closing, &tracker, &mosh);
                         }
@@ -563,8 +573,17 @@ async fn drive<T: Transport, D: DatagramTransport>(
     let reason = outcome.unwrap_or_else(CloseReason::Failed);
     // Terminals and watches first: tell them why, then wait until each has said `Closed`.
     closing_sender.send_replace(Some(reason.clone()));
-    drop(tracker);
+    drop((tracker, mosh_tracker));
+    let closing_since = Instant::now();
     let _ = timeout(SESSIONS_CLOSE_GRACE, drained.recv()).await;
+    // Counted from the same moment: the mosh sessions have been closing meanwhile. A loss
+    // releases their trackers at once (they outlive the connection), so only a user disconnect
+    // waits here.
+    let _ = timeout_at(
+        closing_since + mosh_session::CLOSE_BUDGET,
+        mosh_drained.recv(),
+    )
+    .await;
     if reason == CloseReason::Disconnected && !network_ended {
         shutdown.send_replace(true);
         // Let the SSH disconnect flush, but never wait indefinitely for a peer.
@@ -598,7 +617,7 @@ fn dispatch<D: DatagramTransport>(
             transport: TerminalTransport::Mosh,
             size,
             driver,
-        } => spawn_mosh(host, target, size, driver, closing, tracker, mosh),
+        } => spawn_mosh(host, target, size, driver, closing, mosh),
         HostCommand::Capabilities { reply } => {
             let host = Arc::clone(host);
             let (mut closing, tracker) = (closing.clone(), tracker.clone());
@@ -670,6 +689,8 @@ struct MoshContext<'a, D> {
     datagrams: &'a Arc<D>,
     peer: Option<SocketAddr>,
     connect_timeout: Duration,
+    /// Held by every mosh session until it has closed.
+    tracker: &'a mpsc::Sender<()>,
 }
 
 fn spawn_mosh<D: DatagramTransport>(
@@ -678,7 +699,6 @@ fn spawn_mosh<D: DatagramTransport>(
     size: TerminalSize,
     session: SessionDriver,
     closing: &Closing,
-    tracker: &mpsc::Sender<()>,
     mosh: &MoshContext<'_, D>,
 ) {
     let open = mosh_session::Open {
@@ -688,7 +708,7 @@ fn spawn_mosh<D: DatagramTransport>(
         target,
         size,
         closing: closing.clone(),
-        tracker: tracker.clone(),
+        tracker: mosh.tracker.clone(),
         connect_timeout: mosh.connect_timeout,
     };
     // A failed spawn drops the closure and with it the driver, which closes the session with

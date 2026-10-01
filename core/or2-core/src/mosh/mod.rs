@@ -29,5 +29,5 @@ pub mod ssp;
 
 pub use bootstrap::{BootstrapError, MoshKey, MoshParams, bootstrap, terminate};
 pub use driver::{CONNECT_TIMEOUT, HealthObserver, LinkControl, start, start_with};
-pub(crate) use driver::{Plan, run_session};
+pub(crate) use driver::{GOODBYE_TIMEOUT, Plan, run_session};
 pub use ssp::session::LinkHealth;
