@@ -196,6 +196,9 @@ class ActiveTerminal internal constructor(val id: Long, val host: Host, val targ
     /** Which session object's callbacks count: a fallback to SSH replaces the handle and bumps this. */
     internal var attempt = 0
 
+    /** The connection (generation) this terminal was opened on: a mosh session outlives it when it is lost. */
+    internal var origin: ActiveHost? = null
+
     /** Mosh only: the server's process id on the host, read when the session connected and kept after it closes. */
     internal var moshServerPid: UInt? = null
 
@@ -259,6 +262,17 @@ class HostConnections(
     private val mutableHosts = MutableStateFlow<Map<Long, ActiveHost>>(emptyMap())
     private val mutableTerminals = MutableStateFlow<List<ActiveTerminal>>(emptyList())
     private var nextTerminalId = 1L
+
+    /**
+     * Connections that were replaced while mosh terminals opened on them were still running. A mosh
+     * session needs its SSH connection only to start, so it survives the loss of it, but the native
+     * host object counts as the user's hand on the host: disconnecting it, or releasing it, closes
+     * every mosh session of that host (user cancellation, see contracts.md). Replacing a lost
+     * connection with a new one must therefore not touch the old object while a survivor runs, so it is
+     * kept here, owned, until its last mosh terminal has closed or been dismissed ([releaseLingering]).
+     * An explicit disconnect, a deletion and "Disconnect all" still reach it.
+     */
+    private val lingering = mutableListOf<ActiveHost>()
 
     /** Opening, reusing and switching to agent terminals, with the pane focus each needs first. */
     val activations = TerminalActivations(this, scope)
@@ -359,7 +373,31 @@ class HostConnections(
     private fun replace(hostId: Long, current: ActiveHost) {
         val previous = mutableHosts.value[hostId]
         mutableHosts.value += hostId to current
-        previous?.let(::retireHost)
+        if (previous == null) return
+        // Replacing the SSH connection is not the user ending the host: keep the old native object
+        // while mosh terminals opened on it still run (they would be closed with it).
+        if (holdsTerminals(previous)) retainForSurvivors(previous) else retireHost(previous)
+    }
+
+    /** Mosh terminals opened on [host] that have not closed or been dismissed: they need the object kept. */
+    private fun holdsTerminals(host: ActiveHost) = mutableTerminals.value.any {
+        it.origin === host && !it.retired && it.state.value !is SessionState.Closed && it.mutableTransport.value == TerminalTransport.MOSH
+    }
+
+    private fun retainForSurvivors(previous: ActiveHost) {
+        // The connection is over: nothing is watched on it any more, and nothing new opens on it
+        // (`owns` fails), but the native object stays untouched.
+        previous.mutableWatches.value.forEach { stopWatch(it) }
+        previous.mutableWatches.value = emptyList()
+        lingering += previous
+    }
+
+    /** Ends the retained connections whose mosh terminals have all closed or been dismissed. */
+    private fun releaseLingering() {
+        if (lingering.isEmpty()) return
+        val done = lingering.filterNot(::holdsTerminals)
+        lingering.removeAll(done)
+        done.forEach(::retireHost)
     }
 
     /** Persist trust, bound to the presented key, and only then approve it. */
@@ -385,14 +423,24 @@ class HostConnections(
 
     /** Ends the connection; its terminals and watches close, and the closed state stays visible. */
     fun disconnect(hostId: Long) {
-        val current = mutableHosts.value[hostId] ?: return
+        val current = mutableHosts.value[hostId]
+        val older = lingering.filter { it.host.id == hostId }
+        if (current == null && older.isEmpty()) return
         userClose?.hostClosed(hostId)
-        current.disconnectRequested = true
-        current.mutablePort.value?.disconnect()
+        current?.let {
+            it.disconnectRequested = true
+            it.mutablePort.value?.disconnect()
+        }
+        // The user ends the host: that includes the mosh terminals of its older connections, which
+        // close with their own object (and release it once they have).
+        older.forEach { it.mutablePort.value?.disconnect() }
     }
 
     /** Forgets a connection (disconnecting it first). Terminals keep their own lifecycle. */
     fun dismissHost(hostId: Long) {
+        val older = lingering.filter { it.host.id == hostId }
+        lingering.removeAll(older)
+        older.forEach(::retireHost)
         val current = mutableHosts.value[hostId] ?: return
         mutableHosts.value -= hostId
         retireHost(current)
@@ -592,6 +640,7 @@ class HostConnections(
         val now = clock()
         val choice = chooseTransport(pref, moshServer, current.moshRejected(now))
         val terminal = ActiveTerminal(nextTerminalId, current.host, target)
+        terminal.origin = current
         terminal.fallbackEligible = pref == TransportPref.AUTO && choice == TerminalTransport.MOSH
         if (pref == TransportPref.AUTO && moshServer != null && choice == TerminalTransport.SSH) {
             terminal.mutableNote.value = current.moshFallbackNote ?: MOSH_PAUSED_NOTE
@@ -638,6 +687,8 @@ class HostConnections(
         if (state is SessionState.Closed && state.reason is CloseReason.RemoteExited) {
             userClose?.terminalClosed(terminal.host.id, terminal.target)
         }
+        // The last survivor of a replaced connection is gone: nothing keeps that connection any more.
+        if (state is SessionState.Closed) releaseLingering()
     }
 
     // --- mosh servers orphaned by process death ------------------------------------------
@@ -790,6 +841,7 @@ class HostConnections(
     fun disconnectAll() {
         mutableTerminals.value.filter { !it.retired && it.state.value !is SessionState.Closed }.forEach(::disconnectTerminal)
         mutableHosts.value.values.filter { it.isLive }.forEach { disconnect(it.host.id) }
+        lingering.toList().forEach { it.mutablePort.value?.disconnect() }
     }
 
     /** Retire ownership, but never destroy a handle still leased by a composed terminal screen. */
@@ -798,6 +850,7 @@ class HostConnections(
         userClose?.terminalClosed(terminal.host.id, terminal.target)
         mutableTerminals.value -= terminal
         retireTerminal(terminal)
+        releaseLingering()
     }
 
     internal fun attachDisplay(terminal: ActiveTerminal) { terminal.displays++ }

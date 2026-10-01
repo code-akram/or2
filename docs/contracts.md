@@ -1788,6 +1788,23 @@ to fail v0 step 3. These changes landed after lanes M3-A and M3-B and are integr
 - **Multi-address mosh.** Mosh pins to the address SSH actually reached. The host form says so under
   the address list: `In order of preference. All are tried; the first to answer wins. Mosh stays on
   the address SSH reached, so list the one that works on every network first.`
+- **Reconnecting keeps the surviving mosh terminals.** A mosh session outlives a lost SSH connection, but
+  disconnecting or releasing the native host object is the user's cancellation in Rust and closes every mosh
+  session of that host (see "Host close semantics"). Reconnecting (the chip, a tap, Resume) used to retire the
+  lost connection that way and so killed the very terminal it was meant to preserve. `HostConnections.replace`
+  now tells *replacing the SSH connection* from *the user ending the host*: when mosh terminals opened on the
+  lost connection (`ActiveTerminal.origin`) are still running it keeps that native object, untouched, in a
+  `lingering` list and only the new connection becomes the host's. The old object is released (disconnect, then
+  close) when its last mosh terminal has closed or been dismissed. An SSH-only lost connection is retired at once
+  as before. The explicit paths still reach older generations: `disconnect(hostId)` disconnects every lingering
+  connection of that host as well as the current one, `dismissHost`/`release` (host edit, deletion) retire
+  them, and `disconnectAll` disconnects them (their terminals close through Rust's cancellation, each
+  `Disconnected`, and the objects are released as they close). New input and output on the *original* terminal
+  after a reconnect work: `HostConnectionsNativeTest` (real FFI, loopback sshd, local `mosh-server`) cuts the
+  SSH connection by killing the fixture's session processes, reconnects, drives the original terminal, and then
+  checks that an explicit host disconnect, and separately "Disconnect all", close it and release the old
+  connection; `HostConnectionsReconnectTest` covers the bookkeeping on fakes (survivor kept, released on the
+  last close or dismissal, several generations, delete, edit, disconnect all).
 - **Manifest.** `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`, `POST_NOTIFICATIONS`,
   `ACCESS_NETWORK_STATE` and `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` were all already declared by M3-B
   (with `INTERNET` and `USE_BIOMETRIC`, seven in all); `ManifestTest` pins the list, the service's

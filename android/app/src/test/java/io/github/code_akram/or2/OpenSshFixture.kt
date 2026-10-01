@@ -103,6 +103,31 @@ internal class OpenSshFixture : AutoCloseable {
         }
     }
 
+    /**
+     * Cuts every established SSH connection by killing the process tree under the listener this
+     * fixture started (the monitor and the session process of each connection; the listener
+     * keeps accepting). A `mosh-server` a session started is a daemon that is no longer in that
+     * tree, so it survives, as after a lost network.
+     */
+    fun dropConnections() {
+        val listener = runCatching { directory.resolve("pid").toFile().readText().trim().toLong() }.getOrNull() ?: return
+        val parents = mutableMapOf<Long, Long>()
+        for (entry in Path.of("/proc").toFile().listFiles() ?: return) {
+            val pid = entry.name.toLongOrNull() ?: continue
+            // `pid (comm) state ppid ...`: the command name may hold spaces and brackets, so read after the last ')'.
+            val stat = runCatching { entry.resolve("stat").readText() }.getOrNull() ?: continue
+            stat.substringAfterLast(')').trim().split(' ').getOrNull(1)?.toLongOrNull()?.let { parents[pid] = it }
+        }
+        val tree = mutableSetOf<Long>()
+        var frontier = setOf(listener)
+        while (frontier.isNotEmpty()) {
+            frontier = parents.filter { it.value in frontier && tree.add(it.key) }.keys
+        }
+        for (pid in tree) {
+            runCatching { ProcessBuilder("kill", "-KILL", pid.toString()).start().waitFor(2, TimeUnit.SECONDS) }
+        }
+    }
+
     override fun close() {
         stopSessionProcesses()
         process?.let {

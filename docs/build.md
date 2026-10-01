@@ -170,7 +170,9 @@ recovered link health) with a bounded timeout, never for a fixed sleep or for `f
 which replays its last signal; `linkHealth` is a StateFlow that conflates, so only the lossless
 listener in `HostContractTest` asserts the whole health sequence.
 `HostConnectionsNativeTest` (the holder over the production connector: first-use trust persisted
-before approval, trusted reconnect, changed-key reject, retained closed handles) and
+before approval, trusted reconnect, changed-key reject, retained closed handles, and a mosh terminal that
+survives an SSH loss and a reconnect and then still answers, until an explicit disconnect or "Disconnect
+all" closes it; the fixture's `dropConnections` kills its own sshd's session processes) and
 `HostConnectNativeTest` (the FFI itself: address racing past a dead first address, trust,
 suspend `capabilities()`/`listTmuxSessions()`, shell terminals with echo, resize, UTF-8, key
 input and exit status, close ordering with terminals before the host, authentication failure) run
@@ -341,7 +343,8 @@ Connection and terminal ownership are application-scoped (`HostConnections`, hel
 is open (it does not own the connections); process death ends them. There is at most one connection per host and any number of
 terminals per connection. A disconnect leaves a terminal's handle and final frame readable under
 `Closed` until "Close" retires it; reconnecting a closed host replaces its connection object but
-leaves its terminals alone. A terminal-screen display lease delays native `close()` until the
+leaves its terminals alone (a lost connection whose mosh terminals still run is kept, owned, until the last
+one closes, because releasing the native object would close them; see [contracts](contracts.md)). A terminal-screen display lease delays native `close()` until the
 old screen leaves composition, then yields a main-loop turn for terminal disposal. Activity
 recreation and navigation alone neither disconnect nor retire anything. MainActivity uses
 `adjustResize`; the root adds IME padding everywhere except the terminal destination, where
