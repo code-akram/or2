@@ -76,7 +76,7 @@ fun KeysScreen(
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).testTag("keys-list")) {
             Text(
                 "Private keys stay encrypted with hardware-backed AES-GCM. Every save and connect requires a strong biometric.",
-                style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.padding(top = 8.dp),
+                style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.padding(top = 4.dp),
             )
             SectionHeader("Your keys")
             if (keys.isEmpty()) {
@@ -89,7 +89,7 @@ fun KeysScreen(
             } else {
                 GroupCard {
                     keys.forEachIndexed { index, key ->
-                        if (index > 0) GroupDivider(inset = 56.dp)
+                        if (index > 0) GroupDivider(inset = 44.dp)
                         ListRow(
                             key.label, subtitle = shortFingerprint(key.fingerprint), subtitleMono = true, icon = Or2Icons.Key, chevron = true,
                             modifier = Modifier.testTag("key:${key.id}"), onClick = { publicKey = key },
@@ -98,8 +98,8 @@ fun KeysScreen(
                 }
             }
             SectionHeader("New key")
-            Spacer(Modifier.height(8.dp)) // The first label gets the room its card-less group lacks.
-            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Spacer(Modifier.height(6.dp)) // The first label gets the room its card-less group lacks.
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Or2Field(label, { label = it }, label = "Key label", placeholder = "my-phone", enabled = !busy, tag = "key-label")
                 Or2Field(comment, { comment = it }, label = "Public-key comment (optional)",
                     placeholder = "me@phone", enabled = !busy, tag = "key-comment")
@@ -111,8 +111,8 @@ fun KeysScreen(
                 }
             }
             uri?.let { selected ->
-                Spacer(Modifier.height(16.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Spacer(Modifier.height(12.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("File selected. Enter a passphrase if it is encrypted.", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
                     Or2Field(passphrase, { passphrase = it }, tag = "key-passphrase", label = "Import passphrase (optional)",
                         visualTransformation = PasswordVisualTransformation(),
@@ -126,7 +126,7 @@ fun KeysScreen(
                     PillButton("Clear", { uri = null; passphrase = "" }, Modifier.fillMaxWidth().testTag("key-clear"), enabled = !busy)
                 }
             }
-            Spacer(Modifier.height(32.dp))
+            Spacer(Modifier.height(24.dp))
             BottomInsetSpacer()
         }
     }
@@ -134,7 +134,7 @@ fun KeysScreen(
         Or2Sheet({ publicKey = null }, title = key.label) {
             Column(
                 Modifier.verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).padding(bottom = Or2Dimens.Gutter),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text("${key.algorithm} · Add this line to authorized_keys yourself. or2 never installs keys automatically.",
                     style = Or2Type.Secondary, color = Or2Colors.TextMuted)
@@ -147,14 +147,14 @@ fun KeysScreen(
                         (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
                             .setPrimaryClip(ClipData.newPlainText("SSH public key", key.openssh))
                     })
-                    GroupDivider(inset = 56.dp)
+                    GroupDivider(inset = 44.dp)
                     ListRow("Share public key", icon = Or2Icons.Share, modifier = Modifier.testTag("key-share"), onClick = {
                         context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
                             putExtra(Intent.EXTRA_TEXT, key.openssh)
                         }, "Share public key"))
                     })
-                    GroupDivider(inset = 56.dp)
+                    GroupDivider(inset = 44.dp)
                     ListRow("Delete key", icon = Or2Icons.Trash, titleColor = Or2Colors.Danger, enabled = !busy,
                         modifier = Modifier.testTag("key-delete"), onClick = { deleting = key; publicKey = null })
                 }

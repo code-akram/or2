@@ -157,8 +157,6 @@ fun TerminalScreen(
                         }
                     },
                     close = { chrome.composerOpen = false },
-                    paste = ::clipboardText,
-                    panes = openPanes,
                 )
             }
             KeyToolbar(

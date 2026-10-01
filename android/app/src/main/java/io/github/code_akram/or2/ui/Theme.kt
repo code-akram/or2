@@ -42,6 +42,12 @@ object Or2Colors {
 
     /** Icons, chevrons, handles and idle dots: Catppuccin overlay0. Too dim for text. */
     val Subtle = Color(0xFF6C7086)
+
+    /** Field placeholders: Catppuccin subtext0, one step above `textMuted` so a hint reads at the light weight (6.7:1 on `surface`). */
+    val Placeholder = Color(0xFFA6ADC8)
+
+    /** The label of a disabled primary button on `accentMuted`: `text` at 80 % composited (5.5:1; `textMuted` there was 3.9:1). */
+    val OnAccentDisabled = Color(0xFFAEB7D4)
     val Accent = Color(0xFF89B4FA)
     val AccentMuted = Color(0xFF343B53)
     val Attention = Color(0xFFFAB387)
@@ -65,55 +71,74 @@ object Or2Colors {
     val ToolbarPill = Background.copy(alpha = 0.85f)
 }
 
+/**
+ * The compact scale (docs/ui.md): the owner prefers a dense phone UI, in the same range as the
+ * small 12 dp terminal font. Visual sizes are small; the platform still grows every clickable to a
+ * 48 dp touch target (hit testing), and the primary controls are at least 40 dp tall as drawn.
+ */
 object Or2Dimens {
-    val Gutter = 16.dp
-    val SectionGap = 32.dp
-    val SectionHeaderGap = 8.dp
-    val IconButton = 48.dp
-    val RowMin = 56.dp
-    val RowMinSubtitle = 72.dp
-    val Icon = 24.dp
-    val IconTile = 56.dp
-    val StatusDot = 10.dp
-    val Fab = 60.dp
-    val PrimaryButton = 56.dp
-    val EmptyCircle = 96.dp
-    val EmptyIcon = 40.dp
-    val Field = 48.dp
-    val Key = 44.dp
-    val KeyWidth = 36.dp
-    val KeyTouch = 52.dp
-    val PadKey = 56.dp
-    val SheetHandleWidth = 36.dp
-    val SheetHandleHeight = 4.dp
-    val TerminalHandleWidth = 44.dp
+    val Gutter = 12.dp
+    val SectionGap = 24.dp
+    val SectionHeaderGap = 6.dp
+    val IconButton = 44.dp
+    val RowMin = 44.dp
+    val RowMinSubtitle = 56.dp
+    val Icon = 20.dp
+    val IconTile = 44.dp
+    val StatusDot = 8.dp
+    val Fab = 48.dp
+    val PrimaryButton = 44.dp
+    val EmptyCircle = 72.dp
+    val EmptyIcon = 32.dp
+    val Field = 44.dp
+    val Segmented = 32.dp
+    val Chip = 28.dp
 
-    /** Terminal header buttons: a small visible disc inside a 48 dp touch target. */
+    /** A toolbar key as drawn (a 30 dp pill) inside a 40 dp tall touch box, 4 dp wider than the key. */
+    val Key = 30.dp
+    val KeyWidth = 30.dp
+    val KeyTouch = 40.dp
+    val PadKey = 40.dp
+    val PadGap = 6.dp
+    val SheetHandleWidth = 32.dp
+    val SheetHandleHeight = 4.dp
+    val TerminalHandleWidth = 36.dp
+
+    /** The terminal header row and its buttons: a small visible disc in a 36 dp target (the platform grows it to 48). */
+    val HeaderRow = 36.dp
     val HeaderButtonDisc = 18.dp
     val HeaderButtonGlyph = 12.dp
-    val HeaderButtonTouch = 48.dp
+    val HeaderButtonTouch = 36.dp
+
+    /** The header buttons' boxes are 48 dp wide, so neighbouring discs are 48 dp apart centre to centre and their touch targets never overlap. */
+    val HeaderButtonTouchWidth = 48.dp
     val TerminalInset = 4.dp
 
-    /** The arrow pad's extras pill: 44 dp tall, symbol keys 32 dp wide, navigation keys as wide as their label. */
-    val PadExtrasHeight = 44.dp
-    val PadExtraKeyWidth = 32.dp
-    val PadExtraNavKeyWidth = 44.dp
-    val PadHandleTouch = 32.dp
-    val ComposerAction = 48.dp
-    val Spinner = 28.dp
+    /** The arrow pad's extras pill: 36 dp tall, symbol keys 28 dp wide, navigation keys as wide as their label. */
+    val PadExtrasHeight = 36.dp
+    val PadExtraKeyWidth = 28.dp
+    val PadExtraNavKeyWidth = 38.dp
+    val PadHandleTouch = 28.dp
+
+    /** The composer's actions are 36 dp circles (the send button's fill); icon-only actions have a 40 dp touch box. */
+    val ComposerAction = 36.dp
+    val ComposerTouch = 40.dp
+    /** The connecting spinner sits in the server icon's own slot, so it is exactly the icon's size. */
+    val Spinner = Icon
 }
 
 object Or2Shapes {
-    val Card = RoundedCornerShape(20.dp)
-    val Field = RoundedCornerShape(16.dp)
-    val Tile = RoundedCornerShape(16.dp)
-    val Thumbnail = RoundedCornerShape(16.dp)
-    val Key = RoundedCornerShape(16.dp)
-    val Composer = RoundedCornerShape(24.dp)
+    val Card = RoundedCornerShape(16.dp)
+    val Field = RoundedCornerShape(12.dp)
+    val Tile = RoundedCornerShape(12.dp)
+    val Thumbnail = RoundedCornerShape(12.dp)
+    val Key = RoundedCornerShape(12.dp)
+    val Composer = RoundedCornerShape(20.dp)
+    val PadBacking = RoundedCornerShape(16.dp)
     val Pill = RoundedCornerShape(percent = 50)
     val Circle = CircleShape
-    val Sheet = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
-    val TerminalCard = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+    val Sheet = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+    val TerminalCard = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
 }
 
 /** Light and regular weights only: emphasis comes from colour and size. */
@@ -122,32 +147,35 @@ object Or2Type {
     private val mono get() = Or2Mono
 
     /** Sheet titles and the debug gallery menu. */
-    val ScreenTitle = TextStyle(fontFamily = sans, fontWeight = FontWeight.Light, fontSize = 28.sp, lineHeight = 34.sp)
+    val ScreenTitle = TextStyle(fontFamily = sans, fontWeight = FontWeight.Light, fontSize = 20.sp, lineHeight = 26.sp)
 
-    /** The title of a pushed screen (form, keys, host): Moshi's is about 20 sp light. */
-    val TopBarTitle = TextStyle(fontFamily = sans, fontWeight = FontWeight.Light, fontSize = 20.sp, lineHeight = 26.sp)
-    val CardTitle = TextStyle(fontFamily = sans, fontWeight = FontWeight.Light, fontSize = 20.sp, lineHeight = 26.sp)
-    val RowLabel = TextStyle(fontFamily = sans, fontWeight = FontWeight.Light, fontSize = 18.sp, lineHeight = 24.sp)
-    val Body = TextStyle(fontFamily = sans, fontWeight = FontWeight.Light, fontSize = 16.sp, lineHeight = 22.sp)
-    val Secondary = TextStyle(fontFamily = sans, fontWeight = FontWeight.Light, fontSize = 15.sp, lineHeight = 20.sp)
-    val Button = TextStyle(fontFamily = sans, fontWeight = FontWeight.Normal, fontSize = 18.sp, lineHeight = 24.sp)
+    /** The title of a pushed screen (form, keys, host). */
+    val TopBarTitle = TextStyle(fontFamily = sans, fontWeight = FontWeight.Light, fontSize = 16.sp, lineHeight = 22.sp)
+    val CardTitle = TextStyle(fontFamily = sans, fontWeight = FontWeight.Light, fontSize = 15.sp, lineHeight = 20.sp)
+    val RowLabel = TextStyle(fontFamily = sans, fontWeight = FontWeight.Light, fontSize = 14.sp, lineHeight = 19.sp)
+    val Body = TextStyle(fontFamily = sans, fontWeight = FontWeight.Light, fontSize = 13.sp, lineHeight = 18.sp)
+    val Secondary = TextStyle(fontFamily = sans, fontWeight = FontWeight.Light, fontSize = 12.sp, lineHeight = 16.sp)
+    val Button = TextStyle(fontFamily = sans, fontWeight = FontWeight.Normal, fontSize = 14.sp, lineHeight = 19.sp)
     val SectionHeader = TextStyle(
-        fontFamily = sans, fontWeight = FontWeight.Normal, fontSize = 13.sp, lineHeight = 18.sp, letterSpacing = 0.08.em,
+        fontFamily = sans, fontWeight = FontWeight.Normal, fontSize = 10.5.sp, lineHeight = 14.sp, letterSpacing = 0.08.em,
     )
     val Kicker = TextStyle(
-        fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 12.sp, lineHeight = 16.sp, letterSpacing = 0.15.em,
+        fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 11.sp, lineHeight = 14.sp, letterSpacing = 0.15.em,
     )
-    val Mono = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 15.sp, lineHeight = 20.sp)
-    val MonoSmall = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 13.sp, lineHeight = 18.sp)
-    val MonoLarge = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 17.sp, lineHeight = 24.sp)
-    val Badge = TextStyle(fontFamily = sans, fontWeight = FontWeight.Normal, fontSize = 13.sp, lineHeight = 16.sp)
+    val Mono = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 12.sp, lineHeight = 16.sp)
+    val MonoSmall = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 10.5.sp, lineHeight = 16.sp)
+    val MonoLarge = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 14.sp, lineHeight = 19.sp)
+    val Badge = TextStyle(fontFamily = sans, fontWeight = FontWeight.Normal, fontSize = 11.sp, lineHeight = 14.sp)
 
-    /** Overlay pills on thumbnails: small, because the whole terminal is shown scaled down. */
+    /** Overlay pills on thumbnails and the terminal header's transport badge: small, they sit on the terminal. */
     val Pill = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 11.sp, lineHeight = 14.sp)
-    val Chip = TextStyle(fontFamily = sans, fontWeight = FontWeight.Light, fontSize = 14.sp, lineHeight = 18.sp)
+    val Chip = TextStyle(fontFamily = sans, fontWeight = FontWeight.Light, fontSize = 12.sp, lineHeight = 16.sp)
 
     /** Toolbar and pad keys (`Ctrl`, `Esc`, `Tab`). */
-    val Key = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 14.sp, lineHeight = 18.sp)
+    val Key = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 12.sp, lineHeight = 16.sp)
+
+    /** The composer's input text. */
+    val Composer = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 13.sp, lineHeight = 18.sp)
 }
 
 private val Or2ColorScheme = darkColorScheme(

@@ -47,7 +47,7 @@ import io.github.code_akram.or2.ui.StatusDot
 import io.github.code_akram.or2.ui.TopBar
 
 /** The dot column of agent rows and host rows: both start their text at the same x. */
-private val LeadingSlot = 26.dp
+private val LeadingSlot = 20.dp
 
 /** Test tag of an agent row: host, session (`-` for the default one) and pane identify it. */
 fun inboxItemTag(item: InboxItem) = "inbox-item:${item.hostId}:${item.session ?: "-"}:${item.paneId}"
@@ -102,11 +102,11 @@ fun InboxScreen(
                 drawRect(Or2Colors.Background)
                 drawCornerGlow()
             }, contentPadding = PaddingValues(horizontal = Or2Dimens.Gutter),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             if (state.hosts.isEmpty()) {
                 item(key = "empty-hosts") {
-                    Column(Modifier.padding(top = 96.dp).testTag("inbox-no-hosts"), verticalArrangement = Arrangement.spacedBy(32.dp)) {
+                    Column(Modifier.padding(top = 72.dp).testTag("inbox-no-hosts"), verticalArrangement = Arrangement.spacedBy(24.dp)) {
                         EmptyState(
                             Or2Icons.Inbox, "No agents to watch",
                             "No hosts show agents here. Add a host and leave \"Show agents in the inbox\" on.",
@@ -121,18 +121,18 @@ fun InboxScreen(
                         Or2Icons.Inbox, "No agent events yet",
                         if (anyConnected) "No agents are running on the connected hosts.\nWhen an agent asks for approval, a question,\nor finishes a task, it shows up here."
                         else "Connect a host to see its agents.\nWhen an agent asks for approval, a question,\nor finishes a task, it shows up here.",
-                        Modifier.padding(top = 72.dp, bottom = 16.dp).testTag("inbox-empty"),
+                        Modifier.padding(top = 56.dp, bottom = 12.dp).testTag("inbox-empty"),
                     )
                 }
             }
             state.groups.forEach { group ->
                 stickyHeader(key = "group:${group.status}") {
                     Row(
-                        Modifier.fillMaxWidth().background(Or2Colors.Background).padding(top = 16.dp, bottom = 8.dp)
+                        Modifier.fillMaxWidth().background(Or2Colors.Background).padding(top = 12.dp, bottom = 6.dp)
                             .testTag("inbox-group:${group.status}"),
                     ) {
                         StatusDot(statusColor(group.status), Modifier.align(Alignment.CenterVertically))
-                        Spacer(Modifier.width(10.dp))
+                        Spacer(Modifier.width(8.dp))
                         Text(
                             "${statusLabel(group.status)} · ${group.items.size}".uppercase(), style = Or2Type.SectionHeader,
                             color = Or2Colors.TextMuted,
@@ -143,7 +143,7 @@ fun InboxScreen(
             }
             if (state.hosts.isNotEmpty()) {
                 item(key = "hosts-header") {
-                    Row(Modifier.fillMaxWidth().padding(top = Or2Dimens.SectionGap - 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.fillMaxWidth().padding(top = Or2Dimens.SectionGap - 6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.weight(1f)) { SectionHeader("Hosts", topGap = 0.dp) }
                         if (connectable.size > 1) {
                             PillButton("Connect all", connectAll, Modifier.testTag("inbox-connect-all"), enabled = !busy)
@@ -153,14 +153,14 @@ fun InboxScreen(
                 item(key = "hosts") {
                     GroupCard {
                         state.hosts.forEachIndexed { index, row ->
-                            if (index > 0) GroupDivider(inset = 42.dp)
+                            if (index > 0) GroupDivider(inset = 32.dp)
                             HostStatusRow(row, busy, { connect(row.host) }, { openHost(row.host) })
                         }
                     }
                 }
             }
             item(key = "end") {
-                Spacer(Modifier.height(32.dp))
+                Spacer(Modifier.height(24.dp))
                 BottomInsetSpacer() // The list scrolls under the gesture bar, never cut above it.
             }
         }
@@ -173,7 +173,7 @@ private fun HostStatusRow(row: InboxHostRow, busy: Boolean, connect: () -> Unit,
     Box(Modifier.fillMaxWidth().testTag("inbox-host:${row.host.id}")) {
     Row(
         Modifier.fillMaxWidth().clickable(role = Role.Button, onClick = open).testTag("inbox-open:${row.host.id}")
-            .padding(start = Or2Dimens.Gutter, end = 8.dp, top = 12.dp, bottom = 12.dp),
+            .padding(start = Or2Dimens.Gutter, end = 8.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.width(LeadingSlot), contentAlignment = Alignment.CenterStart) {
@@ -186,7 +186,7 @@ private fun HostStatusRow(row: InboxHostRow, busy: Boolean, connect: () -> Unit,
             row.herdrNote?.let { Text(it, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.testTag("inbox-herdr-note:${row.host.id}")) }
         }
         if (row.link == LinkStatus.NOT_CONNECTED || failed) {
-            PillButton(if (failed) "Retry" else "Unlock", connect, Modifier.testTag("inbox-connect:${row.host.id}"),
+            PillButton(if (failed) "Retry" else "Unlock", connect, Modifier.testTag("inbox-connect:${row.host.id}"), compact = true,
                 enabled = !busy && row.host.keyId != null)
         }
     }
@@ -201,11 +201,11 @@ private fun AgentRow(item: InboxItem, open: (InboxItem) -> Unit) {
         color = if (blocked) Or2Colors.AttentionSurface else Or2Colors.Surface,
         border = if (blocked) BorderStroke(1.dp, Or2Colors.AttentionBorder) else null,
     ) {
-        Row(Modifier.padding(Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(horizontal = Or2Dimens.Gutter, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.width(LeadingSlot), contentAlignment = Alignment.CenterStart) {
                 StatusDot(statusColor(item.status), pulsing = item.status == AgentStatus.WORKING)
             }
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
                 Text(item.agentName, style = Or2Type.RowLabel, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val place = listOfNotNull(item.workspaceLabel, item.tabLabel).joinToString(" / ")
                 Text(
@@ -216,7 +216,7 @@ private fun AgentRow(item: InboxItem, open: (InboxItem) -> Unit) {
                     Text(it, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, maxLines = 1, overflow = TextOverflow.StartEllipsis)
                 }
             }
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(8.dp))
             Text(statusLabel(item.status), style = Or2Type.Secondary, color = if (blocked) Or2Colors.Attention else Or2Colors.TextMuted,
                 modifier = Modifier.testTag("status-chip"))
         }

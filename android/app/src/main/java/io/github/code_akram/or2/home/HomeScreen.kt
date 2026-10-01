@@ -111,22 +111,22 @@ fun HomeScreen(
                         openInbox, Modifier.testTag("nav-inbox"),
                     )
                     if (blocked > 0) {
-                        StatusDot(Or2Colors.Attention, Modifier.align(Alignment.TopEnd).padding(top = 10.dp, end = 10.dp).testTag("inbox-badge"))
+                        StatusDot(Or2Colors.Attention, Modifier.align(Alignment.TopEnd).padding(top = 9.dp, end = 9.dp).testTag("inbox-badge"))
                     }
                 }
                 IconAction(Or2Icons.Key, "SSH keys", openKeys, Modifier.testTag("nav-keys"))
             })
             Column(Modifier.padding(horizontal = Or2Dimens.Gutter)) {
                 if (sessions.isNotEmpty()) {
-                    SectionHeader("Sessions", topGap = 12.dp)
+                    SectionHeader("Sessions", topGap = 8.dp)
                     SessionRow(sessions, openSession)
                 }
                 SectionHeader("Connections", hint = if (hosts.isNotEmpty()) "Long press for options." else null,
-                    topGap = if (sessions.isEmpty()) 24.dp else Or2Dimens.SectionGap)
+                    topGap = if (sessions.isEmpty()) 16.dp else Or2Dimens.SectionGap)
                 if (hosts.isEmpty()) {
                     EmptyConnections(keyCount, addHost, openKeys)
                 } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         hosts.forEach { card ->
                             HostCardView(card, onClick = { openHost(card.host) }, onLongClick = { options = card })
                         }
@@ -135,23 +135,23 @@ fun HomeScreen(
                                 modifier = Modifier.testTag("home-add-key"))
                         }
                     }
-                    Row(Modifier.padding(top = 12.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(Modifier.padding(top = 8.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (blocked > 0) StatusChip("Needs attention: $blocked", Or2Colors.Attention, Modifier.testTag("chip-attention"), onClick = openInbox)
                         if (working > 0) StatusChip("Working: $working", Or2Colors.Working, Modifier.testTag("chip-working"), onClick = openInbox)
                         if (canConnectAll && !busy) StatusChip("Connect all", Or2Colors.Accent, Modifier.testTag("home-connect-all"), onClick = connectAll)
                     }
                 }
             }
-            Spacer(Modifier.height(Or2Dimens.Fab + 48.dp))
+            Spacer(Modifier.height(Or2Dimens.Fab + 32.dp))
             BottomInsetSpacer()
         }
         Box(
-            Modifier.align(Alignment.BottomEnd).windowInsetsPadding(Or2BottomInsets).padding(end = 24.dp, bottom = 8.dp).size(Or2Dimens.Fab).clip(Or2Shapes.Circle)
+            Modifier.align(Alignment.BottomEnd).windowInsetsPadding(Or2BottomInsets).padding(end = 16.dp, bottom = 8.dp).size(Or2Dimens.Fab).clip(Or2Shapes.Circle)
                 .background(Or2Colors.Accent).clickable(role = Role.Button, onClick = addHost)
                 .semantics { contentDescription = "Add host" }.testTag("home-add-host"),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(Or2Icons.Plus, null, Modifier.size(28.dp), tint = Or2Colors.Background)
+            Icon(Or2Icons.Plus, null, Modifier.size(24.dp), tint = Or2Colors.Background)
         }
     }
     options?.let { card ->
@@ -164,15 +164,15 @@ fun HomeScreen(
                         ListRow("Connect", icon = Or2Icons.Power, enabled = !busy && host.keyId != null,
                             subtitle = if (host.keyId == null) "Select a key first" else null,
                             modifier = Modifier.testTag("option-connect"), onClick = { options = null; connectHost(host) })
-                        GroupDivider(inset = 56.dp)
+                        GroupDivider(inset = 44.dp)
                     }
                     ListRow("Edit", icon = Or2Icons.Pencil, modifier = Modifier.testTag("option-edit"), onClick = { options = null; editHost(host) })
                     if (live) {
-                        GroupDivider(inset = 56.dp)
+                        GroupDivider(inset = 44.dp)
                         ListRow("Disconnect", icon = Or2Icons.Power, modifier = Modifier.testTag("option-disconnect"),
                             onClick = { options = null; disconnectHost(host) })
                     }
-                    GroupDivider(inset = 56.dp)
+                    GroupDivider(inset = 44.dp)
                     ListRow("Delete", icon = Or2Icons.Trash, titleColor = Or2Colors.Danger, enabled = !busy,
                         modifier = Modifier.testTag("option-delete"), onClick = { options = null; deleting = host })
                 }
@@ -190,12 +190,12 @@ fun HomeScreen(
 
 @Composable
 private fun EmptyConnections(keyCount: Int, addHost: () -> Unit, openKeys: () -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(top = 32.dp).testTag("home-empty"), verticalArrangement = Arrangement.spacedBy(32.dp)) {
+    Column(Modifier.fillMaxWidth().padding(top = 24.dp).testTag("home-empty"), verticalArrangement = Arrangement.spacedBy(24.dp)) {
         EmptyState(
             Or2Icons.Server, "No connections yet",
             "Add a host to attach to its tmux sessions\nand watch its herdr agents here.",
         )
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (keyCount == 0) {
                 ActionCard("First step", "Add an SSH key", "Generate one on this phone. The private key stays in hardware-backed storage.",
                     meta = "~1 min · needs your biometric", icon = Or2Icons.Key, onClick = openKeys,
@@ -217,20 +217,20 @@ fun HostCardView(card: HostCard, onClick: () -> Unit, onLongClick: () -> Unit, m
         modifier.testTag("host:${host.id}").semantics { stateDescription = hostStateDescription(status) },
         onClick = onClick, onLongClick = onLongClick,
     ) {
-        Row(Modifier.padding(start = 20.dp, end = Or2Dimens.Gutter, top = 20.dp, bottom = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(start = 14.dp, end = Or2Dimens.Gutter, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(Or2Dimens.Spinner), contentAlignment = Alignment.Center) {
                 if (status.spinning) {
-                    // The same 28 dp slot as the server icon, so the glyph does not jump between states.
+                    // The same 24 dp slot as the server icon, so the glyph does not jump between states.
                     Spinner(Modifier.testTag("host-spinner:${host.id}"), size = Or2Dimens.Spinner)
                 } else {
-                    Icon(Or2Icons.Server, null, Modifier.size(28.dp), tint = Or2Colors.TextMuted)
+                    Icon(Or2Icons.Server, null, Modifier.size(Or2Dimens.Spinner), tint = Or2Colors.TextMuted)
                     dotColor(status.dot)?.let {
-                        StatusDot(it, Modifier.align(Alignment.TopEnd).offset(x = 4.dp, y = (-4).dp).testTag("host-dot:${host.id}"))
+                        StatusDot(it, Modifier.align(Alignment.TopEnd).offset(x = 3.dp, y = (-3).dp).testTag("host-dot:${host.id}"))
                     }
                 }
             }
-            Spacer(Modifier.width(16.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(host.label, style = Or2Type.CardTitle, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 when {
                     status.progress != null ->
@@ -241,7 +241,7 @@ fun HostCardView(card: HostCard, onClick: () -> Unit, onLongClick: () -> Unit, m
                         Text(hostAddressLine(host), style = Or2Type.Mono, color = Or2Colors.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(6.dp))
             Icon(Or2Icons.ChevronRight, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.TextMuted)
         }
     }
@@ -267,12 +267,12 @@ private fun dotColor(dot: HostDot): Color? = when (dot) {
     HostDot.FAILED -> Or2Colors.Danger
 }
 
-/** Thumbnails about 45 % of the width each, scrolling sideways. */
+/** Thumbnails about 38 % of the width each, scrolling sideways. */
 @Composable
 private fun SessionRow(sessions: List<HomeSession>, open: (HomeSession) -> Unit) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val cardWidth = maxWidth * 0.45f
-        Row(Modifier.horizontalScroll(rememberScrollState()).testTag("sessions-row"), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        val cardWidth = maxWidth * 0.38f
+        Row(Modifier.horizontalScroll(rememberScrollState()).testTag("sessions-row"), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             sessions.forEach { SessionCard(it, cardWidth) { open(it) } }
         }
     }
@@ -286,22 +286,22 @@ private fun SessionCard(session: HomeSession, width: Dp, onClick: () -> Unit) {
                 .clickable(role = Role.Button, onClickLabel = "Resume ${session.title}", onClick = onClick),
         ) {
             // Inset like Moshi's thumbnails, so the rounded corners never slice glyphs or the cursor.
-            session.preview(Modifier.fillMaxSize().padding(start = 8.dp, end = 8.dp, top = 32.dp, bottom = 8.dp))
+            session.preview(Modifier.fillMaxSize().padding(start = 6.dp, end = 6.dp, top = 26.dp, bottom = 6.dp))
             Row(
-                Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Top,
+                Modifier.fillMaxWidth().padding(6.dp), verticalAlignment = Alignment.Top,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
                     session.hostLabel, style = Or2Type.Pill, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false).clip(Or2Shapes.Pill).background(Or2Colors.ToolbarPill)
-                        .padding(horizontal = 8.dp, vertical = 2.dp).testTag("session-host:${session.id}"),
+                        .padding(horizontal = 6.dp, vertical = 2.dp).testTag("session-host:${session.id}"),
                 )
-                Spacer(Modifier.width(6.dp))
+                Spacer(Modifier.width(4.dp))
                 TransportBadge(session.transport, Modifier.testTag("session-transport:${session.id}"), small = true)
             }
         }
         Text(session.title, style = Or2Type.Body, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(top = 8.dp, start = 4.dp))
+            modifier = Modifier.padding(top = 6.dp, start = 4.dp))
         Text(session.detail, style = Or2Type.MonoSmall, color = Or2Colors.Accent, maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(start = 4.dp))
     }

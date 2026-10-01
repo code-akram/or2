@@ -50,8 +50,8 @@ class TerminalVisualDeviceTest {
             assertTrue("$label must be visible", bounds.width() > 0 && bounds.height() > 0)
             if (scrolls && label !in listOf("Composer", "Keyboard")) return@forEach
             assertTrue("$label ($bounds) must fit within $toolbar without scrolling", toolbar.contains(bounds))
-            assertTrue("$label touch target must be at least 36 dp wide", bounds.width() >= 36 * density - 1)
-            assertTrue("$label touch target must be at least 48 dp tall", bounds.height() >= 48 * density - 1)
+            assertTrue("$label touch box must be at least 34 dp wide", bounds.width() >= 34 * density - 1)
+            assertTrue("$label touch box must be at least 40 dp tall (the key itself is drawn 30 dp)", bounds.height() >= 40 * density - 1)
             assertTrue("$label must follow the preceding key", bounds.left >= right - 1)
             right = bounds.right
         }

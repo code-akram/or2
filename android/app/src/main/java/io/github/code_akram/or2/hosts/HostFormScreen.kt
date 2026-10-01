@@ -84,12 +84,12 @@ fun HostFormScreen(
         )
         Column(
             Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).testTag("host-form"),
-            verticalArrangement = Arrangement.spacedBy(24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Spacer(Modifier.height(0.dp))
             Or2Field(label, { label = it }, label = "Name", placeholder = "My server", mono = false, tag = "host-label")
-            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text("Addresses", style = Or2Type.Body, color = Or2Colors.Text)
                     Text("In order of preference. All are tried; the first to answer wins.", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
                 }
@@ -107,7 +107,7 @@ fun HostFormScreen(
             }
             Or2Field(username, { username = it }, label = "Username", placeholder = "your-username",
                 errorText = usernameError, tag = "host-username")
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("SSH key", style = Or2Type.Body, color = Or2Colors.Text)
                 if (keys.isEmpty()) {
                     Text("Generate or import a key on the Keys screen first.", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
@@ -117,7 +117,7 @@ fun HostFormScreen(
                     if (keys.none { it.id == keyId }) Text("Choose a key", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
                     GroupCard(Modifier.selectableGroup()) {
                         keys.forEachIndexed { index, key ->
-                            if (index > 0) GroupDivider(inset = 56.dp)
+                            if (index > 0) GroupDivider(inset = 44.dp)
                             ListRow(
                                 key.label, subtitle = shortFingerprint(key.fingerprint), subtitleMono = true, icon = Or2Icons.Key,
                                 modifier = Modifier.testTag("host-key:${key.id}").semantics(mergeDescendants = true) {}
@@ -139,14 +139,14 @@ fun HostFormScreen(
             if (previous != null) {
                 Text("Changing any address or port clears previous host-key trust.", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
             }
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 PrimaryButton("Save", ::submit, Modifier.testTag("host-form-primary"), enabled = valid && !busy)
                 Text(
                     "Private keys stay encrypted in hardware-backed storage on this device. Connecting always needs your biometric.",
-                    style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                    style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp),
                 )
             }
-            Spacer(Modifier.height(32.dp))
+            Spacer(Modifier.height(24.dp))
             BottomInsetSpacer()
         }
     }
@@ -165,12 +165,12 @@ private fun AddressRow(
     up: () -> Unit, down: () -> Unit, remove: () -> Unit,
 ) {
     val hostnameError = if (address.hostname.isEmpty()) null else hostFieldError(address.hostname)
-    Column(Modifier.testTag("address:$index"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
+    Column(Modifier.testTag("address:$index"), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
             Or2Field(address.hostname, { change(address.copy(hostname = it)) }, Modifier.weight(1f), tag = "address-hostname:$index",
                 label = "Host", placeholder = "192.0.2.10", errorText = hostnameError,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false))
-            Or2Field(address.port, { change(address.copy(port = it)) }, Modifier.width(96.dp), tag = "address-port:$index",
+            Or2Field(address.port, { change(address.copy(port = it)) }, Modifier.width(80.dp), tag = "address-port:$index",
                 label = "Port", placeholder = "22", errorText = if (portError(address.port) != null) "1-65535" else null,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
         }

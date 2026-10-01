@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -32,6 +34,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -40,15 +43,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,10 +74,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 
 // --- top bar -------------------------------------------------------------------------------
 
-/** A 48 dp round icon button; every icon in the app is one of these or sits in a row. */
+/** A 44 dp round icon button (the platform grows its touch target to 48 dp); every icon in the app is one of these or sits in a row. */
 @Composable
 fun IconAction(
     icon: ImageVector, description: String, onClick: () -> Unit, modifier: Modifier = Modifier,
@@ -101,23 +108,23 @@ fun BottomInsetSpacer(modifier: Modifier = Modifier) {
 }
 
 /**
- * No app-bar fill: an optional back arrow, a light 20 sp title on the background and trailing
+ * No app-bar fill: an optional back arrow, a light 16 sp title on the background and trailing
  * icon buttons. Top-level screens pass no title and only [actions].
  */
 @Composable
 fun TopBar(
     modifier: Modifier = Modifier, title: String? = null, back: (() -> Unit)? = null,
-    backIcon: ImageVector = Or2Icons.Back, backDescription: String = "Back", endPadding: Dp = 4.dp, actions: @Composable RowScope.() -> Unit = {},
+    backIcon: ImageVector = Or2Icons.Back, backDescription: String = "Back", endPadding: Dp = 2.dp, actions: @Composable RowScope.() -> Unit = {},
 ) {
     Row(
-        modifier.fillMaxWidth().padding(start = 4.dp, end = endPadding).heightIn(min = 56.dp),
+        modifier.fillMaxWidth().padding(start = 2.dp, end = endPadding).heightIn(min = 48.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (back != null) IconAction(backIcon, backDescription, back, Modifier.testTag("top-back"))
         if (title != null) {
             Text(
                 title, style = Or2Type.TopBarTitle, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f).padding(start = if (back != null) 20.dp else Or2Dimens.Gutter - 4.dp)
+                modifier = Modifier.weight(1f).padding(start = if (back != null) 12.dp else Or2Dimens.Gutter - 2.dp)
                     .semantics { heading() },
             )
         } else {
@@ -144,7 +151,7 @@ fun SectionHeader(text: String, modifier: Modifier = Modifier, hint: String? = n
     }
 }
 
-/** A `surface` card with the 20 dp radius; click and long-click are optional. */
+/** A `surface` card with the 16 dp radius; click and long-click are optional. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun Or2Card(
@@ -177,8 +184,8 @@ fun GroupDivider(inset: Dp = Or2Dimens.Gutter) {
 }
 
 /**
- * A grouped-list row: optional 24 dp muted outline icon, label, muted subtitle (mono for
- * machine text), trailing value and chevron. At least 56 dp tall, 72 dp with a subtitle.
+ * A grouped-list row: optional 20 dp muted outline icon, label, muted subtitle (mono for
+ * machine text), trailing value and chevron. At least 44 dp tall, 56 dp with a subtitle.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -195,12 +202,12 @@ fun ListRow(
     }
     Row(
         modifier.fillMaxWidth().heightIn(min = if (subtitle != null) Or2Dimens.RowMinSubtitle else Or2Dimens.RowMin)
-            .then(interactive).padding(horizontal = Or2Dimens.Gutter, vertical = 12.dp),
+            .then(interactive).padding(horizontal = Or2Dimens.Gutter, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (icon != null) {
             Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Subtle)
-            Spacer(Modifier.width(16.dp))
+            Spacer(Modifier.width(12.dp))
         }
         Column(Modifier.weight(1f)) {
             Text(title, style = Or2Type.RowLabel, color = if (enabled) titleColor else Or2Colors.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -212,15 +219,15 @@ fun ListRow(
             }
         }
         if (value != null) {
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(8.dp))
             Text(value, style = Or2Type.Body, color = Or2Colors.TextMuted, maxLines = 1)
         }
         if (trailing != null) {
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(8.dp))
             trailing()
         }
         if (chevron) {
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(6.dp))
             Icon(Or2Icons.ChevronRight, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Subtle)
         }
     }
@@ -250,25 +257,25 @@ fun StatusDot(color: Color, modifier: Modifier = Modifier, size: Dp = Or2Dimens.
  * as a stray arc.
  */
 @Composable
-fun Spinner(modifier: Modifier = Modifier, size: Dp = 20.dp) {
+fun Spinner(modifier: Modifier = Modifier, size: Dp = 16.dp) {
     CircularProgressIndicator(
         modifier.size(size), color = Or2Colors.Accent, trackColor = Or2Colors.SurfaceTrack,
-        strokeWidth = if (size >= 24.dp) 3.dp else 2.dp,
+        strokeWidth = if (size >= 24.dp) 2.5.dp else 2.dp,
     )
 }
 
-/** A pill in `surface` with a 10 dp coloured dot and a muted label, e.g. `● Needs attention: 1`. */
+/** A 28 dp pill in `surface` with an 8 dp coloured dot and a muted label, e.g. `● Needs attention: 1`. */
 @Composable
 fun StatusChip(label: String, dot: Color, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
     Row(
         modifier.then(if (onClick != null) Modifier.minimumInteractiveComponentSize() else Modifier)
             .clip(Or2Shapes.Pill).background(Or2Colors.Surface)
             .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+            .heightIn(min = Or2Dimens.Chip).padding(horizontal = 12.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         StatusDot(dot)
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(8.dp))
         Text(label, style = Or2Type.Chip, color = Or2Colors.TextMuted, maxLines = 1)
     }
 }
@@ -282,7 +289,7 @@ fun Badge(
     Text(
         text, style = if (small) Or2Type.Pill else Or2Type.Badge, color = content, maxLines = 1,
         modifier = modifier.clip(Or2Shapes.Pill).background(container)
-            .padding(horizontal = if (small) 8.dp else 12.dp, vertical = if (small) 2.dp else 6.dp),
+            .padding(horizontal = if (small) 6.dp else 10.dp, vertical = if (small) 2.dp else 4.dp),
     )
 }
 
@@ -315,16 +322,16 @@ fun Or2Field(
             decorationBox = { inner ->
                 Column {
                     if (label != null) {
-                        Text(label, style = Or2Type.Body, color = Or2Colors.Text, modifier = Modifier.padding(bottom = 8.dp))
+                        Text(label, style = Or2Type.Body, color = Or2Colors.Text, modifier = Modifier.padding(bottom = 6.dp))
                     }
                     Row(
                         Modifier.fillMaxWidth().heightIn(min = Or2Dimens.Field).clip(Or2Shapes.Field).background(Or2Colors.Surface)
                             .then(if (errorText != null) Modifier.border(1.dp, Or2Colors.Danger, Or2Shapes.Field) else Modifier)
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Box(Modifier.weight(1f)) {
-                            if (value.isEmpty()) Text(placeholder, style = style, color = Or2Colors.TextMuted, maxLines = 1)
+                            if (value.isEmpty()) Text(placeholder, style = style, color = Or2Colors.Placeholder, maxLines = 1)
                             inner()
                         }
                         trailing?.let {
@@ -336,7 +343,7 @@ fun Or2Field(
             },
         )
         if (errorText != null) {
-            Text(errorText, style = Or2Type.Secondary, color = Or2Colors.Danger, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
+            Text(errorText, style = Or2Type.Secondary, color = Or2Colors.Danger, modifier = Modifier.padding(start = 4.dp, top = 4.dp))
         }
     }
 }
@@ -354,18 +361,18 @@ fun Segmented(
         options.forEachIndexed { index, option ->
             val on = index == selected
             val fill by animateColorAsState(if (on) Or2Colors.Surface else Color.Transparent, label = "segment-fill")
-            // The clickable spans the whole 40 dp track; the raised segment is drawn 4 dp inside it.
+            // The clickable spans the whole 32 dp track; the raised segment is drawn 3 dp inside it.
             Row(
-                Modifier.heightIn(min = 40.dp).clip(Or2Shapes.Pill)
+                Modifier.heightIn(min = Or2Dimens.Segmented).clip(Or2Shapes.Pill)
                     .selectable(selected = on, role = Role.Tab, onClick = { onSelect(index) })
-                    .semantics { contentDescription = option }.padding(4.dp)
+                    .semantics { contentDescription = option }.padding(3.dp)
                     .clip(Or2Shapes.Pill).background(fill)
-                    .padding(horizontal = 14.dp).testTag("$tagPrefix:$index"),
+                    .padding(horizontal = 12.dp).testTag("$tagPrefix:$index"),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center,
             ) {
                 icons.getOrNull(index)?.let {
-                    Icon(it, null, Modifier.size(20.dp), tint = if (on) Or2Colors.Text else Or2Colors.TextMuted)
-                    Spacer(Modifier.width(8.dp))
+                    Icon(it, null, Modifier.size(Or2Dimens.Icon), tint = if (on) Or2Colors.Text else Or2Colors.TextMuted)
+                    Spacer(Modifier.width(6.dp))
                 }
                 Text(option, style = Or2Type.Body, color = if (on) Or2Colors.Text else Or2Colors.TextMuted, maxLines = 1)
             }
@@ -373,24 +380,24 @@ fun Segmented(
     }
 }
 
-/** `accent` track with a `background` knob when on; `surfaceTrack` when off. */
+/** `accent` track with a `text` knob when on (a dark knob read as a hole in the track); `surfaceTrack` with a muted knob when off. */
 @Composable
 fun Or2Toggle(checked: Boolean, onCheckedChange: (Boolean) -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
     val track by animateColorAsState(if (checked) Or2Colors.Accent else Or2Colors.SurfaceTrack, label = "toggle-track")
-    val knob by animateColorAsState(if (checked) Or2Colors.Background else Or2Colors.TextMuted, label = "toggle-knob")
-    val offset by animateDpAsState(if (checked) 22.dp else 0.dp, label = "toggle-offset")
+    val knob by animateColorAsState(if (checked) Or2Colors.Text else Or2Colors.TextMuted, label = "toggle-knob")
+    val offset by animateDpAsState(if (checked) 18.dp else 0.dp, label = "toggle-offset")
     Box(
-        modifier.size(width = 52.dp, height = 32.dp).clip(Or2Shapes.Pill).background(track)
+        modifier.size(width = 42.dp, height = 26.dp).clip(Or2Shapes.Pill).background(track)
             .toggleable(checked, enabled = enabled, role = Role.Switch, onValueChange = onCheckedChange)
-            .padding(4.dp),
+            .padding(3.dp),
     ) {
-        Box(Modifier.offset(x = offset).size(24.dp).clip(CircleShape).background(knob))
+        Box(Modifier.offset(x = offset).size(20.dp).clip(CircleShape).background(knob))
     }
 }
 
 // --- buttons ---------------------------------------------------------------------------------
 
-/** The full-width pill at the end of a form: `accent`, 56 dp, text in `background`. */
+/** The full-width pill at the end of a form: `accent`, 44 dp, text in `background`; disabled it is `accentMuted` with a light label. */
 @Composable
 fun PrimaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
     Box(
@@ -399,25 +406,29 @@ fun PrimaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifi
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text, style = Or2Type.Button, color = if (enabled) Or2Colors.Background else Or2Colors.TextMuted, maxLines = 1)
+        Text(text, style = Or2Type.Button, color = if (enabled) Or2Colors.Background else Or2Colors.OnAccentDisabled, maxLines = 1)
     }
 }
 
-/** A secondary pill: `surfaceTrack` with text, optional trailing icon (e.g. "Skip"). */
+/**
+ * A secondary pill: `surfaceTrack` with text, optional trailing icon (e.g. "Skip"). [compact] is the
+ * chip scale (28 dp, 12 sp) for an action that sits inside a list row (Retry, Unlock).
+ */
 @Composable
 fun PillButton(
     text: String, onClick: () -> Unit, modifier: Modifier = Modifier, icon: ImageVector? = null,
     enabled: Boolean = true, container: Color = Or2Colors.SurfaceTrack, content: Color = Or2Colors.Text,
+    compact: Boolean = false,
 ) {
     Row(
-        modifier.heightIn(min = 48.dp).clip(Or2Shapes.Pill).background(container)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick).padding(horizontal = 24.dp),
+        modifier.heightIn(min = if (compact) Or2Dimens.Chip else Or2Dimens.Segmented + 4.dp).clip(Or2Shapes.Pill).background(container)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick).padding(horizontal = if (compact) 12.dp else 18.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center,
     ) {
-        Text(text, style = Or2Type.Body, color = if (enabled) content else Or2Colors.TextMuted, maxLines = 1)
+        Text(text, style = if (compact) Or2Type.Chip else Or2Type.Body, color = if (enabled) content else Or2Colors.TextMuted, maxLines = 1)
         if (icon != null) {
-            Spacer(Modifier.width(8.dp))
-            Icon(icon, null, Modifier.size(20.dp), tint = if (enabled) content else Or2Colors.TextMuted)
+            Spacer(Modifier.width(6.dp))
+            Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = if (enabled) content else Or2Colors.TextMuted)
         }
     }
 }
@@ -427,15 +438,15 @@ fun PillButton(
 fun TextAction(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, color: Color = Or2Colors.Accent, enabled: Boolean = true) {
     Text(
         text, style = Or2Type.Body, color = if (enabled) color else Or2Colors.TextMuted, maxLines = 1,
-        modifier = modifier.heightIn(min = 48.dp).clip(Or2Shapes.Pill)
+        modifier = modifier.heightIn(min = 40.dp).clip(Or2Shapes.Pill)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 12.dp),
+            .padding(horizontal = 10.dp, vertical = 10.dp),
     )
 }
 
 // --- empty states, notices ---------------------------------------------------------------------
 
-/** Centred 96 dp `surface` circle with a 40 dp outline icon, a 20 sp title and a muted explanation. */
+/** Centred 72 dp `surface` circle with a 32 dp outline icon, a 20 sp title and a muted explanation. */
 @Composable
 fun EmptyState(
     icon: ImageVector, title: String, body: String, modifier: Modifier = Modifier, action: @Composable (() -> Unit)? = null,
@@ -444,12 +455,12 @@ fun EmptyState(
         Box(Modifier.size(Or2Dimens.EmptyCircle).clip(CircleShape).background(Or2Colors.Surface), contentAlignment = Alignment.Center) {
             Icon(icon, null, Modifier.size(Or2Dimens.EmptyIcon), tint = Or2Colors.Subtle)
         }
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(16.dp))
         Text(title, style = Or2Type.CardTitle, color = Or2Colors.Text, textAlign = TextAlign.Center)
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(6.dp))
         Text(body, style = Or2Type.Body, color = Or2Colors.TextMuted, textAlign = TextAlign.Center)
         if (action != null) {
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(16.dp))
             action()
         }
     }
@@ -465,9 +476,9 @@ fun AttentionCard(
         modifier, onClick = onClick, color = Or2Colors.AttentionSurface,
         border = BorderStroke(1.dp, Or2Colors.AttentionBorder),
     ) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Attention)
-            Spacer(Modifier.width(16.dp))
+            Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(title, style = Or2Type.RowLabel, color = Or2Colors.Text)
                 if (subtitle != null) Text(subtitle, style = Or2Type.Secondary, color = subtitleColor)
@@ -482,13 +493,13 @@ fun AttentionCard(
 @Composable
 fun SheetHandle(modifier: Modifier = Modifier) {
     Box(
-        modifier.padding(vertical = 14.dp).size(Or2Dimens.SheetHandleWidth, Or2Dimens.SheetHandleHeight)
+        modifier.padding(vertical = 10.dp).size(Or2Dimens.SheetHandleWidth, Or2Dimens.SheetHandleHeight)
             .clip(Or2Shapes.Pill).background(Or2Colors.Subtle),
     )
 }
 
 /**
- * A modal bottom sheet in `surfaceRaised`: 28 dp top radius, drag handle, optional title on the
+ * A modal bottom sheet in `surfaceRaised`: 24 dp top radius, drag handle, optional title on the
  * left and a "Done" action on the right. Always opens fully.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -505,7 +516,7 @@ fun Or2Sheet(
     ) {
         if (title != null || done != null) {
             Row(
-                Modifier.fillMaxWidth().padding(start = Or2Dimens.Gutter + 4.dp, end = Or2Dimens.Gutter - 4.dp, bottom = 8.dp),
+                Modifier.fillMaxWidth().padding(start = Or2Dimens.Gutter + 4.dp, end = Or2Dimens.Gutter - 4.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
@@ -519,20 +530,38 @@ fun Or2Sheet(
     }
 }
 
-/** An alert dialog in the app's own style; the caller supplies its buttons with [TextAction]. */
+/**
+ * An alert dialog in the app's own style: a `surfaceRaised` card with the 12 dp gutter on the screen
+ * sides and 16 dp inside (Material's AlertDialog keeps 24 dp everywhere and a 280 dp minimum width,
+ * which looked like another design system), the title, the content and the buttons right-aligned
+ * under it (wrapping onto a second line when they do not fit). The caller supplies the buttons with
+ * [TextAction].
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun Or2Dialog(
     onDismiss: () -> Unit, title: String, confirm: @Composable () -> Unit, modifier: Modifier = Modifier,
     dismiss: @Composable (() -> Unit)? = null, titleColor: Color = Or2Colors.Text,
     titleStyle: TextStyle = Or2Type.CardTitle, content: @Composable () -> Unit,
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss, modifier = modifier,
-        title = { Text(title, style = titleStyle, color = titleColor) },
-        text = content, confirmButton = confirm, dismissButton = dismiss,
-        shape = Or2Shapes.Card, containerColor = Or2Colors.SurfaceRaised, titleContentColor = titleColor,
-        textContentColor = Or2Colors.Text,
-    )
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            modifier.padding(horizontal = Or2Dimens.Gutter).widthIn(max = 480.dp).fillMaxWidth()
+                .clip(Or2Shapes.Card).background(Or2Colors.SurfaceRaised).padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp),
+        ) {
+            Text(title, style = titleStyle, color = titleColor, modifier = Modifier.semantics { heading() })
+            Spacer(Modifier.height(12.dp))
+            // Dialog content is body text in `text` by default, as the Material dialog's text slot was.
+            CompositionLocalProvider(LocalContentColor provides Or2Colors.Text, LocalTextStyle provides Or2Type.Body) {
+                Box(Modifier.weight(1f, fill = false)) { content() }
+            }
+            Spacer(Modifier.height(4.dp))
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End)) {
+                dismiss?.invoke()
+                confirm()
+            }
+        }
+    }
 }
 
 /** A line of mono machine text in a `surfaceRaisedRow` block (fingerprints, public keys). */
@@ -540,12 +569,12 @@ fun Or2Dialog(
 fun MonoBlock(text: String, modifier: Modifier = Modifier, color: Color = Or2Colors.Text, container: Color = Or2Colors.SurfaceRaisedRow) {
     Text(
         text, style = Or2Type.Mono, color = color,
-        modifier = modifier.fillMaxWidth().clip(Or2Shapes.Field).background(container).padding(horizontal = 16.dp, vertical = 12.dp),
+        modifier = modifier.fillMaxWidth().clip(Or2Shapes.Field).background(container).padding(horizontal = 12.dp, vertical = 8.dp),
     )
 }
 
 /**
- * A call-to-action card with an icon tile: a mono accent kicker, a 20 sp title, a muted
+ * A call-to-action card with an icon tile: a mono accent kicker, a 15 sp title, a muted
  * explanation and a mono meta line (`~3 min · needs hostname + key`), then a chevron.
  */
 @Composable
@@ -559,14 +588,14 @@ fun ActionCard(
                 Modifier.size(Or2Dimens.IconTile).clip(Or2Shapes.Tile).background(Or2Colors.AccentMuted),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(icon, null, Modifier.size(28.dp), tint = Or2Colors.Accent)
+                Icon(icon, null, Modifier.size(24.dp), tint = Or2Colors.Accent)
             }
-            Spacer(Modifier.width(16.dp))
+            Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(kicker.uppercase(), style = Or2Type.Kicker, color = Or2Colors.Accent.copy(alpha = 0.7f))
+                Text(kicker.uppercase(), style = Or2Type.Kicker, color = Or2Colors.Accent)
                 Text(title, style = Or2Type.CardTitle, color = Or2Colors.Text)
-                Text(body, style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.padding(top = 4.dp))
-                if (meta != null) Text(meta, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.padding(top = 8.dp))
+                Text(body, style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.padding(top = 2.dp))
+                if (meta != null) Text(meta, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.padding(top = 6.dp))
             }
             Spacer(Modifier.width(8.dp))
             Icon(Or2Icons.ChevronRight, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Accent)

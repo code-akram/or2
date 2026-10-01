@@ -272,7 +272,7 @@ fun Or2App(
             } else {
                 Notices(message, busy, focusing, dismiss = { actions.message(null) },
                     Modifier.align(Alignment.BottomCenter).windowInsetsPadding(Or2BottomInsets)
-                        .padding(bottom = if (current == Destination.Home) Or2Dimens.Fab + 32.dp else 8.dp))
+                        .padding(bottom = if (current == Destination.Home) Or2Dimens.Fab + 24.dp else 8.dp))
             }
         }
     }
@@ -296,7 +296,7 @@ private fun InboxState.cwdOf(terminal: ActiveTerminal): String? {
 private fun MessageCard(message: String, dismiss: () -> Unit) {
     Or2Card(Modifier.testTag("message-banner").semantics { liveRegion = LiveRegionMode.Polite }, color = Or2Colors.SurfaceRaised) {
         Row(Modifier.padding(start = Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
-            Text(message, style = Or2Type.Secondary, color = Or2Colors.Text, modifier = Modifier.weight(1f).padding(vertical = 12.dp))
+            Text(message, style = Or2Type.Secondary, color = Or2Colors.Text, modifier = Modifier.weight(1f).padding(vertical = 8.dp))
             IconAction(Or2Icons.Close, "Dismiss message", dismiss, Modifier.testTag("message-dismiss"), tint = Or2Colors.TextMuted)
         }
     }

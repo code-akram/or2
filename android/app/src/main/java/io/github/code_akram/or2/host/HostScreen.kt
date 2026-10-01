@@ -134,7 +134,7 @@ fun HostScreen(
         })
         Column(
             Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).testTag("host-detail"),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             StatusCard(host, hostState, link)
             if (host.keyId == null) {
@@ -154,7 +154,7 @@ fun HostScreen(
             }
             if (terminals.isNotEmpty()) {
                 Column(Modifier.testTag("open-terminals")) {
-                    SectionHeader("Open sessions", topGap = 8.dp)
+                    SectionHeader("Open sessions", topGap = 6.dp)
                     GroupCard {
                         terminals.forEachIndexed { index, terminal ->
                             if (index > 0) GroupDivider()
@@ -166,7 +166,7 @@ fun HostScreen(
                     }
                 }
             }
-            Spacer(Modifier.height(32.dp))
+            Spacer(Modifier.height(24.dp))
             BottomInsetSpacer()
         }
     }
@@ -194,19 +194,19 @@ private fun StatusCard(host: Host, hostState: HostState?, link: LinkStatus) {
     }
     Or2Card {
         Row(Modifier.padding(Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(Or2Dimens.IconTile), contentAlignment = Alignment.Center) {
                 if (link == LinkStatus.CONNECTING) {
-                    Spinner(size = 24.dp)
+                    Spinner(size = Or2Dimens.Spinner)
                 } else {
-                    Icon(Or2Icons.Server, null, Modifier.size(30.dp), tint = Or2Colors.TextMuted)
+                    Icon(Or2Icons.Server, null, Modifier.size(Or2Dimens.Spinner), tint = Or2Colors.TextMuted)
                 }
             }
-            Spacer(Modifier.width(16.dp))
+            Spacer(Modifier.width(8.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(host.username + "@" + host.addressSummary, style = Or2Type.Mono, color = Or2Colors.TextMuted)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (link != LinkStatus.CONNECTING) {
-                        StatusDot(color, Modifier.padding(end = 8.dp))
+                        StatusDot(color, Modifier.padding(end = 6.dp))
                     }
                     Text(message, style = Or2Type.Body, color = if (link == LinkStatus.FAILED) Or2Colors.Danger else Or2Colors.Text,
                         modifier = Modifier.testTag("host-state"))
@@ -249,7 +249,7 @@ fun SessionPickerSheet(
     var chosen by remember { mutableStateOf(initialTab) }
     val tab = chosen ?: if (caps != null && caps.herdr == null && caps.tmux != null) PickerTab.TMUX else PickerTab.HERDR
     // A fixed minimum height keeps the segmented control where the thumb left it when the tab changes.
-    val minHeight = (LocalConfiguration.current.screenHeightDp * 0.55f).dp
+    val minHeight = (LocalConfiguration.current.screenHeightDp * 0.4f).dp
     Or2Sheet(dismiss, title = null, done = null) {
         Column(Modifier.imePadding().heightIn(min = minHeight).testTag("session-picker")) {
             Row(Modifier.fillMaxWidth().padding(horizontal = Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
@@ -263,7 +263,7 @@ fun SessionPickerSheet(
             Column(
                 Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(Or2Dimens.Gutter)
                     .testTag("picker-list"),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 when (tab) {
                     PickerTab.HERDR -> HerdrList(caps, capsError, openHerdr)
@@ -272,15 +272,17 @@ fun SessionPickerSheet(
                 }
                 if (tab != PickerTab.RECENT) {
                     Row(
-                        Modifier.clickable(role = Role.Button, onClick = refresh).padding(vertical = 12.dp).testTag("host-refresh"),
+                        // The icon starts at the rows' text inset (their 12 dp padding inside the card, less the glyph's own margin).
+                        Modifier.clickable(role = Role.Button, onClick = refresh)
+                            .padding(start = Or2Dimens.Gutter - 2.dp, end = Or2Dimens.Gutter, top = 8.dp, bottom = 8.dp).testTag("host-refresh"),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(Or2Icons.Refresh, null, Modifier.size(20.dp), tint = Or2Colors.TextMuted)
-                        Spacer(Modifier.width(8.dp))
+                        Icon(Or2Icons.Refresh, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.TextMuted)
+                        Spacer(Modifier.width(6.dp))
                         Text("Refresh", style = Or2Type.Body, color = Or2Colors.TextMuted)
                     }
                 }
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(12.dp))
             }
         }
     }
@@ -288,7 +290,7 @@ fun SessionPickerSheet(
 
 @Composable
 private fun Muted(text: String, modifier: Modifier = Modifier, color: Color = Or2Colors.TextMuted) {
-    Text(text, style = Or2Type.Body, color = color, modifier = modifier.padding(horizontal = 4.dp, vertical = 8.dp))
+    Text(text, style = Or2Type.Body, color = color, modifier = modifier.padding(horizontal = 4.dp, vertical = 6.dp))
 }
 
 /** A sheet row: raised so it reads against the sheet; tag on the outer box, the click target inside. */
@@ -307,7 +309,7 @@ private fun SheetRow(
 private fun Marker(color: Color, text: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         StatusDot(color)
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(6.dp))
         Text(text, style = Or2Type.Secondary, color = Or2Colors.TextMuted)
     }
 }
@@ -324,10 +326,11 @@ private fun HerdrList(caps: HostCapabilities?, capsError: String?, open: (String
                 if (index > 0) GroupDivider()
                 SheetRow(
                     "herdr:${session.name}", session.name + if (session.isDefault) " (default)" else "",
-                    if (session.running) "running" else "not running",
+                    // The state is the marker at the right, never a second caption line as well.
+                    null,
                     // The default session is opened without a name, never by its listed name.
                     { open(if (session.isDefault) null else session.name) }, "herdr-open:${session.name}", enabled = session.running,
-                    marker = if (session.running) ({ Marker(Or2Colors.Done, "Running") }) else null,
+                    marker = { if (session.running) Marker(Or2Colors.Done, "Running") else Marker(Or2Colors.Subtle, "Not running") },
                 )
             }
         }
@@ -370,7 +373,7 @@ private fun NewTmuxSession(open: (String) -> Unit) {
     var name by rememberSaveable { mutableStateOf("") }
     // Show the rule only once something is typed, so the empty field is not an error.
     val error = if (name.isEmpty()) null else tmuxNameError(name)
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Or2Field(name, { name = it }, label = "New session", placeholder = "session-name", errorText = error, tag = "tmux-new-name")
         PillButton("Create and attach", { open(name); name = "" }, Modifier.testTag("tmux-new"), enabled = tmuxNameError(name) == null,
             icon = Or2Icons.Plus)
