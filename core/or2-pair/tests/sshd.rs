@@ -780,7 +780,7 @@ fn paired_end_to_end(layout: Layout) {
     );
 
     // The host sees it, prints it and exits.
-    host.until("Paired \"Pixel-8\"");
+    host.until("\"Pixel-8\" can now log in as");
     let (code_exit, seen) = host.finish();
     assert_eq!(code_exit, Some(0), "{seen}\n{}", sshd.log());
 
@@ -1026,7 +1026,10 @@ fn a_forcecommand_in_sshd_config_is_not_or2_pair() {
     let shown = String::from_utf8_lossy(&out.stdout).into_owned();
     assert_eq!(out.status.code(), Some(1), "{shown}");
     assert!(
-        shown.contains("fail  sshd_config sets a ForceCommand") && shown.contains("--manual"),
+        shown.lines().any(|line| line.ends_with(
+            "  sshd_config sets a ForceCommand, which would run instead of the pairing command"
+        ) && (line.starts_with("■  ") || line.starts_with("x  ")))
+            && shown.contains("--manual"),
         "{shown}"
     );
     assert!(!shown.contains("Code shown on your phone"), "{shown}");
@@ -1246,7 +1249,7 @@ mod real_phone {
         assert_eq!(result.username, current_user());
         assert_eq!(result.fingerprint, phone.public_key().fingerprint);
 
-        host.until("Paired \"Pixel-8\"");
+        host.until("\"Pixel-8\" can now log in as");
         let (exit, seen) = host.finish();
         assert_eq!(exit, Some(0), "{seen}\n{}", sshd.log());
         let after = sshd.keys_text();

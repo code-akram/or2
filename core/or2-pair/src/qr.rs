@@ -189,6 +189,134 @@ mod tests {
         assert!(coloured.lines().all(|line| line.ends_with(RESET)));
     }
 
+    /// What a camera sees of `drawing` on a terminal: one row of modules per text row (two for
+    /// half blocks), `true` for a dark module. `dark_terminal` is the background around it.
+    fn seen(drawing: &str, style: QrStyle, dark_terminal: bool) -> Vec<Vec<bool>> {
+        let mut rows = Vec::new();
+        for line in drawing.lines() {
+            if style.ascii && style.color {
+                let mut row = Vec::new();
+                let mut dark = false;
+                let mut rest = line;
+                while !rest.is_empty() {
+                    if let Some(after) = rest.strip_prefix('\x1b') {
+                        let end = after.find('m').unwrap();
+                        match &after[..=end] {
+                            "[40m" => dark = true,
+                            "[107m" => dark = false,
+                            _ => {}
+                        }
+                        rest = &after[end + 1..];
+                    } else {
+                        assert!(rest.starts_with("  "), "{rest:?}");
+                        row.push(dark);
+                        rest = &rest[2..];
+                    }
+                }
+                rows.push(row);
+            } else if style.ascii {
+                let chars: Vec<char> = line.chars().collect();
+                // Ink is the terminal's foreground: light on a dark terminal.
+                rows.push(
+                    chars
+                        .chunks(2)
+                        .map(|pair| (pair[0] == '#') != dark_terminal)
+                        .collect(),
+                );
+            } else {
+                let plain: String = line.replace(BLACK_ON_WHITE, "").replace(RESET, "");
+                // With colour ink is black; without, the terminal's foreground.
+                let ink_is_dark = style.color || !dark_terminal;
+                let (mut top, mut bottom) = (Vec::new(), Vec::new());
+                for c in plain.chars() {
+                    let (t, b) = match c {
+                        '█' => (true, true),
+                        '▀' => (true, false),
+                        '▄' => (false, true),
+                        _ => (false, false),
+                    };
+                    top.push(t == ink_is_dark);
+                    bottom.push(b == ink_is_dark);
+                }
+                rows.push(top);
+                rows.push(bottom);
+            }
+        }
+        rows
+    }
+
+    /// Reads `rows` with an independent decoder (rqrr), with a margin of the terminal's
+    /// background around them.
+    fn decode(rows: &[Vec<bool>], dark_terminal: bool) -> String {
+        let (margin, scale) = (4, 4);
+        let width = rows.iter().map(Vec::len).max().unwrap() + 2 * margin;
+        let height = rows.len() + 2 * margin;
+        let dark_at = |x: usize, y: usize| {
+            y.checked_sub(margin)
+                .and_then(|y| rows.get(y))
+                .and_then(|row| x.checked_sub(margin).and_then(|x| row.get(x)))
+                .copied()
+                .unwrap_or(dark_terminal)
+        };
+        let mut image =
+            rqrr::PreparedImage::prepare_from_greyscale(width * scale, height * scale, |x, y| {
+                if dark_at(x / scale, y / scale) {
+                    0
+                } else {
+                    255
+                }
+            });
+        let grids = image.detect_grids();
+        assert_eq!(grids.len(), 1, "one QR code in the drawing");
+        grids[0].decode().expect("the QR decodes").1
+    }
+
+    #[test]
+    fn every_style_decodes_on_the_rail() {
+        use crate::rail::{Rail, Style};
+        let code = format!("or2-pair:2?{}", "name=Test%20Host&a=192.0.2.1&".repeat(6));
+        for (ascii, color, invert) in [
+            (false, false, false),
+            (false, false, true),
+            (false, true, false),
+            (true, false, false),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            let style = style(ascii, color, invert);
+            let rail = Rail::new(Style {
+                color,
+                unicode: !ascii,
+                ..Style::plain()
+            });
+            let mut out = Vec::new();
+            rail.block(&mut out, &render(&code, style).unwrap())
+                .unwrap();
+            let drawn = String::from_utf8(out).unwrap();
+            // Each row after the rail's gutter, the code exactly as drawn.
+            let gutter = if color {
+                if ascii {
+                    "\x1b[2m|\x1b[0m  "
+                } else {
+                    "\x1b[2m│\x1b[0m  "
+                }
+            } else if ascii {
+                "|  "
+            } else {
+                "│  "
+            };
+            let rows: Vec<&str> = drawn
+                .lines()
+                .map(|line| line.strip_prefix(gutter).expect(line))
+                .collect();
+            assert_eq!(rows.join("\n") + "\n", render(&code, style).unwrap());
+            // On the terminal it was drawn for: a dark one, or a light one with --invert.
+            let dark_terminal = !invert;
+            let modules = seen(&rows.join("\n"), style, dark_terminal);
+            assert_eq!(decode(&modules, dark_terminal), code, "{style:?}");
+        }
+    }
+
     #[test]
     fn a_thousand_bytes_still_makes_a_code() {
         let long = format!("or2-pair:1?{}", "a".repeat(1000));

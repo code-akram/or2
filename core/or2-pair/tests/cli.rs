@@ -16,6 +16,8 @@ fn run(home: &Path, args: &[&str]) -> Output {
         .env("OR2_PAIR_TEST_HOME", home)
         .env("OR2_PAIR_TEST_USER", "tester")
         .env("NO_COLOR", "1")
+        // The rail's glyphs follow the locale: fixed here, so the tests read the same everywhere.
+        .env("LC_ALL", "C.UTF-8")
         .stdin(Stdio::null())
         .output()
         .expect("run or2-pair")
@@ -107,17 +109,59 @@ fn without_a_terminal_it_refuses_so_a_pipe_cannot_answer_for_the_user() {
     let home = tempfile::tempdir().unwrap();
     let out = run(home.path(), &["--ssh-port", "1"]);
     assert_eq!(out.status.code(), Some(1));
-    let error = text(&out.stderr);
-    assert!(
-        error.contains("terminal") && error.contains("--manual"),
-        "{error}"
+    // The rail opens on standard output; the error that ends it, and its end, on standard error.
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "┌  or2-pair {} · pair a phone with this host\n",
+            env!("CARGO_PKG_VERSION")
+        )
     );
-    let shown = text(&out.stdout);
-    assert!(
-        !shown.contains("or2-pair:2?") && !shown.contains("Waiting"),
-        "{shown}"
+    assert_eq!(
+        text(&out.stderr),
+        "│\n■  pairing needs a terminal to type the code in\n│  run or2-pair in a terminal, or use --manual\n│\n└  Failed\n"
     );
     assert!(!home.path().join(".ssh").exists());
+}
+
+#[test]
+fn the_rail_falls_back_to_ascii_outside_a_utf8_locale_and_with_ascii() {
+    let home = tempfile::tempdir().unwrap();
+    let ascii = |args: &[&str], locale: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_or2-pair"))
+            .args(args)
+            .env("HOME", home.path())
+            .env("USER", "tester")
+            .env("OR2_PAIR_TEST_HOME", home.path())
+            .env("OR2_PAIR_TEST_USER", "tester")
+            .env_remove("LC_CTYPE")
+            .env_remove("LANG")
+            .env("LC_ALL", locale)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run or2-pair");
+        (text(&out.stdout), text(&out.stderr))
+    };
+    for (args, locale) in [
+        (&["--ssh-port", "1"][..], "C"),
+        (&["--ssh-port", "1"], "POSIX"),
+        (&["--ssh-port", "1", "--ascii"], "C.UTF-8"),
+    ] {
+        let (shown, error) = ascii(args, locale);
+        assert_eq!(
+            shown,
+            format!(
+                "+  or2-pair {} - pair a phone with this host\n",
+                env!("CARGO_PKG_VERSION")
+            ),
+            "{args:?} {locale}"
+        );
+        assert_eq!(
+            error,
+            "|\nx  pairing needs a terminal to type the code in\n|  run or2-pair in a terminal, or use --manual\n|\n`  Failed\n",
+            "{args:?} {locale}"
+        );
+    }
 }
 
 #[test]
@@ -133,9 +177,13 @@ fn a_user_flag_that_names_someone_else_is_refused_before_anything_is_touched() {
         error.contains("or2-not-the-current-user") && error.contains("not the account"),
         "{error}"
     );
+    assert!(
+        error.starts_with("│\n■  --user ") && error.ends_with("│\n└  Failed\n"),
+        "{error}"
+    );
     let shown = text(&out.stdout);
     assert!(
-        !shown.contains("or2-pair:2?") && !shown.contains("Checks"),
+        !shown.contains("or2-pair:2?") && !shown.contains("sshd"),
         "{shown}"
     );
     assert!(!home.path().join(".ssh").exists());
@@ -227,6 +275,7 @@ mod live {
                 .env("OR2_PAIR_TEST_USER", "tester")
                 .env("OR2_PAIR_TEST_ETC_SSH", self.etc.path())
                 .env("NO_COLOR", "1")
+                .env("LC_ALL", "C.UTF-8")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
             command
@@ -342,6 +391,70 @@ mod live {
         assert_eq!(unsafe { libc::kill(child.id() as libc::pid_t, signal) }, 0);
     }
 
+    /// `--check` with its output on a terminal (a pseudo-terminal): what it printed, with the
+    /// terminal's `\r\n` back to `\n`.
+    #[cfg(target_os = "linux")]
+    fn check_on_a_terminal(host: &Host, extra: &[&str], env: &[(&str, &str)]) -> String {
+        use std::io::Read;
+        let (mut master, terminal) = pty();
+        let mut command = host.command(env!("CARGO_BIN_EXE_or2-pair"));
+        command
+            .env_remove("NO_COLOR")
+            .env("TERM", "xterm-256color")
+            .args(["--check", "--ssh-port", &host.port.to_string()])
+            .args(extra)
+            .stdin(Stdio::null())
+            .stdout(terminal)
+            .stderr(Stdio::null());
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        let mut child = command.spawn().unwrap();
+        // Only the child holds the terminal now: the master reads to its end once it exits.
+        drop(command);
+        let mut seen = Vec::new();
+        // Linux ends a hung-up pseudo-terminal with EIO; what came before it is kept.
+        let _ = master.read_to_end(&mut seen);
+        assert!(child.wait().unwrap().success());
+        text(&seen).replace("\r\n", "\n")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn on_a_terminal_the_rail_has_colour_unless_told_otherwise() {
+        let host = Host::new();
+        let coloured = check_on_a_terminal(&host, &[], &[]);
+        for drawn in [
+            "\x1b[2m┌\x1b[0m  or2-pair ",
+            "\n\x1b[2m│\x1b[0m\n\x1b[32m✔\x1b[0m  sshd is answering on port ",
+            "\n\x1b[2m└\x1b[0m  Done\n",
+        ] {
+            assert!(coloured.contains(drawn), "{drawn:?} in {coloured:?}");
+        }
+        // NO_COLOR, --no-color and TERM=dumb: the same rail without a single escape.
+        for (extra, env) in [
+            (&[][..], &[("NO_COLOR", "1")][..]),
+            (&["--no-color"], &[]),
+            (&[], &[("TERM", "dumb")]),
+        ] {
+            let plain = check_on_a_terminal(&host, extra, env);
+            assert!(!plain.contains('\x1b'), "{extra:?} {env:?}: {plain:?}");
+            assert!(
+                plain.starts_with("┌  or2-pair ") && plain.ends_with("\n│\n└  Done\n"),
+                "{plain}"
+            );
+        }
+        // Outside a UTF-8 locale: the ASCII rail, coloured all the same.
+        let ascii = check_on_a_terminal(&host, &[], &[("LC_ALL", "C")]);
+        assert!(
+            ascii.starts_with("\x1b[2m+\x1b[0m  or2-pair ")
+                && ascii.contains("\n\x1b[32m+\x1b[0m  sshd is answering on port ")
+                && ascii.ends_with("\n\x1b[2m`\x1b[0m  Done\n"),
+            "{ascii:?}"
+        );
+        assert!(ascii.is_ascii(), "{ascii:?}");
+    }
+
     #[test]
     fn check_reports_and_changes_nothing_even_without_a_terminal() {
         let host = Host::new();
@@ -355,11 +468,12 @@ mod live {
         assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
         let report = text(&out.stdout);
         assert!(
-            report.contains("Checks") && report.contains("Nothing was changed"),
+            report.starts_with("┌  or2-pair ")
+                && report.contains(" Nothing was changed.\n│\n└  Done\n"),
             "{report}"
         );
         assert!(
-            report.contains("sshd is not answering on port 1"),
+            report.contains("\n■  sshd is not answering on port 1\n│  "),
             "{report}"
         );
         assert!(
@@ -615,6 +729,78 @@ mod live {
         kill(&running.child, libc::SIGINT);
         let (code, seen) = running.finish();
         assert_eq!(code, Some(1), "{seen}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn on_a_terminal_the_answered_question_is_redrawn_with_the_code_masked() {
+        use std::io::Read;
+        use std::sync::{Arc, Mutex};
+        if !testhost_path_is_usable() {
+            return;
+        }
+        let host = Host::new();
+        let (master, terminal) = pty();
+        let mut command = host.command(env!("CARGO_BIN_EXE_or2-pair"));
+        command
+            .env("TERM", "xterm")
+            .args([
+                "--ssh-port",
+                &host.port.to_string(),
+                "--address",
+                "127.0.0.1",
+                "--name",
+                "Test",
+            ])
+            .stdin(terminal.try_clone().unwrap())
+            .stdout(terminal.try_clone().unwrap())
+            .stderr(Stdio::null());
+        let child = command.spawn().unwrap();
+        drop(command);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let reader = {
+            let seen = Arc::clone(&seen);
+            let mut master = master.try_clone().unwrap();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                while let Ok(count) = master.read(&mut buf) {
+                    if count == 0 {
+                        break;
+                    }
+                    seen.lock().unwrap().extend_from_slice(&buf[..count]);
+                }
+            })
+        };
+        let shown = || text(&seen.lock().unwrap()).replace("\r\n", "\n");
+        until_echo(&terminal, false);
+        (&master).write_all(format!("{CODE}\n").as_bytes()).unwrap();
+        let limit = Instant::now() + Duration::from_secs(20);
+        while !shown().contains("Waiting for the phone") {
+            assert!(Instant::now() < limit, "{:?}", shown());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        kill(&child, libc::SIGINT);
+        let mut child = child;
+        assert_eq!(child.wait().unwrap().code(), Some(1));
+        drop(terminal);
+        reader.join().unwrap();
+        let shown = shown();
+        // Asked with a hint on the answer's line and the cursor back at its start; answered by
+        // drawing the question again as answered and the code masked on the answer's line.
+        assert!(
+            shown.contains(
+                "◆  Code shown on your phone\n│  hidden as you type; Enter when done\r\x1b[3C"
+            ),
+            "{shown:?}"
+        );
+        assert!(
+            shown.contains(
+                "\r\x1b[1A\x1b[2K◇  Code shown on your phone\n\r\x1b[2K│  ••••-••••-••••\n"
+            ),
+            "{shown:?}"
+        );
+        assert!(!shown.contains("7KQ4"), "{shown:?}");
+        assert!(shown.ends_with("\n│\n└  Cancelled\n"), "{shown:?}");
     }
 
     #[cfg(target_os = "linux")]

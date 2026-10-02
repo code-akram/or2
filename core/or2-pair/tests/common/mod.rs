@@ -290,7 +290,7 @@ pub fn pair<R>(
                 exe: setup.exe.clone(),
                 prompt: script,
                 can_ask: setup.can_ask,
-                color: false,
+                style: or2_pair::rail::Style::plain(),
                 random: &random,
                 now: &DateTime::now,
                 signals,

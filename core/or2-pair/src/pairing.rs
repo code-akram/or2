@@ -21,6 +21,7 @@ use crate::authorized_keys::{self, Backup};
 use crate::bootstrap::{self, Dialect, PairingId};
 use crate::code::PairCode;
 use crate::date::DateTime;
+use crate::rail::{Mark, Rail, Stream, Style};
 use crate::run::{RunError, Signals};
 use crate::state::{Done, Held, Liveness, State, StateDir};
 
@@ -314,15 +315,21 @@ impl Drop for Live<'_> {
             }
         };
         self.liveness = None;
+        let rail = Rail::new(Style::detect(Stream::Stderr));
+        let mut err = std::io::stderr().lock();
         for warning in self.take_warnings() {
-            eprintln!("or2-pair: {warning}");
+            let _ = rail.step(&mut err, Mark::Warn, &warning);
         }
         if let Some(Ended::RemovalFailed(error)) = ended {
-            eprintln!(
-                "or2-pair: could not remove the temporary pairing key ({error}); delete this line from {}: {}",
-                self.account.keys_path().display(),
-                self.line
+            let _ = rail.step(
+                &mut err,
+                Mark::Error,
+                &format!(
+                    "could not remove the temporary pairing key ({error})\ndelete this line from {}:",
+                    self.account.keys_path().display()
+                ),
             );
+            let _ = rail.block(&mut err, &self.line);
         }
     }
 }

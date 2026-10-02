@@ -123,18 +123,26 @@ fn a_phone_pairs_and_its_key_replaces_the_temporary_one() {
     assert_eq!(backups.len(), 1);
     assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), original);
 
-    // What was printed, in order: the checks, the prompt, the host, the key line, the QR.
+    // What was printed, in order, on one rail: the checks, the prompt (answered, masked), the
+    // host, the key line, the QR, the code off the rail, the wait, the pairing, the end.
     let out = &result.output;
+    assert!(
+        out.starts_with("┌  or2-pair test · pair a phone with this host\n│\n"),
+        "{out}"
+    );
     let order = [
-        "Checks",
-        "sshd is answering on port 22 (OpenSSH_9.9)",
-        "Code shown on your phone: ",
-        "This host",
+        "\n✔  sshd is answering on port 22 (OpenSSH_9.9)",
+        "\n●  Open or2 on your phone: Add host > Easy pair\n│",
+        "\n◆  Code shown on your phone\n│  ••••-••••-••••\n│",
+        "\n●  This host\n│  name       Test Host\n│  user       alice\n│  ssh port   22",
         HOST_FINGERPRINT,
-        "A temporary pairing key was added for alice until ",
-        "or2-pair:2?name=Test%20Host",
-        "Waiting for the phone",
-        "Paired \"Pixel-8\" (SHA256:",
+        "\n●  A temporary pairing key was added for alice until ",
+        "\n│  Scan this with the same phone:\n│\n│  ███",
+        "\n│\n│  Or paste this code into the app (Easy pair > Paste pairing code):\nor2-pair:2?name=Test%20Host",
+        "\n│\n●  Waiting for the phone (until ",
+        "\n│\n✔  \"Pixel-8\" can now log in as alice (SHA256:",
+        "\n│  Its key replaced the temporary key. To undo, delete the line ending or2-Pixel-8-",
+        "\n│\n└  Paired\n",
     ];
     let mut at = 0;
     for needle in order {
@@ -185,7 +193,7 @@ fn the_code_is_a_valid_version_2_code_with_the_new_address_order() {
     assert!(text.len() <= max_bytes());
     assert!(
         result.output.contains(
-            "10.147.17.5 (overlay), 192.168.1.20 (LAN), 203.0.113.9 (public), 2001:db8::9 (public)"
+            "│  addresses  10.147.17.5 (overlay)\n│             192.168.1.20 (LAN)\n│             203.0.113.9 (public)\n│             2001:db8::9 (public)\n│             testhost.local (mDNS name, same network only)\n"
         ),
         "{}",
         result.output
@@ -284,7 +292,7 @@ fn without_a_terminal_it_refuses_before_asking_or_changing_anything() {
         result.exit
     );
     assert_eq!(script.asked.load(Ordering::SeqCst), 0);
-    assert!(!result.output.contains("Checks") && !world.ssh_dir().exists());
+    assert!(!result.output.contains("sshd is answering") && !world.ssh_dir().exists());
     let message = RunError::NotInteractive.to_string();
     assert!(
         message.contains("terminal") && message.contains("--manual"),
@@ -360,7 +368,10 @@ fn a_signal_ends_the_run_and_removes_the_temporary_key() {
     assert!(
         result
             .output
-            .contains("Cancelled. The temporary key was removed.")
+            .contains("│\n✔  The temporary key was removed.\n│  The previous file is saved as ")
+            && result.output.ends_with("\n│\n└  Cancelled\n"),
+        "{}",
+        result.output
     );
     let (outcome, _) = enroll(&world, &result.phone.unwrap(), PHONE_KEY, "late");
     assert_eq!(outcome, Outcome::Refused(Reason::Expired));
@@ -737,7 +748,7 @@ fn what_makes_pairing_impossible_stops_the_run_before_the_prompt_and_before_any_
             result.output
         );
         assert!(
-            result.output.contains("fail") && result.output.contains(reason),
+            result.output.contains("\n■  ") && result.output.contains(reason),
             "{what}:\n{}",
             result.output
         );
@@ -777,7 +788,7 @@ fn sshd_config_warnings_are_shown_but_do_not_stop_the_pairing() {
     assert!(
         result
             .output
-            .contains("warn  sshd_config sets a ForceCommand")
+            .contains("\n▲  sshd_config sets a ForceCommand")
             && result.output.contains("--manual"),
         "{}",
         result.output
@@ -831,27 +842,38 @@ fn the_printed_qr_decodes_to_the_pairing_code() {
         enroll(&world, &id_of(&ready.payload), PHONE_KEY, "p");
     });
     assert_eq!(result.exit.unwrap(), Exit::Paired);
-    let drawing: Vec<&str> = result
+    // The screen around the code as drawn: the rail's blank line above, every row of the code
+    // after the rail's gutter, the rail's blank line below. The rail glyph stays in the picture.
+    let screen: Vec<&str> = result
         .output
         .lines()
         .skip_while(|line| !line.contains("Scan this with the same phone"))
-        .skip(2)
-        .take_while(|line| !line.is_empty())
+        .skip(1)
+        .take_while(|line| !line.contains("Or paste this code"))
         .collect();
-    assert_eq!(decode(&drawing), printed_code(&result.output));
+    assert_eq!(screen.first(), Some(&"│"));
+    assert_eq!(screen.last(), Some(&"│"));
+    let rows = &screen[1..screen.len() - 1];
+    assert!(rows.len() > 10, "{screen:?}");
+    for row in rows {
+        // The gutter, then the quiet zone, lit on a dark terminal.
+        assert!(row.starts_with("│  ██"), "{row}");
+    }
+    assert_eq!(decode(&screen), printed_code(&result.output));
 }
 
 /// Turns the half-block drawing back into pixels (ink = light module on a dark terminal) and
-/// reads it with an independent QR decoder.
+/// reads it with an independent QR decoder. The rail's `│` counts as ink from top to bottom of
+/// its cell (it is a thin line in fact): the worst case for the quiet zone beside it.
 fn decode(lines: &[&str]) -> String {
     let scale = 4;
-    let width = lines[0].chars().count();
+    let width = lines.iter().map(|line| line.chars().count()).max().unwrap();
     let height = lines.len() * 2;
     let mut pixels = vec![0u8; width * height];
     for (row, line) in lines.iter().enumerate() {
         for (col, c) in line.chars().enumerate() {
             let (top_ink, bottom_ink) = match c {
-                '█' => (true, true),
+                '█' | '│' => (true, true),
                 '▀' => (true, false),
                 '▄' => (false, true),
                 _ => (false, false),
@@ -908,7 +930,7 @@ fn another_user_is_refused_before_anything_is_touched() {
         }
         other => panic!("{other:?}"),
     }
-    assert!(!result.output.contains("Checks"));
+    assert!(!result.output.contains("sshd is answering"));
 }
 
 #[test]

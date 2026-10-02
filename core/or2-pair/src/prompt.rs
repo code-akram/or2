@@ -17,6 +17,12 @@ pub const MAX_LINE: usize = 256;
 pub trait CodePrompt {
     /// One line without its terminator; `None` at the end of input (Ctrl-D, a closed pipe).
     fn read_line(&self) -> Option<Zeroizing<String>>;
+
+    /// Whether the process was stopped (Ctrl-Z) and continued while the last line was read:
+    /// the shell wrote to the terminal meanwhile, so the question is not redrawn in place.
+    fn was_stopped(&self) -> bool {
+        false
+    }
 }
 
 /// Standard input.
@@ -30,11 +36,30 @@ impl Stdin {
     }
 }
 
+/// Whether the last [`Stdin::read_line`] saw the process continued after a stop.
+static STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl CodePrompt for Stdin {
     fn read_line(&self) -> Option<Zeroizing<String>> {
         #[cfg(unix)]
-        let _quiet = EchoOff::new(0);
+        {
+            let before = echo::resumes();
+            let line = {
+                let _quiet = EchoOff::new(0);
+                read_line_from_stdin()
+            };
+            STOPPED.store(
+                echo::resumes() != before,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            line
+        }
+        #[cfg(not(unix))]
         read_line_from_stdin()
+    }
+
+    fn was_stopped(&self) -> bool {
+        STOPPED.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -66,6 +91,14 @@ mod echo {
 
     /// Set while the guard puts the terminal back: [`resume`] then leaves echo alone.
     static CLOSING: AtomicBool = AtomicBool::new(false);
+
+    /// How many times [`resume`] ran: the process was stopped and continued during a prompt.
+    static RESUMED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    /// How many times the process was continued after a stop during a prompt, so far.
+    pub fn resumes() -> u32 {
+        RESUMED.load(Ordering::SeqCst)
+    }
 
     /// The signals that end the process while the code is typed.
     const ENDING: [libc::c_int; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
@@ -149,6 +182,8 @@ mod echo {
     /// has now, without `ECHO` and `ECHONL`), and SIGTSTP is handled again (the stop gave it its
     /// default action). Nothing once the guard is putting things back, or gone.
     extern "C" fn resume(_: libc::c_int) {
+        // A lock-free atomic: async-signal-safe.
+        RESUMED.fetch_add(1, Ordering::SeqCst);
         let fd = SAVED_FD.load(Ordering::SeqCst);
         if fd < 0 || CLOSING.load(Ordering::SeqCst) {
             return;
