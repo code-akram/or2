@@ -433,7 +433,20 @@ async fn terminate_stops_a_server_nobody_connected_to() {
     let pid = params.server_pid.expect("mosh-server reports its pid");
     let host = LoopbackSsh(LocalHost::new());
 
-    // Without a reported pid the guard finds the server by the port it listens on.
+    // Without a reported pid the guard finds the server by the port it listens on. mosh-server
+    // forks after binding, and the exiting parent (also a mosh-server) holds the socket until it
+    // is gone: under load it can still be there, so wait for the server to be the only owner. (A
+    // guard kills what it holds when dropped, so the wait reads the owners without making one.)
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while udp_port_owners(params.port)
+        .into_iter()
+        .filter(|owner| comm(*owner).as_deref() == Some("mosh-server"))
+        .count()
+        > 1
+        && Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let by_port = ServerGuard::adopt(None, params.port);
     assert!(by_port.armed() && by_port.processes[0].0 == pid);
 
