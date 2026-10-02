@@ -956,6 +956,24 @@ mod tests {
             let text = text.replace("{}", CELLAR);
             assert_eq!(parse_app_rule(&text, path), expected, "{text:?}");
         }
+        // Captured from a Mac (macOS, Homebrew mosh 1.4.0, 2026-10-02): the firewall on with
+        // stealth mode, block-all off, and mosh-server's rule, exit status 0.
+        assert_eq!(
+            parse_global_state("Firewall is enabled. (State = 1)\nFirewall stealth mode is on\n"),
+            parse_global_state(ON)
+        );
+        assert_eq!(
+            parse_block_all("Firewall has block all state set to disabled.\n"),
+            Some(false)
+        );
+        let real = Path::new("/opt/homebrew/Cellar/mosh/1.4.0_43/bin/mosh-server");
+        assert_eq!(
+            parse_app_rule(
+                "Incoming connection to /opt/homebrew/Cellar/mosh/1.4.0_43/bin/mosh-server is permitted.\n",
+                real
+            ),
+            Some(AppRule::Allowed)
+        );
         // A word in the path says nothing.
         let odd = Path::new("/Users/dev/blocked/bin/mosh-server");
         assert_eq!(
