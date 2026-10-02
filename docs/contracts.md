@@ -2497,9 +2497,10 @@ restrict,command="<exe> enroll <id>",expiry-time="<YYYYMMDDHHMM>Z"
   file's mode (and group, where the account may) and on Linux its `security.selinux` extended attribute
   when it has one and the new file's differs (while SELinux is active, a label that cannot be set
   refuses the change: sshd might not be allowed to read the file; without SELinux the attribute means
-  nothing and only a privileged process may set it, so a stale one is not copied); then the target is checked again (the name is still the file that was read, same device and
-  inode, not a link, regular, owner, one hard link, StrictModes), so a hard link added or a file swapped
-  in meanwhile is refused with nothing changed; then `renameat` over it and an `fsync` of `~/.ssh`. A
+  nothing and only a privileged process may set it, so a stale one is not copied); then the target is
+  checked again (the name is still the file that was read, same device and inode, not a link, regular,
+  owner, one hard link, StrictModes), so a hard link added or a file swapped in meanwhile is refused
+  with nothing changed; then `renameat` over it and an `fsync` of `~/.ssh`. A
   missing file is created by linking the new one to its name, which fails if the name appeared
   meanwhile. A crash, a kill or a full disk leaves the old file or the new one, never a mix; a failure
   removes the temporary file. Between the second check and the rename a process of the same account can
@@ -2903,15 +2904,15 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
   the run ended; `HostKeyMismatch`; `Gone` for a second phone; rc-file noise from a `.bashrc` that
   echoes; a `ForceCommand` the checks can read refuses before the prompt, and `NotOr2Pair` from one they
   cannot; a host under `TZ=<-05>5` with sshd under `TZ=UTC` pairs (the `Z` expiry), and sshd five hours
-  ahead of UTC refuses a past `Z` expiry and accepts a future one. The host crate's suite also runs the product's own client
-  (`or2_core::pair`, a dev-dependency) against the built testhost behind the disposable sshd: its parser
+  ahead of UTC refuses a past `Z` expiry and accepts a future one. The host crate's suite also runs
+  the product's own client (`or2_core::pair`, a dev-dependency) against the built testhost behind the disposable sshd: its parser
   reads the QR line the host printed (and agrees with the host crate's reference reader), `pair_enroll`
   pairs, and a different `K`, a different host key and an ended run give `BootstrapRefused`,
   `HostKeyMismatch` and `BootstrapRefused`.
 - **`or2_core::pair`**: `PairCode` (the 31-symbol alphabet and `Z` refused as invalid, the check
   character with no exception and the five shared check vectors, rejection sampling and uniformity
-  bounds, any white space ignored and the length checked first, as on the host), the parser table, the derivation vector, the client against a scripted exchange and every
-  error mapping.
+  bounds, any white space ignored and the length checked first, as on the host), the parser table,
+  the derivation vector, the client against a scripted exchange and every error mapping.
 - **Kotlin**: `PairFlowTest` (fakes; among them that changing the key after a save failure starts no
   second enrolment, `changingTheKeyAfterASaveFailureAttemptsASecondEnrolment`), `PairMessagesTest`,
   `PairEndToEndTest` (`or2-pair-testhost` behind a disposable sshd with `K` from the flow written to its
