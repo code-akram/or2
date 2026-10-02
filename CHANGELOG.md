@@ -18,6 +18,9 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ### Fixed
 
+- Nothing in the app can draw into the status bar any more: every screen is clipped to the safe area (only the
+  background runs under it), sheets stop below it, and dialogs keep clear of it. One top bar everywhere, fixed,
+  with a hairline that appears once content scrolls under it.
 - After scrolling a herdr or tmux pane with a swipe that went to the program as wheel events, the scroll-to-bottom
   button now shows and returns the pane to its live screen; typing first returns it too.
 

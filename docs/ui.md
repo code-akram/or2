@@ -7,6 +7,11 @@ Moshi Android app (studied on the test phone; screenshots stay out of the reposi
 Compose code follows it through one theme file (`ui/Theme.kt`, `ui/Components.kt`), never ad-hoc
 colours or sizes.
 
+**The shell (top edge).** `AppScaffold` pads every screen to the safe area (status bar, cutout, sides) and
+clips it there: the background alone runs under the status bar; no title, icon, row, overscroll or drag of any
+screen can ever draw into it. Sheets and dialogs, separate windows, follow the sheet and dialog rules (a sheet
+stops 12 dp below the status bar). `TopEdgeDeviceTest` checks every screen and sheet.
+
 ## Compact scale (the default)
 
 The whole UI is compact by default: UI text, controls, the arrow pad, forms, sheets and dialogs

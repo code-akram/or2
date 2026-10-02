@@ -40,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -732,9 +733,13 @@ fun AppScaffold(fullScreen: Boolean, content: @Composable () -> Unit) {
     Or2Theme {
         Box(Modifier.fillMaxSize().or2Background()) {
             val insets = WindowInsets.systemBars.union(WindowInsets.displayCutout)
+            // The shell: every screen lives inside the safe area and is clipped to it, so nothing a screen
+            // draws (a title, an icon, a row moved by a scroll, an overscroll stretch, a drag) can ever reach
+            // the status bar or the cutout. Only the background above runs under the system bars.
             Box(
                 Modifier.fillMaxSize()
                     .windowInsetsPadding(insets.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top))
+                    .clipToBounds()
                     .then(if (fullScreen) Modifier else Modifier.imePadding()),
             ) { content() }
         }
