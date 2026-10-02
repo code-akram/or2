@@ -4933,11 +4933,27 @@ stays green.
   descriptor it closes). A keyboard's grant is given back exactly once on every path (`Once`), as soon
   as the reading is over. `ImagePaste` starts its coroutine atomically, so a taken image is always
   prepared and gives back its grant even when cancelled before it ran; a refused one is given back by
-  the caller. **Narrowed:** a provider that ignores the cancel keeps that one IO thread until it
-  answers; the upload has ended and its grant was given back by then. Tests: JVM
+  the caller. Tests: JVM
   `aCancelStopsAProviderThatNeverOpensOrNeverReadsAndGivesTheGrantBackAtOnce`,
   `aProviderTooSlowToAnswerIsRefusedAtTheDeadlineAndAborted` (each for a blocked open and a blocked
   read), `aTakenImageIsAlwaysPreparedSoItsGrantIsGivenBackEvenWhenCancelledAtOnce`.
+- **Fix: abandoned provider reads are bounded (Codex v0.1.2 fix-check P2; branch `v012/fix-3`).** A
+  provider that ignores the cancel keeps its thread until it answers, and each new share or keyboard
+  image used to add one more blocked `Dispatchers.IO` job. Reads now run on `ImageReaders`, not the
+  shared IO pool: a pool of `MAX_LIVE_READS` (4) daemon threads of their own (`or2-image-read`), with
+  one place per read. A read holds its place until its blocking call really returns, not when its
+  caller gives up at the cancel or the deadline. With all four places taken by reads that have not
+  returned, a new image (attach button, keyboard, share) is refused before anything is opened, in the
+  strip: `Earlier images are still being read; try again later` (`STILL_READING`). No more blocking
+  work starts, and the grant is given back as for any refusal. A place comes back when its provider
+  finally answers or fails. So stuck providers cost or2 at most four threads; the upload and its grant
+  are released at the deadline as before. Test: JVM
+  `providersThatIgnoreTheAbortHoldAtMostTheCapAndLaterReadsAreRefusedWithoutStartingAny`: with a cap of
+  2 and six timed-out reads whose provider ignores the abort, only two are opened, at most two workers
+  are live, and the other four are refused; once the providers answer, a read goes through again. On
+  the old unbounded path all six were opened and timed out (`[TOO_SLOW x6]`). **Open:** no Android
+  instrumentation test with a real `ContentResolver` provider (open cancellation, a blocked descriptor
+  read, the grant) runs here: the phone is not used.
 - **Fix: the image directory is checked, not trusted (Codex P2 #7, Fable P3).** Each part of
   `.cache/or2/images` is checked with `lstat` before anything is made below it, and fails closed
   (`upload::directory_problem`): a directory; not a symbolic link; not writable by group or others
