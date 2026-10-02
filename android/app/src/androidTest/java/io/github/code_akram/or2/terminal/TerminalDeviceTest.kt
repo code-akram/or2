@@ -105,6 +105,7 @@ class TerminalDeviceTest {
         override fun state(): SessionState = SessionState.Connected
         override fun transport() = TerminalTransport.SSH
         override fun serverPid(): UInt? = null
+        override fun clientId(): String? = null
         override fun roam() = Unit
         override fun approveHostKey(fingerprint: String) = Unit
         override fun rejectHostKey() = Unit

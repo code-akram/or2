@@ -44,6 +44,7 @@ class UiSession(private val initial: SessionState = SessionState.Connected) : Se
     override fun state() = initial
     override fun transport() = TerminalTransport.SSH
     override fun serverPid(): UInt? = null
+    override fun clientId(): String? = null
     override fun roam() = Unit
     override fun approveHostKey(fingerprint: String) = Unit
     override fun rejectHostKey() = Unit
@@ -90,5 +91,5 @@ class UiPort(
     override suspend fun focusHerdrPane(session: String?, paneId: String) = Unit
     override suspend fun stopMoshServer(pid: UInt) = Unit
     override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll) = Unit
-    override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav) = Unit
+    override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) = Unit
 }

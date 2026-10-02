@@ -251,6 +251,8 @@ struct Shared {
     frames: Mutex<FrameMailbox>,
     /// A mosh session's `mosh-server` process id on the host, or [`NO_SERVER_PID`].
     server_pid: AtomicU32,
+    /// A tmux terminal's client id ([`crate::tmux::new_client_id`]); fixed at its open.
+    client_id: Option<String>,
 }
 
 /// No server pid (a real process id is never 0: that is the scheduler).
@@ -261,10 +263,19 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 pub fn channel(observer: Arc<dyn SessionObserver>) -> (SessionHandle, SessionDriver) {
+    channel_with_client(observer, None)
+}
+
+/// [`channel`] for a terminal with a tmux client id ([`SessionHandle::client_id`]).
+pub fn channel_with_client(
+    observer: Arc<dyn SessionObserver>,
+    client_id: Option<String>,
+) -> (SessionHandle, SessionDriver) {
     let shared = Arc::new(Shared {
         state: Mutex::new(SessionState::Connecting),
         frames: Mutex::new(FrameMailbox::default()),
         server_pid: AtomicU32::new(NO_SERVER_PID),
+        client_id,
     });
     let (sender, receiver) = mpsc::unbounded_channel();
     (
@@ -304,6 +315,16 @@ impl SessionHandle {
             NO_SERVER_PID => None,
             pid => Some(pid),
         }
+    }
+
+    /// A tmux terminal's client id: opaque, fixed for the session's life, and its own (another
+    /// terminal on the same tmux session, or this terminal's next session after a transport
+    /// swap, has another). Its attach records its tmux client under it, and
+    /// [`HostHandle::navigate`] given it moves exactly that client. `None` for other targets.
+    ///
+    /// [`HostHandle::navigate`]: crate::host::HostHandle::navigate
+    pub fn client_id(&self) -> Option<&str> {
+        self.shared.client_id.as_deref()
     }
 
     pub fn approve_host_key(&self, fingerprint: &str) -> Result<(), SessionError> {
@@ -420,6 +441,11 @@ impl SessionDriver {
 
     pub fn state(&self) -> SessionState {
         lock(&self.shared.state).clone()
+    }
+
+    /// The session's tmux client id, if any ([`SessionHandle::client_id`]).
+    pub fn client_id(&self) -> Option<&str> {
+        self.shared.client_id.as_deref()
     }
 
     /// Records the `mosh-server` pid [`SessionHandle::server_pid`] reports and, for a real pid

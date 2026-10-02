@@ -960,9 +960,50 @@ fn mosh_runs_the_tmux_attach_command_and_the_session_outlives_the_client() {
             .any(|name| name == "or2mosh"),
         "{listed:?}"
     );
+    // The attach (an argument list mosh-server runs, `;` included) recorded its tmux client
+    // under the terminal's client id, which navigation finds it by.
+    let id = term.handle.client_id().expect("a tmux terminal").to_owned();
+    let recorded = || {
+        let output = live
+            .sshd
+            .tmux()
+            .args([
+                "show-options",
+                "-s",
+                "-q",
+                "-v",
+                &format!("@or2-client-{id}"),
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    let clients = live
+        .sshd
+        .tmux()
+        .args(["list-clients", "-F", "#{client_name}"])
+        .output()
+        .unwrap();
+    let client = recorded();
+    assert!(
+        !client.is_empty()
+            && String::from_utf8_lossy(&clients.stdout)
+                .lines()
+                .any(|name| name == client),
+        "{client:?} {clients:?}"
+    );
     term.handle.disconnect();
     assert_eq!(term.closed(), CloseReason::Disconnected);
     live.wait_no_servers("mosh-server to exit");
+    // Closed: what it recorded is released (the host connection is still up).
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !recorded().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the record was not released"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
     let listed = live
         .sshd
         .tmux()

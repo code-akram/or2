@@ -188,7 +188,9 @@ host-key prompt and a dying connection task.
 `core/or2-core/tests/host_nav.rs` runs `HostHandle::navigate` (the swipe gestures' moves) for a
 tmux target end to end: the disposable sshd, tmux on its private `TMUX_TMPDIR`, a real tmux client
 attached by an SSH terminal, and window, pane and session moves checked with `tmux display` and
-`list-clients` (an `or2-a2` session next to `or2-a` proves the targets are exact). It needs `sshd`
+`list-clients` (an `or2-a2` session next to `or2-a` proves the targets are exact); a second test
+attaches two SSH terminals to one session and checks that each gesture moves only the client its
+terminal's attach recorded (`@or2-client-<id>`), and that a closed terminal releases it. It needs `sshd`
 and `tmux`, with the same skips and `OR2_REQUIRE_*` switches as `host.rs`. The herdr moves run
 against a real isolated herdr in `herdr_live.rs` (below) and a scripted one in `herdr::navigate`'s
 unit tests.

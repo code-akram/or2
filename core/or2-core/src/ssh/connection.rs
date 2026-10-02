@@ -98,6 +98,8 @@ const SESSIONS_CLOSE_GRACE: Duration = Duration::from_secs(3);
 const KEEPALIVE_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a watch whose capability probe failed waits before probing again.
 const WATCH_RETRY: Duration = Duration::from_secs(10);
+/// How long a closed tmux terminal's release ([`SshHost::release_tmux_client`]) may take.
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// From the network task to the host thread. Pairing ([`super::pair_client`]) runs on the same
 /// connection machinery and answers only the host-key and transport-end events.
@@ -155,6 +157,17 @@ pub(super) struct SshHost {
     /// Test only: see `Client::reader_gate`.
     #[cfg(test)]
     reader_gate: Arc<Mutex<Option<super::client::TestReaderGate>>>,
+}
+
+/// See [`SshHost::tmux_release`].
+pub(super) struct TmuxRelease(Option<(Arc<SshHost>, String, Closing)>);
+
+impl Drop for TmuxRelease {
+    fn drop(&mut self) {
+        if let Some((host, client_id, closing)) = self.0.take() {
+            host.release_tmux_client(client_id, closing);
+        }
+    }
 }
 
 /// Every established SSH connection of the process, for [`network_changed`]. Weak: a closed
@@ -271,6 +284,44 @@ impl SshHost {
     /// channel setup.
     pub(super) fn exec_timeout(&self) -> Duration {
         self.exec_timeout
+    }
+
+    /// A tmux terminal with client id `client_id` has closed: forgets its client
+    /// ([`tmux::release_client`]: the entry its session moves left here at once; what its
+    /// attach recorded on the tmux server in the background, best effort, bounded, and not at
+    /// all once this connection is closing or closed). Never delays the terminal's close.
+    pub(super) fn release_tmux_client(self: &Arc<Self>, client_id: String, mut closing: Closing) {
+        self.tmux_clients.release(&client_id);
+        if closing.borrow().is_some() || self.is_closed() {
+            return;
+        }
+        let host = Arc::clone(self);
+        runtime().spawn(async move {
+            let release = async {
+                let Ok(programs) = host.programs().await else {
+                    return;
+                };
+                if let Some(path) = &programs.tmux {
+                    let _ =
+                        tmux::release_client(&*host, path, &host.tmux_clients, &client_id).await;
+                }
+            };
+            tokio::select! {
+                _ = timeout(RELEASE_TIMEOUT, release) => {}
+                _ = closed_reason(&mut closing) => {}
+            }
+        });
+    }
+
+    /// Releases a tmux terminal's client ([`SshHost::release_tmux_client`]) when dropped: a
+    /// terminal's driver holds it and drops it once the session has closed, whichever way it
+    /// ends. Nothing for a terminal without a client id.
+    pub(super) fn tmux_release(
+        self: &Arc<Self>,
+        client_id: Option<&str>,
+        closing: &Closing,
+    ) -> TmuxRelease {
+        TmuxRelease(client_id.map(|id| (Arc::clone(self), id.to_owned(), closing.clone())))
     }
 
     /// Whether the SSH connection is gone.
@@ -1104,6 +1155,7 @@ fn dispatch<D: DatagramTransport>(
         HostCommand::Navigate {
             target,
             pane_id,
+            client_id,
             nav,
             reply,
         } => {
@@ -1112,7 +1164,7 @@ fn dispatch<D: DatagramTransport>(
             runtime().spawn(async move {
                 let _tracker = tracker;
                 tokio::select! {
-                    result = navigate(&host, target, pane_id, nav) => { let _ = reply.send(result); }
+                    result = navigate(&host, target, pane_id, client_id, nav) => { let _ = reply.send(result); }
                     _ = closed_reason(&mut closing) => {}
                 }
             });
@@ -1300,6 +1352,7 @@ async fn navigate(
     host: &Arc<SshHost>,
     target: TerminalTarget,
     pane_id: Option<String>,
+    client_id: Option<String>,
     nav: TargetNav,
 ) -> Result<(), HostError> {
     let capabilities = host.programs().await.map_err(host_error)?;
@@ -1313,12 +1366,19 @@ async fn navigate(
                 .tmux
                 .as_ref()
                 .ok_or_else(|| not_installed("tmux"))?;
-            tmux::navigate(&**host, path, &host.tmux_clients, &session_name, nav)
-                .await
-                .map_err(|error| match error {
-                    TmuxError::Remote(error) => host_error(error),
-                    TmuxError::Failed(message) => HostError::CommandFailed { message },
-                })
+            tmux::navigate(
+                &**host,
+                path,
+                &host.tmux_clients,
+                &session_name,
+                client_id.as_deref(),
+                nav,
+            )
+            .await
+            .map_err(|error| match error {
+                TmuxError::Remote(error) => host_error(error),
+                TmuxError::Failed(message) => HostError::CommandFailed { message },
+            })
         }
         TerminalTarget::Herdr { session, .. } => {
             let path = capabilities

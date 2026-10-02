@@ -525,15 +525,22 @@ impl HostConnection {
     /// `NotInstalled` without the program, `PaneNotFound` for a vanished herdr pane,
     /// `CommandFailed` otherwise (a tmux session move with no client attached to the target).
     /// Cancelling the coroutine drops the reply only.
+    ///
+    /// `client_id` is the moving terminal's `Session.client_id()`, of the session it shows now
+    /// (after a transport swap, the new one's): a tmux move then acts on exactly that
+    /// terminal's tmux client, which its attach recorded, however many terminals (of this app
+    /// or not) show the same tmux session. `None` finds the client by the target alone (the
+    /// most recently active one showing it); herdr ignores it. A malformed id is `InvalidName`.
     pub async fn navigate(
         &self,
         target: TerminalTarget,
         pane_id: Option<String>,
         nav: TargetNav,
+        client_id: Option<String>,
     ) -> Result<(), HostError> {
         Ok(self
             .handle
-            .navigate(target.into(), pane_id, nav.into())
+            .navigate(target.into(), pane_id, nav.into(), client_id)
             .await?)
     }
 

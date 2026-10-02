@@ -400,6 +400,8 @@ pub enum HostCommand {
     Navigate {
         target: TerminalTarget,
         pane_id: Option<String>,
+        /// The moving terminal's tmux client id (validated; [`SessionHandle::client_id`]).
+        client_id: Option<String>,
         nav: TargetNav,
         reply: oneshot::Sender<Result<(), HostError>>,
     },
@@ -564,7 +566,11 @@ impl HostHandle {
         self.require_connected()?;
         target.validate()?;
         let deadline = budget.map(|budget| Instant::now() + budget);
-        let (handle, driver) = session::channel(observer);
+        // Every tmux terminal gets its own client id, which its attach records its tmux client
+        // under (`tmux::attach_command`): what `navigate` moves is then exactly its client.
+        let client_id =
+            matches!(target, TerminalTarget::Tmux { .. }).then(crate::tmux::new_client_id);
+        let (handle, driver) = session::channel_with_client(observer, client_id);
         self.send(HostCommand::OpenTerminal {
             target,
             transport,
@@ -688,14 +694,25 @@ impl HostHandle {
     /// like [`TerminalTarget`]'s (`InvalidName`); a host without the program is
     /// `NotInstalled`, a vanished herdr pane `PaneNotFound`. Moving past the last window, tab or
     /// workspace wraps around; with only one there is nothing to do, which is `Ok(())`.
+    ///
+    /// `client_id` is the moving terminal's [`SessionHandle::client_id`] (the session it shows
+    /// now): a tmux move then acts on exactly that terminal's tmux client, whatever other
+    /// terminals show the same tmux session. `None` finds the client by the target alone (the
+    /// most recently active one showing it), and herdr ignores it. A malformed id is
+    /// `InvalidName`.
     pub async fn navigate(
         &self,
         target: TerminalTarget,
         pane_id: Option<String>,
         nav: TargetNav,
+        client_id: Option<String>,
     ) -> Result<(), HostError> {
         target.validate()?;
-        if !pane_id.as_deref().is_none_or(is_valid_herdr_pane_id) {
+        if !pane_id.as_deref().is_none_or(is_valid_herdr_pane_id)
+            || !client_id
+                .as_deref()
+                .is_none_or(crate::tmux::is_valid_client_id)
+        {
             return Err(HostError::InvalidName);
         }
         if target == TerminalTarget::Shell {
@@ -706,6 +723,7 @@ impl HostHandle {
         self.send(HostCommand::Navigate {
             target,
             pane_id,
+            client_id,
             nav,
             reply,
         })?;
@@ -1335,20 +1353,20 @@ mod tests {
         // A shell has nothing to move: `Ok` whatever the host's state, and nothing is sent.
         assert_eq!(
             handle
-                .navigate(TerminalTarget::Shell, None, TargetNav::NextWindow)
+                .navigate(TerminalTarget::Shell, None, TargetNav::NextWindow, None)
                 .await,
             Ok(())
         );
         assert_eq!(
             handle
-                .navigate(tmux.clone(), None, TargetNav::NextWindow)
+                .navigate(tmux.clone(), None, TargetNav::NextWindow, None)
                 .await,
             Err(HostError::NotConnected)
         );
         connect(&mut driver);
         assert_eq!(
             handle
-                .navigate(TerminalTarget::Shell, None, TargetNav::NextSession)
+                .navigate(TerminalTarget::Shell, None, TargetNav::NextSession, None)
                 .await,
             Ok(())
         );
@@ -1372,14 +1390,27 @@ mod tests {
                     .navigate(
                         target.clone(),
                         pane.map(str::to_owned),
-                        TargetNav::NextWindow
+                        TargetNav::NextWindow,
+                        None
                     )
                     .await,
                 Err(HostError::InvalidName),
                 "{target:?} {pane:?}"
             );
         }
+        // A client id becomes part of a tmux option's name: only one `new_client_id` makes.
+        for id in ["", "x", "@or2-client-1", "0123456789ABCDEF0123456789ABCDEF"] {
+            assert_eq!(
+                handle
+                    .navigate(tmux.clone(), None, TargetNav::NextWindow, Some(id.into()))
+                    .await,
+                Err(HostError::InvalidName),
+                "{id:?}"
+            );
+        }
         assert!(driver.commands.try_recv().is_err(), "nothing was enqueued");
+        let id = crate::tmux::new_client_id();
+        let sent_id = id.clone();
 
         let answers = std::thread::spawn(move || {
             let expected = [
@@ -1388,6 +1419,7 @@ mod tests {
                         session_name: "main".into(),
                     },
                     None,
+                    Some(sent_id),
                     TargetNav::NextWindow,
                     Ok(()),
                 ),
@@ -1397,29 +1429,36 @@ mod tests {
                         pane_id: None,
                     },
                     Some("w1:p2".to_owned()),
+                    None,
                     TargetNav::Pane {
                         direction: NavDirection::Left,
                     },
                     Err(HostError::PaneNotFound),
                 ),
             ];
-            for (want_target, want_pane, want_nav, answer) in expected {
+            for (want_target, want_pane, want_client, want_nav, answer) in expected {
                 let HostCommand::Navigate {
                     target,
                     pane_id,
+                    client_id,
                     nav,
                     reply,
                 } = driver.blocking_next_command()
                 else {
                     panic!("unexpected command")
                 };
-                assert_eq!((target, pane_id, nav), (want_target, want_pane, want_nav));
+                assert_eq!(
+                    (target, pane_id, client_id, nav),
+                    (want_target, want_pane, want_client, want_nav)
+                );
                 reply.send(answer).unwrap();
             }
             driver
         });
         assert_eq!(
-            handle.navigate(tmux, None, TargetNav::NextWindow).await,
+            handle
+                .navigate(tmux, None, TargetNav::NextWindow, Some(id))
+                .await,
             Ok(())
         );
         assert_eq!(
@@ -1429,7 +1468,8 @@ mod tests {
                     Some("w1:p2".into()),
                     TargetNav::Pane {
                         direction: NavDirection::Left
-                    }
+                    },
+                    None
                 )
                 .await,
             Err(HostError::PaneNotFound)
@@ -1438,7 +1478,7 @@ mod tests {
         driver.close(CloseReason::Disconnected);
         assert_eq!(
             handle
-                .navigate(herdr(None), None, TargetNav::NextSession)
+                .navigate(herdr(None), None, TargetNav::NextSession, None)
                 .await,
             Err(HostError::Closed)
         );
@@ -1594,6 +1634,42 @@ mod tests {
         let deadline = deadline.expect("a budget gives a deadline");
         assert!(deadline >= before + Duration::from_secs(5));
         assert!(deadline <= after + Duration::from_secs(5));
+    }
+
+    /// Every tmux terminal has a client id of its own, shared by its handle and its driver (which
+    /// gives it to the attach); other targets have none.
+    #[test]
+    fn each_tmux_terminal_gets_its_own_client_id() {
+        let (_recorder, handle, mut driver) = setup(false);
+        connect(&mut driver);
+        let sessions = Arc::new(SessionRecorder::default());
+        let tmux = TerminalTarget::Tmux {
+            session_name: "work".into(),
+        };
+        let open = |target: &TerminalTarget, transport| {
+            handle
+                .open_terminal_with(target.clone(), transport, size(), sessions.clone())
+                .unwrap()
+        };
+        let first = open(&tmux, TerminalTransport::Ssh);
+        let second = open(&tmux, TerminalTransport::Mosh);
+        let shell = open(&TerminalTarget::Shell, TerminalTransport::Ssh);
+        let first_id = first.client_id().expect("a tmux terminal has an id");
+        let second_id = second.client_id().expect("a tmux terminal has an id");
+        assert!(crate::tmux::is_valid_client_id(first_id));
+        assert_ne!(first_id, second_id, "one per terminal, not per target");
+        assert_eq!(shell.client_id(), None);
+        for want in [Some(first_id), Some(second_id), None] {
+            let HostCommand::OpenTerminal {
+                driver: session_driver,
+                ..
+            } = driver.blocking_next_command()
+            else {
+                panic!("expected OpenTerminal");
+            };
+            assert_eq!(session_driver.client_id(), want);
+            session_driver.discard();
+        }
     }
 
     #[test]

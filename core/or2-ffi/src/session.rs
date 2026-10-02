@@ -496,6 +496,14 @@ impl Session {
         self.handle.server_pid()
     }
 
+    /// A tmux terminal's client id (API 14): opaque, fixed for the session's life, and its
+    /// own (two terminals on one tmux session have two; the session a transport swap moves a
+    /// terminal to has a new one). Pass the shown session's id to `HostConnection.navigate`
+    /// so a gesture moves this terminal's tmux client. `None` for shell and herdr terminals.
+    pub fn client_id(&self) -> Option<String> {
+        self.handle.client_id().map(str::to_owned)
+    }
+
     /// mosh: open a new UDP socket now (the network changed), instead of noticing after
     /// seconds without answers. SSH: a no-op. Never fails; a closed session ignores it.
     pub fn roam(&self) {

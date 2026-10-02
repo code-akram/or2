@@ -2238,6 +2238,7 @@ fn abort_a_terminal_task_and_count_closes(target: TerminalTarget, focus_waits: b
         super::terminal_session::channel_task(
             ssh,
             target,
+            None,
             &session_events,
             outgoing,
             latest_size,
@@ -2556,6 +2557,7 @@ fn a_terminal_task_aborted_while_pty_or_shell_reply_is_pending_closes_its_channe
             super::terminal_session::channel_task(
                 ssh,
                 TerminalTarget::Shell,
+                None,
                 &sender,
                 outgoing,
                 latest_size,
@@ -2663,6 +2665,7 @@ fn a_pump_whose_local_input_ended_closes_its_channel_on_the_healthy_connection()
         super::terminal_session::channel_task(
             host,
             TerminalTarget::Shell,
+            None,
             &sender,
             outgoing,
             size,

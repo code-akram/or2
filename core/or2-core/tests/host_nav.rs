@@ -150,7 +150,7 @@ fn tmux_moves_windows_panes_and_the_terminal_client_between_sessions() {
     let target = TerminalTarget::Tmux {
         session_name: "or2-a".into(),
     };
-    let navigate = |nav: TargetNav| block_on(host.navigate(target.clone(), None, nav));
+    let navigate = |nav: TargetNav| block_on(host.navigate(target.clone(), None, nav, None));
 
     // Before a terminal is attached a session move has no client to switch.
     assert!(matches!(
@@ -220,10 +220,184 @@ fn tmux_moves_windows_panes_and_the_terminal_client_between_sessions() {
 
     // A shell target has nothing to move.
     assert_eq!(
-        block_on(host.navigate(TerminalTarget::Shell, None, TargetNav::NextSession)),
+        block_on(host.navigate(TerminalTarget::Shell, None, TargetNav::NextSession, None)),
         Ok(())
     );
 
     terminal.disconnect();
+    host.disconnect();
+}
+
+/// Two terminals on the same tmux session, the app's two-clients case: each gesture moves the
+/// client of the terminal it was made on (by that terminal's `client_id`), never the other
+/// one, although the other is the more recently active client on the target. A closed terminal
+/// releases what its attach recorded.
+#[test]
+fn two_terminals_on_one_tmux_session_each_move_only_their_own_client() {
+    if !sshd_ready() || !tmux_ready() {
+        return;
+    }
+    let sshd = Sshd::new(false);
+    let key = ClientKey::generate_ed25519("");
+    sshd.authorize(&key);
+    let (tx, states) = mpsc::channel();
+    let host = connect_host(
+        HostConnectRequest::new(
+            &[("127.0.0.1", sshd.port)],
+            &Sshd::username(),
+            &key.to_stored(),
+            std::slice::from_ref(&sshd.host),
+        )
+        .unwrap(),
+        Arc::new(HostObs(tx)),
+    );
+    let mut state = states.recv_timeout(WAIT).unwrap();
+    while state != (HostState::Connected { address_index: 0 }) {
+        assert!(!matches!(state, HostState::Closed(_)), "{state:?}");
+        state = states.recv_timeout(WAIT).unwrap();
+    }
+    // Sessions in tmux's (name) order: or2-a, or2-b, or2-c; or2-a and or2-b with two windows.
+    for name in ["or2-a", "or2-b", "or2-c"] {
+        tmux(
+            &sshd,
+            &[
+                "new-session",
+                "-d",
+                "-s",
+                name,
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "sh",
+            ],
+        );
+    }
+    tmux(&sshd, &["new-window", "-d", "-t", "=or2-a:", "sh"]);
+    tmux(&sshd, &["new-window", "-d", "-t", "=or2-b:", "sh"]);
+    let window = |session: &str| {
+        tmux(
+            &sshd,
+            &[
+                "display",
+                "-p",
+                "-t",
+                &format!("={session}:"),
+                "#{window_index}",
+            ],
+        )
+    };
+
+    let target = TerminalTarget::Tmux {
+        session_name: "or2-a".into(),
+    };
+    let open = || {
+        let (tx, states) = mpsc::channel();
+        let terminal = host
+            .open_terminal(
+                target.clone(),
+                TerminalSize::new(80, 24).unwrap(),
+                Arc::new(SessionObs(tx)),
+            )
+            .unwrap();
+        assert_eq!(states.recv_timeout(WAIT).unwrap(), SessionState::Connected);
+        terminal
+    };
+    let first = open();
+    let second = open();
+    let (a, b) = (
+        first.client_id().unwrap().to_owned(),
+        second.client_id().unwrap().to_owned(),
+    );
+    assert_ne!(a, b);
+    // Each attach recorded its own client.
+    let recorded = |id: &str| {
+        let output = sshd
+            .tmux()
+            .args([
+                "show-options",
+                "-s",
+                "-q",
+                "-v",
+                &format!("@or2-client-{id}"),
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    let deadline = Instant::now() + WAIT;
+    while recorded(&a).is_empty() || recorded(&b).is_empty() {
+        assert!(Instant::now() < deadline, "the attaches recorded no client");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let (tty_a, tty_b) = (recorded(&a), recorded(&b));
+    assert_ne!(tty_a, tty_b);
+    // What `field` of the client named `tty` is ("" while it is not listed).
+    let client = |tty: &str, field: &str| {
+        tmux(
+            &sshd,
+            &["list-clients", "-F", &format!("#{{client_name}} {field}")],
+        )
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{tty} ")).map(str::to_owned))
+        .unwrap_or_default()
+    };
+    let shows = |tty: &str| client(tty, "#{client_session}");
+    eventually("A's client", "or2-a", || shows(&tty_a));
+    eventually("B's client", "or2-a", || shows(&tty_b));
+
+    // B is the more recently active client on the target: a guess by the target would take it
+    // for A's gestures too.
+    std::thread::sleep(Duration::from_millis(1100));
+    second.send_text(" ".into()).unwrap();
+    let activity = |tty: &str| {
+        client(tty, "#{client_activity}")
+            .parse::<u64>()
+            .unwrap_or_default()
+    };
+    let deadline = Instant::now() + WAIT;
+    while activity(&tty_b) <= activity(&tty_a) {
+        assert!(Instant::now() < deadline, "B never became the more active");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let navigate = |id: &str, nav: TargetNav| {
+        block_on(host.navigate(target.clone(), None, nav, Some(id.to_owned())))
+    };
+    // Alternating session moves: each moves its own client only.
+    navigate(&a, TargetNav::NextSession).unwrap();
+    eventually("A after its next session", "or2-b", || shows(&tty_a));
+    assert_eq!(shows(&tty_b), "or2-a", "B stayed");
+    navigate(&b, TargetNav::PreviousSession).unwrap();
+    eventually("B after its previous session", "or2-c", || shows(&tty_b));
+    assert_eq!(shows(&tty_a), "or2-b", "A stayed");
+    navigate(&a, TargetNav::NextSession).unwrap();
+    eventually("A after its next session", "or2-c", || shows(&tty_a));
+    assert_eq!(shows(&tty_b), "or2-c", "B stayed");
+    navigate(&b, TargetNav::NextSession).unwrap();
+    eventually("B after its next session", "or2-a", || shows(&tty_b));
+    assert_eq!(shows(&tty_a), "or2-c", "A stayed");
+
+    // Window moves act on the session each terminal's own client shows.
+    navigate(&b, TargetNav::NextWindow).unwrap();
+    assert_eq!(window("or2-a"), "1");
+    navigate(&a, TargetNav::PreviousSession).unwrap();
+    eventually("A after its previous session", "or2-b", || shows(&tty_a));
+    navigate(&a, TargetNav::NextWindow).unwrap();
+    assert_eq!(window("or2-b"), "1");
+    assert_eq!(window("or2-a"), "1", "B's session untouched by A's move");
+
+    // Closing A releases what its attach recorded; B still moves its own client.
+    first.disconnect();
+    let deadline = Instant::now() + WAIT;
+    while !recorded(&a).is_empty() {
+        assert!(Instant::now() < deadline, "A's record was not released");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(recorded(&b), tty_b);
+    navigate(&b, TargetNav::NextSession).unwrap();
+    eventually("B after its next session", "or2-b", || shows(&tty_b));
+
+    second.disconnect();
     host.disconnect();
 }
