@@ -3229,3 +3229,171 @@ make sense.
   `ConnectionServiceDeviceTest.theServiceStartsAndKeepsRunningWithoutTheNotificationPermission` (skipped where the
   permission is granted).
 - UI gallery: `keepalive`, `keepalive-waiting` (Android's dialog up), `home-notices` (both one-line cards).
+
+# v0.1.1: instant opens and the Next items (API 14)
+
+Owner requests of 2026-10-02: opening a terminal must be instant on every host, including one whose
+firewall drops mosh's UDP (a Mac paired that day took seconds: AUTO waited for the capability probe,
+then spent the whole 5 s mosh budget before falling back to SSH); and four roadmap Next items ship in
+the same patch: agent notifications, wheel-aware scrolling, tap links with OSC 52, and gestures with
+hardware-keyboard shortcuts. One FFI bump, **`API_VERSION` = 14**, covers every lane; each lane adds
+only its own exports below.
+
+## FFI (API 14)
+
+| Export | Lane |
+|---|---|
+| `HostConnection.mosh_server() async -> Result<Option<String>, HostError>`: the path of `mosh-server`, resolved by the program probe alone (never by the herdr listing) | Instant |
+| `TerminalFrame.modes: TerminalModes { mouse_tracking: bool, alternate_screen: bool }` | Scroll |
+| `ViewportScroll::Wheel { rows: i32, column: u16, row: u16 }` (negative rows = up; the touch's cell) | Scroll |
+| `HostConnection.scroll_target(target: TerminalTarget, pane_id: Option<String>, scroll: TargetScroll) async -> Result<(), HostError>`, `TargetScroll { Up { lines: u32 }, Down { lines: u32 }, Bottom }` | Scroll |
+| `ResolvedRow.links: Vec<CellLink { start_column: u16, end_column: u16, uri: String }>` (OSC 8 hyperlinks; empty when none) | Links |
+| `SessionListener.on_clipboard_write(text: String)` (OSC 52 and OSC 1337 copy; reads are never answered) | Links |
+| `HostConnection.navigate(target: TerminalTarget, pane_id: Option<String>, nav: TargetNav) async -> Result<(), HostError>`, `TargetNav { NextWindow, PreviousWindow, Pane { direction: NavDirection }, NextSession, PreviousSession }`, `NavDirection { Left, Right, Up, Down }` | Gestures |
+
+Both transports (the SSH pump and the mosh driver's engine) behave the same for every frame and
+callback field above. A target with nothing to do (a `Shell` target for `scroll_target` or
+`navigate`) returns `Ok(())` and does nothing.
+
+## Instant opens (lane Instant)
+
+**Rule: no open waits on UDP or on herdr's session listing.** Measured by the `or2.timing` markers
+(debug builds): an inbox tap or a host-screen row on a connected LAN host reaches `frame` without any
+wait for mosh, whatever the host's firewall does.
+
+- **Program probe first.** `probe_within` publishes the program probe's result (`mosh_server`, `tmux`,
+  `herdr` paths, locale) as soon as `PROBE_SCRIPT` returns; the herdr listing completes separately
+  and fills `capabilities().herdr_sessions` as today. Every Rust wait for program paths (the tmux and
+  herdr SSH opens) waits for the program probe only. `mosh_server()` is the new export Kotlin's
+  transport choice awaits instead of `capabilities()`.
+- **Per-connection UDP verdict** (`ActiveHost.udpVerdict`: `UNKNOWN`, `OK`, `BLOCKED`), reset on every
+  new connection and on a host edit. Nothing about UDP is remembered across connections any more: the
+  24 h memory (`MOSH_PAUSE_MS`, `moshFailedUntil`, `MOSH_PAUSED_NOTE`) is no longer read or written
+  (the Room column stays, unused; no migration), because a blocked host now costs one invisible
+  background attempt and a user who fixes the firewall must get mosh on the next connection.
+- **AUTO, tmux and herdr targets:** verdict `OK` opens over mosh directly. `UNKNOWN` opens over **SSH at
+  once** and starts a mosh terminal for the same target in the background (budget: the explicit-mosh
+  15 s); when it reaches `Connected` the `ActiveTerminal` swaps to it (the existing
+  `fallBackToSsh` swap run the other way: same id, thumbnail and navigation, the `attempt` counter
+  drops the old session's frames) and the SSH session is disconnected; the verdict becomes `OK`. A
+  background start that fails `TimedOut` or `NotInstalled { mosh-server }` sets `BLOCKED` and the
+  terminal stays on SSH, unseen. `BLOCKED` opens over SSH with no attempt. At most one background
+  attempt per terminal; one in flight per host at a time (others wait for its verdict, never for UDP).
+  Closing the terminal, or the user disconnecting the host, cancels the attempt and stops its server
+  (the existing abandon/`terminate` path, its pid recorded like any mosh server's).
+- **AUTO, `Shell` target** (two shells cannot be swapped): `OK` opens mosh; `BLOCKED` or no
+  `mosh-server` opens SSH; `UNKNOWN` opens mosh with a budget of `max(700 ms, 6 × the program probe's
+  round trip)` and falls back to SSH as today, setting the verdict.
+- **No probe wait on a tap.** `awaitTransportChoice` awaits `mosh_server()` (one exec round trip), and
+  only when the host connected in this tap; an inbox tap on a live host never waits.
+- **Explicit `SSH` / `MOSH`** preferences are unchanged.
+- **The note.** No note under terminals any more. A `BLOCKED` verdict shows one muted line on the host
+  screen: `Mosh can't reach this host over UDP, so terminals use SSH. On a Mac, run or2-pair --check
+  for the fix.` The terminal header's badge follows the live transport (it flips SSH → Mosh on a
+  swap). **Bug fixed with it:** the old note was drawn over the terminal's top rows; any line under
+  the header must take layout space, never overlay the grid.
+- **Tests:** JVM tests for the choice table, the swap (frames of the old session dropped, one attempt,
+  cancel on close, `BLOCKED` stays SSH), the verdict reset; a Rust test that `mosh_server()` resolves
+  while the herdr listing hangs; the device suite on the `.devicetest` app.
+
+## or2-pair on macOS: the firewall (lane Instant, host side)
+
+`HostFacts::detect` on macOS runs one read-only command (an exception to "files only", recorded in
+"Fixes for this host"): `/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate`, and when it
+is on, `--getblockall` and `--getappblocked <mosh-server's real path>` (symlinks resolved, Homebrew's
+`/opt/homebrew/bin/mosh-server` → `Cellar/...`). No `sudo`, nothing changed. When the firewall would
+block mosh-server, the checks print a warning (pairing still proceeds: SSH works) with the exact fix:
+
+```sh
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add "<real path>"
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp "<real path>"
+```
+
+and say that `brew upgrade mosh` replaces the binary, so the rule must be added again (`or2-pair
+--check` shows it). "Block all incoming connections" gets its own sentence (it overrides any rule). A
+missing `socketfilterfw` or unreadable output is silence, not an error. Unit tests on captured outputs;
+no test runs the real command.
+
+## Agent notifications (lane Notify)
+
+Kotlin only, no FFI change. The roadmap rule: **exactly one notification per Blocked or Done edge**
+(`HerdrAgent.state_change_seq` advancing into `Blocked` or `Done`), **none while that pane is on
+screen** (its terminal is the visible one and the app is resumed), **tap opens the pane** (through
+`launchOpenAgent`, the same path as an inbox tap).
+
+- A new channel `agents` ("Agents", `IMPORTANCE_HIGH`), created with the existing `connections` one.
+  One notification per pane (id from host id + session + pane id), replaced on the next edge and
+  cancelled when the pane is opened, goes back to `Working`, or disappears.
+- Title: the agent's label as the inbox shows it; text: `Needs input` (Blocked) or `Done`; sub-text: the
+  host name. Nothing from the pane's output.
+- **On by default** for every host shown in the inbox (`showInInbox`), once the notification permission
+  is granted; a switch in Settings (`Agent notifications`, default on) turns all of them off. No
+  per-host setting (no Room migration). The Home permission card's text says it covers connection
+  status and agent alerts (`NotificationUse.AGENT_ALERTS`). Owner preference: zero configuration.
+- Edges seen while the app was not watching (the first snapshot after a connect) never notify: only an
+  advance observed by a live watch does.
+- `MainActivity` handles the notification's intent (`onCreate` and `onNewIntent`): host id, session,
+  pane id; a host that is no longer connected is connected first, as a Resume does.
+- Tests: JVM tests for the edge rule (one per seq, no notification on screen, none on the first
+  snapshot, cancel rules); the device suite checks the channel and a posted notification.
+
+## Wheel-aware scrolling (lane Scroll)
+
+A vertical swipe scrolls what the user is looking at, never shell history:
+
+1. **Mouse tracking on** (`TerminalModes.mouse_tracking`: tmux with `mouse on`, herdr, vim with mouse,
+   any TUI that asked): the swipe sends wheel events at the touch's cell (`ViewportScroll::Wheel`),
+   encoded by libghostty-vt's mouse encoder with the terminal's own mouse format.
+2. Else, **a tmux target** on the alternate screen: `scroll_target` runs, over exec, `tmux copy-mode -e
+   -t <session>` then `tmux send-keys -t <session> -X -N <lines> scroll-up` (or `scroll-down`);
+   `Bottom` sends `-X cancel`. No consent prompt and no `set mouse on`.
+3. Else, **a herdr target**: `scroll_target` uses herdr's `pane.scroll` (`offset_from_bottom`, the
+   pane's current offset kept by Rust per pane; `Bottom` is 0).
+4. Else (a plain shell, or a full-screen program on the alternate screen without mouse): today's
+   behaviour (primary screen: the scrollback viewport; alternate screen: arrow keys).
+
+Swipes are coalesced: at most one `scroll_target` call in flight per terminal, the deltas summed.
+**Scroll-to-bottom button:** a small round button at the bottom right (compact, per the UI system)
+shown while the primary-screen viewport is above the bottom (`Scrollback.offset > 0`) or after a
+route 2 or 3 scroll up that has not returned to the bottom; tapping it returns (viewport bottom, or
+`TargetScroll::Bottom`). Any key, paste or composer submit while a route 2 or 3 scroll is away first
+sends `Bottom`, so typing never lands in tmux copy mode. Tests: Rust tests for the wheel encoding (SGR
+and X10 formats, the touch's cell) and the tmux/herdr commands against `LocalHost`/the herdr fixture;
+JVM tests for the routing and the button's visibility.
+
+## Tap links and OSC 52 (lane Links)
+
+- **Tap a link to open it.** A single tap on a URL opens it (`Intent.ACTION_VIEW`, through the system
+  chooser when no default exists); a tap elsewhere keeps today's behaviour (clear the selection, show
+  the keyboard). Links are OSC 8 hyperlinks (`ResolvedRow.links`, from libghostty-vt's
+  `hyperlink_uri`) and plain-text URLs detected in Kotlin over the visible rows, **joining wrapped
+  rows** (`ResolvedRow.wrapped`) so a URL broken across lines opens whole. Detected schemes: `http`,
+  `https` only (no `file:`, `intent:` or `javascript:`). A tapped link flashes an underline for the tap
+  (feedback), no confirmation dialog.
+- **OSC 52 copy.** A clipboard write from the host (`on_clipboard_write`) sets the Android clipboard
+  (`ClipData` labelled `or2`), **on by default** with a Settings switch (`Copy from the host`, default
+  on); a read request is never answered (the host never learns the phone's clipboard). Writes are
+  limited to 1 MiB and rate-limited to one per 500 ms per terminal (later ones in the window replace
+  the pending one). Android 13+ shows its own copy confirmation; or2 adds none. Owner preference over
+  the roadmap's per-host opt-in: zero configuration, with the global switch as the off-ramp.
+- Tests: Rust tests that an OSC 8 link reaches `ResolvedRow.links` on both transports and that OSC 52
+  reaches the observer (base64 decoded, an invalid payload dropped); JVM tests for URL detection
+  (wrapped, trailing punctuation, brackets, schemes refused) and the rate limit.
+
+## Gestures and hardware-keyboard shortcuts (lane Gestures)
+
+- **Horizontal swipe** (one finger, horizontal dominant, past a threshold, not while selecting):
+  left = next tmux window / herdr tab (`TargetNav::NextWindow`), right = previous. **Two-finger
+  horizontal swipe:** the pane in that direction (`Pane { Left | Right }`); **two-finger vertical
+  swipe:** next/previous tmux session or herdr workspace (`NextSession`/`PreviousSession`). Pinch
+  keeps priority over two-finger swipes (a scale change past its slop makes it a pinch). A `Shell`
+  target ignores these swipes. Implementation: tmux through exec (`next-window`, `previous-window`,
+  `select-pane -L/-R/-U/-D`, `switch-client -n/-p` with the client's tty found by `list-clients`);
+  herdr through its API (`tab.focus` on the neighbouring tab from `tab.list`, `pane.focus_direction`,
+  `workspace.focus`).
+- **Hardware keyboard** (an attached keyboard, not the IME): `Ctrl+Shift+1..9` switch to the n-th open
+  terminal (Home's order), `Ctrl+Shift+W` close the terminal, `Ctrl+Shift+V` paste, `Ctrl+Shift+C` copy the
+  selection, `Ctrl+Shift+Enter` open the composer, `Ctrl+Shift+/` show a compact shortcuts sheet. Every
+  other key goes to the terminal as today. Matched by key code, not by the character (layouts differ).
+- Tests: JVM tests for the gesture classifier (thresholds, pinch priority, selection) and the shortcut
+  table; Rust tests for the tmux commands and the herdr calls against fixtures.
