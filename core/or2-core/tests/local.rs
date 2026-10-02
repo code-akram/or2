@@ -4,7 +4,7 @@
 //! tmux server is ever contacted.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -43,10 +43,28 @@ fn sh_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
+/// Writes an executable script. A child `sh` writes it, never this process: tests run in
+/// parallel threads, and a writable descriptor of ours could be inherited by a process another
+/// thread forks, so running the script at once would fail with "Text file busy" (ETXTBSY).
 fn script(path: &Path, body: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut writer = Command::new("sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writer
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("#!/bin/sh\n{body}\n").as_bytes())
+        .unwrap();
+    assert!(
+        writer.wait().unwrap().success(),
+        "writing {}",
+        path.display()
+    );
 }
 
 /// `PATH` is `<dir>/pathbin`, which holds nothing but `sh` (the rendered probe line starts

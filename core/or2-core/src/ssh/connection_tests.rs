@@ -1161,8 +1161,11 @@ fn session_closed(states: &sync::Receiver<SessionState>) -> CloseReason {
     reason
 }
 
+/// Waits for an asynchronous effect (a channel closing, a server seeing a request). The bound is
+/// generous because the whole workspace runs its suites in parallel; it returns as soon as the
+/// condition holds.
 fn wait_for(condition: impl Fn() -> bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !condition() {
         assert!(std::time::Instant::now() < deadline, "condition not met");
         std::thread::sleep(Duration::from_millis(10));
