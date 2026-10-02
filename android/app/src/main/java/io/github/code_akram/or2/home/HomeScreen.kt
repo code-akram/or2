@@ -107,6 +107,7 @@ fun HomeScreen(
     connectAll: () -> Unit,
     modifier: Modifier = Modifier,
     openAbout: () -> Unit = {},
+    openSettings: () -> Unit = {},
     resume: HomeResume? = null,
     onResume: () -> Unit = {},
     /** The battery exemption was declined: a small, dismissible card offers it again, blocking nothing. */
@@ -114,8 +115,8 @@ fun HomeScreen(
     allowBattery: () -> Unit = {},
     dismissBattery: () -> Unit = {},
     /**
-     * A host is connected and the connection notification cannot show (no `POST_NOTIFICATIONS`): a small, dismissible
-     * card offers it, in context. Nothing asks for it on connect.
+     * A host is connected and neither the connection notification nor agent alerts can show (no
+     * `POST_NOTIFICATIONS`): a small, dismissible card offers it, in context. Nothing asks for it on connect.
      */
     notificationCard: Boolean = false,
     allowNotifications: () -> Unit = {},
@@ -137,6 +138,7 @@ fun HomeScreen(
                     }
                 }
                 IconAction(Or2Icons.Key, "SSH keys", openKeys, Modifier.testTag("nav-keys"))
+                IconAction(Or2Icons.Settings, "Settings", openSettings, Modifier.testTag("nav-settings"))
                 IconAction(Or2Icons.Info, "About or2", openAbout, Modifier.testTag("nav-about"))
             })
             Column(Modifier.padding(horizontal = Or2Dimens.Gutter)) {
@@ -148,7 +150,7 @@ fun HomeScreen(
                     NoticeCard("Background connections may drop", "battery", allowBattery, dismissBattery, Modifier.padding(top = Or2Dimens.Gutter))
                 }
                 if (notificationCard) {
-                    NoticeCard("Show connection notification", "notification", allowNotifications, dismissNotifications,
+                    NoticeCard("Show connection and agent notifications", "notification", allowNotifications, dismissNotifications,
                         Modifier.padding(top = if (batteryCard) 8.dp else Or2Dimens.Gutter))
                 }
                 if (sessions.isNotEmpty()) {
@@ -224,8 +226,8 @@ fun HomeScreen(
 
 /**
  * A one-line, dismissible offer above SESSIONS: "Background connections may drop" (the battery exemption was
- * declined; Allow opens the system's request) and "Show connection notification" (Allow asks for the permission, or
- * opens the app's notification settings once Android no longer asks). Tagged `home-<tag>-card`,
+ * declined; Allow opens the system's request) and "Show connection and agent notifications" (Allow asks for the
+ * permission, or opens the app's notification settings once Android no longer asks). Tagged `home-<tag>-card`,
  * `<tag>-card-allow` and `<tag>-card-dismiss`.
  */
 @Composable

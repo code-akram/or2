@@ -10,7 +10,8 @@ import kotlinx.coroutines.flow.asStateFlow
  *
  * - The battery-optimisation exemption is the last step of adding a host ([BatteryPrompt]), asked once ever.
  * - `POST_NOTIFICATIONS` is offered in context ([NotificationPermission], [NotificationOffer]): Home's small
- *   "Show connection notification" card while a host is connected. The foreground service runs without it.
+ *   "Show connection and agent notifications" card while a host is connected. The foreground service runs
+ *   without it; agent alerts need it.
  *
  * Every flag lives in the app's [PrefStore]; the keys of the earlier connect-time prompts are read so that a user
  * who already answered one is not asked again.
@@ -130,8 +131,7 @@ enum class NotificationGrant {
  * What the app wants notifications for. Each use has its own in-context offer ([NotificationPermission.offer]) and
  * its own dismissal; the permission itself is one.
  *
- * Agent alerts (M4) are the next use: add `AGENT_ALERTS` here and show its offer where the alerts are switched on,
- * then call the same `AppActions.allowNotifications`. Nothing asks on connect.
+ * Nothing asks on connect; every offer's "Allow" calls the same `AppActions.allowNotifications`.
  */
 enum class NotificationUse(val dismissedKey: String, val legacyKey: String? = null) {
     /**
@@ -140,6 +140,12 @@ enum class NotificationUse(val dismissedKey: String, val legacyKey: String? = nu
      * this offer replaced: a user who answered that is not offered it again.
      */
     CONNECTION("notification_offer_connection_dismissed", legacyKey = "notifications_asked"),
+
+    /**
+     * Agent alerts (v0.1.1) together with the connection status: Home's one card covers both ("Show connection and
+     * agent notifications"). A new use, so a user who dismissed the connection-only card is offered it once more.
+     */
+    AGENT_ALERTS("notification_offer_agents_dismissed"),
 }
 
 /**

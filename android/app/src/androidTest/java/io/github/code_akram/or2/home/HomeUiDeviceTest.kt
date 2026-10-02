@@ -130,7 +130,7 @@ class HomeUiDeviceTest {
     fun theConnectionNotificationIsOfferedInContextAsASmallDismissibleCard() {
         show(listOf(card(one, HostState.Connected(0u))), batteryCard = true, notificationCard = true)
         compose.onNodeWithTag("home-notification-card").assertIsDisplayed()
-        compose.onNodeWithText("Show connection notification").assertIsDisplayed()
+        compose.onNodeWithText("Show connection and agent notifications").assertIsDisplayed()
         compose.onNodeWithTag("home-battery-card").assertIsDisplayed() // Both one-line offers fit together.
         compose.onNodeWithTag("host:1").assertIsDisplayed().performClick()
         compose.onNodeWithTag("notification-card-allow").performClick()

@@ -45,6 +45,7 @@ import io.github.code_akram.or2.keys.keyErrorMessage
 import io.github.code_akram.or2.keys.newKeyErrorMessage
 import io.github.code_akram.or2.keys.readPrivateKey
 import io.github.code_akram.or2.keys.vaultErrorMessage
+import io.github.code_akram.or2.notify.AgentNotifications
 import io.github.code_akram.or2.session.hostConnectErrorMessage
 import io.github.code_akram.or2.session.hostErrorMessage
 import kotlinx.coroutines.CancellationException
@@ -84,6 +85,8 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         app.watchConnections()
+        // A notification's tap that started (or restarted) the activity; a recreation does not repeat it.
+        if (savedInstanceState == null) openAgentFrom(intent)
         enableEdgeToEdge(
             // Dark only: transparent bars with light icons over the app's own background.
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
@@ -112,12 +115,16 @@ class MainActivity : FragmentActivity() {
             battery = app.battery,
             requestBatteryExemption = ::requestBatteryExemption,
             answerKeepAlive = ::answerKeepAlive,
-            notifications = app.notifications.offer(NotificationUse.CONNECTION),
+            notifications = app.notifications.offer(NotificationUse.AGENT_ALERTS),
             allowNotifications = ::allowNotifications,
             takeColdResume = app.sessionMarker::takeColdResume,
             pair = pairModel.flow,
             deviceLabel = Build.MODEL.takeIf { it.isNotBlank() } ?: "Android phone",
             createKey = { label, comment -> createKey(label) { generateEd25519Key(comment) } },
+            agentAlerts = app.agentAlertSettings,
+            setAgentAlerts = ::setAgentAlerts,
+            agentOpens = app.agentOpens,
+            onScreen = app.agentAlerts::screenChanged,
         )
         setContent {
             val hosts by model.hosts.collectAsStateWithLifecycle()
@@ -126,6 +133,29 @@ class MainActivity : FragmentActivity() {
             val loaded by model.loaded.collectAsStateWithLifecycle()
             Or2App(hosts, keys, message, busy, app.connections, actions, loaded)
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        openAgentFrom(intent)
+    }
+
+    /**
+     * An agent notification's tap: its notification goes, and the UI opens the pane through `launchOpenAgent` (the
+     * inbox tap's path), connecting the host first when it is not connected. Any other intent is ignored.
+     */
+    private fun openAgentFrom(intent: Intent?) {
+        val pane = AgentNotifications.paneOf(intent, app.prefs) ?: return
+        app.agentAlerts.opened(pane)
+        app.agentOpens.request(pane)
+    }
+
+    /** The Settings switch. Turned on without the notification permission, it asks for it (in context). */
+    private fun setAgentAlerts(on: Boolean) {
+        app.agentAlertSettings.set(on)
+        app.agentAlerts.enabledChanged()
+        if (on && !app.notifications.isGranted()) allowNotifications()
     }
 
     private fun operation(block: suspend () -> Unit) {
@@ -220,8 +250,8 @@ class MainActivity : FragmentActivity() {
 
     /**
      * "Allow" on a notification offer: Android's `POST_NOTIFICATIONS` dialog, or the app's notification settings once
-     * Android no longer shows it (denied for good). The one entry point for every use ([NotificationUse]); agent alerts
-     * will call it from their own offer.
+     * Android no longer shows it (denied for good). The one entry point for every use ([NotificationUse]): Home's card
+     * (connection status and agent alerts) and the Settings switch call it.
      */
     private fun allowNotifications() {
         val permission = app.notifications

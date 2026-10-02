@@ -167,4 +167,20 @@ class OneTimePromptsTest {
         // A denial does not hide the offer: it stays until it is dismissed.
         assertTrue(permission.offer(NotificationUse.CONNECTION).visible.value)
     }
+
+    @Test
+    fun theAgentAlertsOfferIsANewUseWithItsOwnDismissal() {
+        // Home's card covers connection status and agent alerts: a user who dismissed the connection-only card, or
+        // answered the connect-time request, is offered it once more.
+        val store = MemoryPrefStore().apply { putBoolean("notifications_asked", true) }
+        val permission = NotificationPermission(store) { false }
+        permission.offer(NotificationUse.CONNECTION).dismiss()
+        val agents = permission.offer(NotificationUse.AGENT_ALERTS)
+        assertTrue(agents.visible.value)
+        agents.dismiss()
+        assertFalse(agents.visible.value)
+        assertFalse(NotificationPermission(store) { false }.offer(NotificationUse.AGENT_ALERTS).visible.value) // Persisted.
+        // Granted: no offer.
+        assertFalse(NotificationPermission(MemoryPrefStore()) { true }.offer(NotificationUse.AGENT_ALERTS).visible.value)
+    }
 }
