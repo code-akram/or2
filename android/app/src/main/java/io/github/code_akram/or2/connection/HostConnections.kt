@@ -2,7 +2,6 @@ package io.github.code_akram.or2.connection
 
 import io.github.code_akram.or2.app.TerminalActivations
 import io.github.code_akram.or2.data.Host
-import io.github.code_akram.or2.data.MoshFailureStore
 import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.data.TrustStore
 import io.github.code_akram.or2.ffi.CloseReason
@@ -66,6 +65,12 @@ interface HostPort : AutoCloseable {
         target: TerminalTarget, transport: TerminalTransport, columns: UShort, rows: UShort, moshBudgetMs: UInt?, listener: SessionListener,
     ): SessionInterface
     suspend fun capabilities(): HostCapabilities
+
+    /**
+     * API 14: the path of `mosh-server` (null: not installed), from the program probe alone (one
+     * exec round trip, never held up by herdr's session listing).
+     */
+    suspend fun moshServer(): String?
     suspend fun listTmuxSessions(): List<TmuxSession>
     fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface
 
@@ -89,6 +94,7 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
         target: TerminalTarget, transport: TerminalTransport, columns: UShort, rows: UShort, moshBudgetMs: UInt?, listener: SessionListener,
     ): SessionInterface = connection.openTerminal(target, transport, columns, rows, moshBudgetMs, listener)
     override suspend fun capabilities() = connection.capabilities()
+    override suspend fun moshServer() = connection.moshServer()
     override suspend fun listTmuxSessions() = connection.listTmuxSessions()
     override fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface =
         connection.watchHerdr(session, listener)
@@ -136,19 +142,24 @@ class ActiveHost internal constructor(val host: Host) {
     internal var timedLive = false
 
     /**
-     * Set when mosh failed on this connection under AUTO (UDP blocked, no `mosh-server`): later
-     * AUTO terminals on it go straight to SSH. The note explains why, in muted text.
+     * Whether mosh's UDP gets through to the host, learned on this connection only (a new connection,
+     * or an edit of the host, starts again from `UNKNOWN`): see [planOpen].
      */
-    internal var moshFallbackNote: String? = null
+    internal val mutableUdpVerdict = MutableStateFlow(UdpVerdict.UNKNOWN)
+    val udpVerdict = mutableUdpVerdict.asStateFlow()
 
-    /**
-     * Epoch milliseconds until which AUTO skips mosh for this host, from an earlier connection's
-     * failure ([Host.moshFailedUntil], persisted) or this one's. 0 is no memory.
-     */
-    internal var moshPausedUntil = host.moshFailedUntil
+    /** The program probe's answer about `mosh-server` (`mosh_server()`), asked once the host connected; null until it answered. */
+    internal val mutableMoshServer = MutableStateFlow<MoshServerAnswer?>(null)
+    val moshServer = mutableMoshServer.asStateFlow()
 
-    /** AUTO must not try mosh on this connection now: it failed here, or recently on this host. */
-    internal fun moshRejected(now: Long) = moshFallbackNote != null || moshPausedUntil > now
+    /** Completes once `mosh_server()` has answered or failed on this connection. */
+    internal val moshServerSettled = CompletableDeferred<Unit>()
+
+    /** The terminal whose background mosh attempt is this host's one in flight while the verdict is `UNKNOWN`. */
+    internal var probingTerminal: ActiveTerminal? = null
+
+    /** SSH terminals waiting for [probingTerminal]'s verdict before trying mosh in the background themselves. */
+    internal val awaitingVerdict = mutableListOf<ActiveTerminal>()
 
     /** Whether herdr watches should run: the host's inbox flag, which can change on a live connection. */
     internal var watching = host.showInInbox
@@ -190,14 +201,26 @@ class ActiveTerminal internal constructor(val id: Long, val host: Host, val targ
     internal val mutableHandle = MutableStateFlow<SessionInterface?>(null)
     internal val mutableTransport = MutableStateFlow(TerminalTransport.SSH)
     internal val mutableLinkHealth = MutableStateFlow<LinkHealth?>(null)
-    internal val mutableNote = MutableStateFlow<String?>(null)
     internal var displays = 0
     internal var retired = false
     internal var destroyed = false
     internal var disconnectRequested = false
 
-    /** Which session object's callbacks count: a fallback to SSH replaces the handle and bumps this. */
+    /**
+     * Which session object's callbacks count: a fallback to SSH, or the swap to a background mosh
+     * session, replaces the handle and moves this on, so the old session's frames are dropped.
+     */
     internal var attempt = 0
+
+    /**
+     * AUTO opened this terminal over SSH while UDP was untested: the mosh session started for the same
+     * target in the background (callbacks numbered [backgroundAttempt]), swapped in once `Connected`.
+     */
+    internal var background: SessionInterface? = null
+    internal var backgroundAttempt = NO_ATTEMPT
+
+    /** At most one background mosh attempt per terminal. */
+    internal var backgroundTried = false
 
     /** The connection (generation) this terminal was opened on: a mosh session outlives it when it is lost. */
     internal var origin: ActiveHost? = null
@@ -227,11 +250,13 @@ class ActiveTerminal internal constructor(val id: Long, val host: Host, val targ
     /** Mosh only: the latest link health, null before the first report. */
     val linkHealth = mutableLinkHealth.asStateFlow()
 
-    /** A muted explanation (AUTO fell back to SSH), or null. */
-    val note = mutableNote.asStateFlow()
-
     /** Short label for the session switcher. */
     val title: String get() = targetTitle(target)
+
+    internal companion object {
+        /** No session object has this number. */
+        const val NO_ATTEMPT = -1
+    }
 }
 
 /** Short label for a terminal target: `shell`, `tmux main`, `herdr work w1:p2`. */
@@ -260,10 +285,8 @@ class HostConnections(
     private val trust: TrustStore,
     main: CoroutineDispatcher = Dispatchers.Main.immediate,
     private val worker: CoroutineDispatcher = Dispatchers.Default,
-    /** Where AUTO's per-host memory of a mosh failure is kept (Room); null remembers nothing. */
-    private val moshFailures: MoshFailureStore? = null,
-    /** Wall-clock milliseconds, for the failure memory's expiry. */
-    private val clock: () -> Long = System::currentTimeMillis,
+    /** Monotonic milliseconds, for the program probe's round trip (a shell's mosh budget). */
+    private val monotonicMs: () -> Long = { System.nanoTime() / 1_000_000 },
     /** The mosh servers this app started, so an orphan of a dead process is stopped at the next connection; null keeps none. */
     private val moshServers: MoshServerLedger? = null,
     /** Debug timing markers (logcat tag `or2.timing`); the default records nothing. */
@@ -364,6 +387,9 @@ class HostConnections(
                         }
                         if (state is HostState.Connected) {
                             reapOrphans(current)
+                            // Beside the probe, not after it: `mosh_server()` is the program probe
+                            // alone, and the transport choice needs nothing more.
+                            scope.launch { askMoshServer(current) }
                             probe(current)
                         }
                         if (state is HostState.Closed) releaseWatches(current)
@@ -498,6 +524,8 @@ class HostConnections(
         } else {
             setWatching(updated.id, updated.showInInbox)
             setTransport(updated.id, updated.transport)
+            // An edit is a fresh decision about mosh (the user may have just fixed the firewall).
+            mutableHosts.value[updated.id]?.mutableUdpVerdict?.value = UdpVerdict.UNKNOWN
         }
         if (previous.moshIdentity() != updated.moshIdentity()) {
             moshServers?.purge(updated.id)
@@ -517,7 +545,10 @@ class HostConnections(
      * not come through here: its surviving mosh terminals stay eligible.
      */
     private fun markHostTerminalsClosing(hostId: Long) {
-        mutableTerminals.value.filter { it.host.id == hostId }.forEach { it.disconnectRequested = true }
+        mutableTerminals.value.filter { it.host.id == hostId }.forEach {
+            it.disconnectRequested = true
+            cancelBackground(it)
+        }
     }
 
     private fun retireHost(current: ActiveHost) {
@@ -574,6 +605,30 @@ class HostConnections(
         }
     }
 
+    /**
+     * Asks the program probe for `mosh-server` once per connection and keeps the answer with its round
+     * trip ([ActiveHost.moshServer]). A query that fails leaves the answer unknown, and the wait for it
+     * ([ActiveHost.moshServerSettled]) is over either way.
+     */
+    private suspend fun askMoshServer(current: ActiveHost) {
+        try {
+            if (current.mutableMoshServer.value != null) return
+            val port = current.ready.await()
+            val started = monotonicMs()
+            val path = port.moshServer()
+            if (current.mutableMoshServer.value == null) {
+                current.mutableMoshServer.value = MoshServerAnswer(path, monotonicMs() - started)
+                timing.mark("connect host=${current.host.id}", "mosh-server")
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            // Unknown: AUTO still opens at once (a shell over SSH, tmux and herdr with a background try).
+        } finally {
+            current.moshServerSettled.complete(Unit)
+        }
+    }
+
     /** Re-queries capabilities and brings the watches in line with them. */
     suspend fun refresh(current: ActiveHost) {
         if (current.state.value is HostState.Connected) probe(current)
@@ -595,17 +650,11 @@ class HostConnections(
 
     /**
      * Follows the host's transport preference on a live connection: terminals opened afterwards
-     * use it, terminals already open keep what they run over. A changed preference is a fresh
-     * decision, so the memory of an earlier mosh failure on this connection ([ActiveHost.moshFallbackNote])
-     * is dropped with it.
+     * use it, terminals already open keep what they run over.
      */
     fun setTransport(hostId: Long, pref: TransportPref) {
         val current = mutableHosts.value[hostId] ?: return
-        if (current.transportPref == pref) return
         current.transportPref = pref
-        current.moshFallbackNote = null
-        // Room's `saveHost` clears the stored memory in the same write as the new preference.
-        current.moshPausedUntil = 0
     }
 
     /**
@@ -672,36 +721,163 @@ class HostConnections(
     // --- terminals ----------------------------------------------------------------------
 
     /**
-     * Call on main. Opens a terminal on a connected host; throws [HostException] if it cannot.
-     * The transport follows the host's current preference ([chooseTransport]); under AUTO that
-     * needs the capability probe, so callers that can suspend call [awaitTransportChoice] first
-     * (a probe that has not answered counts as no `mosh-server`). Under AUTO a mosh terminal gets a
-     * [AUTO_MOSH_BUDGET_MS] budget for its whole start, and one that fails with `TimedOut` or a missing
-     * `mosh-server` before it connected is retried over SSH on the same [ActiveTerminal]; a timeout is
-     * also remembered for the host for [MOSH_PAUSE_MS], and AUTO skips mosh until then.
+     * Call on main. Opens a terminal on a connected host at once; throws [HostException] if it cannot.
+     * The transport follows the host's current preference and, under AUTO, the connection's
+     * [UdpVerdict] and `mosh_server()` answer ([planOpen]): nothing here waits for UDP. A tmux or herdr
+     * terminal opened over SSH while UDP is untested gets a mosh session in the background, swapped in
+     * once it connects; an AUTO mosh terminal that fails with `TimedOut` or a missing `mosh-server`
+     * before it connected is retried over SSH on the same [ActiveTerminal].
      */
     fun openTerminal(current: ActiveHost, target: TerminalTarget): ActiveTerminal {
         if (!owns(current) || current.retired) throw HostException.Closed()
         val port = current.mutablePort.value ?: throw HostException.NotConnected()
-        val pref = current.transportPref
-        val moshServer = current.capabilities.value?.moshServer
-        val now = clock()
-        val choice = chooseTransport(pref, moshServer, current.moshRejected(now))
+        val plan = planOpen(current.transportPref, target, current.udpVerdict.value, current.moshServer.value)
         val terminal = ActiveTerminal(nextTerminalId, current.host, target)
         terminal.origin = current
-        terminal.fallbackEligible = pref == TransportPref.AUTO && choice == TerminalTransport.MOSH
-        if (pref == TransportPref.AUTO && moshServer != null && choice == TerminalTransport.SSH) {
-            terminal.mutableNote.value = current.moshFallbackNote ?: MOSH_PAUSED_NOTE
-        }
-        // AUTO gives mosh a short budget (the whole start, bootstrap included) so a blocked UDP path
-        // costs seconds before SSH takes over; an explicit Mosh keeps the 15 s default.
-        val budget = if (terminal.fallbackEligible) AUTO_MOSH_BUDGET_MS else null
-        val session = port.openTerminal(target, choice, 80u, 24u, budget, sessionListener(terminal, current, attempt = 0))
+        terminal.fallbackEligible = plan.fallbackEligible
+        val session = port.openTerminal(target, plan.transport, 80u, 24u, plan.moshBudgetMs, sessionListener(terminal, current, attempt = 0))
         nextTerminalId++
         terminal.mutableTransport.value = session.transport()
         terminal.mutableHandle.value = session
         mutableTerminals.value += terminal
+        if (plan.background) requestBackground(terminal, current)
         return terminal
+    }
+
+    // --- the background mosh attempt and the swap -------------------------------------------
+
+    /**
+     * A tmux or herdr terminal opened over SSH while UDP is untested wants mosh behind it. One attempt
+     * per host is in flight while the verdict is `UNKNOWN`; the others wait for its verdict (never for
+     * UDP: their SSH terminal is already in use): `OK` starts theirs, `BLOCKED` keeps them on SSH.
+     */
+    private fun requestBackground(terminal: ActiveTerminal, current: ActiveHost) {
+        when (current.udpVerdict.value) {
+            UdpVerdict.OK -> startBackground(terminal, current)
+            UdpVerdict.BLOCKED -> Unit
+            UdpVerdict.UNKNOWN ->
+                if (current.probingTerminal == null) startBackground(terminal, current) else current.awaitingVerdict += terminal
+        }
+    }
+
+    /** Starts [terminal]'s one background mosh session (the explicit-mosh 15 s budget); false when it did not start. */
+    private fun startBackground(terminal: ActiveTerminal, current: ActiveHost): Boolean {
+        if (terminal.backgroundTried || terminal.retired || terminal.disconnectRequested) return false
+        if (terminal.mutableState.value is SessionState.Closed || !owns(current) || current.retired) return false
+        val port = current.mutablePort.value ?: return false
+        terminal.backgroundTried = true
+        val attempt = terminal.attempt + 1
+        val session = try {
+            port.openTerminal(terminal.target, TerminalTransport.MOSH, 80u, 24u, null, sessionListener(terminal, current, attempt))
+        } catch (_: HostException) {
+            return false // The host is going: the terminal stays on SSH.
+        }
+        terminal.background = session
+        terminal.backgroundAttempt = attempt
+        if (current.udpVerdict.value == UdpVerdict.UNKNOWN) current.probingTerminal = terminal
+        return true
+    }
+
+    /** What the background session of [terminal] reports (its own callbacks; the terminal still shows SSH). */
+    private fun backgroundState(terminal: ActiveTerminal, current: ActiveHost, state: SessionState) {
+        val session = terminal.background ?: return
+        when (state) {
+            SessionState.Connected -> swapToMosh(terminal, current, session)
+            is SessionState.Closed -> {
+                endBackground(terminal, session)
+                val failure = (state.reason as? CloseReason.Failed)?.failure
+                if (failure != null && isMoshFallback(failure)) {
+                    if (current.probingTerminal === terminal) current.probingTerminal = null
+                    setVerdict(current, UdpVerdict.BLOCKED) // The terminal stays on SSH, unseen.
+                } else {
+                    releaseProbe(current, terminal) // Inconclusive (a lost connection, a failing command): the next one tries.
+                }
+            }
+            else -> Unit
+        }
+    }
+
+    /**
+     * The background mosh session connected: the [ActiveTerminal] moves to it (the fallback's swap run
+     * the other way: same id, thumbnail and navigation; the old session's frames are dropped by the
+     * attempt counter), and the SSH session is disconnected. The verdict becomes `OK`.
+     */
+    private fun swapToMosh(terminal: ActiveTerminal, current: ActiveHost, session: SessionInterface) {
+        if (terminal.retired || terminal.disconnectRequested || terminal.mutableState.value is SessionState.Closed) {
+            cancelBackground(terminal)
+            return
+        }
+        val previous = terminal.mutableHandle.value
+        terminal.attempt = terminal.backgroundAttempt
+        terminal.background = null
+        terminal.backgroundAttempt = ActiveTerminal.NO_ATTEMPT
+        terminal.mutableLinkHealth.value = null
+        terminal.mutableTransport.value = session.transport()
+        terminal.mutableHandle.value = session
+        if (terminal.mutableState.value != SessionState.Connected) {
+            terminal.mutableHasConnected.value = true
+            terminal.mutableState.value = SessionState.Connected
+            timing.terminalConnected(terminal.id)
+        }
+        recordMoshServer(terminal)
+        if (current.probingTerminal === terminal) current.probingTerminal = null
+        setVerdict(current, UdpVerdict.OK)
+        // The view binds the new handle and draws its frame.
+        terminal.mutableFrames.tryEmit(Unit)
+        if (previous != null) {
+            try {
+                previous.disconnect()
+            } catch (_: Exception) {
+                // Already gone: nothing left to end.
+            }
+            scope.launch { yield(); (previous as? AutoCloseable)?.close() }
+        }
+    }
+
+    /** The background session ended or was abandoned: forget it and release its native object. */
+    private fun endBackground(terminal: ActiveTerminal, session: SessionInterface) {
+        terminal.background = null
+        terminal.backgroundAttempt = ActiveTerminal.NO_ATTEMPT
+        scope.launch { yield(); (session as? AutoCloseable)?.close() }
+    }
+
+    /**
+     * The terminal is closing (the user, a host-wide close) or over: its background attempt is cancelled,
+     * which stops a `mosh-server` it started (Rust's abandon path), and it waits for no verdict.
+     */
+    private fun cancelBackground(terminal: ActiveTerminal) {
+        val current = terminal.origin
+        current?.awaitingVerdict?.remove(terminal)
+        val session = terminal.background ?: return
+        try {
+            session.disconnect()
+        } catch (_: Exception) {
+            // Already gone.
+        }
+        endBackground(terminal, session)
+        if (current != null) releaseProbe(current, terminal)
+    }
+
+    /** [terminal]'s attempt no longer stands for the host's: the next terminal waiting for a verdict tries. */
+    private fun releaseProbe(current: ActiveHost, terminal: ActiveTerminal) {
+        if (current.probingTerminal !== terminal) return
+        current.probingTerminal = null
+        if (current.udpVerdict.value != UdpVerdict.UNKNOWN) return
+        while (current.awaitingVerdict.isNotEmpty()) {
+            if (startBackground(current.awaitingVerdict.removeAt(0), current)) return
+        }
+    }
+
+    /** What the connection learned about UDP; terminals waiting for it try mosh (`OK`) or stay on SSH. */
+    private fun setVerdict(current: ActiveHost, verdict: UdpVerdict) {
+        if (current.mutableUdpVerdict.value != verdict && verdict != UdpVerdict.UNKNOWN) {
+            timing.mark("connect host=${current.host.id}", if (verdict == UdpVerdict.OK) "udp-ok" else "udp-blocked")
+        }
+        current.mutableUdpVerdict.value = verdict
+        if (verdict == UdpVerdict.UNKNOWN) return
+        val waiting = current.awaitingVerdict.toList()
+        current.awaitingVerdict.clear()
+        if (verdict == UdpVerdict.OK) waiting.forEach { startBackground(it, current) }
     }
 
     private fun sessionListener(terminal: ActiveTerminal, current: ActiveHost, attempt: Int) = object : SessionListener {
@@ -719,15 +895,23 @@ class HostConnections(
     }
 
     private fun sessionState(terminal: ActiveTerminal, current: ActiveHost, attempt: Int, state: SessionState) {
-        // A replaced session (the mosh attempt after a fallback) is over; nothing it says counts.
-        if (attempt != terminal.attempt) return
+        if (attempt != terminal.attempt) {
+            // The background mosh session speaks for itself until it is swapped in.
+            if (attempt == terminal.backgroundAttempt) backgroundState(terminal, current, state)
+            // A replaced session (the mosh attempt after a fallback, the SSH one after a swap) is over.
+            return
+        }
         if (state is SessionState.Closed && fallBackToSsh(terminal, current, state)) return
         // Preserve a transient Connected even if the UI observes only Closed.
         if (state == SessionState.Connected) {
             terminal.mutableHasConnected.value = true
             recordMoshServer(terminal)
             timing.terminalConnected(terminal.id)
+            // Any mosh terminal that connects shows UDP gets through on this connection.
+            if (terminal.mutableTransport.value == TerminalTransport.MOSH) setVerdict(current, UdpVerdict.OK)
         }
+        // The terminal is over: its background attempt has nothing left to replace.
+        if (state is SessionState.Closed) cancelBackground(terminal)
         terminal.mutableState.value = state
         if (state is SessionState.Closed) timing.forgetTerminal(terminal.id)
         if (state is SessionState.Closed) forgetMoshServer(terminal, state.reason)
@@ -803,23 +987,18 @@ class HostConnections(
         val failure = (state.reason as? CloseReason.Failed)?.failure ?: return false
         if (!terminal.fallbackEligible || !isMoshFallback(failure) || terminal.mutableHasConnected.value) return false
         if (terminal.disconnectRequested || terminal.retired || !owns(current) || current.retired) return false
-        // The timeout is what mosh did on this host's destination, whatever happens to the SSH retry:
-        // a connection lost together with UDP (the retry throws `Closed`) must not make the next
-        // connection repeat the same blocked attempt. Remembered only while this connection is still
-        // the host's (the guard above), so an edited destination never gets the old one's memory.
-        if (failure is SessionFailure.TimedOut) rememberMoshFailure(current)
+        // What mosh did on this connection, whatever happens to the SSH retry: later AUTO terminals on
+        // it go straight to SSH, and the host screen says why. Nothing outlives the connection.
+        setVerdict(current, UdpVerdict.BLOCKED)
         val port = current.mutablePort.value ?: return false
         val previous = terminal.mutableHandle.value
         val previousAttempt = terminal.attempt
-        val note = moshFallbackNote(failure)
         terminal.attempt = previousAttempt + 1
         terminal.fallbackEligible = false
         terminal.mutableState.value = SessionState.Connecting
         try {
             val session = port.openTerminal(terminal.target, TerminalTransport.SSH, 80u, 24u, null,
                 sessionListener(terminal, current, terminal.attempt))
-            current.moshFallbackNote = note
-            terminal.mutableNote.value = note
             terminal.mutableLinkHealth.value = null
             terminal.mutableTransport.value = session.transport()
             terminal.mutableHandle.value = session
@@ -835,28 +1014,8 @@ class HostConnections(
     }
 
     /**
-     * UDP did not get through: AUTO skips mosh for this host for [MOSH_PAUSE_MS] (also across
-     * connections and restarts, through [moshFailures]). A missing `mosh-server` is not remembered:
-     * the capability probe already says so on every connection, and installing it must just work.
-     */
-    private fun rememberMoshFailure(current: ActiveHost) {
-        val until = clock() + MOSH_PAUSE_MS
-        current.moshPausedUntil = until
-        val store = moshFailures ?: return
-        scope.launch {
-            try {
-                store.markMoshFailed(current.host.id, until)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                // Without the memory the next connection simply tries mosh once more.
-            }
-        }
-    }
-
-    /**
-     * Waits (at most [timeoutMs]) for the capability probe of [current], so a terminal opened
-     * right after connecting can choose mosh. Returns at once when the probe has answered.
+     * Waits (at most [timeoutMs]) for the capability probe of [current]. Returns at once when the
+     * probe has answered.
      */
     suspend fun awaitCapabilities(current: ActiveHost, timeoutMs: Long = 3_000) {
         if (current.capabilities.value != null || current.capabilitiesError.value != null) return
@@ -866,18 +1025,22 @@ class HostConnections(
     }
 
     /**
-     * Call before [openTerminal]: under AUTO the transport depends on the capability probe, so a
-     * tap right after connecting waits for it (briefly) instead of silently choosing SSH. An
-     * explicit SSH or Mosh preference never waits.
+     * Call before [openTerminal]. Only a tap that itself connected the host ([connectedInThisTap]: a
+     * Resume that had to connect first) waits, under AUTO, for `mosh_server()` (the program probe: one
+     * exec round trip, at most [timeoutMs]), so its shell can still choose mosh. Any other tap, an
+     * inbox tap on a live host above all, never waits; nor does an explicit SSH or Mosh preference.
      */
-    suspend fun awaitTransportChoice(current: ActiveHost) {
-        if (current.transportPref == TransportPref.AUTO) awaitCapabilities(current)
+    suspend fun awaitTransportChoice(current: ActiveHost, connectedInThisTap: Boolean = false, timeoutMs: Long = 3_000) {
+        if (!connectedInThisTap || current.transportPref != TransportPref.AUTO) return
+        if (current.moshServerSettled.isCompleted) return
+        withTimeoutOrNull(timeoutMs) { current.moshServerSettled.await() }
     }
 
-    /** The user ends this terminal. */
+    /** The user ends this terminal (and its background mosh attempt, if any). */
     fun disconnectTerminal(terminal: ActiveTerminal) {
         userClose?.terminalClosed(terminal.host.id, terminal.target)
         terminal.disconnectRequested = true
+        cancelBackground(terminal)
         terminal.mutableHandle.value?.disconnect()
     }
 
@@ -917,6 +1080,7 @@ class HostConnections(
         if (terminal.destroyed) return
         terminal.retired = true
         terminal.disconnectRequested = true
+        cancelBackground(terminal)
         terminal.mutableHandle.value?.disconnect()
         closeRetired(terminal)
     }

@@ -81,6 +81,7 @@ class UiPort(
         return session
     }
     override suspend fun capabilities() = caps
+    override suspend fun moshServer() = caps.moshServer
     override suspend fun listTmuxSessions() = tmux
     override fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface {
         watchListeners += listener

@@ -224,6 +224,10 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   `Asleep`), the inbox row's message is `Asleep` in `textMuted` with the usual `Unlock` pill (tapping still
   connects), and the host screen's status card says `Asleep` with a muted dot. A rejected key or host key
   stays a `danger` failure.
+- **UDP blocked (host screen):** while a connected host's UDP verdict is `BLOCKED` (and its probe did not
+  say mosh-server is missing), one muted `Secondary` line sits under the status card: `Mosh can't reach
+  this host over UDP, so terminals use SSH. On a Mac, run or2-pair --check for the fix.` Nothing else
+  explains it, and no terminal carries a note.
 - **Reconnect chip:** when the app returns and an inbox host's SSH connection was lost, a status chip
   (`surface` pill, 28 dp, `attention` 8 dp dot, `Chip` 12 sp `text` label, a 16 dp `textMuted` close glyph
   at the right) reads `Reconnect Alpha · 1 fingerprint` (`Reconnect 3 hosts · 2 fingerprints`). It floats with
@@ -247,13 +251,15 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   a small round "minimise" button (18 dp disc with a 12 dp glyph, `attention`) and sidebar toggle (18 dp, green) in
   48 x 36 dp boxes (48 dp touch targets that do not overlap), the mono title (`host: target`) in `textMuted`, and a trailing transport badge
   (`Mosh` in a saturated teal pill with dark text, `SSH` in a `surfaceTrack` pill with full `text`).
-  The badge shows the transport the session really runs over (`SSH` after an AUTO fallback). A
+  The badge shows the transport the session really runs over (`SSH` after an AUTO fallback; it flips
+  `SSH` to `Mosh` when AUTO swaps a terminal to its background mosh session). A
   mosh session that has heard nothing for more than 5 s greys it (the `SSH` look: `surfaceTrack`
-  with `textMuted` text, still reading `Mosh`) and a mono `MonoSmall` line `Last heard 12 s ago` in `attention`
-  appears under the header; the AUTO fallback explanation (`Mosh could not reach the host over UDP.
-  Using SSH for this connection.`) is a muted mono line in the same place. Both lines are drawn
-  over the first terminal row on a card-coloured scrim (12 dp gutter) and never move the terminal: a flapping link
-  must not resize the grid. They go away on recovery (the stale line also when the session closes).
+  with `textMuted` text, still reading `Mosh`) and a mono `MonoSmall` `Last heard 12 s ago` in `attention`
+  appears in the header row itself, just before the badge (the title gives way). Nothing is ever
+  drawn over the terminal's rows, and a flapping link never resizes the grid (the row keeps its
+  height); any line under the header takes layout space. It goes away on recovery and when the
+  session closes. There is no note under terminals: why AUTO uses SSH is said once, on the host
+  screen (see "UDP blocked").
   The drag handle overlaps the top of the 36 dp header row, so the header costs no extra height.
   The card follows the terminal's own background (the remote can change it with OSC 11). The sidebar toggle opens the sessions sheet
   (switch session, disconnect). The terminal is edge to edge below it with a thin `accent`

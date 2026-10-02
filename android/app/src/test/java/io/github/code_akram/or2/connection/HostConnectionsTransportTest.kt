@@ -1,7 +1,7 @@
 package io.github.code_akram.or2.connection
 
+import io.github.code_akram.or2.app.MemoryPrefStore
 import io.github.code_akram.or2.data.Host
-import io.github.code_akram.or2.data.MoshFailureStore
 import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HostException
@@ -17,6 +17,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -28,113 +29,163 @@ import org.junit.Assert.*
 import org.junit.Test
 
 /**
- * M3: which transport a terminal opens over, the AUTO fallback from mosh to SSH on the same
- * `ActiveTerminal`, link health, and the service-facing helpers, on fakes.
+ * Which transport a terminal opens over (v0.1.1 "Instant opens": the choice table, the per-connection
+ * UDP verdict, the background mosh attempt and the swap, the shell's budget), the AUTO fallback from
+ * mosh to SSH on the same `ActiveTerminal`, link health, and the service-facing helpers, on fakes.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class HostConnectionsTransportTest {
     private val shell = TerminalTarget.Shell
+    private val tmux = TerminalTarget.Tmux("main")
 
-    /** A [MoshFailureStore] that records what Room would be told. */
-    private class Failures : MoshFailureStore {
-        val marks = mutableListOf<Pair<Long, Long>>()
-        var cleared = 0
-        var failure: Exception? = null
-        override suspend fun markMoshFailed(hostId: Long, until: Long) {
-            failure?.let { throw it }
-            marks += hostId to until
-        }
-        override suspend fun clearMoshFailure(hostId: Long) { cleared++ }
-    }
-
-    private class Rig(val holder: HostConnections, val port: FakePort, val hostListener: HostListener, val host: Host) {
+    private class Rig(val holder: HostConnections, val port: FakePort, val hostListener: HostListener, val host: Host, val ledger: MoshServerLedger) {
         val active get() = holder.host(host.id)!!
     }
 
     /**
      * A connected host. [probed] false makes the capability probe fail; [pending] leaves it
-     * unanswered (neither capabilities nor an error) until `port.capsGate` completes.
+     * unanswered until `port.capsGate` completes, and [moshPending] does the same for `mosh_server()`
+     * (`port.moshServerGate`). The program probe's round trip is [roundTripMs] of virtual time.
      */
     private suspend fun TestScope.rig(
         pref: TransportPref = TransportPref.AUTO, moshServer: String? = "/usr/bin/mosh-server", probed: Boolean = true,
-        pending: Boolean = false, store: MoshFailureStore? = null, clock: () -> Long = { NOW }, failedUntil: Long = 0,
+        pending: Boolean = false, moshPending: Boolean = false, failedUntil: Long = 0, roundTripMs: Long = 0,
     ): Rig {
         val host = testHost(transport = pref, moshFailedUntil = failedUntil)
         val port = FakePort()
         port.caps = port.caps.copy(moshServer = moshServer)
         if (!probed) port.capsFailure = IllegalStateException("probe not answered")
         if (pending) port.capsGate = CompletableDeferred()
+        port.moshServerGate = if (moshPending) CompletableDeferred() else if (roundTripMs > 0) {
+            CompletableDeferred<Unit>().also { gate -> launch { kotlinx.coroutines.delay(roundTripMs); gate.complete(Unit) } }
+        } else null
         var listener: HostListener? = null
+        val ledger = MoshServerLedger(MemoryPrefStore())
         val holder = HostConnections({ _, l -> listener = l; port }, FakeTrust(), StandardTestDispatcher(testScheduler), UnconfinedTestDispatcher(testScheduler),
-            store, clock)
+            monotonicMs = { testScheduler.currentTime }, moshServers = ledger)
         holder.connect(host, byteArrayOf(1))
         port.nativeState = HostState.Connected(0u)
         listener!!.onHostStateChanged(HostState.Connected(0u))
         advanceUntilIdle()
-        return Rig(holder, port, listener!!, host)
+        return Rig(holder, port, listener!!, host, ledger)
     }
 
     private fun TestScope.sessionListener(rig: Rig, index: Int): SessionListener = rig.port.terminals[index].second
 
-    private fun TestScope.fail(rig: Rig, index: Int, failure: SessionFailure) {
-        sessionListener(rig, index).onStateChanged(SessionState.Closed(CloseReason.Failed(failure)))
+    private fun TestScope.state(rig: Rig, index: Int, state: SessionState) {
+        sessionListener(rig, index).onStateChanged(state)
         advanceUntilIdle()
     }
 
+    private fun TestScope.fail(rig: Rig, index: Int, failure: SessionFailure) = state(rig, index, SessionState.Closed(CloseReason.Failed(failure)))
+
+    /** Counts what a terminal's view would be told to draw. */
+    private fun TestScope.frames(terminal: ActiveTerminal): () -> Int {
+        var count = 0
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { terminal.frameReady.collect { count++ } }
+        return { count }
+    }
+
+    // --- the choice on a live connection -----------------------------------------------------
+
     @Test
-    fun autoOpensMoshWhenTheHostHasMoshServerAndReportsTheRealTransport() = runTest {
+    fun autoShellOpensMoshOnABudgetFromTheProgramProbesRoundTrip() = runTest {
         val rig = rig()
+        assertEquals(MoshServerAnswer("/usr/bin/mosh-server", 0), rig.active.moshServer.value)
         val terminal = rig.holder.openTerminal(rig.active, shell)
         assertEquals(listOf(TerminalTransport.MOSH), rig.port.transports)
-        assertEquals(TerminalTransport.MOSH, terminal.transport.value)
-        assertNull(terminal.note.value)
+        assertEquals(listOf<UInt?>(700u), rig.port.budgets) // max(700 ms, 6 x 0 ms)
+        assertTrue(terminal.fallbackEligible)
         assertEquals(TerminalTransport.MOSH, rig.holder.transports().first()[terminal.id])
+
+        val slow = rig(roundTripMs = 250)
+        assertEquals(250L, slow.active.moshServer.value!!.roundTripMs)
+        slow.holder.openTerminal(slow.active, shell)
+        assertEquals(listOf<UInt?>(1_500u), slow.port.budgets)
     }
 
     @Test
-    fun autoOpensSshWithoutMoshServerOrBeforeTheProbeAnswered() = runTest {
+    fun autoShellOpensSshWithoutMoshServerOrBeforeTheProgramProbeAnswered() = runTest {
         val none = rig(moshServer = null)
         none.holder.openTerminal(none.active, shell)
         assertEquals(listOf(TerminalTransport.SSH), none.port.transports)
-        assertNull(none.holder.terminals.value.single().note.value) // No mosh to fall back from: nothing to explain.
 
-        // The probe has not answered at all (not failed): the synchronous open still has no mosh-server to go on.
-        val early = rig(pending = true)
-        assertNull(early.active.capabilities.value)
-        assertNull(early.active.capabilitiesError.value)
+        // `mosh_server()` has not answered: the open does not wait for it.
+        val early = rig(moshPending = true)
+        assertNull(early.active.moshServer.value)
         val terminal = early.holder.openTerminal(early.active, shell)
         assertEquals(listOf(TerminalTransport.SSH), early.port.transports)
         assertEquals(TerminalTransport.SSH, terminal.transport.value)
     }
 
     @Test
-    fun aTapBeforeTheProbeAnsweredWaitsForItSoAutoStillChoosesMosh() = runTest {
-        val rig = rig(pending = true)
+    fun theTransportChoiceAwaitsTheProgramProbeOnlyWhenTheTapConnectedTheHost() = runTest {
+        // A tap on a live host (an inbox tap) never waits, even while the answer is outstanding.
+        val live = rig(moshPending = true)
+        val before = testScheduler.currentTime
+        live.holder.awaitTransportChoice(live.active)
+        live.holder.awaitTransportChoice(live.active, connectedInThisTap = false)
+        assertEquals(before, testScheduler.currentTime)
+
+        // A Resume that connected the host waits for `mosh_server()` alone (not capabilities()), and
+        // its shell then chooses mosh.
+        val resumed = rig(moshPending = true, pending = true)
         val opened = async {
-            rig.holder.awaitTransportChoice(rig.active)
-            rig.holder.openTerminal(rig.active, shell)
+            resumed.holder.awaitTransportChoice(resumed.active, connectedInThisTap = true)
+            resumed.holder.openTerminal(resumed.active, shell)
         }
         runCurrent()
-        assertFalse(opened.isCompleted) // Waiting for the probe, not opened over SSH.
-        assertTrue(rig.port.transports.isEmpty())
-        rig.port.capsGate!!.complete(Unit)
+        assertFalse(opened.isCompleted)
+        resumed.port.moshServerGate!!.complete(Unit)
         advanceUntilIdle()
-        assertEquals(listOf(TerminalTransport.MOSH), rig.port.transports)
         assertEquals(TerminalTransport.MOSH, opened.await().transport.value)
+        assertNull(resumed.active.capabilities.value) // The full probe is still out: never waited for.
+
+        // A failed query ends the wait too, and a query that never answers is given up on.
+        val failing = rig(moshPending = true)
+        failing.port.moshServerFailure = HostException.CommandFailed("no channel")
+        failing.port.moshServerGate!!.complete(Unit)
+        advanceUntilIdle()
+        val start = testScheduler.currentTime
+        failing.holder.awaitTransportChoice(failing.active, connectedInThisTap = true)
+        assertEquals(start, testScheduler.currentTime)
+        assertNull(failing.active.moshServer.value)
+        val never = rig(moshPending = true)
+        val waitFrom = testScheduler.currentTime
+        never.holder.awaitTransportChoice(never.active, connectedInThisTap = true, timeoutMs = 3_000)
+        assertEquals(3_000L, testScheduler.currentTime - waitFrom)
     }
 
     @Test
-    fun anExplicitPreferenceNeverWaitsForTheProbe() = runTest {
+    fun anExplicitPreferenceNeverWaits() = runTest {
         for (pref in listOf(TransportPref.SSH, TransportPref.MOSH)) {
-            val rig = rig(pref, pending = true)
-            rig.holder.awaitTransportChoice(rig.active)
-            assertEquals(0L, testScheduler.currentTime)
+            val rig = rig(pref, moshPending = true)
+            val before = testScheduler.currentTime
+            rig.holder.awaitTransportChoice(rig.active, connectedInThisTap = true)
+            assertEquals(before, testScheduler.currentTime)
         }
+    }
+
+    @Test
+    fun explicitPreferencesAreNeverSecondGuessed() = runTest {
+        val ssh = rig(TransportPref.SSH)
+        ssh.holder.openTerminal(ssh.active, shell)
+        ssh.holder.openTerminal(ssh.active, tmux)
+        assertEquals(listOf(TerminalTransport.SSH, TerminalTransport.SSH), ssh.port.transports) // No background try either.
+
+        val mosh = rig(TransportPref.MOSH, moshServer = null)
+        val terminal = mosh.holder.openTerminal(mosh.active, shell)
+        assertEquals(listOf(TerminalTransport.MOSH), mosh.port.transports) // Asked for, so it fails visibly if it must.
+        assertEquals(listOf<UInt?>(null), mosh.port.budgets) // The 15 s default.
+        fail(mosh, 0, SessionFailure.NotInstalled("mosh-server"))
+        assertEquals(SessionState.Closed(CloseReason.Failed(SessionFailure.NotInstalled("mosh-server"))), terminal.state.value)
+        assertEquals(1, mosh.port.transports.size) // No silent SSH.
     }
 
     @Test
     fun aTransportPreferenceEditedOnALiveConnectionAppliesToTheNextTerminal() = runTest {
-        val rig = rig() // AUTO with mosh-server: mosh.
+        val rig = rig()
+        rig.active.mutableUdpVerdict.value = UdpVerdict.OK
         rig.holder.openTerminal(rig.active, shell)
         rig.holder.setTransport(rig.host.id, TransportPref.SSH)
         val ssh = rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("a"))
@@ -148,40 +199,264 @@ class HostConnectionsTransportTest {
             listOf(TerminalTransport.MOSH, TerminalTransport.SSH, TerminalTransport.MOSH, TerminalTransport.MOSH),
             rig.port.transports,
         )
-        // The terminals already open keep what they run over.
         assertEquals(TerminalTransport.MOSH, rig.holder.terminals.value.first().transport.value)
         rig.holder.setTransport(999, TransportPref.SSH) // A host without a connection: nothing to do.
     }
 
     @Test
-    fun changingThePreferenceDropsTheMemoryOfAnEarlierMoshFailure() = runTest {
+    fun udpKnownToWorkOpensTmuxAndHerdrOverMoshDirectly() = runTest {
         val rig = rig()
-        rig.holder.openTerminal(rig.active, shell)
-        fail(rig, 0, SessionFailure.TimedOut)
-        assertNotNull(rig.active.moshFallbackNote)
-        rig.holder.setTransport(rig.host.id, TransportPref.SSH)
-        rig.holder.setTransport(rig.host.id, TransportPref.AUTO)
-        assertNull(rig.active.moshFallbackNote)
+        rig.active.mutableUdpVerdict.value = UdpVerdict.OK
+        val terminal = rig.holder.openTerminal(rig.active, TerminalTarget.Herdr(null, "w1:p1"))
+        assertEquals(listOf(TerminalTransport.MOSH), rig.port.transports)
+        assertEquals(listOf<UInt?>(AUTO_MOSH_BUDGET_MS), rig.port.budgets)
+        assertTrue(terminal.fallbackEligible)
+    }
+
+    // --- the background attempt and the swap -------------------------------------------------
+
+    @Test
+    fun tmuxOpensOverSshAtOnceAndSwapsToTheBackgroundMoshSessionOnceItConnects() = runTest {
+        val rig = rig()
+        rig.port.nextServerPid = 4242u
+        val terminal = rig.holder.openTerminal(rig.active, tmux)
+        // SSH now, mosh behind it with the explicit-mosh budget (15 s, Rust's default).
+        assertEquals(listOf(TerminalTransport.SSH, TerminalTransport.MOSH), rig.port.transports)
+        assertEquals(listOf<UInt?>(null, null), rig.port.budgets)
+        val ssh = rig.port.terminals[0].third
+        val mosh = rig.port.terminals[1].third
+        assertSame(ssh, terminal.handle.value)
+        assertEquals(TerminalTransport.SSH, terminal.transport.value)
+        val drawn = frames(terminal)
+        state(rig, 0, SessionState.Connected)
+        sessionListener(rig, 0).onFrameReady()
+        advanceUntilIdle()
+        val beforeSwap = drawn()
+
+        // The background session's frames and health do not reach the terminal before the swap.
+        sessionListener(rig, 1).onFrameReady()
+        sessionListener(rig, 1).onLinkHealth(LinkHealth(300uL, 300uL))
+        advanceUntilIdle()
+        assertEquals(beforeSwap, drawn())
+        assertNull(terminal.linkHealth.value)
+        assertEquals(UdpVerdict.UNKNOWN, rig.active.udpVerdict.value)
+
+        state(rig, 1, SessionState.Connected)
+
+        // Same terminal, now on mosh: the badge follows, the server is recorded, UDP is known to work.
+        assertEquals(listOf(terminal), rig.holder.terminals.value)
+        assertSame(mosh, terminal.handle.value)
+        assertEquals(TerminalTransport.MOSH, terminal.transport.value)
+        assertEquals(TerminalTransport.MOSH, rig.holder.transports().first()[terminal.id])
+        assertEquals(SessionState.Connected, terminal.state.value)
+        assertEquals(4242u, terminal.moshServerPid)
+        assertEquals(listOf(4242u), rig.ledger.pids(rig.host))
+        assertEquals(UdpVerdict.OK, rig.active.udpVerdict.value)
+        assertTrue(drawn() > beforeSwap) // The view is told to draw the new session.
+        // The SSH session is disconnected and released.
+        assertEquals(listOf("disconnect", "close"), ssh.events)
+        assertFalse(mosh.destroyed)
+
+        // The old session can no longer speak for the terminal: its frames and its close are dropped.
+        val afterSwap = drawn()
+        sessionListener(rig, 0).onFrameReady()
+        state(rig, 0, SessionState.Closed(CloseReason.Disconnected))
+        assertEquals(afterSwap, drawn())
+        assertEquals(SessionState.Connected, terminal.state.value)
+        sessionListener(rig, 1).onFrameReady()
+        sessionListener(rig, 1).onLinkHealth(LinkHealth(400uL, 400uL))
+        advanceUntilIdle()
+        assertEquals(afterSwap + 1, drawn())
+        assertEquals(LinkHealth(400uL, 400uL), terminal.linkHealth.value)
+
+        // UDP works now: the next tmux terminal opens over mosh directly.
+        rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("next"))
+        assertEquals(TerminalTransport.MOSH, rig.port.transports.last())
+        assertEquals(3, rig.port.transports.size)
+    }
+
+    @Test
+    fun aBackgroundMoshThatConnectsBeforeTheSshSessionStillSwapsIn() = runTest {
+        val rig = rig()
+        val terminal = rig.holder.openTerminal(rig.active, TerminalTarget.Herdr("work", null))
+        state(rig, 1, SessionState.Connected)
+        assertEquals(TerminalTransport.MOSH, terminal.transport.value)
+        assertEquals(SessionState.Connected, terminal.state.value)
+        assertTrue(terminal.hasConnected.value)
+        // The SSH open that lost the race is ended, and what it says later does not count.
+        assertEquals("disconnect", rig.port.terminals[0].third.events.first())
+        state(rig, 0, SessionState.Connected)
+        state(rig, 0, SessionState.Closed(CloseReason.Disconnected))
+        assertEquals(SessionState.Connected, terminal.state.value)
+    }
+
+    @Test
+    fun aBlockedBackgroundAttemptLeavesTheTerminalOnSshUnseen() = runTest {
+        for (failure in listOf(SessionFailure.TimedOut, SessionFailure.NotInstalled("mosh-server"))) {
+            val rig = rig()
+            val terminal = rig.holder.openTerminal(rig.active, tmux)
+            state(rig, 0, SessionState.Connected)
+            fail(rig, 1, failure)
+            // Nothing the user sees changes: the terminal stays on SSH, connected.
+            assertSame(rig.port.terminals[0].third, terminal.handle.value)
+            assertEquals(TerminalTransport.SSH, terminal.transport.value)
+            assertEquals(SessionState.Connected, terminal.state.value)
+            assertTrue(rig.port.terminals[1].third.destroyed) // The failed attempt is released.
+            assertEquals(UdpVerdict.BLOCKED, rig.active.udpVerdict.value)
+            // BLOCKED opens over SSH with no attempt, for every target.
+            rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("b"))
+            rig.holder.openTerminal(rig.active, shell)
+            assertEquals(listOf(TerminalTransport.SSH, TerminalTransport.MOSH, TerminalTransport.SSH, TerminalTransport.SSH), rig.port.transports)
+        }
+    }
+
+    @Test
+    fun anInconclusiveBackgroundFailureKeepsTheVerdictUnknown() = runTest {
+        val rig = rig()
+        val terminal = rig.holder.openTerminal(rig.active, tmux)
+        fail(rig, 1, SessionFailure.CommandFailed("mosh-server did not start"))
+        assertEquals(UdpVerdict.UNKNOWN, rig.active.udpVerdict.value)
+        assertEquals(TerminalTransport.SSH, terminal.transport.value)
+        // At most one attempt per terminal: nothing is retried for it.
+        advanceTimeBy(60_000)
+        assertEquals(2, rig.port.transports.size)
+        // The next terminal tries again.
+        rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("b"))
+        assertEquals(listOf(TerminalTransport.SSH, TerminalTransport.MOSH, TerminalTransport.SSH, TerminalTransport.MOSH), rig.port.transports)
+    }
+
+    @Test
+    fun oneAttemptIsInFlightPerHostAndTheOthersWaitForItsVerdict() = runTest {
+        val rig = rig()
+        val a = rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("a"))
+        val b = rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("b"))
+        val c = rig.holder.openTerminal(rig.active, TerminalTarget.Herdr(null, "w1:p1"))
+        // Every terminal opened at once over SSH; only the first tries mosh.
+        assertEquals(listOf(TerminalTransport.SSH, TerminalTransport.MOSH, TerminalTransport.SSH, TerminalTransport.SSH), rig.port.transports)
+        listOf(a, b, c).forEach { assertEquals(TerminalTransport.SSH, it.transport.value) }
+
+        state(rig, 1, SessionState.Connected) // a's attempt: UDP works.
+        assertEquals(TerminalTransport.MOSH, a.transport.value)
+        // The waiting terminals now try theirs, each its own.
+        assertEquals(6, rig.port.transports.size)
+        assertEquals(listOf(TerminalTransport.MOSH, TerminalTransport.MOSH), rig.port.transports.drop(4))
+        state(rig, 4, SessionState.Connected)
+        state(rig, 5, SessionState.Connected)
+        assertEquals(TerminalTransport.MOSH, b.transport.value)
+        assertEquals(TerminalTransport.MOSH, c.transport.value)
+    }
+
+    @Test
+    fun aBlockedVerdictKeepsTheWaitingTerminalsOnSshWithoutAnAttempt() = runTest {
+        val rig = rig()
+        rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("a"))
+        val b = rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("b"))
+        fail(rig, 1, SessionFailure.TimedOut)
+        advanceTimeBy(60_000)
+        assertEquals(3, rig.port.transports.size)
+        assertEquals(TerminalTransport.SSH, b.transport.value)
+    }
+
+    @Test
+    fun anInconclusiveFailureHandsTheProbeToTheNextWaitingTerminal() = runTest {
+        val rig = rig()
+        rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("a"))
+        val b = rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("b"))
+        fail(rig, 1, SessionFailure.ConnectionLost("reset"))
+        assertEquals(TerminalTransport.MOSH, rig.port.transports.last())
+        assertEquals(4, rig.port.transports.size)
+        state(rig, 3, SessionState.Connected)
+        assertEquals(TerminalTransport.MOSH, b.transport.value)
+    }
+
+    @Test
+    fun closingTheTerminalCancelsItsBackgroundAttemptAndStopsItsServer() = runTest {
+        val rig = rig()
+        val terminal = rig.holder.openTerminal(rig.active, tmux)
+        val waiting = rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("b"))
+        val mosh = rig.port.terminals[1].third
+        rig.holder.disconnectTerminal(terminal)
+        advanceUntilIdle()
+        // Disconnecting the mosh session before it connected is Rust's abandon path, which stops its server.
+        assertEquals(listOf("disconnect", "close"), mosh.events)
+        // A late Connected from the cancelled attempt swaps nothing in.
+        state(rig, 1, SessionState.Connected)
+        assertEquals(TerminalTransport.SSH, terminal.transport.value)
+        assertSame(rig.port.terminals[0].third, terminal.handle.value)
+        // The host's probe passed on to the terminal that was waiting.
+        assertEquals(4, rig.port.transports.size)
+        assertEquals(TerminalTransport.MOSH, rig.port.terminals[3].third.transport)
+        // Dismissing (closing) that one cancels its attempt too.
+        rig.holder.dismissTerminal(waiting)
+        advanceUntilIdle()
+        assertEquals("disconnect", rig.port.terminals[3].third.events.first())
+        assertTrue(rig.port.terminals[3].third.destroyed)
+    }
+
+    @Test
+    fun disconnectingTheHostCancelsTheBackgroundAttempts() = runTest {
+        val rig = rig()
+        rig.holder.openTerminal(rig.active, tmux)
+        rig.holder.disconnect(rig.host.id)
+        advanceUntilIdle()
+        assertEquals("disconnect", rig.port.terminals[1].third.events.first())
+        state(rig, 1, SessionState.Connected)
+        assertEquals(TerminalTransport.SSH, rig.holder.terminals.value.single().transport.value)
+    }
+
+    @Test
+    fun anSshSessionThatClosesTakesItsBackgroundAttemptWithIt() = runTest {
+        val rig = rig()
+        val terminal = rig.holder.openTerminal(rig.active, tmux)
+        fail(rig, 0, SessionFailure.ConnectionLost("gone"))
+        assertEquals("disconnect", rig.port.terminals[1].third.events.first())
+        state(rig, 1, SessionState.Connected)
+        assertTrue(terminal.state.value is SessionState.Closed)
+        assertEquals(TerminalTransport.SSH, terminal.transport.value)
+    }
+
+    // --- the verdict: per connection, never remembered ------------------------------------
+
+    @Test
+    fun theVerdictIsResetOnEveryNewConnectionAndOnAHostEdit() = runTest {
+        val rig = rig()
+        rig.holder.openTerminal(rig.active, tmux)
+        fail(rig, 1, SessionFailure.TimedOut)
+        assertEquals(UdpVerdict.BLOCKED, rig.active.udpVerdict.value)
+
+        // An edit (here: the label) is a fresh decision: the user may have just fixed the firewall.
+        val renamed = Host(rig.host.record.copy(label = "Renamed"), rig.host.addresses)
+        rig.holder.hostEdited(rig.host, renamed)
+        assertEquals(UdpVerdict.UNKNOWN, rig.active.udpVerdict.value)
         rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("again"))
-        assertEquals(TerminalTransport.MOSH, rig.port.transports.last()) // A fresh decision: mosh is tried again.
+        assertEquals(TerminalTransport.MOSH, rig.port.transports.last()) // Tried again in the background.
+
+        // A new connection starts from UNKNOWN whatever the old one learned.
+        fail(rig, 3, SessionFailure.TimedOut)
+        assertEquals(UdpVerdict.BLOCKED, rig.active.udpVerdict.value)
+        val old = rig.active
+        rig.holder.disconnect(rig.host.id)
+        rig.hostListener.onHostStateChanged(HostState.Closed(CloseReason.Disconnected))
+        advanceUntilIdle()
+        rig.holder.connect(rig.host, byteArrayOf(1))
+        advanceUntilIdle()
+        assertNotSame(old, rig.active)
+        assertEquals(UdpVerdict.UNKNOWN, rig.active.udpVerdict.value)
     }
 
     @Test
-    fun explicitPreferencesAreNeverSecondGuessed() = runTest {
-        val ssh = rig(TransportPref.SSH)
-        ssh.holder.openTerminal(ssh.active, shell)
-        assertEquals(listOf(TerminalTransport.SSH), ssh.port.transports) // Even with mosh-server present.
-
-        val mosh = rig(TransportPref.MOSH, moshServer = null)
-        val terminal = mosh.holder.openTerminal(mosh.active, shell)
-        assertEquals(listOf(TerminalTransport.MOSH), mosh.port.transports) // Asked for, so it fails visibly if it must.
-        fail(mosh, 0, SessionFailure.NotInstalled("mosh-server"))
-        assertEquals(SessionState.Closed(CloseReason.Failed(SessionFailure.NotInstalled("mosh-server"))), terminal.state.value)
-        assertEquals(1, mosh.port.transports.size) // No silent SSH.
+    fun nothingAboutUdpIsRememberedAcrossConnections() = runTest {
+        // A host record still carrying the old 24 h memory: it is not read any more.
+        val rig = rig(failedUntil = Long.MAX_VALUE)
+        assertEquals(UdpVerdict.UNKNOWN, rig.active.udpVerdict.value)
+        rig.holder.openTerminal(rig.active, shell)
+        assertEquals(listOf(TerminalTransport.MOSH), rig.port.transports)
     }
 
+    // --- the shell's fallback --------------------------------------------------------------
+
     @Test
-    fun autoFallsBackToSshWhenMoshTimesOutAndRemembersItForTheConnection() = runTest {
+    fun autoFallsBackToSshWhenAShellsMoshTimesOutAndBlocksMoshForTheConnection() = runTest {
         val rig = rig()
         val terminal = rig.holder.openTerminal(rig.active, shell)
         val mosh = rig.port.terminals[0].third
@@ -192,14 +467,15 @@ class HostConnectionsTransportTest {
         fail(rig, 0, SessionFailure.TimedOut)
 
         assertEquals(listOf(TerminalTransport.MOSH, TerminalTransport.SSH), rig.port.transports)
+        assertEquals(listOf<UInt?>(700u, null), rig.port.budgets) // The SSH retry has no budget to give.
         assertSame(rig.port.terminals[1].third, terminal.handle.value) // The same terminal, a new session.
         assertEquals(TerminalTransport.SSH, terminal.transport.value)
         assertEquals(SessionState.Connecting, terminal.state.value) // The mosh failure is not shown.
         assertFalse(terminal.hasConnected.value)
         assertNull(terminal.linkHealth.value)
-        assertTrue(terminal.note.value!!.contains("UDP"))
         assertTrue(mosh.destroyed) // The replaced native object is released.
         assertEquals(listOf(terminal), rig.holder.terminals.value)
+        assertEquals(UdpVerdict.BLOCKED, rig.active.udpVerdict.value)
 
         // The replaced attempt can no longer speak for the terminal.
         sessionListener(rig, 0).onStateChanged(SessionState.Connected)
@@ -208,24 +484,31 @@ class HostConnectionsTransportTest {
         assertEquals(SessionState.Connecting, terminal.state.value)
         assertNull(terminal.linkHealth.value)
 
-        sessionListener(rig, 1).onStateChanged(SessionState.Connected)
-        advanceUntilIdle()
+        state(rig, 1, SessionState.Connected)
         assertEquals(SessionState.Connected, terminal.state.value)
         assertTrue(terminal.hasConnected.value)
 
-        // Remembered for this connection: the next terminal goes straight to SSH, explained the same way.
-        val second = rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("work"))
+        // For this connection: the next terminal goes straight to SSH, with no background try.
+        rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("work"))
         assertEquals(listOf(TerminalTransport.MOSH, TerminalTransport.SSH, TerminalTransport.SSH), rig.port.transports)
-        assertEquals(terminal.note.value, second.note.value)
     }
 
     @Test
-    fun aMissingMoshServerAlsoFallsBackAndTheFallbackIsOnlyForTheConnection() = runTest {
+    fun aShellOnMoshThatConnectsMakesTheVerdictOk() = runTest {
         val rig = rig()
-        val terminal = rig.holder.openTerminal(rig.active, shell)
+        rig.holder.openTerminal(rig.active, shell)
+        state(rig, 0, SessionState.Connected)
+        assertEquals(UdpVerdict.OK, rig.active.udpVerdict.value)
+        rig.holder.openTerminal(rig.active, tmux)
+        assertEquals(listOf(TerminalTransport.MOSH, TerminalTransport.MOSH), rig.port.transports)
+    }
+
+    @Test
+    fun aMissingMoshServerAlsoFallsBack() = runTest {
+        val rig = rig()
+        rig.holder.openTerminal(rig.active, shell)
         fail(rig, 0, SessionFailure.NotInstalled("mosh-server"))
         assertEquals(listOf(TerminalTransport.MOSH, TerminalTransport.SSH), rig.port.transports)
-        assertTrue(terminal.note.value!!.startsWith("mosh-server is not installed"))
         // A new connection (here: a new rig) starts with no memory of it.
         val again = rig()
         again.holder.openTerminal(again.active, shell)
@@ -233,15 +516,19 @@ class HostConnectionsTransportTest {
     }
 
     @Test
-    fun aMissingTmuxOrHerdrIsNotAMoshFailureAndDoesNotMarkMoshAsRejected() = runTest {
+    fun aMissingTmuxOrHerdrIsNotAMoshFailure() = runTest {
         val rig = rig()
+        rig.active.mutableUdpVerdict.value = UdpVerdict.OK
         val terminal = rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("work"))
         fail(rig, 0, SessionFailure.NotInstalled("tmux"))
         assertEquals(1, rig.port.transports.size) // No SSH retry that would fail the same way.
         assertEquals(SessionState.Closed(CloseReason.Failed(SessionFailure.NotInstalled("tmux"))), terminal.state.value)
-        assertNull(rig.active.moshFallbackNote)
-        rig.holder.openTerminal(rig.active, shell)
-        assertEquals(TerminalTransport.MOSH, rig.port.transports.last()) // Mosh itself was fine.
+        assertEquals(UdpVerdict.OK, rig.active.udpVerdict.value)
+        // Nor in the background: the attempt says nothing about UDP.
+        val other = rig()
+        other.holder.openTerminal(other.active, tmux)
+        fail(other, 1, SessionFailure.NotInstalled("tmux"))
+        assertEquals(UdpVerdict.UNKNOWN, other.active.udpVerdict.value)
     }
 
     @Test
@@ -251,14 +538,14 @@ class HostConnectionsTransportTest {
         fail(rig, 0, SessionFailure.Unreachable("no route"))
         assertEquals(1, rig.port.transports.size)
         assertTrue(terminal.state.value is SessionState.Closed)
+        assertEquals(UdpVerdict.UNKNOWN, rig.active.udpVerdict.value)
 
-        val connected = rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("a"))
-        sessionListener(rig, 1).onStateChanged(SessionState.Connected)
-        advanceUntilIdle()
+        val connected = rig.holder.openTerminal(rig.active, shell)
+        state(rig, 1, SessionState.Connected)
         fail(rig, 1, SessionFailure.TimedOut) // Mid-session: mosh was working, so this is a real failure.
         assertEquals(2, rig.port.transports.size)
         assertTrue(connected.state.value is SessionState.Closed)
-        assertNull(rig.active.moshFallbackNote)
+        assertEquals(UdpVerdict.OK, rig.active.udpVerdict.value)
     }
 
     @Test
@@ -268,14 +555,17 @@ class HostConnectionsTransportTest {
         rig.holder.disconnectTerminal(ended)
         fail(rig, 0, SessionFailure.TimedOut)
         assertEquals(1, rig.port.transports.size)
+        assertEquals(UdpVerdict.UNKNOWN, rig.active.udpVerdict.value) // The user ended it: not mosh's failure.
 
-        val other = rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("b"))
+        val other = rig.holder.openTerminal(rig.active, shell)
         rig.port.openFailure = HostException.Closed()
         fail(rig, 1, SessionFailure.TimedOut)
         assertEquals(SessionState.Closed(CloseReason.Failed(SessionFailure.TimedOut)), other.state.value)
         assertEquals(TerminalTransport.MOSH, other.transport.value)
-        assertNull(rig.active.moshFallbackNote)
+        assertEquals(UdpVerdict.BLOCKED, rig.active.udpVerdict.value)
     }
+
+    // --- the rest of the terminal's life ---------------------------------------------------
 
     @Test
     fun linkHealthIsKeptPerTerminal() = runTest {
@@ -288,15 +578,14 @@ class HostConnectionsTransportTest {
         assertEquals("Last heard 6 s ago", linkStaleLabel(terminal.linkHealth.value))
 
         // A closed session hears nothing: the stale line must not outlive it.
-        sessionListener(rig, 0).onStateChanged(SessionState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("gone"))))
-        advanceUntilIdle()
+        fail(rig, 0, SessionFailure.ConnectionLost("gone"))
         assertNull(terminal.linkHealth.value)
         assertNull(linkStaleLabel(terminal.linkHealth.value))
     }
 
     @Test
     fun disconnectAllEndsEveryTerminalAndHostAndTheUserCloseListenerHearsIt() = runTest {
-        val rig = rig()
+        val rig = rig(TransportPref.SSH)
         val events = mutableListOf<String>()
         rig.holder.userClose = object : UserCloseListener {
             override fun hostClosed(hostId: Long) { events += "host:$hostId" }
@@ -323,7 +612,7 @@ class HostConnectionsTransportTest {
 
     @Test
     fun aRemoteExitIsReportedAsTheUserEndingTheTerminalButAFailureIsNot() = runTest {
-        val rig = rig()
+        val rig = rig(TransportPref.SSH)
         val events = mutableListOf<String>()
         rig.holder.userClose = object : UserCloseListener {
             override fun hostClosed(hostId: Long) = Unit
@@ -331,11 +620,9 @@ class HostConnectionsTransportTest {
         }
         rig.holder.openTerminal(rig.active, shell)
         rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("w"))
-        sessionListener(rig, 1).onStateChanged(SessionState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("gone"))))
-        advanceUntilIdle()
+        fail(rig, 1, SessionFailure.ConnectionLost("gone"))
         assertTrue(events.isEmpty())
-        sessionListener(rig, 0).onStateChanged(SessionState.Closed(CloseReason.RemoteExited(0u)))
-        advanceUntilIdle()
+        state(rig, 0, SessionState.Closed(CloseReason.RemoteExited(0u)))
         assertEquals(listOf("closed:${TerminalTarget.Shell}"), events)
     }
 
@@ -361,14 +648,16 @@ class HostConnectionsTransportTest {
     @Test
     fun awaitCapabilitiesReturnsAtOnceWhenKnownAndGivesUpAfterTheTimeout() = runTest {
         val known = rig()
+        val t0 = testScheduler.currentTime
         known.holder.awaitCapabilities(known.active, timeoutMs = 10_000)
-        assertEquals(0L, testScheduler.currentTime) // No waiting.
+        assertEquals(t0, testScheduler.currentTime) // No waiting.
 
         val failed = rig(probed = false)
         // The failed probe is an answer too: it must not make the caller wait out the timeout.
         assertNotNull(failed.active.capabilitiesError.value)
+        val t1 = testScheduler.currentTime
         failed.holder.awaitCapabilities(failed.active, timeoutMs = 10_000)
-        assertEquals(0L, testScheduler.currentTime)
+        assertEquals(t1, testScheduler.currentTime)
 
         // A probe that never answers: the caller gives up after the timeout and carries on without it.
         val never = rig(pending = true)
@@ -387,151 +676,5 @@ class HostConnectionsTransportTest {
         waiting.await()
         assertEquals(1_000L, testScheduler.currentTime - started)
         assertNotNull(slow.active.capabilities.value)
-    }
-
-    // --- the follow-up: AUTO's 5 s budget and the 24 h memory of a failure ----------------------
-
-    private fun TestScope.timedOut(rig: Rig, index: Int = 0) = fail(rig, index, SessionFailure.TimedOut)
-
-    @Test
-    fun autoGivesMoshAFiveSecondBudgetAndAnExplicitChoiceKeepsTheDefault() = runTest {
-        val auto = rig()
-        auto.holder.openTerminal(auto.active, shell)
-        assertEquals(listOf<UInt?>(5_000u), auto.port.budgets)
-        assertEquals(AUTO_MOSH_BUDGET_MS, auto.port.budgets.single())
-
-        // Explicit Mosh: no budget (the 15 s default); explicit SSH: none either.
-        val mosh = rig(TransportPref.MOSH)
-        mosh.holder.openTerminal(mosh.active, shell)
-        assertEquals(listOf<UInt?>(null), mosh.port.budgets)
-        val ssh = rig(TransportPref.SSH)
-        ssh.holder.openTerminal(ssh.active, shell)
-        assertEquals(listOf<UInt?>(null), ssh.port.budgets)
-
-        // The SSH retry after a fallback has no budget to give.
-        timedOut(auto)
-        assertEquals(listOf<UInt?>(5_000u, null), auto.port.budgets)
-    }
-
-    @Test
-    fun aMoshTimeoutIsRememberedPerHostForTwentyFourHours() = runTest {
-        val store = Failures()
-        val rig = rig(store = store)
-        rig.holder.openTerminal(rig.active, shell)
-        timedOut(rig)
-        assertEquals(listOf(rig.host.id to NOW + MOSH_PAUSE_MS), store.marks)
-        assertEquals(24L * 60 * 60 * 1000, MOSH_PAUSE_MS)
-        assertEquals(NOW + MOSH_PAUSE_MS, rig.active.moshPausedUntil)
-    }
-
-    @Test
-    fun aHostWithAnUnexpiredFailureSkipsMoshUnderAutoWithANoteAndTriesAgainOnceItExpired() = runTest {
-        var now = NOW
-        val paused = rig(failedUntil = NOW + 1_000, clock = { now })
-        val first = paused.holder.openTerminal(paused.active, shell)
-        assertEquals(listOf(TerminalTransport.SSH), paused.port.transports) // Straight to SSH, no mosh attempt.
-        assertEquals(listOf<UInt?>(null), paused.port.budgets)
-        assertEquals(MOSH_PAUSED_NOTE, first.note.value)
-        assertFalse(first.fallbackEligible)
-
-        // The memory expires on its own: no clearing, the clock moves past it.
-        now = NOW + 1_001
-        val again = paused.holder.openTerminal(paused.active, TerminalTarget.Tmux("later"))
-        assertEquals(TerminalTransport.MOSH, paused.port.transports.last())
-        assertNull(again.note.value)
-        assertTrue(again.fallbackEligible)
-    }
-
-    @Test
-    fun anExplicitMoshPreferenceIgnoresTheMemory() = runTest {
-        val rig = rig(TransportPref.MOSH, failedUntil = NOW + 10_000)
-        rig.holder.openTerminal(rig.active, shell)
-        assertEquals(listOf(TerminalTransport.MOSH), rig.port.transports)
-    }
-
-    @Test
-    fun changingThePreferenceClearsThePersistedPause() = runTest {
-        val rig = rig(failedUntil = NOW + 10_000)
-        assertEquals(NOW + 10_000, rig.active.moshPausedUntil)
-        rig.holder.setTransport(rig.host.id, TransportPref.SSH)
-        assertEquals(0L, rig.active.moshPausedUntil)
-        rig.holder.setTransport(rig.host.id, TransportPref.AUTO)
-        rig.holder.openTerminal(rig.active, shell)
-        assertEquals(listOf(TerminalTransport.MOSH), rig.port.transports)
-    }
-
-    @Test
-    fun aMissingMoshServerIsNotRememberedForADayAndAStorageFailureChangesNothingElse() = runTest {
-        val store = Failures()
-        val missing = rig(store = store)
-        missing.holder.openTerminal(missing.active, shell)
-        fail(missing, 0, SessionFailure.NotInstalled("mosh-server"))
-        assertTrue(store.marks.isEmpty()) // The probe says so on every connection; installing it must just work.
-        assertEquals(0L, missing.active.moshPausedUntil)
-
-        val broken = Failures().also { it.failure = IllegalStateException("disk full") }
-        val rig = rig(store = broken)
-        val terminal = rig.holder.openTerminal(rig.active, shell)
-        timedOut(rig)
-        // The fallback itself still happened, and this connection remembers it in memory.
-        assertEquals(listOf(TerminalTransport.MOSH, TerminalTransport.SSH), rig.port.transports)
-        assertNotNull(terminal.note.value)
-        assertEquals(NOW + MOSH_PAUSE_MS, rig.active.moshPausedUntil)
-    }
-
-    @Test
-    fun aTimeoutIsRememberedEvenIfTheSshRetryCannotStart() = runTest {
-        val store = Failures()
-        val rig = rig(store = store)
-        val terminal = rig.holder.openTerminal(rig.active, shell)
-        // Coupled SSH and UDP loss: the connection is gone just before the fallback's own open.
-        rig.port.openFailure = HostException.Closed()
-        timedOut(rig)
-        assertEquals(NOW + MOSH_PAUSE_MS, rig.active.moshPausedUntil)
-        assertEquals(listOf(rig.host.id to NOW + MOSH_PAUSE_MS), store.marks)
-        // The mosh failure is shown as it was, and the retry is not claimed.
-        assertEquals(SessionState.Closed(CloseReason.Failed(SessionFailure.TimedOut)), terminal.state.value)
-        assertEquals(TerminalTransport.MOSH, terminal.transport.value)
-        assertNull(terminal.note.value)
-        assertNull(rig.active.moshFallbackNote)
-        // The next AUTO terminal on a connection that works goes straight to SSH.
-        rig.port.openFailure = null
-        val next = rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("later"))
-        assertEquals(TerminalTransport.SSH, rig.port.transports.last())
-        assertEquals(MOSH_PAUSED_NOTE, next.note.value)
-    }
-
-    @Test
-    fun aTimeoutOfATerminalThatIsNoLongerOwnedIsNotRemembered() = runTest {
-        val store = Failures()
-        val ended = rig(store = store)
-        val terminal = ended.holder.openTerminal(ended.active, shell)
-        ended.holder.disconnectTerminal(terminal) // The user ended it: not mosh's failure.
-        timedOut(ended)
-        assertTrue(store.marks.isEmpty())
-        assertEquals(0L, ended.active.moshPausedUntil)
-
-        // A destination edit released the connection: whatever its terminals say, the memory is
-        // about a destination that no longer exists.
-        val edited = rig(store = store)
-        edited.holder.openTerminal(edited.active, shell)
-        val old = edited.active
-        edited.holder.release(edited.host.id, closeTerminals = false)
-        timedOut(edited)
-        assertTrue(store.marks.isEmpty())
-        assertEquals(0L, old.moshPausedUntil)
-    }
-
-    @Test
-    fun aFallbackWithoutAStoreStillWorks() = runTest {
-        val rig = rig() // No store: nothing is persisted, the connection still remembers.
-        rig.holder.openTerminal(rig.active, shell)
-        timedOut(rig)
-        rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("x"))
-        assertEquals(listOf(TerminalTransport.MOSH, TerminalTransport.SSH, TerminalTransport.SSH), rig.port.transports)
-    }
-
-    private companion object {
-        const val NOW = 1_800_000_000_000L
     }
 }

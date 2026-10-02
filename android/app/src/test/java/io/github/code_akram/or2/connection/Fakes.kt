@@ -145,6 +145,16 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         capsFailure?.let { throw it }
         return caps
     }
+    /** While set, `mosh_server()` is unanswered until it completes. */
+    var moshServerGate: CompletableDeferred<Unit>? = null
+    var moshServerFailure: Exception? = null
+    var moshServerCalls = 0
+    override suspend fun moshServer(): String? {
+        moshServerCalls++
+        moshServerGate?.await()
+        moshServerFailure?.let { throw it }
+        return caps.moshServer
+    }
     override suspend fun listTmuxSessions() = tmux
     override fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface {
         check(!destroyed) { "Host connection object has already been destroyed" }

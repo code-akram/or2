@@ -74,7 +74,9 @@ class TerminalActivations(private val connections: HostConnections, private val 
      * first); otherwise a new one is opened while its pane (if any) is being focused. Timing marks go to
      * [span]. Throws what the focus or the open threw, after dismissing a terminal it had opened.
      */
-    private suspend fun openOrReuse(active: ActiveHost, hostId: Long, target: TerminalTarget, span: String): ActiveTerminal {
+    private suspend fun openOrReuse(
+        active: ActiveHost, hostId: Long, target: TerminalTarget, span: String, connectedInThisTap: Boolean = false,
+    ): ActiveTerminal {
         val timing = connections.timing
         val herdr = target as? TerminalTarget.Herdr
         val paneId = herdr?.paneId
@@ -93,7 +95,7 @@ class TerminalActivations(private val connections: HostConnections, private val 
                     connections.focusHerdrPane(active, herdr.session, paneId)
                     timing.mark(span, "focused")
                 } else null
-                connections.awaitTransportChoice(active)
+                connections.awaitTransportChoice(active, connectedInThisTap)
                 val terminal = connections.openTerminal(active, target)
                 opened = terminal
                 timing.watchTerminal(terminal.id, span)
@@ -107,13 +109,11 @@ class TerminalActivations(private val connections: HostConnections, private val 
     }
 
     /**
-     * A terminal opened from the host screen (shell, tmux, a herdr session): under AUTO it first
-     * waits for the capability probe (see [HostConnections.awaitTransportChoice]) so a quick tap
-     * after connecting does not silently pick SSH.
+     * A terminal opened from the host screen (shell, tmux, a herdr session) on a connected host: it
+     * opens at once, never waiting for the probe or for UDP (see [HostConnections.openTerminal]).
      */
     suspend fun open(active: ActiveHost, target: TerminalTarget): Activation {
         try {
-            connections.awaitTransportChoice(active)
             return Activation.Ready(connections.openTerminal(active, target))
         } catch (error: CancellationException) {
             throw error
@@ -151,16 +151,17 @@ class TerminalActivations(private val connections: HostConnections, private val 
     /**
      * Reattach: reopens the terminal the user last had on a connected host. A herdr pane is focused
      * as for an inbox tap (together with a new terminal's start); an open terminal for the same target
-     * is reused. The transport is chosen afresh by the host's preference (the capability probe is
-     * awaited briefly so AUTO can still choose mosh right after connecting); what the target ran over
-     * before is not carried along. [span] is the timing path this belongs to (a Resume's own, else a
-     * `reopen` span of its own).
+     * is reused. The transport is chosen afresh by the host's preference; what the target ran over
+     * before is not carried along. [connectedInThisTap] (a Resume that had to connect the host first)
+     * lets AUTO await `mosh_server()`, one round trip, so a shell can still choose mosh (see
+     * [HostConnections.awaitTransportChoice]). [span] is the timing path this belongs to (a Resume's
+     * own, else a `reopen` span of its own).
      */
-    suspend fun reopen(last: LastTerminal, hostLabel: String, span: String? = null): Activation {
+    suspend fun reopen(last: LastTerminal, hostLabel: String, span: String? = null, connectedInThisTap: Boolean = false): Activation {
         val active = connections.host(last.hostId) ?: return Activation.Failed("$hostLabel is no longer connected.")
         val path = span ?: "reopen host=${last.hostId}".also { connections.timing.begin(it) }
         try {
-            return Activation.Ready(openOrReuse(active, last.hostId, last.target, path))
+            return Activation.Ready(openOrReuse(active, last.hostId, last.target, path, connectedInThisTap))
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
@@ -168,13 +169,13 @@ class TerminalActivations(private val connections: HostConnections, private val 
         }
     }
 
-    fun launchReopen(last: LastTerminal, hostLabel: String, span: String? = null, done: (Activation) -> Unit) {
+    fun launchReopen(last: LastTerminal, hostLabel: String, span: String? = null, connectedInThisTap: Boolean = false, done: (Activation) -> Unit) {
         val title = when (val target = last.target) {
             TerminalTarget.Shell -> "shell"
             is TerminalTarget.Tmux -> "tmux ${target.sessionName}"
             is TerminalTarget.Herdr -> "herdr" + (target.paneId?.let { " $it" } ?: "")
         }
-        launch("Resuming $hostLabel: $title", done) { reopen(last, hostLabel, span) }
+        launch("Resuming $hostLabel: $title", done) { reopen(last, hostLabel, span, connectedInThisTap) }
     }
 
     fun launchOpen(active: ActiveHost, target: TerminalTarget, done: (Activation) -> Unit) {

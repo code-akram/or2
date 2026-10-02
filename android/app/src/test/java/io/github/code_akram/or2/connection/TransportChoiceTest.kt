@@ -3,25 +3,70 @@ package io.github.code_akram.or2.connection
 import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.ffi.LinkHealth
 import io.github.code_akram.or2.ffi.SessionFailure
+import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TerminalTransport
 import org.junit.Assert.*
 import org.junit.Test
 
 class TransportChoiceTest {
-    private val server = "/usr/bin/mosh-server"
+    private val found = MoshServerAnswer("/usr/bin/mosh-server", roundTripMs = 40)
+    private val absent = MoshServerAnswer(null, roundTripMs = 40)
+    private val shell = TerminalTarget.Shell
+    private val swappable = listOf(TerminalTarget.Tmux("main"), TerminalTarget.Herdr(null, "w1:p1"), TerminalTarget.Herdr("work", null))
+    private val ssh = OpenPlan(TerminalTransport.SSH)
 
     @Test
-    fun autoPicksMoshOnlyWithMoshServerAndNoEarlierFailure() {
-        assertEquals(TerminalTransport.MOSH, chooseTransport(TransportPref.AUTO, server, moshRejected = false))
-        assertEquals(TerminalTransport.SSH, chooseTransport(TransportPref.AUTO, null, moshRejected = false))
-        assertEquals(TerminalTransport.SSH, chooseTransport(TransportPref.AUTO, server, moshRejected = true))
+    fun autoWithUdpUntestedOpensTmuxAndHerdrOverSshAtOnceWithAMoshTryBehind() {
+        for (target in swappable) {
+            // Whether or not the probe has answered: nothing waits.
+            assertEquals(OpenPlan(TerminalTransport.SSH, background = true), planOpen(TransportPref.AUTO, target, UdpVerdict.UNKNOWN, found))
+            assertEquals(OpenPlan(TerminalTransport.SSH, background = true), planOpen(TransportPref.AUTO, target, UdpVerdict.UNKNOWN, null))
+        }
     }
 
     @Test
-    fun explicitChoicesAreHonouredWhateverTheProbeSaid() {
-        for (rejected in listOf(false, true)) for (found in listOf(server, null)) {
-            assertEquals(TerminalTransport.SSH, chooseTransport(TransportPref.SSH, found, rejected))
-            assertEquals(TerminalTransport.MOSH, chooseTransport(TransportPref.MOSH, found, rejected))
+    fun autoWithUdpKnownToWorkOpensMoshDirectlyWithTheFallback() {
+        for (target in swappable + shell) {
+            assertEquals(OpenPlan(TerminalTransport.MOSH, AUTO_MOSH_BUDGET_MS, fallbackEligible = true),
+                planOpen(TransportPref.AUTO, target, UdpVerdict.OK, found))
+        }
+        assertEquals(5_000u, AUTO_MOSH_BUDGET_MS)
+    }
+
+    @Test
+    fun autoWithUdpBlockedOrNoMoshServerOpensSshWithNoAttempt() {
+        for (target in swappable + shell) {
+            assertEquals(ssh, planOpen(TransportPref.AUTO, target, UdpVerdict.BLOCKED, found))
+            assertEquals(ssh, planOpen(TransportPref.AUTO, target, UdpVerdict.BLOCKED, null))
+            assertEquals(ssh, planOpen(TransportPref.AUTO, target, UdpVerdict.UNKNOWN, absent))
+            assertEquals(ssh, planOpen(TransportPref.AUTO, target, UdpVerdict.OK, absent))
+        }
+    }
+
+    @Test
+    fun autoShellWithUdpUntestedTriesMoshOnABudgetFromTheProbesRoundTrip() {
+        // Two shells cannot be swapped: mosh first, on a short budget, then SSH.
+        assertEquals(OpenPlan(TerminalTransport.MOSH, 700u, fallbackEligible = true), planOpen(TransportPref.AUTO, shell, UdpVerdict.UNKNOWN, found))
+        val slow = MoshServerAnswer("/usr/bin/mosh-server", roundTripMs = 300)
+        assertEquals(OpenPlan(TerminalTransport.MOSH, 1_800u, fallbackEligible = true), planOpen(TransportPref.AUTO, shell, UdpVerdict.UNKNOWN, slow))
+        // The probe has not answered: no mosh-server to go on, and no wait for it.
+        assertEquals(ssh, planOpen(TransportPref.AUTO, shell, UdpVerdict.UNKNOWN, null))
+    }
+
+    @Test
+    fun theShellBudgetIsSixRoundTripsWithAFloorAndACeiling() {
+        assertEquals(700u, shellMoshBudgetMs(0))
+        assertEquals(700u, shellMoshBudgetMs(116))
+        assertEquals(702u, shellMoshBudgetMs(117))
+        assertEquals(1_200u, shellMoshBudgetMs(200))
+        assertEquals(15_000u, shellMoshBudgetMs(10_000))
+    }
+
+    @Test
+    fun explicitChoicesAreHonouredWhateverTheProbeAndTheVerdictSay() {
+        for (verdict in UdpVerdict.entries) for (answer in listOf(found, absent, null)) for (target in swappable + shell) {
+            assertEquals(ssh, planOpen(TransportPref.SSH, target, verdict, answer))
+            assertEquals(OpenPlan(TerminalTransport.MOSH), planOpen(TransportPref.MOSH, target, verdict, answer))
         }
     }
 
@@ -40,10 +85,9 @@ class TransportChoiceTest {
     }
 
     @Test
-    fun theFallbackNoteSaysWhy() {
-        assertTrue(moshFallbackNote(SessionFailure.TimedOut).contains("UDP"))
-        assertTrue(moshFallbackNote(SessionFailure.NotInstalled("mosh-server")).startsWith("mosh-server is not installed"))
-        assertTrue(moshFallbackNote(SessionFailure.TimedOut).endsWith("Using SSH for this connection."))
+    fun theBlockedLineSaysWhyAndWhereTheFixIs() {
+        assertTrue(UDP_BLOCKED_LINE.startsWith("Mosh can't reach this host over UDP, so terminals use SSH."))
+        assertTrue(UDP_BLOCKED_LINE.endsWith("On a Mac, run or2-pair --check for the fix."))
     }
 
     @Test

@@ -23,7 +23,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -33,7 +32,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -103,7 +101,6 @@ fun SessionScreen(
         val hasConnected by terminal.hasConnected.collectAsStateWithLifecycle()
         val transport by terminal.transport.collectAsStateWithLifecycle()
         val linkHealth by terminal.linkHealth.collectAsStateWithLifecycle()
-        val note by terminal.note.collectAsStateWithLifecycle()
         val closed = state is SessionState.Closed
         val endSession = { if (closed) { holder.dismissTerminal(terminal); minimise() } else holder.disconnectTerminal(terminal) }
         var switcher by remember { mutableStateOf(false) }
@@ -111,14 +108,14 @@ fun SessionScreen(
         var background by remember { mutableStateOf(Or2Colors.TerminalBackground) }
         if (hasConnected) {
             TerminalCard(terminalTitle(terminal), transport.display(), state, minimise, openSwitcher = { switcher = true }, endSession,
-                background = background, linkHealth = linkHealth, note = note) {
+                background = background, linkHealth = linkHealth) {
                 // Keep the borrowed handle composed through Closed so its final frame stays visible.
                 handle?.let { TerminalScreen(it, terminal.state, terminal.frameReady, Modifier.weight(1f),
                     composerHint = "Message " + terminal.host.label + "…", openPanes = { switcher = true },
                     onBackground = { background = it }, onFrameDrawn = { holder.timing.terminalFrame(terminal.id) }) }
             }
         } else {
-            PendingTerminal(terminal, state, closed, endSession, minimise, open, select, note)
+            PendingTerminal(terminal, state, closed, endSession, minimise, open, select)
         }
         if (switcher) {
             SessionSwitcher(terminal, open, closed, select = { switcher = false; select(it) }, endSession = { switcher = false; endSession() },
@@ -130,25 +127,25 @@ fun SessionScreen(
 /**
  * The full-height card: drag handle, header row (mono [title], [transport] badge), and the terminal
  * below. A mosh session that has not heard from the server for more than five seconds
- * ([linkHealth]) greys its badge and says how long ago; [note] is a muted explanation (AUTO fell
- * back to SSH).
+ * ([linkHealth]) greys its badge and says how long ago, in the header row itself: nothing is ever
+ * drawn over the terminal's rows, and a flapping link does not resize the grid (the row keeps its
+ * height; the title gives way).
  */
 @Composable
 fun TerminalCard(
     title: String, transport: Transport, state: SessionState, minimise: () -> Unit, openSwitcher: () -> Unit, endSession: () -> Unit,
-    modifier: Modifier = Modifier, background: Color = Or2Colors.TerminalBackground, linkHealth: LinkHealth? = null, note: String? = null,
+    modifier: Modifier = Modifier, background: Color = Or2Colors.TerminalBackground, linkHealth: LinkHealth? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val stale = linkStaleLabel(linkHealth)
     var dragY by remember { mutableFloatStateOf(0f) }
-    var headerHeight by remember { mutableIntStateOf(0) }
     val threshold = with(LocalDensity.current) { 96.dp.toPx() }
     Box(
         modifier.fillMaxSize().padding(top = 2.dp).offset { IntOffset(0, dragY.roundToInt()) }
             .clip(Or2Shapes.TerminalCard).background(background).testTag("terminal-card"),
     ) {
         Column(Modifier.fillMaxSize()) {
-            Column(Modifier.onSizeChanged { headerHeight = it.height }.pointerInput(Unit) {
+            Column(Modifier.pointerInput(Unit) {
                 detectVerticalDragGestures(
                     onDragEnd = { if (dragY > threshold) minimise() else dragY = 0f },
                     onDragCancel = { dragY = 0f },
@@ -172,6 +169,10 @@ fun TerminalCard(
                             title, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, maxLines = 1,
                             overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(horizontal = 4.dp).testTag("terminal-title"),
                         )
+                        if (stale != null) {
+                            Text(stale, style = Or2Type.MonoSmall, color = Or2Colors.Attention, maxLines = 1,
+                                modifier = Modifier.padding(end = 6.dp).testTag("terminal-link"))
+                        }
                         TransportBadge(transport, Modifier.padding(end = 10.dp).testTag("terminal-transport"), small = true, stale = stale != null)
                     }
                 }
@@ -185,18 +186,6 @@ fun TerminalCard(
                 }
             }
             content()
-        }
-        // Under the header but over the terminal, not above it: these lines come and go (a flapping
-        // link toggles the stale text), and a line more or less above the terminal would resize its
-        // grid and make the remote redraw each time.
-        if (stale != null || note != null) {
-            Column(
-                Modifier.align(Alignment.TopStart).offset { IntOffset(0, headerHeight) }.fillMaxWidth()
-                    .background(background.copy(alpha = 0.85f)).padding(horizontal = Or2Dimens.Gutter),
-            ) {
-                if (stale != null) Text(stale, style = Or2Type.MonoSmall, color = Or2Colors.Attention, modifier = Modifier.testTag("terminal-link"))
-                if (note != null) Text(note, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.testTag("terminal-note"))
-            }
         }
     }
 }
@@ -242,14 +231,13 @@ fun transportBadgeColors(transport: Transport, stale: Boolean): Pair<Color, Colo
 @Composable
 private fun PendingTerminal(
     terminal: ActiveTerminal, state: SessionState, closed: Boolean, endSession: () -> Unit, minimise: () -> Unit,
-    open: List<ActiveTerminal>, select: (ActiveTerminal) -> Unit, note: String? = null,
+    open: List<ActiveTerminal>, select: (ActiveTerminal) -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
         TopBar(title = terminal.host.label, back = minimise, backIcon = Or2Icons.ChevronDown)
         Column(Modifier.padding(horizontal = Or2Dimens.Gutter), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(terminal.title + " · " + sessionMessage(state), style = Or2Type.Mono, color = Or2Colors.TextMuted,
                 modifier = Modifier.testTag("terminal-status"))
-            if (note != null) Text(note, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.testTag("terminal-note"))
             PillButton(if (closed) "Close session" else "Disconnect", endSession, Modifier.testTag("terminal-end"))
             if (open.size > 1) SessionList(terminal, open, select)
         }

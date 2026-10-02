@@ -5,6 +5,7 @@ import androidx.compose.runtime.key
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -12,6 +13,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import io.github.code_akram.or2.MainActivity
+import io.github.code_akram.or2.connection.UDP_BLOCKED_LINE
 import io.github.code_akram.or2.connection.uiHost
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
@@ -48,6 +50,7 @@ class HostScreenUiDeviceTest {
     private fun show(
         state: HostState?, caps: HostCapabilities? = this.caps, tmux: TmuxList = this.tmux, capsError: String? = null,
         calls: Calls = Calls(), busy: Boolean = false, host: Host = this.host, terminals: List<HostTerminalItem> = emptyList(),
+        udpBlocked: Boolean = false,
     ) = compose.runOnUiThread {
         val generation = ++generations
         compose.activity.setContent {
@@ -58,7 +61,8 @@ class HostScreenUiDeviceTest {
                     approve = { calls.log += "approve:${it.presented.fingerprint}" }, reject = { calls.log += "reject" },
                     openShell = { calls.log += "shell" }, openTmux = { calls.log += "tmux:$it" },
                     openHerdr = { calls.log += "herdr:$it" }, refresh = { calls.log += "refresh" },
-                    terminals = terminals, resume = { calls.log += "resume:$it" }, edit = { calls.log += "edit" }, back = { calls.log += "back" })
+                    terminals = terminals, resume = { calls.log += "resume:$it" }, edit = { calls.log += "edit" }, back = { calls.log += "back" },
+                    udpBlocked = udpBlocked)
             } }
         }
     }
@@ -69,6 +73,16 @@ class HostScreenUiDeviceTest {
     private fun reopenPicker() {
         compose.onNodeWithTag("host-open-picker").performScrollTo().performClick()
         compose.onNodeWithTag("session-picker").assertIsDisplayed()
+    }
+
+    @Test
+    fun aBlockedUdpVerdictShowsOneMutedLineOnlyWhileConnected() {
+        show(HostState.Connected(0u), udpBlocked = true)
+        compose.onNodeWithTag("host-udp-blocked").assertExists().assertTextEquals(UDP_BLOCKED_LINE)
+        show(HostState.Connected(0u), udpBlocked = false)
+        compose.onNodeWithTag("host-udp-blocked").assertDoesNotExist()
+        show(null, udpBlocked = true)
+        compose.onNodeWithTag("host-udp-blocked").assertDoesNotExist()
     }
 
     @Test

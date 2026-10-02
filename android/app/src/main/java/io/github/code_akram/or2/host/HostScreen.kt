@@ -33,6 +33,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
+import io.github.code_akram.or2.connection.UDP_BLOCKED_LINE
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.ffi.HostCapabilities
 import io.github.code_akram.or2.ffi.HostState
@@ -88,7 +89,8 @@ data class HostTerminalItem(val id: Long, val title: String, val closed: Boolean
  * supplies what it knows. The sheet opens by itself when the host connects, once per connection:
  * [pickerOffered] (kept by the caller, so it survives leaving and re-entering this screen, e.g. Back
  * from a terminal) says it already did, and [setPickerOffered] records it, or resets it when the
- * connection ends.
+ * connection ends. [udpBlocked]: mosh's UDP does not reach the host on this connection, so its
+ * terminals use SSH; one muted line says so and how to fix it.
  */
 @Composable
 fun HostScreen(
@@ -113,6 +115,7 @@ fun HostScreen(
     edit: () -> Unit = {},
     pickerOffered: Boolean = false,
     setPickerOffered: (Boolean) -> Unit = {},
+    udpBlocked: Boolean = false,
 ) {
     val link = linkStatus(hostState, host.sleeps)
     var pickerOpen by rememberSaveable { mutableStateOf(false) }
@@ -138,6 +141,10 @@ fun HostScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             StatusCard(host, hostState, link)
+            if (link == LinkStatus.CONNECTED && udpBlocked) {
+                Text(UDP_BLOCKED_LINE, style = Or2Type.Secondary, color = Or2Colors.TextMuted,
+                    modifier = Modifier.padding(horizontal = 4.dp).testTag("host-udp-blocked"))
+            }
             if (host.keyId == null) {
                 AttentionCard("Select a key", "Edit this host and choose the SSH key it signs in with.", onClick = edit)
             }

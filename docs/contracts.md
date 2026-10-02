@@ -3296,6 +3296,99 @@ wait for mosh, whatever the host's firewall does.
   cancel on close, `BLOCKED` stays SSH), the verdict reset; a Rust test that `mosh_server()` resolves
   while the herdr listing hangs; the device suite on the `.devicetest` app.
 
+### Implemented (branch `v011/instant`)
+
+**Rust.** `probe.rs` is split: `probe_programs` runs `PROBE_SCRIPT` alone; `probe_within(host, limit,
+programs)` joins a program-probe future with `HERDR_SCRIPT` (the public `probe`/`probe_entries` pass
+`probe_programs`, so their behaviour is unchanged). `SshHost` caches the two apart: `programs()` is a
+`OnceCell` of the program probe, published the moment its script returns; `capabilities()` runs
+`probe_within` with `programs()` as its program half, so the first full probe and any concurrent
+`programs()` waiter share one `PROBE_SCRIPT` exec (still one exec per connection, two scripts at
+once). `programs()` is what every program-path wait now uses: the tmux and herdr terminal plans (SSH
+and mosh), the mosh start's `mosh-server` check, `list_tmux_sessions` and `focus_herdr_pane`.
+`watch_herdr` still waits for the whole probe: it is not an open, and it needs the directory the
+listing seeds. `HostCommand::MoshServer` / `HostHandle::mosh_server()` answer from `programs()`; the
+FFI export `HostConnection.mosh_server()` wraps it, and `contract_probe_host` answers it with its
+fixed path. Tests: `probe::tests::the_program_probe_is_published_when_its_script_returns_not_with_the_listing`
+(paused time: a waiter on the program cache gets its answer at t=0 while the hung listing runs to its
+bound), and in `ssh/connection_tests.rs`
+`mosh_server_and_tmux_resolve_from_the_program_probe_while_the_herdr_listing_hangs` (a real SSH
+fixture whose herdr listing never answers: `mosh_server()` and `list_tmux_sessions()` resolve in under
+a second while `capabilities()` is still held, one program probe serves all three) and
+`mosh_server_is_none_without_it_and_runs_only_the_program_probe` (`None`, cached, `Closed` after the
+host closed). The fixture's `HerdrList::Hang` is new.
+
+**Kotlin.**
+- `TransportChoice.kt`: `UdpVerdict`, `MoshServerAnswer(path, roundTripMs)`, `OpenPlan` and
+  `planOpen(pref, target, verdict, moshServer)` (the choice table) replace `chooseTransport`;
+  `shellMoshBudgetMs`, `UDP_BLOCKED_LINE`. `MOSH_PAUSE_MS`, `MOSH_PAUSED_NOTE` and
+  `moshFallbackNote` are gone.
+- `HostConnections`: `HostPort.moshServer()`; on `Connected` the holder asks `mosh_server()` beside
+  the probe and keeps the answer with its round trip (`ActiveHost.moshServer`, `moshServerSettled`;
+  a failed query leaves it unknown). `ActiveHost.udpVerdict` (a `StateFlow`) starts `UNKNOWN` per
+  connection and is reset by `hostEdited` (any edit that keeps the connection). `openTerminal` opens
+  at once from `planOpen`. A tmux or herdr terminal opened over SSH under `UNKNOWN` requests a
+  background mosh session (`ActiveTerminal.background`, numbered `attempt + 1`); while the host's
+  verdict is `UNKNOWN` one terminal holds the probe (`ActiveHost.probingTerminal`) and the others queue
+  (`awaitingVerdict`). The background session's callbacks go to `backgroundState`: `Connected` swaps it
+  in (`attempt` moves on, handle and transport replaced, link health cleared, the server's pid
+  recorded in the ledger, a frame tick for the view, the SSH session disconnected and released, the
+  verdict `OK`, the queue started); `Closed` with `TimedOut` or `NotInstalled { mosh-server }` sets
+  `BLOCKED` (the terminal stays on SSH, the queue is dropped); any other close is inconclusive and
+  hands the probe to the next queued terminal. `cancelBackground` runs from `disconnectTerminal`,
+  `retireTerminal` (dismiss), every host-wide close (`markHostTerminalsClosing`: the user's Disconnect,
+  dismiss, release, a destination edit) and the foreground session's own `Closed`; it disconnects the
+  attempt (Rust's abandon path stops its server) and releases it. Any AUTO-or-not mosh terminal that
+  reaches `Connected` sets `OK`; the shell's SSH fallback sets `BLOCKED`. The constructor's
+  `moshFailures` and `clock` are gone (`monotonicMs` measures the round trip).
+- `awaitTransportChoice(current, connectedInThisTap = false)`: waits (at most 3 s) for
+  `moshServerSettled` only under AUTO and only when `connectedInThisTap`. Only the Resume path that
+  had to connect the host first passes `true` (`Or2App`'s pending resume, through
+  `TerminalActivations.reopen`/`launchReopen`); the host screen's `open` no longer awaits anything.
+- UI: `TerminalCard` has no `note`; the `Last heard N s ago` line moved into the header row (before the
+  badge, the title ellipsizes), so nothing overlays the grid and the grid never resizes for it.
+  `HostScreen(udpBlocked)` shows `UDP_BLOCKED_LINE` (`host-udp-blocked`) under the status card while
+  connected; `Or2App` passes `BLOCKED && mosh-server not known to be missing`.
+- Timing: the connect span also marks `mosh-server` (the answer) and `udp-ok` / `udp-blocked` (the
+  verdict); the tap path still ends at `frame` (the SSH session's `terminal-connected`; the swap does
+  not mark a second one).
+
+**Decisions and deviations.**
+- The shell's budget is capped at 15 s (`max(700 ms, 6 × RTT)`, at most what an explicit Mosh gets):
+  a pathological round trip must not make AUTO wait longer than an explicit choice would.
+- `UNKNOWN` with no `mosh_server()` answer yet: a shell opens SSH (no `mosh-server` known, no wait); a
+  tmux or herdr terminal still starts its background attempt (a missing `mosh-server` then ends it
+  `NotInstalled`, `BLOCKED`). A probe that answered "not installed" opens SSH with no attempt.
+- Under `OK`, AUTO terminals keep `AUTO_MOSH_BUDGET_MS` (5 s) and the SSH fallback, in case the link
+  changed since the verdict; a fallback then sets `BLOCKED`.
+- The host-screen line is hidden when the program probe says `mosh-server` is missing (that is not a
+  UDP problem), even though such a background failure also sets `BLOCKED` as specified.
+- The data layer is untouched: the Room column, `MoshFailureStore` and the DAO stay (no migration),
+  and `saveHost` still zeroes the unused column on a transport or address edit; nothing reads it or
+  sets it any more. Removing that dead write would change data-layer and migration device tests for
+  no behaviour.
+- A background herdr-pane start focuses its pane again when it starts (the mosh plan owes the same
+  focus as any herdr-pane open); it races nothing the user did unless they switched panes inside
+  herdr in the second it takes.
+
+**Tests (Kotlin).** `TransportChoiceTest` (the whole table, the shell budget's floor and ceiling,
+explicit preferences under every verdict, the blocked line); `HostConnectionsTransportTest` (rewritten:
+the shell budget from the measured round trip, SSH before the answer, the transport choice's wait only
+on a tap that connected the host and only for `mosh_server()`, the swap with the old session's frames,
+health and close dropped and the badge flow flipping, a background mosh that beats the SSH session,
+`BLOCKED` for `TimedOut` and `NotInstalled { mosh-server }` staying on SSH unseen, inconclusive
+failures, one attempt per terminal and one in flight per host with the queue started on `OK` and
+dropped on `BLOCKED`, cancellation on close, dismiss, host disconnect and the SSH session's own close,
+the verdict reset on a host edit and a new connection, the old 24 h memory ignored);
+`TerminalActivationsTest` (a host-screen open and an inbox tap never wait; only a Resume that
+connected awaits `mosh_server()`); `TimingTest` (the `mosh-server` and `udp-ok` marks, the tap path
+through a swap); `HostConnectionsProbeTest` (the real-FFI swap against `contract_probe_host`: tmux
+opens SSH and moves to the probe's mosh session, health sequence and roam after it; the swapped-in
+server's pid is recorded); `HostContractTest` (`moshServer()` over the FFI, `NotConnected`/`Closed`).
+Device tests (compiled, not run here): `TransportChromeDeviceTest` (the link line sits in the header,
+never over the terminal, and never resizes it; no note), `HostScreenUiDeviceTest` (the blocked line
+only while connected).
+
 ## or2-pair on macOS: the firewall (lane Instant, host side)
 
 `HostFacts::detect` on macOS runs one read-only command (an exception to "files only", recorded in

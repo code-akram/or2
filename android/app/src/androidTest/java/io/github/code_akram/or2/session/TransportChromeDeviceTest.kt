@@ -21,23 +21,23 @@ import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.terminal.Transport
 import io.github.code_akram.or2.ui.Or2Theme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
-/** The terminal header's transport badge, link-health text and fallback note, without any connection. */
+/** The terminal header's transport badge and link-health text, without any connection. */
 class TransportChromeDeviceTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
 
     private var transport by mutableStateOf(Transport.MOSH)
     private var health by mutableStateOf<LinkHealth?>(null)
-    private var note by mutableStateOf<String?>(null)
 
     private fun show() = compose.runOnUiThread {
         compose.activity.setContent {
             Or2Theme {
                 TerminalCard(
                     "workstation: tmux main", transport, SessionState.Connected, minimise = {}, openSwitcher = {}, endSession = {},
-                    linkHealth = health, note = note,
+                    linkHealth = health,
                 ) { Box(Modifier.weight(1f).fillMaxWidth().testTag("terminal-body")) }
             }
         }
@@ -78,26 +78,25 @@ class TransportChromeDeviceTest {
     }
 
     @Test
-    fun theLinkAndNoteLinesNeverResizeTheTerminal() {
+    fun theLinkLineSitsInTheHeaderNeverOverTheTerminalAndNeverResizesIt() {
         show()
-        val height = { compose.onNodeWithTag("terminal-body").fetchSemanticsNode().size.height }
-        val plain = height()
-        compose.runOnUiThread { health = LinkHealth(12_300uL, 12_300uL); note = "Using SSH for this connection." }
-        compose.onNodeWithTag("terminal-link").assertIsDisplayed()
-        compose.onNodeWithTag("terminal-note").assertIsDisplayed()
-        // They sit over the terminal: a flapping link must not make the grid (and the remote) resize each time.
-        assertEquals(plain, height())
-        compose.runOnUiThread { health = LinkHealth(400uL, 400uL); note = null }
+        val body = { compose.onNodeWithTag("terminal-body").fetchSemanticsNode().boundsInRoot }
+        val plain = body()
+        compose.runOnUiThread { health = LinkHealth(12_300uL, 12_300uL) }
+        val link = compose.onNodeWithTag("terminal-link").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        // It takes the header's own space: no row of the terminal is covered.
+        assertTrue("the link line overlaps the terminal", link.bottom <= body().top)
+        // And a flapping link must not make the grid (and the remote) resize each time.
+        assertEquals(plain, body())
+        compose.runOnUiThread { health = LinkHealth(400uL, 400uL) }
         compose.onNodeWithTag("terminal-link").assertDoesNotExist()
-        assertEquals(plain, height())
+        assertEquals(plain, body())
     }
 
     @Test
-    fun theFallbackNoteIsShownInMutedText() {
+    fun noNoteIsDrawnUnderTheHeader() {
         show()
+        compose.runOnUiThread { transport = Transport.SSH }
         compose.onNodeWithTag("terminal-note").assertDoesNotExist()
-        compose.runOnUiThread { transport = Transport.SSH; note = "Mosh could not reach the host over UDP. Using SSH for this connection." }
-        compose.onNodeWithTag("terminal-note").assertIsDisplayed()
-            .assertTextEquals("Mosh could not reach the host over UDP. Using SSH for this connection.")
     }
 }

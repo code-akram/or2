@@ -2,6 +2,7 @@ package io.github.code_akram.or2.app
 
 import io.github.code_akram.or2.connection.FakePort
 import io.github.code_akram.or2.connection.Timing
+import io.github.code_akram.or2.connection.UdpVerdict
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.ffi.HostListener
@@ -43,12 +44,21 @@ class TerminalActivationsTest {
         fun open(target: TerminalTarget) = holder.openTerminal(holder.host(7)!!, target)
     }
 
-    /** A connected host. [pending] leaves the capability probe unanswered until `port.capsGate` completes. */
-    private suspend fun TestScope.setup(target: Host = host, pending: Boolean = false, timing: Timing = Timing()): Setup {
+    /**
+     * A connected host. [pending] leaves the capability probe unanswered until `port.capsGate` completes,
+     * [moshPending] `mosh_server()` until `port.moshServerGate` does. [udp] is the connection's verdict:
+     * `OK` by default, so each terminal is one mosh session (the background attempt and the swap are
+     * HostConnectionsTransportTest's); null leaves it `UNKNOWN`.
+     */
+    private suspend fun TestScope.setup(
+        target: Host = host, pending: Boolean = false, timing: Timing = Timing(), moshPending: Boolean = false,
+        udp: UdpVerdict? = UdpVerdict.OK,
+    ): Setup {
         val events = mutableListOf<String>()
         val port = FakePort(events)
         port.caps = port.caps.copy(moshServer = "/usr/bin/mosh-server")
         if (pending) port.capsGate = CompletableDeferred()
+        if (moshPending) port.moshServerGate = CompletableDeferred()
         var listener: HostListener? = null
         val holder = HostConnections({ _, l -> listener = l; port }, FakeTrust(), StandardTestDispatcher(testScheduler), UnconfinedTestDispatcher(testScheduler),
             timing = timing)
@@ -56,6 +66,7 @@ class TerminalActivationsTest {
         port.nativeState = HostState.Connected(0u)
         listener!!.onHostStateChanged(HostState.Connected(0u))
         advanceUntilIdle()
+        if (udp != null) holder.host(target.id)!!.mutableUdpVerdict.value = udp
         events.clear() // The probe's own calls are not what these tests are about.
         return Setup(holder, port, events, listener!!)
     }
@@ -193,19 +204,15 @@ class TerminalActivationsTest {
     }
 
     @Test
-    fun aTerminalOpenedFromTheHostScreenWaitsForTheProbeSoAutoCanChooseMosh() = runTest {
-        val s = setup(pending = true)
+    fun aTerminalOpenedFromTheHostScreenOpensAtOnceWithoutWaitingForAnyProbe() = runTest {
+        val s = setup(pending = true, moshPending = true, udp = null)
         var result: Activation? = null
         s.activations.launchOpen(s.holder.host(7)!!, TerminalTarget.Tmux("work")) { result = it }
         runCurrent()
-        assertEquals("Opening Fixture: tmux work", s.activations.pending.value)
-        assertNull(result)
-        assertTrue(s.port.terminals.isEmpty())
-
-        s.port.capsGate!!.complete(Unit)
-        advanceUntilIdle()
+        // Neither the capability probe nor `mosh_server()` has answered: tmux opens over SSH now, mosh behind it.
         val terminal = (result as Activation.Ready).terminal
-        assertEquals(TerminalTransport.MOSH, terminal.transport.value)
+        assertEquals(TerminalTransport.SSH, terminal.transport.value)
+        assertEquals(listOf(TerminalTransport.SSH, TerminalTransport.MOSH), s.port.transports)
         assertNull(s.activations.pending.value)
 
         // A failure to open is a message, never a navigation.
@@ -215,26 +222,33 @@ class TerminalActivationsTest {
     }
 
     @Test
-    fun anInboxTapAndAReattachAlsoWaitForTheProbe() = runTest {
-        val s = setup(pending = true)
+    fun anInboxTapNeverWaitsAndOnlyAResumeThatConnectedTheHostAwaitsMoshServer() = runTest {
+        val s = setup(pending = true, moshPending = true, udp = null)
         var result: Activation? = null
         s.activations.launchOpenAgent(7, host.label, null, "w1:p1") { result = it }
         runCurrent()
-        assertNull(result) // Focused, but not opened over SSH before the probe answered.
-        assertTrue(s.port.terminals.isEmpty())
-        s.port.capsGate!!.complete(Unit)
-        advanceUntilIdle()
-        assertEquals(TerminalTransport.MOSH, (result as Activation.Ready).terminal.transport.value)
+        // An inbox tap on a live host: opened and shown with nothing answered yet.
+        assertEquals(TerminalTransport.SSH, (result as Activation.Ready).terminal.transport.value)
 
-        val r = setup(pending = true)
+        // A reattach on a host that was already connected does not wait either: the shell takes SSH.
+        var shown: Activation? = null
+        s.activations.launchReopen(LastTerminal(7, TerminalTarget.Shell, TerminalTransport.MOSH), host.label) { shown = it }
+        runCurrent()
+        assertEquals(TerminalTransport.SSH, (shown as Activation.Ready).terminal.transport.value)
+
+        // A Resume that connected the host waits for `mosh_server()` alone (one round trip), so its shell
+        // can choose mosh; the capability probe is still unanswered.
+        val r = setup(pending = true, moshPending = true, udp = null)
         var reopened: Activation? = null
-        r.activations.launchReopen(LastTerminal(7, TerminalTarget.Tmux("w"), TerminalTransport.SSH), host.label) { reopened = it }
+        r.activations.launchReopen(LastTerminal(7, TerminalTarget.Shell, TerminalTransport.SSH), host.label, connectedInThisTap = true) { reopened = it }
         runCurrent()
         assertNull(reopened)
-        r.port.capsGate!!.complete(Unit)
+        assertTrue(r.port.terminals.isEmpty())
+        r.port.moshServerGate!!.complete(Unit)
         advanceUntilIdle()
         // What the target ran over before does not decide: SSH was remembered, AUTO with mosh-server picks mosh.
         assertEquals(TerminalTransport.MOSH, (reopened as Activation.Ready).terminal.transport.value)
+        assertNull(r.holder.host(7)!!.capabilities.value)
         s.holder.dismissHost(7)
         r.holder.dismissHost(7)
     }

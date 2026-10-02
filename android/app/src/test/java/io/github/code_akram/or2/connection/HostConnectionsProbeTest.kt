@@ -188,7 +188,7 @@ class HostConnectionsProbeTest {
     }
 
     @Test
-    fun autoOpensMoshAgainstTheProbeWithItsHealthSequenceAndRoamsOnNetworkChanged() = runBlocking<Unit> {
+    fun autoOpensTmuxOverSshThenSwapsToMoshAgainstTheProbeWithItsHealthSequenceAndRoamsOnNetworkChanged() = runBlocking<Unit> {
         Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { main ->
             withContext(main) {
                 val store = Store()
@@ -202,8 +202,13 @@ class HostConnectionsProbeTest {
                     val health = mutableListOf<LinkHealth>()
                     val mosh = holder.openTerminal(active, TerminalTarget.Tmux("work"))
                     val collector = launch { mosh.linkHealth.collect { it?.let(health::add) } }
-                    assertEquals(TerminalTransport.MOSH, mosh.transport.value) // AUTO, and mosh-server was probed.
+                    // AUTO with UDP untested: SSH at once, and the real background mosh session swapped in.
+                    assertEquals(TerminalTransport.SSH, mosh.transport.value)
+                    val ssh = mosh.handle.value!!
+                    withTimeout(5000) { mosh.transport.first { it == TerminalTransport.MOSH } }
                     assertEquals(TerminalTransport.MOSH, mosh.handle.value!!.transport())
+                    assertNotSame(ssh, mosh.handle.value)
+                    assertEquals(UdpVerdict.OK, active.udpVerdict.value)
                     withTimeout(5000) { mosh.state.first { it == SessionState.Connected } }
                     withTimeout(5000) { mosh.linkHealth.first { it?.sinceHeardMs == 400uL } }
                     collector.cancel()
@@ -264,9 +269,10 @@ class HostConnectionsProbeTest {
                     withTimeout(5000) { while (MoshServerLedger(prefs).pids(host).contains(999u)) delay(5) }
                     assertEquals(listOf(13u), MoshServerLedger(prefs).pids(host))
 
-                    // A mosh session records the pid its server reported (the probe's is 4242) once connected...
+                    // A mosh session records the pid its server reported (the probe's is 4242) once connected,
+                    // the background one too, when it is swapped in...
                     val mosh = holder.openTerminal(active, TerminalTarget.Tmux("work"))
-                    assertEquals(TerminalTransport.MOSH, mosh.transport.value)
+                    withTimeout(5000) { mosh.transport.first { it == TerminalTransport.MOSH } }
                     withTimeout(5000) { mosh.state.first { it == SessionState.Connected } }
                     assertEquals(4242u, mosh.handle.value!!.serverPid())
                     assertEquals(listOf(13u, 4242u), MoshServerLedger(prefs).pids(host))

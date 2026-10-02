@@ -268,8 +268,10 @@ the same over the real FFI against `contract_probe_host`'s deterministic answers
 assembles it, `HostRecordsTest` trust clearing on any address-list change and the clearing of the mosh failure
 memory on a new transport or addresses (over a fake of the DAO's primitives), and `MigrationSqlTest`
 runs the real v1 to v2, v2 to v3 and v3 to v4 SQL with foreign keys on and compares each result with a
-fresh database of that version. `HostConnectionsTransportTest` covers AUTO's 5 s budget, the 24 h
-failure memory and its expiry, `ServiceTest` the roaming triggers (`NetworkChanges`: transport-set and
+fresh database of that version. `HostConnectionsTransportTest` covers the instant opens (the AUTO choice table,
+the per-connection UDP verdict and its reset, the background mosh attempt and the swap, one attempt
+per terminal and one in flight per host, cancellation, the shell's budget, the transport choice's wait
+for `mosh_server()` only on a tap that connected the host), `ServiceTest` the roaming triggers (`NetworkChanges`: transport-set and
 interface changes, no reaction to bandwidth ticks, the foreground return, one debounce for all),
 `ReattachTest` the auto-resume after process death, `ReconnectOfferTest` the chip and the sleeping hosts,
 and `ManifestTest` the permission list. `HostConnectionsProbeTest` drives the whole holder

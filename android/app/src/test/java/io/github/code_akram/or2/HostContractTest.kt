@@ -179,6 +179,7 @@ class HostContractTest {
                 host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 80u, 24u, null, RecordingListener())
             }
             assertThrows(HostException.Closed::class.java) { runBlocking { host.capabilities() } }
+            assertThrows(HostException.Closed::class.java) { runBlocking { host.moshServer() } }
         }
         listener.assertQuiet()
         assertFalse(testThread in listener.callbackThreads)
@@ -198,6 +199,7 @@ class HostContractTest {
 
             // Before Connected everything but the host-key decision is refused.
             assertThrows(HostException.NotConnected::class.java) { runBlocking { host.capabilities() } }
+            assertThrows(HostException.NotConnected::class.java) { runBlocking { host.moshServer() } }
             assertThrows(HostException.NotConnected::class.java) { runBlocking { host.listTmuxSessions() } }
             assertThrows(HostException.NotConnected::class.java) {
                 host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 80u, 24u, null, RecordingListener())
@@ -218,6 +220,8 @@ class HostContractTest {
             assertEquals("/usr/bin/tmux", capabilities.tmux)
             assertEquals("/home/probe/.local/bin/herdr", capabilities.herdr)
             assertEquals("/usr/bin/mosh-server", capabilities.moshServer)
+            // API 14: the program probe's answer alone.
+            assertEquals("/usr/bin/mosh-server", runBlocking { host.moshServer() })
             assertEquals("C.UTF-8", capabilities.utf8Locale)
             assertEquals(listOf("default", "or2-probe"), capabilities.herdrSessions.map { it.name })
             assertEquals(listOf(true, false), capabilities.herdrSessions.map { it.running })

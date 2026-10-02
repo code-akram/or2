@@ -1,6 +1,7 @@
 package io.github.code_akram.or2.connection
 
 import io.github.code_akram.or2.data.HostEndpoint
+import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.data.TrustStore
 import io.github.code_akram.or2.ffi.*
 import kotlinx.coroutines.CompletableDeferred
@@ -336,6 +337,8 @@ class HostConnectionsTest {
         holder.connect(host, byteArrayOf(1))
         connected(port)
         val active = holder.host(host.id)!!
+        // One session per terminal: no background mosh attempt beside them (see HostConnectionsTransportTest).
+        active.transportPref = TransportPref.SSH
         val shell = holder.openTerminal(active, TerminalTarget.Shell)
         val tmux = holder.openTerminal(active, TerminalTarget.Tmux("work"))
         val herdr = holder.openTerminal(active, TerminalTarget.Herdr(null, "w1:p2"))

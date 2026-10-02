@@ -66,7 +66,7 @@ class Or2Application : Application() {
     /** The process's one set of connections; [ConnectionService] keeps the process alive while any is open. */
     val connections by lazy {
         HostConnections({ request, listener -> (connectorOverride ?: HostConnector.Native).connect(request, listener) }, database.dao(),
-            moshFailures = database.dao(), moshServers = moshServers, timing = timing)
+            moshServers = moshServers, timing = timing)
             .also { it.userClose = reattach }
     }
 

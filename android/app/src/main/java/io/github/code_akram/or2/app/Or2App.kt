@@ -52,6 +52,7 @@ import io.github.code_akram.or2.connection.reconnectOffer
 import io.github.code_akram.or2.connection.ReconnectOffer
 import io.github.code_akram.or2.connection.terminalClosedStates
 import io.github.code_akram.or2.connection.transports
+import io.github.code_akram.or2.connection.UdpVerdict
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.ffi.AgentStatus
@@ -238,8 +239,8 @@ fun Or2App(
         else activations.launchReuse(terminal) { enter(it, replace) }
     }
 
-    // Under AUTO a tap right after connecting waits (briefly) for the capability probe, so the
-    // terminal does not silently open over SSH on a host that has mosh-server.
+    // Opens at once: under AUTO a tmux or herdr terminal starts on SSH and moves to mosh behind the
+    // scenes once UDP is known to work (see HostConnections.openTerminal).
     fun openTerminal(active: ActiveHost, target: TerminalTarget) {
         actions.message(null)
         activations.launchOpen(active, target) { enter(it, replace = false) }
@@ -264,8 +265,8 @@ fun Or2App(
     fun enterReattached(activation: Activation) {
         enter(activation, replace = NavStack.decode(saved).current is Destination.Terminal)
     }
-    fun reopen(target: LastTerminal, span: String? = null) =
-        activations.launchReopen(target, hostLabel(target.hostId), span, ::enterReattached)
+    fun reopen(target: LastTerminal, span: String? = null, connectedInThisTap: Boolean = false) =
+        activations.launchReopen(target, hostLabel(target.hostId), span, connectedInThisTap, ::enterReattached)
     fun resumeLast() {
         val target = last ?: return
         val host = hosts.find { it.id == target.hostId } ?: return
@@ -288,7 +289,8 @@ fun Or2App(
                 pendingResume = null
                 val span = "resume host=${target.hostId}"
                 connections.timing.mark(span, "host-connected")
-                reopen(target, span.takeIf(connections.timing::isRunning))
+                // This tap connected the host: AUTO may await `mosh_server()` (one round trip) for the shell.
+                reopen(target, span.takeIf(connections.timing::isRunning), connectedInThisTap = true)
             }
         }
     }
@@ -627,6 +629,8 @@ private fun HostPage(
         val state = active?.state?.collectAsStateWithLifecycle()?.value
         val caps = active?.capabilities?.collectAsStateWithLifecycle()?.value
         val capsError = active?.capabilitiesError?.collectAsStateWithLifecycle()?.value
+        val verdict = active?.udpVerdict?.collectAsStateWithLifecycle()?.value
+        val moshServer = active?.moshServer?.collectAsStateWithLifecycle()?.value
         var refreshes by remember { mutableIntStateOf(0) }
         var tmux by remember { mutableStateOf<TmuxList>(TmuxList.Loading) }
         val connected = state is HostState.Connected
@@ -653,6 +657,8 @@ private fun HostPage(
             refresh = { refreshes++ },
             terminals = items, resume = resume, back = back, edit = edit,
             pickerOffered = pickerOffered, setPickerOffered = setPickerOffered,
+            // A host without mosh-server is not a UDP problem: only say so when mosh is there and blocked.
+            udpBlocked = verdict == UdpVerdict.BLOCKED && (moshServer == null || moshServer.path != null),
         )
         // Refreshing re-probes capabilities (new herdr sessions) as well as the tmux list.
         LaunchedEffect(active, refreshes) {

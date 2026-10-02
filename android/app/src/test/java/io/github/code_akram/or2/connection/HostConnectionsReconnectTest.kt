@@ -63,7 +63,8 @@ class HostConnectionsReconnectTest {
         fun open(target: TerminalTarget = TerminalTarget.Shell): ActiveTerminal {
             val terminal = holder.openTerminal(holder.host(host.id)!!, target)
             val generation = ports.last()
-            generation.terminals.last().second.onStateChanged(SessionState.Connected)
+            // The terminal's own session (a tmux one under AUTO may have a background mosh try beside it).
+            generation.terminals.first { it.third === terminal.handle.value }.second.onStateChanged(SessionState.Connected)
             scope.advanceUntilIdle()
             return terminal
         }
@@ -218,7 +219,11 @@ class HostConnectionsReconnectTest {
         rig.open()
         rig.lose()
         rig.connect()
-        rig.open(TerminalTarget.Tmux("second"))
+        val second = rig.open(TerminalTarget.Tmux("second"))
+        // UDP is untested on the new connection: tmux opened over SSH and moves to its background mosh session.
+        assertEquals(TerminalTransport.SSH, second.transport.value)
+        rig.sessionState(1, 1, SessionState.Connected)
+        assertEquals(TerminalTransport.MOSH, second.transport.value)
         rig.lose()
         rig.connect()
 

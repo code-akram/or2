@@ -15,8 +15,10 @@ const val TIMING_TAG = "or2.timing"
  *
  * The paths and their events:
  * - `connect host=N`: `unlocked` (the biometric is done, ms=0), `authenticating`, `connected`,
- *   `capabilities` (the probe answered), `live` (the first herdr view of any watch), or `failed`
- *   (closed before it connected).
+ *   `mosh-server` (the program probe answered `mosh_server()`), `capabilities` (the whole probe
+ *   answered), `live` (the first herdr view of any watch), `udp-ok` / `udp-blocked` (the connection's
+ *   UDP verdict, from the first mosh terminal that connected or failed), or `failed` (closed before
+ *   it connected).
  * - `tap host=N pane=P` (an agent tapped in the inbox) and `reopen host=N` (the return to the
  *   foreground): `begin`, `focused` (herdr acknowledged the pane focus), `terminal-connected`,
  *   `frame` (the first frame was drawn). `reuse host=N pane=P` (a terminal that is already open):

@@ -101,7 +101,7 @@ class TimingTest {
         HostConnections({ _, l -> listener(l); port }, FakeTrust(), StandardTestDispatcher(testScheduler), UnconfinedTestDispatcher(testScheduler), timing = timing)
 
     @Test
-    fun theConnectPathMarksUnlockedConnectedCapabilitiesAndTheFirstLiveViewOnce() = runTest {
+    fun theConnectPathMarksUnlockedConnectedCapabilitiesMoshServerAndTheFirstLiveViewOnce() = runTest {
         val lines = mutableListOf<String>()
         var clock = 500L
         lateinit var hostListener: HostListener
@@ -130,6 +130,7 @@ class TimingTest {
                 "connect host=7 authenticating ms=100",
                 "connect host=7 connected ms=350",
                 "connect host=7 capabilities ms=350",
+                "connect host=7 mosh-server ms=350",
                 "connect host=7 live ms=750",
             ),
             lines,
@@ -151,5 +152,40 @@ class TimingTest {
         assertEquals(listOf("connect host=4 unlocked ms=0", "connect host=4 failed ms=20000"), lines)
         // A host that connected and later closed is not a failure of the connect.
         holder.dismissHost(4)
+    }
+
+    @Test
+    fun aTapThatOpensOverSshIsTimedToItsFirstFrameAndTheSwapMarksTheVerdictNotASecondConnect() = runTest {
+        val lines = mutableListOf<String>()
+        var clock = 0L
+        lateinit var hostListener: HostListener
+        val port = FakePort().apply { caps = caps.copy(moshServer = "/usr/bin/mosh-server") }
+        val holder = holder(Timing(lines::add) { clock }, port) { hostListener = it }
+        holder.connect(testHost(), byteArrayOf(1))
+        port.nativeState = HostState.Connected(0u)
+        hostListener.onHostStateChanged(HostState.Connected(0u))
+        advanceUntilIdle()
+        lines.clear()
+
+        holder.timing.begin("tap host=7 pane=w1:p1")
+        val terminal = holder.openTerminal(holder.host(7)!!, TerminalTarget.Herdr(null, "w1:p1"))
+        holder.timing.watchTerminal(terminal.id, "tap host=7 pane=w1:p1")
+        clock += 40
+        port.terminals[0].second.onStateChanged(SessionState.Connected) // SSH: no wait for UDP.
+        advanceUntilIdle()
+        holder.timing.terminalFrame(terminal.id)
+        clock += 300
+        port.terminals[1].second.onStateChanged(SessionState.Connected) // The background mosh session.
+        advanceUntilIdle()
+        assertEquals(
+            listOf(
+                "tap host=7 pane=w1:p1 begin ms=0",
+                "tap host=7 pane=w1:p1 terminal-connected ms=40",
+                "tap host=7 pane=w1:p1 frame ms=40",
+                "connect host=7 udp-ok ms=340",
+            ),
+            lines,
+        )
+        holder.dismissHost(7)
     }
 }
