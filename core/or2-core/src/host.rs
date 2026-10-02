@@ -908,7 +908,13 @@ impl HostHandle {
         let uploaded = await_reply(response, timeout).await?;
         // Taken, in the step that received it (nothing awaits in between): the host keeps the
         // image. A caller dropped before this never acknowledges it, and the host removes it.
-        let _ = uploaded.taken.send(());
+        // A caller that comes for the path only after the host stopped waiting for its
+        // acknowledgement finds the image removed: the path names nothing, so it is not returned.
+        if uploaded.taken.send(()).is_err() {
+            return Err(HostError::CommandFailed {
+                message: "the upload took too long and its image was removed".into(),
+            });
+        }
         Ok(uploaded.path)
     }
 
@@ -1632,6 +1638,32 @@ mod tests {
         let result = handle.upload_image(vec![1; 10], "png").await;
         assert_eq!(tokio::time::Instant::now(), deadline);
         assert_eq!(host.await.unwrap(), result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_path_whose_acknowledgement_the_host_stopped_waiting_for_is_not_returned() {
+        let (_recorder, handle, mut driver) = setup(false);
+        connect(&mut driver);
+        // The host answers, then gives up waiting for the acknowledgement (its own timeout) and
+        // removes the image before the caller comes for the path.
+        let host = tokio::spawn(async move {
+            let HostCommand::UploadImage { reply, .. } = driver.next_command().await else {
+                panic!("unexpected command")
+            };
+            let (uploaded, acknowledged) = UploadedImage::new("/home/u/late.png".into());
+            assert!(reply.send(Ok(uploaded)).is_ok());
+            drop(acknowledged);
+            driver
+        });
+        // The caller's future is first polled (sending the command) and then woken only after the
+        // host has answered and dropped its acknowledgement.
+        assert_eq!(
+            handle.upload_image(vec![1; 10], "png").await,
+            Err(HostError::CommandFailed {
+                message: "the upload took too long and its image was removed".into()
+            })
+        );
+        let _driver = host.await.unwrap();
     }
 
     fn claude(terminal: &str) -> herdr::AgentIdentity {

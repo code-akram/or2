@@ -5033,3 +5033,10 @@ stays green.
   file is removed by path. Test (in-process server relaying handles as `0xff 0xfe` + its own):
   `a_server_with_handles_that_are_not_utf8_fails_the_upload_cleanly` (no file anywhere, no rename, the
   connection fine). It passes before this fix too: it pins the behaviour, it does not repair one.
+
+**Fix (fix-check 2, P2): a path whose acknowledgement came too late is not returned.** `deliver` waits 30 s
+for the caller's acknowledgement and then removes the image; a caller polled only after that still found the
+queued path. `HostHandle::upload_image` now returns the path only when its acknowledgement was received by the
+host (`taken.send` succeeds), else `CommandFailed` ("the upload took too long and its image was removed").
+Test: `host::tests::a_path_whose_acknowledgement_the_host_stopped_waiting_for_is_not_returned` (fails with the
+check disabled).
