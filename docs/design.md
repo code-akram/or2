@@ -442,11 +442,15 @@ address) the extra port was unreachable although SSH worked. Version 2 pairs ove
 
 - [x] `or2-pair` v2: the phone's code typed on the host, a bootstrap key with a forced command,
   `enroll` with a state file, removal on every ending and the sweep, sshd version gating, IPv6 addresses;
-  v1 listener, bind policy and HMAC exchange removed. Unit tests and the end-to-end suite against a
-  disposable sshd.
-- [ ] Phone v2: `or2_core::pair` over SSH (pinned `hk`, bootstrap key only, one handshake), FFI API 13
-  `pair_new_code`/`pair_enroll`, the Easy pair screen with the code, messages.
-- [ ] Docs: ["Pair a host"](pairing.md) rewritten for v2 (no ports, no firewall workarounds) and the
+  v1 listener, bind policy and HMAC exchange removed. Verified by the `or2-pair` unit tests (120), `flow`,
+  `cli`, `fifo` and `manual_keys` suites and `tests/sshd.rs` (12, against a disposable sshd with
+  `OR2_REQUIRE_SSHD=1`, including the product's own `or2_core::pair` client).
+- [x] Phone v2: `or2_core::pair` over SSH (pinned `hk`, bootstrap key only, one handshake), FFI API 13
+  `pair_new_code`/`pair_enroll`, the Easy pair screen with the code, messages. Verified by the
+  `or2-core` pair unit tests and `tests/pair.rs` (10, disposable sshd), `PairFlowTest`, `PairMessagesTest`,
+  the JVM `PairEndToEndTest` (testhost behind a disposable sshd, then a real `connect_host` with no prompt)
+  and the device suite (`PairUiDeviceTest`, with screenshots of the three screens).
+- [x] Docs: ["Pair a host"](pairing.md) rewritten for v2 (no ports, no firewall workarounds) and the
   [manual setup guide](manual-setup.md).
 - [ ] Phone acceptance of Easy pair: a real `or2-pair` code on a host reached over its public address
   and on a LAN host, with the permission dialog, then connect.
