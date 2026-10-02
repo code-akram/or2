@@ -405,6 +405,28 @@ impl Host {
             0
         );
     }
+
+    /// Stops the waiting run (SIGSTOP) and returns once it is stopped: it neither looks for the
+    /// phone's result nor cleans up until [`Host::go_on`]. Its lock on its state file stays, so
+    /// `enroll` still serves the run.
+    fn pause(&self) {
+        let pid = self.child.id() as libc::pid_t;
+        let mut status = 0;
+        // SAFETY: signalling and waiting for a child process this test started.
+        unsafe {
+            assert_eq!(libc::kill(pid, libc::SIGSTOP), 0);
+            assert_eq!(libc::waitpid(pid, &mut status, libc::WUNTRACED), pid);
+        }
+        assert!(libc::WIFSTOPPED(status), "{status:#x}");
+    }
+
+    fn go_on(&self) {
+        // SAFETY: signalling a child process this test started.
+        assert_eq!(
+            unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGCONT) },
+            0
+        );
+    }
 }
 
 impl Drop for Host {
@@ -909,6 +931,10 @@ fn a_second_phone_that_got_in_before_the_first_finished_is_told_gone() {
     let (second_private, second_public) = phone_key();
     let (first_private, first_public) = phone_key();
     let rt = runtime();
+    // The waiting run must not end (and remove its state) between the first phone's pairing and
+    // the second phone's request: the second would then be told `expired`, not `gone`, depending
+    // on when the run next looked. It is stopped meanwhile; `enroll` does not need it to run.
+    host.pause();
     rt.block_on(async {
         // The second phone is in (it authenticated and has its hello) but has not asked yet...
         let mut second = Phone::open(sshd.address(), &offer, &code).await.unwrap();
@@ -924,6 +950,7 @@ fn a_second_phone_that_got_in_before_the_first_finished_is_told_gone() {
         );
         second.close().await;
     });
+    host.go_on();
     let keys = sshd.keys_text();
     assert!(
         keys.contains(&first_public) && !keys.contains(&second_public),
