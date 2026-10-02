@@ -371,6 +371,24 @@ pub fn upload_timeout(bytes: usize) -> std::time::Duration {
     (QUERY_TIMEOUT + std::time::Duration::from_secs(seconds)).min(MAX_UPLOAD_TIMEOUT)
 }
 
+/// An uploaded image's path, as [`HostCommand::UploadImage`] answers it. A path sent is not yet
+/// a path taken: [`HostHandle::upload_image`] acknowledges it on `taken` in the same step that
+/// receives it, before returning it. A caller that stopped waiting just as it was sent drops it
+/// unacknowledged, and the host removes the image (nothing would ever name it).
+#[derive(Debug)]
+pub struct UploadedImage {
+    pub path: String,
+    pub taken: oneshot::Sender<()>,
+}
+
+impl UploadedImage {
+    /// `path`, and where its acknowledgement arrives: `Ok` once taken, an error when dropped.
+    pub fn new(path: String) -> (Self, oneshot::Receiver<()>) {
+        let (taken, acknowledged) = oneshot::channel();
+        (Self { path, taken }, acknowledged)
+    }
+}
+
 /// What the host driver is asked to do.
 pub enum HostCommand {
     ApproveHostKey {
@@ -468,11 +486,12 @@ pub enum HostCommand {
     /// type into a terminal), `SftpUnavailable` without an SFTP subsystem, `CommandFailed` for
     /// other failures. `bytes` and `extension` are validated (size, lower-case known
     /// extension). A dropped `reply` (the caller cancelled or timed out) stops the upload and
-    /// removes what it made (the temporary file, or the image once renamed), best effort.
+    /// removes what it made (the temporary file, or the image once renamed), best effort, as
+    /// does a path the caller never took ([`UploadedImage::taken`] not acknowledged).
     UploadImage {
         bytes: Vec<u8>,
         extension: String,
-        reply: oneshot::Sender<Result<String, HostError>>,
+        reply: oneshot::Sender<Result<UploadedImage, HostError>>,
     },
     /// Run [`herdr::run`] (or an equivalent) on `driver`, with the herdr path from the probe.
     /// The session name is validated. With no herdr found, move `driver` to
@@ -868,7 +887,8 @@ impl HostHandle {
     /// image; more than [`MAX_IMAGE_BYTES`] is `TooLarge`; both are refused before anything is
     /// sent. A server without SFTP is `SftpUnavailable`; other failures `CommandFailed`.
     /// Bounded by [`upload_timeout`] of its size. Dropping the future (a cancelled upload)
-    /// stops the upload and removes what it made, best effort.
+    /// stops the upload and removes what it made, best effort, also once the path was sent but
+    /// not yet returned ([`UploadedImage`]).
     pub async fn upload_image(&self, bytes: Vec<u8>, extension: &str) -> Result<String, HostError> {
         let extension = extension.to_ascii_lowercase();
         if bytes.is_empty() || !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
@@ -885,7 +905,11 @@ impl HostHandle {
             extension,
             reply,
         })?;
-        await_reply(response, timeout).await
+        let uploaded = await_reply(response, timeout).await?;
+        // Taken, in the step that received it (nothing awaits in between): the host keeps the
+        // image. A caller dropped before this never acknowledges it, and the host removes it.
+        let _ = uploaded.taken.send(());
+        Ok(uploaded.path)
     }
 
     /// Watches a herdr session (`None` is the default session). The watch ends with the
@@ -1538,6 +1562,76 @@ mod tests {
         assert_eq!(started.elapsed(), Duration::from_secs(61));
         assert!(started.elapsed() > QUERY_TIMEOUT);
         held.abort();
+    }
+
+    /// The host side of an upload's last step: answers the next command's reply with `path` at
+    /// `at`, says so on the returned receiver, and resolves with whether its caller acknowledged
+    /// the path.
+    fn answer_upload_at(
+        mut driver: HostDriver,
+        path: &str,
+        at: tokio::time::Instant,
+    ) -> (tokio::task::JoinHandle<bool>, oneshot::Receiver<()>) {
+        let path = path.to_owned();
+        let (answered, sent) = oneshot::channel();
+        let host = tokio::spawn(async move {
+            let HostCommand::UploadImage { reply, .. } = driver.next_command().await else {
+                panic!("unexpected command")
+            };
+            tokio::time::sleep_until(at).await;
+            let (uploaded, acknowledged) = UploadedImage::new(path);
+            if reply.send(Ok(uploaded)).is_err() {
+                return false;
+            }
+            let _ = answered.send(());
+            acknowledged.await.is_ok()
+        });
+        (host, sent)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_uploaded_path_is_acknowledged_as_its_caller_takes_it() {
+        let (_recorder, handle, mut driver) = setup(false);
+        connect(&mut driver);
+        let (host, _) = answer_upload_at(driver, "/home/u/i.png", tokio::time::Instant::now());
+        assert_eq!(
+            handle.upload_image(vec![1; 10], "png").await,
+            Ok("/home/u/i.png".into())
+        );
+        assert!(host.await.unwrap(), "taken");
+    }
+
+    /// The path is sent while the caller is still waiting, and the caller stops waiting (a
+    /// cancel) before it runs again: the path was queued, never taken. The host must hear so, to
+    /// remove the image.
+    #[tokio::test(start_paused = true)]
+    async fn a_path_sent_as_its_caller_gives_up_is_never_acknowledged() {
+        let (_recorder, handle, mut driver) = setup(false);
+        connect(&mut driver);
+        let (host, sent) = answer_upload_at(driver, "/home/u/i.png", tokio::time::Instant::now());
+        let mut upload = Box::pin(handle.upload_image(vec![1; 10], "png"));
+        // The caller waits for the host, which answers; the caller is cancelled before it runs
+        // again.
+        tokio::select! {
+            biased;
+            answered = sent => answered.unwrap(),
+            result = &mut upload => panic!("answered before the host did: {result:?}"),
+        }
+        drop(upload);
+        assert!(!host.await.unwrap(), "a dropped path is not taken");
+    }
+
+    /// The host's answer and the caller's deadline fall due at the same instant: whichever wins,
+    /// the image is kept exactly when the caller got its path.
+    #[tokio::test(start_paused = true)]
+    async fn a_path_sent_at_its_callers_deadline_is_kept_only_if_returned() {
+        let (_recorder, handle, mut driver) = setup(false);
+        connect(&mut driver);
+        let deadline = tokio::time::Instant::now() + upload_timeout(10);
+        let (host, _) = answer_upload_at(driver, "/home/u/i.png", deadline);
+        let result = handle.upload_image(vec![1; 10], "png").await;
+        assert_eq!(tokio::time::Instant::now(), deadline);
+        assert_eq!(host.await.unwrap(), result.is_ok(), "{result:?}");
     }
 
     fn claude(terminal: &str) -> herdr::AgentIdentity {

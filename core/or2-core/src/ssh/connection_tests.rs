@@ -3373,13 +3373,17 @@ fn an_image_whose_caller_stopped_waiting_as_it_was_done_is_removed() {
     let host = fixture.ssh();
     let directory = root.join(".cache/or2/images");
     runtime().block_on(async {
-        // Delivered: the file stays.
+        // Taken (acknowledged as it was received): the file stays.
         let uploaded =
             upload::upload_image(&host, image_bytes(10), "png", std::future::pending()).await;
         let (reply, response) = oneshot::channel();
-        upload::deliver(reply, uploaded).await;
-        let kept = response.await.unwrap().unwrap();
+        let ((), kept) = tokio::join!(upload::deliver(reply, uploaded), async {
+            let uploaded = response.await.unwrap().unwrap();
+            uploaded.taken.send(()).unwrap();
+            uploaded.path
+        });
         assert_eq!(listing(&directory).len(), 1);
+        let kept = [kept.rsplit('/').next().unwrap().to_owned()];
         // Not delivered (the caller's reply is gone): removed.
         let uploaded =
             upload::upload_image(&host, image_bytes(10), "png", std::future::pending()).await;
@@ -3387,10 +3391,34 @@ fn an_image_whose_caller_stopped_waiting_as_it_was_done_is_removed() {
         let (reply, response) = oneshot::channel();
         drop(response);
         upload::deliver(reply, uploaded).await;
-        assert_eq!(
-            listing(&directory),
-            [kept.rsplit('/').next().unwrap().to_owned()]
-        );
+        assert_eq!(listing(&directory), kept);
+    });
+    drop(host);
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+}
+
+/// The path is sent while the caller still waits, and the caller stops waiting (its deadline or
+/// a cancel, ready together with the send) before it takes the path: the queued path is dropped
+/// unread. A send that succeeded is no delivery; the image is removed.
+#[test]
+fn an_image_whose_path_was_sent_but_never_taken_is_removed() {
+    let (mut fixture, _home, root) = sftp_fixture();
+    let host = fixture.ssh();
+    let directory = root.join(".cache/or2/images");
+    runtime().block_on(async {
+        let uploaded =
+            upload::upload_image(&host, image_bytes(10), "png", std::future::pending()).await;
+        assert!(uploaded.is_ok());
+        assert_eq!(listing(&directory).len(), 1);
+        let (reply, response) = oneshot::channel();
+        // `deliver` runs first: the path is sent into the open reply. Then the caller gives up
+        // without receiving it.
+        tokio::join!(upload::deliver(reply, uploaded), async {
+            tokio::task::yield_now().await;
+            drop(response);
+        });
+        assert_eq!(listing(&directory), Vec::<String>::new());
     });
     drop(host);
     fixture.handle.disconnect();

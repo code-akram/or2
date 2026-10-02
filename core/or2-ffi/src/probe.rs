@@ -422,9 +422,11 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                 let _ = reply.send(if extension == "gif" {
                     Err(core_host::HostError::SftpUnavailable)
                 } else {
-                    Ok(format!(
+                    // Nothing to remove: the probe's acknowledgement is not awaited.
+                    Ok(core_host::UploadedImage::new(format!(
                         "{PROBE_IMAGE_DIR}/or2-19700101-000000-000000.{extension}"
                     ))
+                    .0)
                 });
             }
             HostCommand::ScrollTarget { reply, .. } => {

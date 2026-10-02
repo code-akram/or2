@@ -23,7 +23,7 @@
 //!
 //! Whatever ends an upload early (a failure, a check, the caller's reply dropped) removes what
 //! it made, best effort: the temporary file before the rename, the image after it, and an
-//! image whose caller stopped waiting just as it was done ([`deliver`]). One left behind (the
+//! image whose caller did not acknowledge its path ([`deliver`]). One left behind (the
 //! connection died) is an `or2-*` file the sweep removes later.
 //!
 //! SFTP v3 names files by path only (no `openat`, no `O_NOFOLLOW`): the checks hold against
@@ -45,7 +45,7 @@ use tokio::task::JoinSet;
 use tokio::time::{Instant, timeout, timeout_at};
 
 use super::connection::SshHost;
-use crate::host::HostError;
+use crate::host::{HostError, UploadedImage};
 
 /// The image directory, relative to where the server's SFTP starts (the home directory).
 pub(crate) const IMAGE_DIR: &str = ".cache/or2/images";
@@ -71,6 +71,10 @@ pub(crate) const SWEEP_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const SWEEP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long removing a file after a failure or a cancel may take.
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a sent path may wait for its caller's acknowledgement ([`deliver`]). The caller
+/// acknowledges as soon as it runs again, or drops the path when it stopped waiting, so this
+/// only bounds a caller that is never run again.
+const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 /// One SFTP write: OpenSSH takes up to 255 KiB, every server at least 32 KiB.
 const CHUNK: usize = 32 * 1024;
 /// Writes in flight at once.
@@ -100,15 +104,20 @@ pub(super) struct Uploaded {
     relative: String,
 }
 
-/// Hands an upload's result to its caller. An image the caller no longer takes (it stopped
-/// waiting just as the upload was done) is removed, best effort: nothing would ever name it.
+/// Hands an upload's result to its caller, in two steps: the path is sent, then the caller
+/// acknowledges it as it receives it ([`UploadedImage`]). An image the caller did not take (its
+/// reply was gone, or it stopped waiting with the path already sent) is removed, best effort:
+/// nothing would ever name it. A sent path counts as delivered only once acknowledged.
 pub(super) async fn deliver(
-    reply: oneshot::Sender<Result<String, HostError>>,
+    reply: oneshot::Sender<Result<UploadedImage, HostError>>,
     result: Result<Uploaded, HostError>,
 ) {
     match result {
         Ok(uploaded) => {
-            if reply.send(Ok(uploaded.path.clone())).is_err() {
+            let (path, acknowledged) = UploadedImage::new(uploaded.path.clone());
+            let taken = reply.send(Ok(path)).is_ok()
+                && matches!(timeout(ACK_TIMEOUT, acknowledged).await, Ok(Ok(())));
+            if !taken {
                 let _ = timeout(CLEANUP_TIMEOUT, uploaded.sftp.remove(uploaded.relative)).await;
             }
         }
