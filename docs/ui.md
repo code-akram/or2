@@ -204,7 +204,8 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   drawn 28 dp tall). It has no fill of its own (it sits on its container's) and takes layout space: it pushes
   what is below it down and never overlays it. The terminal card uses it for Connecting / Authenticating /
   Waiting for host-key approval (muted, spinner) and for a closed session (warning, with **Close**); while the
-  session is connected, for an image upload: `Uploading image…` (muted, spinner, **Cancel**) or why it failed
+  session is connected, for an image upload: `Uploading image…` (muted, spinner, **Cancel**; for 3 s after a second
+  image that was not taken, `An image is already uploading`) or why it failed
   (warning, **Dismiss**).
 - **Share picker:** an image shared to or2 from another app opens a sheet titled **Send image to**: one grouped
   card of the open terminals (terminal icon, the host, the target in mono), the last used first. A tap shows

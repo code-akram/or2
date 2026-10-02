@@ -4594,7 +4594,8 @@ stays green.
   `channel_failure`, a channel closed instead, or a subsystem that does not answer SFTP's init (a
   missing `sftp-server`) is `SftpUnavailable`. Every path is relative to where the server's SFTP
   starts, which is the login's home, so `~` needs neither `$HOME` nor a shell, and no exec runs at
-  all. Then:
+  all. Then (as first implemented; the review's fixes below supersede the `chmod` best effort, the
+  order, the `realpath` reply, the timeout and the cleanup):
   1. each missing part of `.cache/or2/images` is made with `mkdir` mode `0700` (another upload making
      it meanwhile is fine); an image directory something else made is `chmod`ed to `0700` (best
      effort: a server that refuses `chmod` still gets the upload); a part that is not a directory is
@@ -4684,4 +4685,102 @@ stays green.
 - **Open.** An upload larger than about 30 s of the link's speed hits the query timeout (a 3 MiB JPEG
   needs about 1 Mbit/s); the processed images are usually far smaller. `russh-sftp` decodes SFTP
   handles as UTF-8 strings (lossily): OpenSSH's handles are small integers and survive, a server with
-  binary handles above 0x7f could fail. The sweep compares with the phone's clock.
+  binary handles above 0x7f could fail. The sweep compares with the phone's clock. (Both timeouts and
+  handles: see the fixes below.)
+
+**Fix (v0.1.2 review, lane Paste; branch `v012/fix-paste`).** From the Codex and Fable reviews of
+`0455bd3`. `API_VERSION` stays 16 and no export changed shape: the FFI table above stands.
+
+- **Fix: the host's `realpath` is untrusted (Codex P1 #2, Fable P3).** A server could answer an
+  absolute "path" holding ETX, ESC, CR or LF: typed into a shell (no bracketed paste) the quote is
+  flushed and the rest runs; ESC acts on the terminal or its program. Rust now passes on the server's
+  answer only when it is safe to type (`upload::is_safe_image_path`): absolute, ending in `/` and the
+  exact generated name, at most 4096 bytes, and with no control character (C0, DEL, C1: NUL, ETX, ESC,
+  CR, LF, and so no bracketed-paste marker) and no U+FFFD (a name that was not UTF-8, so not the
+  file's). Otherwise it makes the path from the SFTP start directory's own `realpath` and the known
+  relative path (`<start>/.cache/or2/images/<name>`), checked the same way; otherwise the upload fails
+  (`the host did not resolve the image path`) and the image is removed. Kotlin is the second line:
+  `insertablePath` (absolute, no ISO control character, no U+FFFD, at most 4096 characters);
+  `ImagePaste` fails such an answer in words (`Upload failed: the host answered an unusable path`) and
+  delivers nothing, and `pathInsertion` refuses one outright.
+  Tests: `a_hostile_realpath_never_reaches_the_terminal_in_either_paste_mode` (ETX with a command and
+  LF, an OSC, CR, LF, `ESC [201~`, C1 CSI, NUL, DEL: the path made instead, and `submit_text_bytes` of
+  it with bracketed paste on and off carries no control byte but the paste markers),
+  `a_realpath_that_names_another_file_is_not_passed_on`, `an_upload_with_no_safe_path_fails_and_removes_its_image`,
+  `upload::tests::only_an_absolute_control_free_path_of_the_image_is_safe`; JVM
+  `aPathWithControlCharactersIsNeverInsertedInEitherTarget`.
+- **Fix: only `content:` images (Codex P2 #5).** `readableImageScheme`: `imageFromUri` (every source)
+  refuses any other scheme (`file:`, none) before anything is opened, and `sharedImage` does not take
+  such a share. Tests: JVM `onlyContentUrisAreRead` (`file`, none: refused, nothing opened, the grant
+  given back); device (compile) `sharedImage` of `file://`, a bare path and a relative name is null.
+- **Fix: a provider that never answers (Codex P2 #6).** An image is read through an
+  `AssetFileDescriptor` opened with a `CancellationSignal` (`AndroidImageSource`) on an IO thread of its
+  own (`readImage`): the caller awaits it, so a cancel or the 60 s read deadline (`READ_TIMEOUT`, open
+  to last byte; `The image took too long to read`) returns at once, then aborts the source, which is
+  idempotent: it cancels a pending open and closes the descriptor (Android wakes a read blocked on a
+  descriptor it closes). A keyboard's grant is given back exactly once on every path (`Once`), as soon
+  as the reading is over. `ImagePaste` starts its coroutine atomically, so a taken image is always
+  prepared and gives back its grant even when cancelled before it ran; a refused one is given back by
+  the caller. **Narrowed:** a provider that ignores the cancel keeps that one IO thread until it
+  answers; the upload has ended and its grant was given back by then. Tests: JVM
+  `aCancelStopsAProviderThatNeverOpensOrNeverReadsAndGivesTheGrantBackAtOnce`,
+  `aProviderTooSlowToAnswerIsRefusedAtTheDeadlineAndAborted` (each for a blocked open and a blocked
+  read), `aTakenImageIsAlwaysPreparedSoItsGrantIsGivenBackEvenWhenCancelledAtOnce`.
+- **Fix: the image directory is checked, not trusted (Codex P2 #7, Fable P3).** Each part of
+  `.cache/or2/images` is checked with `lstat` before anything is made below it, and fails closed
+  (`upload::directory_problem`): a directory; not a symbolic link; not writable by group or others; the
+  image directory exactly `0700` after the `setstat` (a server that will not make it private fails the
+  upload: `~/.cache/or2/images could not be made private`). The temporary file gets `fsetstat 0600` and
+  is then checked with `fstat` to be a regular `0600` file, before any byte is written (`the image
+  could not be made private`). Its owner is the account the upload runs as: every part must belong to
+  it (`~/.cache` may also be root's, as a `sudo` program leaves it), checked once the file is made
+  (before the sweep and before any byte) and again before the rename; the sweep removes only that
+  owner's files.
+  A server that reports no modes or no owners fails. **Deviation:** `~/.cache` itself may be a
+  symbolic link (dotfile setups put it elsewhere): it is followed, and its target is held to the same
+  rules (`~/.cache is writable by others` for a shared one). **Narrowed guarantee:** SFTP v3 names
+  files by path only (no `openat`, no `O_NOFOLLOW`), so the checks hold against other accounts, which
+  cannot change a private directory of the user's, but not against a process of the same account
+  racing the upload between a check and the next request; the server itself is trusted with where the
+  bytes go. Tests: `symbolic_links_in_the_image_directory_are_refused_and_nothing_is_written_through_them`,
+  `a_cache_directory_elsewhere_is_followed_only_when_it_is_private`,
+  `directories_others_may_write_to_or_another_user_owns_are_refused`,
+  `a_server_that_ignores_modes_fails_the_upload_instead_of_sharing_the_image` (directory modes and file
+  modes), `the_directories_are_checked_again_before_the_rename` (the directory swapped for a link while
+  the bytes are written), `upload::tests::image_directory_parts_must_be_private_directories_of_the_user`.
+- **Fix: nothing left behind after the rename (Codex P2 #8).** The upload records what it made (the
+  temporary file's create sent, made, the rename sent, renamed); whatever ends it early (a failure, a
+  check, a cancel, the timeout) removes the temporary file, the image, or both while a rename's answer
+  is pending (2 s, best effort). A name that already existed (an exclusive create or a rename refused)
+  is never removed. The image stays the host driver's until its path is delivered: `upload::deliver`
+  removes it when the caller's reply is gone. **Narrowed:** once the path is delivered to the app, an
+  image no one inserts (the app cancelled in that instant) is left for the 7-day sweep; a server stalled
+  longer than the 2 s cleanup keeps the file for the sweep too. Tests:
+  `a_failed_realpath_removes_the_renamed_image`,
+  `an_upload_cancelled_while_its_path_resolves_removes_the_renamed_image` (a delayed `realpath`),
+  `an_image_whose_caller_stopped_waiting_as_it_was_done_is_removed`.
+- **Fix: a path that arrives under the multi-line confirmation (Codex P2 #9).** Confirming clears only
+  the text that was sent (`TerminalChromeState.composerSent`, `composerAfterSend`): an image's path
+  inserted while the dialog was open stays in the composer. Test: JVM `ComposerSendTest`.
+- **Fix: the upload's timeout grows with its size (Fable P3).** `host::upload_timeout`: 30 s and 1 s
+  per 100 KiB begun (a link of 100 KiB/s still gets there), at most 240 s (`MAX_UPLOAD_TIMEOUT`; 20 MiB
+  gets 235 s). The SFTP requests keep their own exec timeout each. Tests:
+  `the_upload_timeout_grows_with_the_image_up_to_a_cap`,
+  `an_upload_waits_its_size_s_timeout_not_the_query_timeout` (3 MiB: 61 s, paused clock).
+- **Fix: a second image is never dropped silently (Fable P3).** While one uploads, `ImagePaste.start`
+  of another (attach button, keyboard, share) takes nothing and the strip says `An image is already
+  uploading` (still with **Cancel**) for 3 s, then `Uploading image…` again. Test: JVM
+  `aSecondImageWhileOneUploadsIsRefusedInWords`.
+- **Fix: a pending share after process death (Fable P3).** The share picker's pending image is saved
+  with a token of the process that took it (`savedShare`); a recreation in another process (the old
+  one died) drops it (`restoredShare`): the terminals it was for are gone. A rotation keeps it, as
+  before. Test: JVM `ImageSharesTest`.
+- **Fix: binary SFTP handles (Codex P3 #10): documented, not patched.** Making `russh-sftp`'s handles
+  opaque bytes changes its protocol types for the client and the server (`Handle`, `Close`, `Read`,
+  `Write`, `Fstat`, `Fsetstat`, `Readdir`): not a small patch. The client is therefore
+  **OpenSSH-compatible** (OpenSSH and every server whose handles are UTF-8), not generally SFTP v3
+  compatible. A server with handles that are not UTF-8 fails the upload cleanly: the lossy handle names
+  no open file there, so the first request on it fails before any byte is written, and the temporary
+  file is removed by path. Test (in-process server relaying handles as `0xff 0xfe` + its own):
+  `a_server_with_handles_that_are_not_utf8_fails_the_upload_cleanly` (no file anywhere, no rename, the
+  connection fine). It passes before this fix too: it pins the behaviour, it does not repair one.
