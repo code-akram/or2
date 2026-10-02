@@ -358,6 +358,9 @@ or Kotlin protocol implementation is used.
 One release stream for the whole project, tagged `vX.Y.Z`: the tag, the Cargo workspace version
 (`core/Cargo.toml`) and the app's `versionName` are the same `X.Y.Z`. A release contains the app's APK and the
 `or2-pair` binaries; its notes are `docs/releases/vX.Y.Z.md` and it gets a [changelog](../CHANGELOG.md) entry.
+A bump changes the workspace version (then `cargo update --workspace --offline` for the lock), the app's
+`versionName` and `versionCode` (one more each release), and the version `NativeContractTest` expects from the
+library.
 
 `.github/workflows/release.yml` runs `dist` on an Ubuntu and a macOS runner (Rust 1.98.1), with
 `--expect-version X.Y.Z` on a tag, and checks each binary's `file` output (Linux: a static or static-pie,
