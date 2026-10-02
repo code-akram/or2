@@ -17,7 +17,10 @@ import java.util.concurrent.TimeUnit
  * `herdr` whose session list is empty, so the holder's automatic capability probe and watches can
  * never find or subscribe to a real herdr session.
  */
-internal class OpenSshFixture : AutoCloseable {
+internal class OpenSshFixture(
+    /** More `NAME=value` entries for the sessions' environment, from the fixture directory (no spaces in values). */
+    extraSetEnv: (Path) -> List<String> = { emptyList() },
+) : AutoCloseable {
     private companion object {
         const val BIND_ATTEMPTS = 5
     }
@@ -66,7 +69,7 @@ internal class OpenSshFixture : AutoCloseable {
                 PubkeyAuthentication yes
                 PrintMotd no
                 PrintLastLog no
-                SetEnv HOME=$directory HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR=$directory TMUX_TMPDIR=${directory.resolve("tmux")} PATH=$bin:/usr/bin:/bin
+                SetEnv HOME=$directory ${extraSetEnv(directory).joinToString("") { "$it " }}HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR=$directory TMUX_TMPDIR=${directory.resolve("tmux")} PATH=$bin:/usr/bin:/bin
                 LogLevel VERBOSE
                 """.trimIndent() + "\n"
             // A free port is found by binding and releasing it, so another process (often a

@@ -18,7 +18,7 @@ sealed interface Destination {
     data class HostForm(val hostId: Long) : Destination
     data class Terminal(val terminalId: Long) : Destination
 
-    /** Easy pair: scan or paste, review, send the key. Its state lives in the pairing flow, not here. */
+    /** Easy pair: show the code, scan or paste, review, enrol the key. Its state lives in the pairing flow, not here. */
     data object EasyPair : Destination
 
     fun encode(): String = when (this) {

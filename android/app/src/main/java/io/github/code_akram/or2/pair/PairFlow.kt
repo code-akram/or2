@@ -5,36 +5,47 @@ import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.HostRecord
 import io.github.code_akram.or2.data.KeyRecord
+import io.github.code_akram.or2.ffi.PairCode
 import io.github.code_akram.or2.ffi.PairException
 import io.github.code_akram.or2.ffi.PairOffer
 import io.github.code_akram.or2.ffi.PairParseException
+import io.github.code_akram.or2.ffi.PairResult
 import io.github.code_akram.or2.ffi.PublicKeyInfo
-import io.github.code_akram.or2.ffi.pairSubmitKey
+import io.github.code_akram.or2.ffi.pairEnroll
+import io.github.code_akram.or2.ffi.pairNewCode
 import io.github.code_akram.or2.ffi.parsePairPayload
 import io.github.code_akram.or2.hosts.AddressDraft
-import io.github.code_akram.or2.hosts.hostFieldError
 import io.github.code_akram.or2.hosts.validHost
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
-/** The native parser and exchange as the flow uses them: [NativePair] in the app, fakes in tests. */
+/** The native code and parser as the flow uses them: [NativePair] in the app, fakes in tests. */
 interface PairBackend {
+    /** A new pairing code `K` from the operating system's random source. */
+    fun newCode(): PairCode
+
     /** @throws PairParseException when [text] is not a valid pairing code. */
     fun parse(text: String): PairOffer
 
-    /** Sends [publicKeyLine] to the host and returns once its user confirmed. @throws PairException */
-    suspend fun submit(offer: PairOffer, publicKeyLine: String, deviceLabel: String)
+    /**
+     * Enrols [publicKeyLine] with the host that made [offer], logging in with the key derived from [code], and returns
+     * once the host installed it. @throws PairException
+     */
+    suspend fun enroll(offer: PairOffer, code: PairCode, publicKeyLine: String, deviceLabel: String): PairResult
 }
 
 object NativePair : PairBackend {
+    override fun newCode() = pairNewCode()
     override fun parse(text: String) = parsePairPayload(text)
-    override suspend fun submit(offer: PairOffer, publicKeyLine: String, deviceLabel: String) =
-        pairSubmitKey(offer, publicKeyLine, deviceLabel)
+    override suspend fun enroll(offer: PairOffer, code: PairCode, publicKeyLine: String, deviceLabel: String) =
+        pairEnroll(offer, code, publicKeyLine, deviceLabel)
 }
 
 /** Saves a paired host together with its trusted host key, in one step. */
@@ -62,6 +73,30 @@ sealed interface KeyChoice {
 /** The first stored key, or a new one when there is none. */
 fun defaultKeyChoice(keys: List<KeyRecord>): KeyChoice = keys.firstOrNull()?.let { KeyChoice.Existing(it.id) } ?: KeyChoice.New
 
+/**
+ * The pairing code `K` as the screen shows it (`7KQ4-M2XD-9PTM`). It is on the screen on purpose, so it is
+ * the one piece of state that must never reach a log: [toString] hides it.
+ */
+data class ShownCode(val text: String) {
+    override fun toString() = "ShownCode(<redacted>)"
+
+    companion object {
+        /** Before any code was drawn (a screen with no flow behind it). */
+        val None = ShownCode("")
+    }
+}
+
+/**
+ * Whether a failed enrolment touched the host, so that the code is spent and the screen draws a new one: the
+ * login with it was at least attempted. Not so when nothing could connect, the host presented another key (the
+ * connection ends before anything is sent), or the phone refused its own input.
+ */
+fun reachedHost(error: PairException): Boolean = when (error) {
+    is PairException.NoPairingId, is PairException.InvalidOffer, is PairException.InvalidKey,
+    is PairException.InvalidDevice, is PairException.Unreachable, is PairException.HostKeyMismatch -> false
+    else -> true
+}
+
 /** What the review screen edits: the offer and the choices made about it. */
 data class PairReview(
     val offer: PairOffer,
@@ -70,13 +105,13 @@ data class PairReview(
     val choice: KeyChoice,
     /** Why the last attempt failed; shown above the button. */
     val error: String? = null,
-    /** The fingerprint of the key the host already accepted, when only saving the host failed: no second exchange. */
+    /** The fingerprint of the key the host already took, when only saving the host failed: no second enrolment. */
     val acceptedKey: String? = null,
-    /** An attempt is running (asking for the biometric, or waiting for the host); the button is off. */
+    /** An attempt is running (asking for the biometric); the button is off. */
     val working: Boolean = false,
 ) {
-    /** Whether a pairing code with a listener was scanned; without one the user installs the key by hand. */
-    val listens get() = offer.exchange != null
+    /** Whether the host will install the key itself (the code has a pairing id); without one the user does it by hand. */
+    val enrolls get() = offer.pairingId != null
 
     /** The label, user and addresses make a host the app can save. */
     val valid get() = validHost(
@@ -85,15 +120,18 @@ data class PairReview(
 }
 
 sealed interface PairState {
-    /** Waiting for a code, from the camera or pasted; [error] explains the last one that was refused. */
-    data class Scanning(val error: String? = null) : PairState
+    /**
+     * Showing [code] and waiting for the host's QR, from the camera or pasted; [error] explains the last code
+     * that was refused or the last pairing that failed.
+     */
+    data class Scanning(val code: ShownCode, val error: String? = null) : PairState
 
     data class Review(val review: PairReview) : PairState
 
-    /** The key is with the host, whose user is asked to confirm [phoneFingerprint]. */
-    data class Submitting(val review: PairReview, val phoneFingerprint: String) : PairState
+    /** The phone is logged in to the host's sshd with [PairReview.offer]'s pairing id, sending its key. */
+    data class Pairing(val review: PairReview) : PairState
 
-    /** A code without a listener: the host is saved and trusted, and the key waits to be installed by hand. */
+    /** A code without a pairing id: the host is saved and trusted, and the key waits to be installed by hand. */
     data class KeyToInstall(val host: Host, val keyLine: String, val fingerprint: String) : PairState
 
     /** Done: the host is saved with its key trusted. The screen connects to it and calls [PairFlow.consume]. */
@@ -101,15 +139,16 @@ sealed interface PairState {
 }
 
 /**
- * Easy pair on the phone: scan or paste, review, send the key, save the host with its host key
- * trusted. Logic only (the screens and the camera are elsewhere), over [PairBackend] and [PairStore].
+ * Easy pair on the phone: show a code, scan or paste the host's QR, review, enrol the key over the host's
+ * sshd, save the host with its host key trusted. Logic only (the screens and the camera are elsewhere), over
+ * [PairBackend] and [PairStore].
  *
  * Rules:
- * - the code and its password are never logged, and the password is wiped once it has served (after
- *   the exchange, and whenever the flow is left, reset or cancelled);
- * - the host is saved, with the host key from the code trusted, only after the host accepted the
- *   key (or at once for a code without a listener), and before anything connects;
- * - a key generated for the pairing is saved first, so a failed exchange leaves a key the retry reuses.
+ * - the code `K` lives in Rust ([PairCode]); a new one is drawn each time the screen opens ([start]) and after
+ *   every pairing that reached the host ([reachedHost]), and it is never logged or stored;
+ * - the host is saved, with the host key from the code trusted, only after the host installed the key (or at
+ *   once for a code without a pairing id), and before anything connects;
+ * - a key generated for the pairing is saved first, so a failed pairing leaves a key the retry reuses.
  */
 class PairFlow(
     private val backend: PairBackend,
@@ -118,24 +157,37 @@ class PairFlow(
     /** Words for a failure while generating or saving the phone's key (biometric cancelled, vault errors). */
     private val describeKeyError: (Throwable) -> String = { "The key could not be created. Try again." },
 ) {
-    private val mutableState = MutableStateFlow<PairState>(PairState.Scanning())
+    private var code = backend.newCode()
+    private val mutableState = MutableStateFlow<PairState>(PairState.Scanning(ShownCode(code.display())))
     val state: StateFlow<PairState> = mutableState.asStateFlow()
     private var job: Job? = null
 
-    /** Back to scanning, dropping (and wiping) whatever was in progress. */
+    /** Draws a new code and frees the old one (it zeroizes on drop). */
+    private fun renewCode() {
+        val spent = code
+        code = backend.newCode()
+        spent.close()
+    }
+
+    /** A new code, and the state that shows it. */
+    private fun scanning(error: String? = null): PairState.Scanning {
+        renewCode()
+        return PairState.Scanning(ShownCode(code.display()), error)
+    }
+
+    /** The screen opens: drop whatever was in progress and show a new code. */
     fun start() {
         job?.cancel()
-        wipe(mutableState.value)
-        mutableState.value = PairState.Scanning()
+        mutableState.value = scanning()
     }
 
     /** The scanner or the paste field produced [text]. Ignored unless the flow is scanning. Returns whether it was taken. */
     fun onCode(text: String, keys: List<KeyRecord>): Boolean {
-        if (mutableState.value !is PairState.Scanning) return false
+        val scanning = mutableState.value as? PairState.Scanning ?: return false
         val offer = try {
             backend.parse(text)
         } catch (error: PairParseException) {
-            mutableState.value = PairState.Scanning(pairParseMessage(error))
+            mutableState.value = scanning.copy(error = pairParseMessage(error))
             return false
         }
         mutableState.value = PairState.Review(
@@ -147,9 +199,9 @@ class PairFlow(
     fun edit(name: String? = null, username: String? = null, choice: KeyChoice? = null) {
         val current = (mutableState.value as? PairState.Review)?.review ?: return
         if (current.working) return
-        // With a listener the host authorizes the key for the one account that ran or2-pair, and the
+        // With a pairing id the host authorizes the key for the one account that ran or2-pair, and the
         // code names it: a different login here would pair one account and connect as another.
-        val username = if (current.listens) null else username
+        val username = if (current.enrolls) null else username
         mutableState.value = PairState.Review(
             current.copy(
                 name = name ?: current.name, username = username ?: current.username,
@@ -158,12 +210,16 @@ class PairFlow(
         )
     }
 
-    /** Back from the review to scanning, wiping the code. */
-    fun rescan() = start()
+    /** Back from the review to scanning. The code stays: the host may be waiting for it, and nothing was sent. */
+    fun rescan() {
+        job?.cancel()
+        mutableState.value = PairState.Scanning(ShownCode(code.display()))
+    }
 
     /**
-     * Authorizes the chosen key on the host, saves the host with its key trusted, and ends in [PairState.Paired]
-     * (or [PairState.KeyToInstall] for a code without a listener). A failure returns to the review with the reason.
+     * Enrols the chosen key with the host, saves the host with its key trusted, and ends in [PairState.Paired]
+     * (or [PairState.KeyToInstall] for a code without a pairing id). A failure that did not reach the host returns to
+     * the review with the reason; one that did returns to scanning with a new code and the reason.
      * [generateKey] creates and stores a new key (it asks for the biometric); it is called only for [KeyChoice.New].
      */
     fun submit(keys: List<KeyRecord>, device: String, generateKey: suspend (label: String, comment: String) -> KeyRecord) {
@@ -194,16 +250,23 @@ class PairFlow(
                 return fail(review, describeKeyError(error))
             }
         }
-        // A key made just now is stored: a retry after a failed exchange picks it up as an existing one.
+        // A key made just now is stored: a retry after a failed pairing picks it up as an existing one.
         val kept = if (review.choice == KeyChoice.New) review.copy(choice = KeyChoice.Existing(key.id)) else review
-        val exchange = review.offer.exchange
-        if (exchange != null && kept.acceptedKey != key.fingerprint) {
-            mutableState.value = PairState.Submitting(kept, key.fingerprint)
+        val enrolls = review.enrolls
+        if (enrolls && kept.acceptedKey != key.fingerprint) {
+            mutableState.value = PairState.Pairing(kept)
             try {
-                backend.submit(review.offer, key.openssh, device)
+                backend.enroll(review.offer, code, key.openssh, device)
             } catch (error: PairException) {
-                return fail(kept, pairErrorMessage(error))
+                currentCoroutineContext().ensureActive() // Cancelled meanwhile: the screen was left, not failed.
+                val message = pairErrorMessage(error, review.name.trim(), review.offer.port.toInt())
+                if (!reachedHost(error)) return fail(kept, message)
+                // The host saw this code: it is spent, and the host's run needs a new one.
+                mutableState.value = scanning(message)
+                return
             }
+            // Success spends the code too, whatever happens when saving: the next screen draws a new one.
+            renewCode()
         }
         val saved = try {
             store.saveTrustedHost(
@@ -216,15 +279,14 @@ class PairFlow(
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
-            // The host has the key already, and the code is spent: a retry saves the host without exchanging again.
+            // The host has the key already: a retry saves the host without pairing again.
             return fail(
-                kept.copy(acceptedKey = key.fingerprint.takeIf { exchange != null }),
+                kept.copy(acceptedKey = key.fingerprint.takeIf { enrolls }),
                 "The host accepted the key, but this phone could not save the host. Try again.",
             )
         }
-        wipe(PairState.Review(review))
         mutableState.value =
-            if (exchange != null) PairState.Paired(saved) else PairState.KeyToInstall(saved, key.openssh, key.fingerprint)
+            if (enrolls) PairState.Paired(saved) else PairState.KeyToInstall(saved, key.openssh, key.fingerprint)
     }
 
     /** Takes the paired host (or ends the key-to-install screen) and returns to scanning. */
@@ -234,24 +296,14 @@ class PairFlow(
             is PairState.KeyToInstall -> current.host
             else -> null
         }
-        if (host != null) mutableState.value = PairState.Scanning()
+        if (host != null) mutableState.value = scanning()
         return host
     }
 
-    /** The user left the pairing screens: abort whatever runs, wipe the code, forget everything. */
+    /** The user left the pairing screens: abort whatever runs and forget everything, including the code. */
     fun cancel() {
         job?.cancel()
         job = null
-        wipe(mutableState.value)
-        mutableState.value = PairState.Scanning()
-    }
-
-    private fun wipe(state: PairState) {
-        val review = when (state) {
-            is PairState.Review -> state.review
-            is PairState.Submitting -> state.review
-            else -> return
-        }
-        review.offer.exchange?.secret?.wipe()
+        mutableState.value = scanning()
     }
 }

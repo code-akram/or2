@@ -13,9 +13,9 @@ import java.util.Random
 
 /** The camera path's decoder over synthetic frames: ZXing's own writer makes the codes, the decoder reads luminance. */
 class QrDecoderTest {
-    private val code = "or2-pair:1?name=Work%20Mac&user=alice&port=22&a=192.168.1.20&a=work-mac.local" +
+    private val code = "or2-pair:2?name=Work%20Mac&user=alice&port=22&a=192.168.1.20&a=work-mac.local" +
         "&hk=ssh-ed25519%20AAAAC3NzaC1lZDI1NTE5AAAAIAc39XUWT33SvSLy6vA7I83%2BXgmwnHmYtMQRjLeaZ2U7" +
-        "&pair=192.168.1.20:41234&otp=AAAQEAYEAUDAOCAJBIFQYDIOB4"
+        "&id=abcdefghijklm"
 
     private fun matrix(text: String, size: Int, level: ErrorCorrectionLevel = ErrorCorrectionLevel.L): BitMatrix =
         QRCodeWriter().encode(
@@ -61,7 +61,7 @@ class QrDecoderTest {
 
     @Test
     fun readsAFullKilobyteCode() {
-        val long = "or2-pair:1?" + "a=x".repeat(1) + "&hk=" + "A".repeat(1000)
+        val long = "or2-pair:2?" + "a=x".repeat(1) + "&hk=" + "A".repeat(1000)
         val m = matrix(long, 900)
         assertEquals(long, QrDecoder().decode(luminance(m), m.width, m.height))
     }

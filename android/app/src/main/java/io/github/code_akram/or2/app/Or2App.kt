@@ -80,6 +80,7 @@ import io.github.code_akram.or2.pair.AddHostSheet
 import io.github.code_akram.or2.pair.PairDestination
 import io.github.code_akram.or2.pair.PairFlow
 import io.github.code_akram.or2.pair.PairState
+import io.github.code_akram.or2.pair.ShownCode
 import io.github.code_akram.or2.session.HostTrustDialog
 import io.github.code_akram.or2.session.SessionScreen
 import io.github.code_akram.or2.session.hostErrorMessage
@@ -177,7 +178,7 @@ fun Or2App(
     var addSheet by rememberSaveable { mutableStateOf(false) }
     fun addHost() { addSheet = true }
     val pairFlow = actions.pair
-    val pairState by (pairFlow?.state ?: remember { kotlinx.coroutines.flow.MutableStateFlow<PairState>(PairState.Scanning()) })
+    val pairState by (pairFlow?.state ?: remember { kotlinx.coroutines.flow.MutableStateFlow<PairState>(PairState.Scanning(ShownCode.None)) })
         .collectAsStateWithLifecycle()
 
     // Hosts between the tap and the key being unlocked: their card says "Unlocking key...".
@@ -442,7 +443,7 @@ fun Or2App(
                 Destination.EasyPair -> if (pairFlow == null) Column { TopBar(back = ::pop) } else PairDestination(
                     pairState, keys, pairFlow, actions.deviceLabel, actions.generatePairKey,
                     close = ::pop,
-                    // A code without a listener ends on the key to install: Done returns Home with the host saved.
+                    // A code made with --manual ends on the key to install: Done returns Home with the host saved.
                     done = { pairFlow.consume(); navigate(NavStack()) },
                 )
                 is Destination.HostForm -> {

@@ -57,6 +57,8 @@ class ThemeTest {
         assertEquals(12f, Or2Type.Mono.fontSize.value, 0f)
         assertEquals(10.5f, Or2Type.MonoSmall.fontSize.value, 0f)
         assertEquals(11f, Or2Type.Pill.fontSize.value, 0f)
+        // The Easy pair code is the one large element; nothing else is above the 20 sp screen title.
+        assertEquals(24f, Or2Type.PairCode.fontSize.value, 0f)
         // Mono lines sit on a 16 sp grid, so stacked notes (title, status, herdr note) keep an even rhythm.
         assertEquals(16f, Or2Type.MonoSmall.lineHeight.value, 0f)
         assertEquals(13f, Or2Type.Composer.fontSize.value, 0f)

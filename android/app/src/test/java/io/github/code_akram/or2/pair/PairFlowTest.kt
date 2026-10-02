@@ -3,9 +3,12 @@ package io.github.code_akram.or2.pair
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.KeyRecord
+import io.github.code_akram.or2.ffi.PairCode
 import io.github.code_akram.or2.ffi.PairException
 import io.github.code_akram.or2.ffi.PairOffer
+import io.github.code_akram.or2.ffi.PairResult
 import io.github.code_akram.or2.ffi.PublicKeyInfo
+import io.github.code_akram.or2.ffi.pairNewCode
 import io.github.code_akram.or2.ffi.parsePairPayload
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -18,6 +21,7 @@ import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -25,30 +29,36 @@ import org.junit.Test
 
 private const val HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAc39XUWT33SvSLy6vA7I83+XgmwnHmYtMQRjLeaZ2U7"
 private const val HOST_FINGERPRINT = "SHA256:PK/nvGiFusFK9/6Qf8dSOX99mI5XQYiMAML2JHCjgQI"
-private const val OTP = "AAAQEAYEAUDAOCAJBIFQYDIOB4"
+private const val PAIRING_ID = "abcdefghijklm"
 
-private fun code(listens: Boolean = true) =
-    "or2-pair:1?name=Work%20Mac&user=alice&port=2222&a=100.101.102.103&a=work-mac.local" +
+/** The text of a host's QR; a code made with --manual has no pairing id. */
+private fun code(pairingId: String? = PAIRING_ID) =
+    "or2-pair:2?name=Work%20Mac&user=alice&port=2222&a=100.101.102.103&a=work-mac.local" +
         "&hk=" + HOST_KEY.replace(" ", "%20").replace("+", "%2B") +
-        if (listens) "&pair=192.168.1.20:41234&otp=$OTP" else ""
+        if (pairingId != null) "&id=$pairingId" else ""
 
 private fun keyRecord(id: String, fingerprint: String = "SHA256:$id") =
     KeyRecord(id, "Key $id", "ssh-ed25519", "ssh-ed25519 AAAA-$id", fingerprint, "", ByteArray(0), ByteArray(0))
 
-/** A backend whose exchange is scripted and whose parser is the real native one. */
+/** What the backend saw of one enrolment: the key line, the device label, the offer's pairing id and the code `K`. */
+private data class Enrolment(val keyLine: String, val device: String, val pairingId: String?, val code: String)
+
+/** A backend whose enrolment is scripted; codes and the parser are the real native ones. */
 private class FakeBackend : PairBackend {
     val events = mutableListOf<String>()
-    val submitted = mutableListOf<Triple<String, String, Boolean>>() // key line, device, secret still intact
+    val enrolments = mutableListOf<Enrolment>()
     var failure: PairException? = null
     var gate: CompletableDeferred<Unit>? = null
 
+    override fun newCode(): PairCode = pairNewCode()
     override fun parse(text: String): PairOffer = parsePairPayload(text)
 
-    override suspend fun submit(offer: PairOffer, publicKeyLine: String, deviceLabel: String) {
-        events += "submit"
-        submitted += Triple(publicKeyLine, deviceLabel, offer.exchange?.secret?.isWiped() == false)
+    override suspend fun enroll(offer: PairOffer, code: PairCode, publicKeyLine: String, deviceLabel: String): PairResult {
+        events += "enroll"
+        enrolments += Enrolment(publicKeyLine, deviceLabel, offer.pairingId, code.display())
         gate?.await()
         failure?.let { throw it }
+        return PairResult(offer.username, "SHA256:installed")
     }
 }
 
@@ -90,11 +100,23 @@ class PairFlowTest {
 
     private fun review() = (flow.state.value as PairState.Review).review
 
+    private fun shown() = (flow.state.value as PairState.Scanning).code.text
+
     private suspend fun awaitState(predicate: (PairState) -> Boolean) = withTimeout(5_000) { flow.state.first(predicate) }
 
     @Test
+    fun theScreenShowsAPairingCodeInCrockfordGroupsOfFourAndEveryStartDrawsANewOne() {
+        val first = shown()
+        assertTrue(first, Regex("[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}").matches(first))
+        flow.start()
+        val second = shown()
+        assertNotEquals(first, second)
+        flow.start()
+        assertNotEquals(second, shown())
+    }
+
+    @Test
     fun aValidCodeOpensTheReviewWithTheHostsOwnNameUserAndTheFirstKeyChosen() {
-        assertTrue(flow.state.value is PairState.Scanning)
         assertTrue(flow.onCode(code(), keys))
         val review = review()
         assertEquals("Work Mac", review.name)
@@ -102,7 +124,8 @@ class PairFlowTest {
         assertEquals(KeyChoice.Existing("a"), review.choice)
         assertEquals(listOf("100.101.102.103", "work-mac.local"), review.offer.addresses.map { it.host })
         assertEquals(HOST_FINGERPRINT, review.offer.hostKey.fingerprint)
-        assertTrue(review.listens)
+        assertEquals(PAIRING_ID, review.offer.pairingId)
+        assertTrue(review.enrolls)
         assertTrue(review.valid)
         assertNull(review.error)
     }
@@ -116,16 +139,19 @@ class PairFlowTest {
     }
 
     @Test
-    fun aBadCodeStaysOnTheScannerWithAReasonAndAnotherCodeIsStillAccepted() {
+    fun aBadCodeStaysOnTheScannerWithAReasonKeepsTheCodeAndAnotherCodeIsStillAccepted() {
+        val shown = shown()
         for ((text, fragment) in listOf(
             "hello" to "not an or2 pairing code",
-            "or2-pair:2?name=x" to "newer or2-pair",
-            "or2-pair:1?name=x" to "not valid",
-            "or2-pair:1?%zz" to "damaged",
+            "or2-pair:1?name=x" to "older or2-pair: update it on the host",
+            "or2-pair:3?name=x" to "Update or2 to use this code",
+            "or2-pair:2?name=x" to "not valid",
+            "or2-pair:2?%zz" to "damaged",
         )) {
             assertFalse(text, flow.onCode(text, keys))
             val state = flow.state.value as PairState.Scanning
             assertTrue("$text: ${state.error}", state.error!!.contains(fragment))
+            assertEquals(shown, state.code.text)
         }
         assertTrue(flow.onCode(code(), keys))
     }
@@ -154,37 +180,39 @@ class PairFlowTest {
     }
 
     @Test
-    fun theUserOfACodeWithAListenerIsTheHostsAccountAndCannotBeEdited() {
+    fun theUserOfACodeWithAPairingIdIsTheHostsAccountAndCannotBeEdited() {
         // The host authorizes the key for the account that ran or2-pair; a different login here would
         // pair one account and then connect as another.
-        flow.onCode(code(listens = true), keys)
-        assertTrue(review().listens)
+        flow.onCode(code(), keys)
+        assertTrue(review().enrolls)
         flow.edit(username = "bob")
         assertEquals("alice", review().username)
-        // A code without a listener only describes the host: the user may name the login to install the key for.
+        // A --manual code only describes the host: the user may name the login to install the key for.
         flow.start()
-        flow.onCode(code(listens = false), keys)
+        flow.onCode(code(pairingId = null), keys)
+        assertFalse(review().enrolls)
         flow.edit(username = "bob")
         assertEquals("bob", review().username)
     }
 
     @Test
-    fun theHostIsSavedWithItsKeyTrustedOnlyAfterTheHostAcceptedTheKey() = runBlocking<Unit> {
+    fun theHostIsSavedWithItsKeyTrustedOnlyAfterTheHostInstalledTheKey() = runBlocking<Unit> {
+        val typedOnTheHost = shown()
         flow.onCode(code(), keys)
         flow.edit(choice = KeyChoice.Existing("b"))
         backend.gate = CompletableDeferred()
         flow.submit(keys, "Pixel 8", generate)
 
-        // Mid-exchange: the host is being asked, nothing is stored, the fingerprint to compare is on screen.
-        val submitting = flow.state.value as PairState.Submitting
-        assertEquals("SHA256:b", submitting.phoneFingerprint)
-        assertEquals(listOf("submit"), backend.events)
-        assertEquals(Triple("ssh-ed25519 AAAA-b", "Pixel 8", true), backend.submitted.single())
+        // Mid-pairing: the host is being talked to, nothing is stored.
+        assertEquals("Work Mac", (flow.state.value as PairState.Pairing).review.name)
+        assertEquals(listOf("enroll"), backend.events)
+        // The code the user typed on the host is the one the key was derived from.
+        assertEquals(Enrolment("ssh-ed25519 AAAA-b", "Pixel 8", PAIRING_ID, typedOnTheHost), backend.enrolments.single())
         assertTrue(store.saved.isEmpty())
 
         backend.gate!!.complete(Unit)
         val paired = awaitState { it is PairState.Paired } as PairState.Paired
-        assertEquals(listOf("submit", "save"), backend.events)
+        assertEquals(listOf("enroll", "save"), backend.events)
         val (host, trusted) = store.saved.single()
         assertEquals("Work Mac", host.label)
         assertEquals("alice", host.username)
@@ -196,13 +224,13 @@ class PairFlowTest {
     }
 
     @Test
-    fun thePasswordIsWipedOnceTheHostIsSaved() = runBlocking<Unit> {
+    fun theSpentCodeIsReplacedOnceTheHostInstalledTheKey() = runBlocking<Unit> {
+        val spent = shown()
         flow.onCode(code(), keys)
-        val secret = review().offer.exchange!!.secret
-        assertFalse(secret.isWiped())
         flow.submit(keys, "Pixel", generate)
         awaitState { it is PairState.Paired }
-        assertTrue(secret.isWiped())
+        assertNotNull(flow.consume())
+        assertNotEquals(spent, shown())
     }
 
     @Test
@@ -211,9 +239,9 @@ class PairFlowTest {
         flow.edit(name = "My Mac")
         flow.submit(emptyList(), "Pixel 8", generate)
         awaitState { it is PairState.Paired }
-        assertEquals(listOf("generate", "submit", "save"), backend.events)
+        assertEquals(listOf("generate", "enroll", "save"), backend.events)
         assertEquals(listOf("Key for My Mac" to "or2@Pixel 8"), generated)
-        assertEquals("ssh-ed25519 AAAA-new", backend.submitted.single().first)
+        assertEquals("ssh-ed25519 AAAA-new", backend.enrolments.single().keyLine)
         assertEquals("new", store.saved.single().first.keyId)
     }
 
@@ -225,7 +253,6 @@ class PairFlowTest {
         val review = (awaitState { it is PairState.Review && !it.review.working } as PairState.Review).review
         assertEquals("key error: biometric cancelled", review.error)
         assertEquals(listOf("generate"), backend.events)
-        assertFalse(review.offer.exchange!!.secret.isWiped())
         // Trying again works.
         generateFailure = null
         flow.submit(emptyList(), "Pixel", generate)
@@ -242,32 +269,58 @@ class PairFlowTest {
     }
 
     @Test
-    fun everyRefusalReturnsToTheReviewWithItsOwnWordsAndSavesNothing() = runBlocking<Unit> {
+    fun aFailureBeforeTheHostSawTheCodeReturnsToTheReviewWithTheSameCodeAndSavesNothing() = runBlocking<Unit> {
         for ((failure, fragment) in listOf(
-            PairException.Declined() to "declined",
-            PairException.AuthenticationFailed() to "already have been used",
-            PairException.HostNotAuthenticated() to "could not be verified",
-            PairException.HostFailed() to "could not add the key",
-            PairException.HostTimedOut() to "Nobody confirmed",
-            PairException.TimedOut() to "Nobody confirmed",
-            PairException.Unreachable() to "same network",
-            PairException.ConnectionLost() to "ended early",
-            PairException.Protocol() to "did not understand",
-            PairException.KeyNotAccepted() to "kind of key",
-            PairException.Wiped() to "already used",
+            PairException.Unreachable() to "Couldn't reach Work Mac on port 2222",
+            PairException.HostKeyMismatch() to "different key than the code",
+            PairException.InvalidKey() to "cannot be sent",
+            PairException.InvalidDevice() to "name cannot be sent",
+            PairException.InvalidOffer() to "cannot be used",
+            PairException.NoPairingId() to "set up by hand",
         )) {
             backend.failure = failure
             flow.start()
+            val typedOnTheHost = shown()
             flow.onCode(code(), keys)
             flow.submit(keys, "Pixel", generate)
             val review = (awaitState { it is PairState.Review && !it.review.working } as PairState.Review).review
             assertTrue("${failure::class.simpleName}: ${review.error}", review.error!!.contains(fragment))
+            assertFalse(reachedHost(failure))
+            assertTrue(store.saved.isEmpty())
+            // Back to scanning from the review keeps the code: the host may still be waiting for it.
+            flow.rescan()
+            assertEquals(typedOnTheHost, shown())
+        }
+    }
+
+    @Test
+    fun aFailureAfterTheHostSawTheCodeReturnsToScanningWithItsReasonAndANewCode() = runBlocking<Unit> {
+        for ((failure, fragment) in listOf(
+            PairException.BootstrapRefused() to "didn't accept this phone's code",
+            PairException.NotOr2Pair() to "Something other than or2-pair answered",
+            PairException.Expired() to "has stopped or timed out",
+            PairException.Gone() to "Another device already used this pairing",
+            PairException.KeyNotAccepted() to "couldn't add the key",
+            PairException.HostFailed() to "couldn't add the key",
+            PairException.TimedOut() to "did not answer in time",
+            PairException.ConnectionLost() to "ended early",
+            PairException.Protocol() to "did not understand",
+            PairException.Refused() to "refused",
+        )) {
+            backend.failure = failure
+            flow.start()
+            val spent = shown()
+            flow.onCode(code(), keys)
+            flow.submit(keys, "Pixel", generate)
+            val state = awaitState { it is PairState.Scanning && it.code.text != spent } as PairState.Scanning
+            assertTrue("${failure::class.simpleName}: ${state.error}", state.error!!.contains(fragment))
+            assertTrue(reachedHost(failure))
             assertTrue(store.saved.isEmpty())
         }
     }
 
     @Test
-    fun aFailedExchangeCanBeRetriedWithTheSameCode() = runBlocking<Unit> {
+    fun aFailedPairingThatDidNotReachTheHostCanBeRetriedWithTheSameCode() = runBlocking<Unit> {
         backend.failure = PairException.Unreachable()
         flow.onCode(code(), keys)
         flow.submit(keys, "Pixel", generate)
@@ -275,12 +328,13 @@ class PairFlowTest {
         backend.failure = null
         flow.submit(keys, "Pixel", generate)
         awaitState { it is PairState.Paired }
-        assertEquals(2, backend.submitted.size)
+        assertEquals(2, backend.enrolments.size)
+        assertEquals(backend.enrolments[0].code, backend.enrolments[1].code)
         assertEquals(1, store.saved.size)
     }
 
     @Test
-    fun ifSavingFailsAfterTheHostAcceptedTheKeyTheRetrySavesWithoutExchangingAgain() = runBlocking<Unit> {
+    fun ifSavingFailsAfterTheHostInstalledTheKeyTheRetrySavesWithoutPairingAgain() = runBlocking<Unit> {
         store.failures = 1
         flow.onCode(code(), keys)
         flow.submit(keys, "Pixel", generate)
@@ -289,31 +343,31 @@ class PairFlowTest {
         assertEquals("SHA256:a", review.acceptedKey)
         flow.submit(keys, "Pixel", generate)
         awaitState { it is PairState.Paired }
-        assertEquals("the spent code is not used twice", 1, backend.submitted.size)
-        assertEquals(listOf("submit", "save", "save"), backend.events)
+        assertEquals("the spent code is not used twice", 1, backend.enrolments.size)
+        assertEquals(listOf("enroll", "save", "save"), backend.events)
     }
 
     @Test
-    fun aSecondTapWhileWorkingDoesNothing() = runBlocking<Unit> {
+    fun aSecondTapWhilePairingDoesNothing() = runBlocking<Unit> {
         backend.gate = CompletableDeferred()
         flow.onCode(code(), keys)
         flow.submit(keys, "Pixel", generate)
         flow.submit(keys, "Pixel", generate)
         flow.edit(name = "ignored")
-        assertEquals(1, backend.submitted.size)
-        assertEquals("Work Mac", (flow.state.value as PairState.Submitting).review.name)
+        assertEquals(1, backend.enrolments.size)
+        assertEquals("Work Mac", (flow.state.value as PairState.Pairing).review.name)
         backend.gate!!.complete(Unit)
         awaitState { it is PairState.Paired }
-        assertEquals(1, backend.submitted.size)
+        assertEquals(1, backend.enrolments.size)
     }
 
     @Test
-    fun aCodeWithoutAListenerSavesTheHostAndShowsTheKeyToInstall() = runBlocking<Unit> {
-        flow.onCode(code(listens = false), emptyList())
-        assertFalse(review().listens)
+    fun aManualCodeSavesTheHostAndShowsTheKeyToInstallWithoutPairing() = runBlocking<Unit> {
+        flow.onCode(code(pairingId = null), emptyList())
         flow.submit(emptyList(), "Pixel", generate)
         val state = awaitState { it is PairState.KeyToInstall } as PairState.KeyToInstall
         assertEquals(listOf("generate", "save"), backend.events)
+        assertTrue(backend.enrolments.isEmpty())
         assertEquals("ssh-ed25519 AAAA-new", state.keyLine)
         assertEquals("SHA256:new", state.fingerprint)
         assertEquals(HOST_FINGERPRINT, store.saved.single().second.fingerprint)
@@ -332,38 +386,50 @@ class PairFlowTest {
     }
 
     @Test
-    fun cancellingWhileTheHostIsBeingAskedAbortsAndWipesTheCode() = runBlocking<Unit> {
+    fun cancellingWhilePairingAbortsAndDropsTheCode() = runBlocking<Unit> {
         backend.gate = CompletableDeferred()
+        val typedOnTheHost = shown()
         flow.onCode(code(), keys)
-        val secret = review().offer.exchange!!.secret
         flow.submit(keys, "Pixel", generate)
-        assertTrue(flow.state.value is PairState.Submitting)
+        assertTrue(flow.state.value is PairState.Pairing)
         flow.cancel()
         assertTrue(flow.state.value is PairState.Scanning)
-        assertTrue(secret.isWiped())
+        assertNotEquals(typedOnTheHost, shown())
         backend.gate!!.complete(Unit)
         assertTrue(store.saved.isEmpty())
         assertTrue(flow.state.value is PairState.Scanning)
     }
 
     @Test
-    fun startingOverAndLeavingTheReviewWipeTheCode() {
+    fun aFailureThatArrivesAfterCancellingDoesNotOverwriteTheScreen() = runBlocking<Unit> {
+        backend.gate = CompletableDeferred()
+        backend.failure = PairException.BootstrapRefused()
         flow.onCode(code(), keys)
-        val first = review().offer.exchange!!.secret
-        flow.rescan()
-        assertTrue(first.isWiped())
-        assertTrue(flow.state.value is PairState.Scanning)
-        flow.onCode(code(), keys)
-        val second = review().offer.exchange!!.secret
-        flow.start()
-        assertTrue(second.isWiped())
+        flow.submit(keys, "Pixel", generate)
+        flow.cancel()
+        val after = flow.state.value
+        backend.gate!!.complete(Unit)
+        assertEquals(after, flow.state.value)
+        assertNull((flow.state.value as PairState.Scanning).error)
     }
 
     @Test
-    fun noStateOfTheFlowPrintsThePasswordOrTheCode() {
+    fun leavingTheReviewKeepsTheCodeAndStartingOverDrawsANewOne() {
+        val first = shown()
         flow.onCode(code(), keys)
-        val shown = flow.state.value.toString()
-        assertFalse(shown, shown.contains(OTP))
-        assertFalse(shown, shown.contains("otp="))
+        flow.rescan()
+        assertTrue(flow.state.value is PairState.Scanning)
+        assertEquals(first, shown())
+        flow.start()
+        assertNotEquals(first, shown())
+    }
+
+    @Test
+    fun noStateOfTheFlowPrintsTheCodeOrTheQr() {
+        val typed = shown()
+        assertFalse(flow.state.value.toString(), flow.state.value.toString().contains(typed))
+        flow.onCode(code(), keys)
+        val text = flow.state.value.toString()
+        assertFalse(text, text.contains(typed))
     }
 }

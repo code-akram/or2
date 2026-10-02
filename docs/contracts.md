@@ -2552,7 +2552,11 @@ nothing (they print a `--manual` code and the manual instructions).
 **`or2-pair-testhost`** (only with `test-support`, never built by `cargo install`) reads `K` from
 standard input without a terminal so tests can feed it, and honours `OR2_PAIR_TEST_HOME`,
 `OR2_PAIR_TEST_USER` and `OR2_PAIR_TEST_AUTHORIZED_KEYS`, which tests point a disposable sshd's
-`AuthorizedKeysFile` at. Its forced command line names the testhost binary.
+`AuthorizedKeysFile` at. Its forced command line names the testhost binary. It also honours
+`OR2_PAIR_TEST_ETC_SSH`, a directory standing in for `/etc/ssh` where it finds the sshd's
+`ssh_host_ed25519_key.pub`, and all four variables reach the forced command through the sshd's `SetEnv`.
+Its standard output carries the QR's text on a line of its own and, when the phone is enrolled, the
+`Paired "…"` line of the sample output above; the JVM test reads those two.
 
 Output, for a host reached over its public address:
 
@@ -2623,6 +2627,39 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
 - After a pairing that reached the host the screen draws a new `K`.
 - A `--manual` code saves the host and trust at once and shows the key line (Copy, Share), unchanged.
 - `PairFlow` stays logic over `PairBackend` and `PairStore` in a `ViewModel`.
+
+**As implemented** (`io.github.code_akram.or2.pair`). Decisions where the text above left room:
+
+- **Where `K` lives.** `PairFlow` holds one `PairCode` (an FFI object; Kotlin sees only its `display()`
+  text, in `PairState.Scanning.code` as a `ShownCode` whose `toString` is redacted) and frees the old one
+  when it draws another. A new one is drawn when the screen opens (`start`), when the screen is left
+  (`cancel`), when a pairing has installed the key, and after a failure that reached the host. Going back
+  from the review to the scanner keeps it: nothing was sent, and the host may still be waiting for it. The
+  `ViewModel` keeps it across a rotation or the permission dialog.
+- **"Reached the host"** is every failure except `Unreachable`, `HostKeyMismatch` (the connection ends
+  before anything is sent) and the phone's own input errors (`NoPairingId`, `InvalidOffer`, `InvalidKey`,
+  `InvalidDevice`). `TimedOut` counts as reached (the handshake may have succeeded), so the choice errs
+  towards a new code.
+- **Where a failure shows.** A failure that did not reach the host returns to the review with the message
+  above the button, and **Pair** retries with the same `K` (the person typed it already). One that reached
+  the host returns to the **Easy pair screen** with a new `K` and the message under the camera card: a
+  retry from the old review could not succeed, because the host's run needs the new `K` typed again, so
+  or2-pair is run again and the new QR scanned.
+- **Saving.** After `ok` the host is saved with `AppDao.saveHostWithTrust` (the user is the offer's
+  `user`, read-only when the code has a pairing id; the result's `fingerprint` was checked against the
+  phone's key by the core). If saving fails, the review shows "The host accepted the key, but this phone
+  could not save the host. Try again." and the retry saves without a second `pair_enroll`.
+- **Messages not named above.** `TimedOut`: "<name> did not answer in time. Run or2-pair again and
+  retry."; `ConnectionLost`: "The connection to the host ended early. Run or2-pair again and retry.";
+  `Protocol`: "The host did not understand the request. Update or2-pair on the host and try again.";
+  `Refused`: "The host refused the request. Run or2-pair again and retry."; `KeyNotAccepted` and
+  `HostFailed` start with the contract's "The host couldn't add the key." and add the reason ("It does
+  not accept this kind of key: use an Ed25519 key." / "Read what or2-pair printed on the host."). The two
+  version messages end with a full stop. Version 1 means `version < 2`.
+- **Tests.** `PairFlowTest` runs the flow over a fake backend whose codes and parser are the native ones.
+  `PairEndToEndTest` is written against this contract and skips until `or2-pair-testhost` is the version 2
+  host (it checks that `--help` lists `enroll`); the integration step must make it run (see the class
+  comment).
 
 ## Tests
 

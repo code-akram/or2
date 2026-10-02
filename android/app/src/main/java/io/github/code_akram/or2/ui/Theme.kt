@@ -165,6 +165,11 @@ object Or2Type {
     val Mono = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 12.sp, lineHeight = 16.sp)
     val MonoSmall = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 10.5.sp, lineHeight = 16.sp)
     val MonoLarge = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 14.sp, lineHeight = 19.sp)
+
+    /** The Easy pair code `7KQ4-M2XD-9PTM`: the one large element of the app, because it is read off the phone and typed on a host. */
+    val PairCode = TextStyle(
+        fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 24.sp, lineHeight = 30.sp, letterSpacing = 0.04.em,
+    )
     val Badge = TextStyle(fontFamily = sans, fontWeight = FontWeight.Normal, fontSize = 11.sp, lineHeight = 14.sp)
 
     /** Overlay pills on thumbnails and the terminal header's transport badge: small, they sit on the terminal. */

@@ -133,15 +133,21 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   handle and no title, holding two `ActionCard`s like Moshi's: `FASTEST` / **Easy pair with QR** (QR icon tile,
   "Recommended · ~1 min") and `SSH-FLUENT` / **Set up manually** (server icon, "~3 min · needs hostname + key").
   Compact scale throughout; the manual card opens the unchanged form.
-- **Easy pair screens:** a pushed screen with a light 16 sp title. The scan screen has a square camera card
+- **Easy pair screens:** a pushed screen with a light 16 sp title. The scan screen opens with the pairing code
+  `K` (`7KQ4-M2XD-9PTM`) in mono at 24 sp (`Or2Type.PairCode`, selectable): the one large element in the app,
+  because it is read off the phone and typed on the host. Under it the muted `Secondary` hint **Type this code
+  into or2-pair on the host**, a `surfaceRaisedRow` row holding the command `or2-pair` with a copy icon button,
+  and one muted line (**Then scan the QR code it prints.**). Then a square camera card
   (24 dp radius, `crust`) that holds the preview or, without the permission, the explanation and an
   **Allow camera** pill; below it a pill **Paste pairing code** that swaps the camera for a mono field and a
-  full-width **Continue**; refusals are one `danger` line under the card. The review is a form: name and user
-  fields, the addresses as numbered mono rows in a grouped card, the host key's fingerprint in a `MonoBlock`
+  full-width **Continue**; refusals, and a pairing that failed after reaching the host (the screen then shows a
+  new code), are one `danger` line under the card. The review is a form: name and user
+  fields (the user read-only when the code carries a pairing id), the addresses as numbered mono rows in a
+  grouped card, the host key's fingerprint in a `MonoBlock`
   with one muted sentence, a radio group of keys (existing keys with their short fingerprints, then **New key**),
-  a `danger` line for the last failure and the full-width **Pair and add host** pill with a muted footnote.
-  Progress is a centred 32 dp spinner, a 20 sp **Confirm on the host**, the phone key's full fingerprint in a
-  `MonoBlock` and a **Cancel** pill; nothing modal.
+  a `danger` line for the last failure and the full-width **Pair** pill (**Add host** for a `--manual` code)
+  with a muted footnote.
+  Progress is a centred 32 dp spinner, a 15 sp light **Pairing with <name>…** and a **Cancel** pill; nothing modal.
 - **Segmented control:** 32 dp `surfaceTrack` pill, selected segment `surface` with `text`, others
   `textMuted`.
 - **Toggle:** `accent` track with a `text` knob when on (a `background` knob read as a hole); `surfaceTrack` with a muted knob when off.

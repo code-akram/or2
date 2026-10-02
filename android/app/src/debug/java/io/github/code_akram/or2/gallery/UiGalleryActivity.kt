@@ -94,6 +94,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 
+/** A made-up pairing code: the contract's own example, whose check character is valid. */
+private const val GALLERY_PAIR_CODE = "7KQ4-M2XD-9PTM"
+
 /**
  * Debug-only UI gallery: every screen and key state rendered with fake data, no network, no
  * biometrics, no database. `am start -n io.github.code_akram.or2/.gallery.UiGalleryActivity
@@ -146,12 +149,12 @@ class UiGalleryActivity : ComponentActivity() {
             "host-form" -> HostFormScreen(null, listOf(key1, key2), false, {}, {})
             "host-form-edit" -> HostFormScreen(multiHost, listOf(key1, key2), false, {}, {})
             "add-host" -> AddHostSheet(easyPair = {}, manual = {}, dismiss = {})
-            "pair-scan" -> PairScanScreen(null, CameraAccess(granted = false, denied = false) {}, {}, back = {})
-            "pair-scan-denied" -> PairScanScreen("That is not an or2 pairing code. Run or2-pair on the host and scan the code it prints.",
+            "pair-scan" -> PairScanScreen(GALLERY_PAIR_CODE, null, CameraAccess(granted = false, denied = false) {}, {}, back = {})
+            "pair-scan-denied" -> PairScanScreen(GALLERY_PAIR_CODE, "That is not an or2 pairing code. Run or2-pair on the host and scan the code it prints.",
                 CameraAccess(granted = false, denied = true) {}, {}, back = {})
             "pair-review" -> pairReview(listOf(key1, key2), KeyChoice.Existing("k1"), error = null)
-            "pair-review-new" -> pairReview(emptyList(), KeyChoice.New, error = "The host declined the key, so nothing was changed. Run or2-pair again to retry.")
-            "pair-progress" -> PairProgressScreen("dev", key1.fingerprint, cancel = {})
+            "pair-review-new" -> pairReview(emptyList(), KeyChoice.New, error = "Couldn't reach workstation on port 22. Pairing uses the same SSH port as connecting: the phone must reach it (same network, ZeroTier or Tailscale, or a public address).")
+            "pair-progress" -> PairProgressScreen("workstation", cancel = {})
             "pair-install" -> PairInstallKeyScreen("workstation", key1.openssh, key1.fingerprint, done = {})
             "keys" -> KeysScreen(listOf(key1, key2), false, { _, _ -> }, { _, _, _ -> }, {})
             "keys-empty" -> KeysScreen(emptyList(), false, { _, _ -> }, { _, _, _ -> }, {})
@@ -173,9 +176,9 @@ class UiGalleryActivity : ComponentActivity() {
     private fun pairReview(keys: List<KeyRecord>, choice: KeyChoice, error: String?) {
         val offer = remember {
             parsePairPayload(
-                "or2-pair:1?name=workstation&user=dev&port=22&a=100.101.102.103&a=192.168.1.20&a=workstation.local" +
+                "or2-pair:2?name=workstation&user=dev&port=22&a=100.101.102.103&a=192.168.1.20&a=workstation.local" +
                     "&hk=ssh-ed25519%20AAAAC3NzaC1lZDI1NTE5AAAAIAc39XUWT33SvSLy6vA7I83%2BXgmwnHmYtMQRjLeaZ2U7" +
-                    "&pair=192.168.1.20:41234&otp=AAAQEAYEAUDAOCAJBIFQYDIOB4",
+                    "&id=abcdefghijklm",
             )
         }
         PairReviewScreen(PairReview(offer, offer.name, offer.username, choice, error), keys, edit = { _, _, _ -> }, submit = {}, back = {})

@@ -58,6 +58,7 @@ import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Field
 import io.github.code_akram.or2.ui.Or2Icons
 import io.github.code_akram.or2.ui.Or2Sheet
+import io.github.code_akram.or2.ui.Or2Shapes
 import io.github.code_akram.or2.ui.Or2Type
 import io.github.code_akram.or2.ui.PillButton
 import io.github.code_akram.or2.ui.PrimaryButton
@@ -101,13 +102,13 @@ fun PairDestination(
 ) {
     when (state) {
         is PairState.Scanning -> PairScanScreen(
-            error = state.error, access = rememberCameraAccess(),
+            code = state.code.text, error = state.error, access = rememberCameraAccess(),
             onCode = { flow.onCode(it, keys) }, back = close,
         )
         is PairState.Review -> PairReviewScreen(
             state.review, keys, edit = flow::edit, submit = { flow.submit(keys, deviceLabel, generateKey) }, back = flow::rescan,
         )
-        is PairState.Submitting -> PairProgressScreen(state.review.username, state.phoneFingerprint, cancel = flow::cancel)
+        is PairState.Pairing -> PairProgressScreen(state.review.name.trim(), cancel = flow::cancel)
         is PairState.KeyToInstall -> PairInstallKeyScreen(state.host.label, state.keyLine, state.fingerprint, done)
         is PairState.Paired -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
             TopBar()
@@ -117,9 +118,15 @@ fun PairDestination(
     }
 }
 
-/** The camera (or a way to allow it) and a paste field: the two ways to hand over a pairing code. */
+/** The command to run on the host; the one line a person copies from this screen. */
+const val PAIR_COMMAND = "or2-pair"
+
+/**
+ * The pairing code to type on the host, then the camera (or a way to allow it) and a paste field: the two ways to hand
+ * over the host's QR. [code] is the phone's `K` (`7KQ4-M2XD-9PTM`).
+ */
 @Composable
-fun PairScanScreen(error: String?, access: CameraAccess, onCode: (String) -> Unit, back: () -> Unit) {
+fun PairScanScreen(code: String, error: String?, access: CameraAccess, onCode: (String) -> Unit, back: () -> Unit) {
     var pasting by rememberSaveable { mutableStateOf(false) }
     var pasted by remember { mutableStateOf("") }
     var asked by rememberSaveable { mutableStateOf(false) }
@@ -137,10 +144,24 @@ fun PairScanScreen(error: String?, access: CameraAccess, onCode: (String) -> Uni
             Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).testTag("pair-scan"),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(
-                "On the host, run or2-pair and scan the QR code it prints.",
-                style = Or2Type.Secondary, color = Or2Colors.TextMuted,
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                // The only large element of the app: it is read off the phone and typed on the host.
+                SelectionContainer {
+                    Text(
+                        code, style = Or2Type.PairCode, color = Or2Colors.Text, maxLines = 1,
+                        modifier = Modifier.padding(top = 4.dp).testTag("pair-code"),
+                    )
+                }
+                Text("Type this code into or2-pair on the host", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
+                Row(
+                    Modifier.fillMaxWidth().clip(Or2Shapes.Field).background(Or2Colors.SurfaceRaisedRow).padding(start = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(PAIR_COMMAND, style = Or2Type.Mono, color = Or2Colors.Text, modifier = Modifier.weight(1f).testTag("pair-command"))
+                    IconAction(Or2Icons.Copy, "Copy the command", { copyText(context, "or2-pair command", PAIR_COMMAND) }, Modifier.testTag("pair-copy-command"))
+                }
+                Text("Then scan the QR code it prints.", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
+            }
             if (!pasting) {
                 Box(
                     Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(24.dp)).background(Or2Colors.Crust).testTag("pair-camera").semantics(mergeDescendants = true) {},
@@ -172,7 +193,7 @@ fun PairScanScreen(error: String?, access: CameraAccess, onCode: (String) -> Uni
             }
             if (pasting) {
                 Or2Field(
-                    pasted, { pasted = it }, label = "Pairing code", placeholder = "or2-pair:1?…", singleLine = false,
+                    pasted, { pasted = it }, label = "Pairing code", placeholder = "or2-pair:2?…", singleLine = false,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
                     tag = "pair-paste-field",
                     trailing = {
@@ -192,6 +213,10 @@ fun PairScanScreen(error: String?, access: CameraAccess, onCode: (String) -> Uni
             BottomInsetSpacer()
         }
     }
+}
+
+private fun copyText(context: Context, label: String, text: String) {
+    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText(label, text))
 }
 
 private fun clipboardText(context: Context): String {
@@ -220,10 +245,10 @@ fun PairReviewScreen(
                 enabled = !review.working, tag = "pair-name")
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Or2Field(review.username, { edit(null, it, null) }, label = "Username", placeholder = "your-username",
-                    // With a listener the key is authorized for the account the code names, so it is not editable.
-                    enabled = !review.working && !review.listens, tag = "pair-username",
+                    // With a pairing id the key is authorized for the account the code names, so it is not editable.
+                    enabled = !review.working && !review.enrolls, tag = "pair-username",
                     errorText = if (review.username.isNotEmpty()) hostFieldError(review.username) else null)
-                if (review.listens) {
+                if (review.enrolls) {
                     Text("The host authorizes this key for ${review.username} only.", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
                 }
             }
@@ -254,8 +279,8 @@ fun PairReviewScreen(
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Key to authorize", style = Or2Type.Body, color = Or2Colors.Text)
                 Text(
-                    if (review.listens) "Its public half is added to authorized_keys on the host, after you confirm there."
-                    else "This code has no listener, so you add its public half to authorized_keys yourself afterwards.",
+                    if (review.enrolls) "Its public half is added to authorized_keys on the host."
+                    else "This code was made with --manual, so you add its public half to authorized_keys yourself afterwards.",
                     style = Or2Type.Secondary, color = Or2Colors.TextMuted,
                 )
                 GroupCard(Modifier.selectableGroup()) {
@@ -283,11 +308,11 @@ fun PairReviewScreen(
             }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 PrimaryButton(
-                    if (review.working) "Working…" else if (review.listens) "Pair and add host" else "Add host",
+                    if (review.working) "Working…" else if (review.enrolls) "Pair" else "Add host",
                     submit, Modifier.testTag("pair-submit"), enabled = review.valid && !review.working,
                 )
                 Text(
-                    if (review.listens) "Only the public key is sent. You confirm it on the host."
+                    if (review.enrolls) "Only the public key is sent, over SSH, with the code you typed on the host."
                     else "The host key above is trusted. Connecting needs the key installed first.",
                     style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.fillMaxWidth(),
                 )
@@ -298,9 +323,9 @@ fun PairReviewScreen(
     }
 }
 
-/** The key is with the host; its user is asked to confirm the fingerprint shown here. */
+/** The phone is logged in to the host and sending its key: one to a few seconds. */
 @Composable
-fun PairProgressScreen(user: String, phoneFingerprint: String, cancel: () -> Unit) {
+fun PairProgressScreen(name: String, cancel: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         TopBar(title = "Easy pair")
         Column(
@@ -309,20 +334,13 @@ fun PairProgressScreen(user: String, phoneFingerprint: String, cancel: () -> Uni
         ) {
             Spacer(Modifier.height(48.dp))
             Spinner(size = 32.dp)
-            Text("Confirm on the host", style = Or2Type.ScreenTitle, color = Or2Colors.Text, textAlign = TextAlign.Center)
-            SelectionContainer {
-                MonoBlock(phoneFingerprint, Modifier.testTag("pair-phone-fingerprint"))
-            }
-            Text(
-                "The host asks: Authorize this key for $user? Check that the fingerprint matches, then type y. It waits up to two minutes.",
-                style = Or2Type.Secondary, color = Or2Colors.TextMuted, textAlign = TextAlign.Center,
-            )
+            Text("Pairing with $name…", style = Or2Type.CardTitle, color = Or2Colors.Text, textAlign = TextAlign.Center, modifier = Modifier.testTag("pair-progress-title"))
             PillButton("Cancel", cancel, Modifier.testTag("pair-cancel"))
         }
     }
 }
 
-/** A code without a listener: the host is saved and trusted; the key is to be installed by hand. */
+/** A code made with --manual: the host is saved and trusted; the key is to be installed by hand. */
 @Composable
 fun PairInstallKeyScreen(hostLabel: String, keyLine: String, fingerprint: String, done: () -> Unit) {
     val context = LocalContext.current
