@@ -23,12 +23,30 @@ const KEEPALIVE_MAX: usize = 3;
 /// In-memory pipe between the transport and russh; see [`relay`].
 const PIPE_BYTES: usize = 65536;
 
-pub(crate) fn config() -> Arc<client::Config> {
-    Arc::new(client::Config {
-        keepalive_interval: Some(KEEPALIVE_INTERVAL),
-        keepalive_max: KEEPALIVE_MAX,
-        ..Default::default()
-    })
+/// The host connection's config. sshd presents a key of the first host-key algorithm the client
+/// lists that it has a key for, so the algorithms of the `trusted` keys are listed first (in
+/// russh's default order among themselves), then every other default one: a host with several
+/// keys presents a trusted one whatever its kind, and a host that has none of them still
+/// handshakes and gets the changed-key prompt. With nothing trusted it is russh's default order
+/// (ED25519 first).
+pub(crate) fn config(trusted: &[HostKey]) -> Arc<client::Config> {
+    let trusted: Vec<_> = trusted
+        .iter()
+        .map(|known| known.public_key().algorithm())
+        .collect();
+    with_host_key_algorithms(trusted_first(&trusted))
+}
+
+/// russh's default host-key algorithms, those that keys of the `trusted` algorithms sign with
+/// first.
+fn trusted_first(trusted: &[Algorithm]) -> Vec<Algorithm> {
+    let (mut first, others): (Vec<_>, Vec<_>) = Preferred::DEFAULT
+        .key
+        .iter()
+        .cloned()
+        .partition(|offered| trusted.iter().any(|key| verifies(offered, key)));
+    first.extend(others);
+    first
 }
 
 /// [`config`] that offers only the host-key algorithm of `pinned`: a host with several keys must
@@ -48,11 +66,24 @@ pub(crate) fn pinned_config(pinned: Algorithm) -> Arc<client::Config> {
         ],
         other => vec![other],
     };
+    with_host_key_algorithms(algorithms)
+}
+
+/// Whether host-key algorithm `offered` is one a key of algorithm `key` signs with: the same
+/// algorithm, or any RSA signature hash for an RSA key.
+fn verifies(offered: &Algorithm, key: &Algorithm) -> bool {
+    matches!(
+        (offered, key),
+        (Algorithm::Rsa { .. }, Algorithm::Rsa { .. })
+    ) || offered == key
+}
+
+fn with_host_key_algorithms(key: Vec<Algorithm>) -> Arc<client::Config> {
     Arc::new(client::Config {
         keepalive_interval: Some(KEEPALIVE_INTERVAL),
         keepalive_max: KEEPALIVE_MAX,
         preferred: Preferred {
-            key: Cow::Owned(algorithms),
+            key: Cow::Owned(key),
             ..Preferred::DEFAULT
         },
         ..Default::default()
@@ -272,4 +303,76 @@ where
         )
     };
     (ssh_stream, relay)
+}
+
+#[cfg(test)]
+mod tests {
+    use russh::keys::ssh_key::EcdsaCurve;
+
+    use super::*;
+
+    const P256: Algorithm = Algorithm::Ecdsa {
+        curve: EcdsaCurve::NistP256,
+    };
+    const P384: Algorithm = Algorithm::Ecdsa {
+        curve: EcdsaCurve::NistP384,
+    };
+    const P521: Algorithm = Algorithm::Ecdsa {
+        curve: EcdsaCurve::NistP521,
+    };
+    const RSA_SHA512: Algorithm = Algorithm::Rsa {
+        hash: Some(HashAlg::Sha512),
+    };
+    const RSA_SHA256: Algorithm = Algorithm::Rsa {
+        hash: Some(HashAlg::Sha256),
+    };
+    const RSA_SHA1: Algorithm = Algorithm::Rsa { hash: None };
+
+    #[test]
+    fn nothing_trusted_or_ed25519_trusted_keeps_the_default_order() {
+        assert_eq!(trusted_first(&[]), Preferred::DEFAULT.key.to_vec());
+        assert_eq!(trusted_first(&[])[0], Algorithm::Ed25519);
+        assert_eq!(
+            trusted_first(&[Algorithm::Ed25519]),
+            Preferred::DEFAULT.key.to_vec()
+        );
+    }
+
+    #[test]
+    fn the_trusted_keys_algorithms_come_first_and_every_other_one_stays_offered() {
+        // An RSA key signs with every RSA hash: all three come first, strongest first.
+        let rsa = trusted_first(&[RSA_SHA1]);
+        assert_eq!(rsa[..3], [RSA_SHA512, RSA_SHA256, RSA_SHA1]);
+        assert_eq!(rsa[3..], [Algorithm::Ed25519, P256, P384, P521]);
+
+        let ecdsa = trusted_first(&[P384]);
+        assert_eq!(
+            ecdsa,
+            [
+                P384,
+                Algorithm::Ed25519,
+                P256,
+                P521,
+                RSA_SHA512,
+                RSA_SHA256,
+                RSA_SHA1
+            ]
+        );
+
+        // Several trusted kinds keep the default order among themselves: ED25519 before RSA.
+        let both = trusted_first(&[RSA_SHA1, Algorithm::Ed25519]);
+        assert_eq!(
+            both[..4],
+            [Algorithm::Ed25519, RSA_SHA512, RSA_SHA256, RSA_SHA1]
+        );
+        assert_eq!(both.len(), Preferred::DEFAULT.key.len());
+    }
+
+    #[test]
+    fn the_pinned_config_offers_the_pinned_kind_only() {
+        let offered = |pinned| pinned_config(pinned).preferred.key.to_vec();
+        assert_eq!(offered(Algorithm::Ed25519), [Algorithm::Ed25519]);
+        assert_eq!(offered(P256), [P256]);
+        assert_eq!(offered(RSA_SHA1), [RSA_SHA512, RSA_SHA256, RSA_SHA1]);
+    }
 }

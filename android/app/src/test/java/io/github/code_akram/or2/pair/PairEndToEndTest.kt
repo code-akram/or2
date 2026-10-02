@@ -19,6 +19,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -129,7 +130,8 @@ class PairEndToEndTest {
 
     private fun world(): World {
         val user = System.getProperty("user.name")!!
-        val fixture = OpenSshFixture { directory ->
+        // ED25519, ECDSA and RSA host keys, like a real host: the code carries the ED25519 one.
+        val fixture = OpenSshFixture(everyHostKey = true) { directory ->
             // The forced command runs under sshd: it needs the CLI's test environment as well.
             listOf(
                 "OR2_PAIR_TEST_HOME=${directory.resolve("clihome")}", "OR2_PAIR_TEST_USER=$user",
@@ -204,11 +206,21 @@ class PairEndToEndTest {
                             try {
                                 holder.connect(connectable, bytes)
                                 val active = holder.host(connectable.id)!!
+                                // Every state the connection goes through, on the holder's main thread.
+                                val seen = mutableListOf<HostState>()
+                                val watching = launch { active.state.collect { seen += it } }
                                 // Straight to Connected: the pairing already trusted the host key.
                                 val state = withTimeout(10_000) {
                                     active.state.first { it is HostState.Connected || it is HostState.AwaitingHostKeyDecision || it is HostState.Closed }
                                 }
                                 assertTrue("expected Connected without a prompt, got $state", state is HostState.Connected)
+                                // What the app does on Connected (the capability probe and its watches) asks nothing either.
+                                withTimeout(10_000) {
+                                    active.capabilities.first { it != null }
+                                }
+                                assertTrue("still Connected after the probe, got ${active.state.value}", active.state.value is HostState.Connected)
+                                watching.cancel()
+                                assertFalse("a host-key prompt after pairing: $seen", seen.any { it is HostState.AwaitingHostKeyDecision })
                                 holder.disconnect(connectable.id)
                                 withTimeout(5_000) { active.state.first { it is HostState.Closed } }
                             } finally {

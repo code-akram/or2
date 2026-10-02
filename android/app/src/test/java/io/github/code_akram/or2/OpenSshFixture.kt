@@ -18,6 +18,11 @@ import java.util.concurrent.TimeUnit
  * never find or subscribe to a real herdr session.
  */
 internal class OpenSshFixture(
+    /**
+     * Also RSA 3072 and ECDSA P-256 host keys (made with `ssh-keygen`), configured before the ED25519 one as a stock
+     * `sshd_config` lists them: a host like most real ones. [hostPublicKey] stays the ED25519 key.
+     */
+    everyHostKey: Boolean = false,
     /** More `NAME=value` entries for the sessions' environment, from the fixture directory (no spaces in values). */
     extraSetEnv: (Path) -> List<String> = { emptyList() },
 ) : AutoCloseable {
@@ -57,7 +62,14 @@ internal class OpenSshFixture(
                 )
                 setExecutable(true)
             }
-            val settings = """
+            val otherKeys = if (!everyHostKey) "" else listOf("rsa" to "3072", "ecdsa" to "256").joinToString("") { (type, bits) ->
+                val file = directory.resolve("host_key_$type")
+                val made = ProcessBuilder("ssh-keygen", "-q", "-t", type, "-b", bits, "-N", "", "-C", "", "-f", file.toString())
+                    .redirectInput(ProcessBuilder.Redirect.from(java.io.File("/dev/null"))).start()
+                check(made.waitFor(30, TimeUnit.SECONDS) && made.exitValue() == 0) { "ssh-keygen -t $type failed" }
+                "HostKey $file\n"
+            }
+            val settings = otherKeys + """
                 ListenAddress ${InetAddress.getLoopbackAddress().hostAddress}
                 HostKey ${directory.resolve("host_key")}
                 AuthorizedKeysFile ${directory.resolve("authorized")}
