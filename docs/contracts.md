@@ -3732,8 +3732,10 @@ JVM tests for the routing and the button's visibility.
   to swipes, flings and the history key's page up. `TargetScroller` keeps at most one `scroll_target`
   in flight per terminal and sums the swipes meanwhile, tracks the lines scrolled up (a swipe down at
   the bottom sends nothing), and holds input: any key, text, paste or composer submit while the target
-  is away (or a call is in flight) sends `Bottom` and goes out, in order, once that call has returned
-  (also when it failed). `HostConnections.scrollTarget` uses the host's current connection (a mosh
+  is away (or a call is in flight) sends `Bottom` and goes out, in order and exactly once, only after
+  a `Bottom` has **succeeded**; a failed one keeps it held (superseded rule: it used to go out also
+  when the call failed; owner decision after the review, see "Fix: held input waits for a `Bottom`
+  that succeeds" below). `HostConnections.scrollTarget` uses the host's current connection (a mosh
   terminal outlives the one it opened on). The button (`ScrollToBottomButton`, a 28 dp disc in a 40 dp
   box at the terminal's bottom right, docs/ui.md) shows while `scrollToBottomVisible`; tapping it, or
   holding the history key, returns the target to `Bottom` and/or the viewport to its bottom.
@@ -3776,9 +3778,9 @@ next key went straight into copy mode. Now:
   recreated view send nothing: the user is still reading the history.
 - **Unconfirmed.** A `Bottom` that fails or is cancelled (unless another `Bottom` is already queued
   behind it) leaves the scroller `unconfirmed`, which counts as `away`: the button shows, and the next
-  input sends `Bottom` first and goes out once it has returned. Input held behind a failed `Bottom`
-  still goes out (typing is never dropped, as before), and the state stays unconfirmed, so every later
-  input tries again until one succeeds. A swipe down while unconfirmed is sent and does not clear it.
+  input sends `Bottom` first. A swipe down while unconfirmed is sent and does not clear it. *Superseded
+  by the fix below:* input held behind a failed `Bottom` no longer goes out; it waits for one that
+  succeeds.
 - Tests: `TargetScrollerTest` (a failed `Bottom` keeps the target away until one succeeds, a queued
   `Bottom` decides over a failed one, `leave` only while away, a cancelled `Bottom`),
   `HostConnectionsTerminalInputTest` (state kept across the swap with the button for the new view and
@@ -3786,6 +3788,46 @@ next key went straight into copy mode. Now:
   a failed hiding `Bottom` shows the button again and the next key waits for a successful one; a
   `Bottom` in flight when hidden is not cancelled; a shell has no scroller). Device test (compiled, not
   run here): `TerminalChromeDeviceTest.aTargetScrolledAwayBeforeTheViewExistedShowsTheButtonAlsoAfterTheSwapsNewView`.
+
+**Fix: held input waits for a `Bottom` that succeeds (Codex v0.1.1 fix check, P1; branch
+`v011/fix-2`).** The fix above still released input held behind a failed `Bottom`, and a failed `Down`
+could leave the local count at zero and release it too, so a key could still land in tmux's copy mode
+(or a scrolled herdr pane). **Owner decision after the review:** input typed while a tmux or herdr
+target is, or may be, scrolled away waits until a `Bottom` has **succeeded**, then goes out exactly
+once, in order. In `TargetScroller`:
+- **Any failed call is unconfirmed.** A `Bottom` that fails or is cancelled, and an `Up` or `Down` that
+  fails (it may or may not have moved the target), set `unconfirmed` (unless a `Bottom` is already
+  queued behind it, which decides); local positions are never trusted after a failure. While
+  unconfirmed the target is `away`: the button shows, and the next input needs a `Bottom` that
+  succeeds. Only a successful `Bottom` clears it; `bottom()` hides the button at once only when the
+  target was not unconfirmed (a first `Bottom` after a plain swipe up), so the button stays visible
+  while away or unconfirmed, also while a retry is out.
+- **Retries.** Input held behind a failed `Bottom` stays queued and `Bottom` is tried again after
+  `RETRY_DELAYS_MS` = 250 ms, 1 s, 2 s, then every 4 s, while the terminal's host connection is live
+  (`HostConnections.hostLive`: the host's current `ActiveHost` is `Connected` with a port, the
+  connection `scrollTarget` uses). When it is not live, the input stays held and the next try goes as
+  soon as it is live again (the delays then start over). Retrying stops, and the held input is
+  dropped, only when the terminal closes: `TargetScroller.close()` from the terminal's `Closed`
+  (`sessionState`) and from `retireTerminal` (dismiss); a closed scroller holds nothing and sends
+  nothing. Without held input a failed `Bottom` (hiding a terminal) is not retried: the button shows
+  and the next input or tap tries again.
+- **The button** (`jumpToBottom` → `bottom()`) tries a `Bottom` at once, replacing a waiting retry.
+- **Cap.** At most `MAX_HELD_BYTES` = 64 KiB are held (UTF-8 bytes of text, pastes and composer
+  submits plus one; a key counts `KEY_BYTES` = 8). An input that would pass the cap is dropped, the
+  newest (so what was typed first still goes out whole and in order); `TargetScroller.input` returns
+  false and the composer's `sendLine` then keeps its message.
+- Tests (each failed against the previous scroller, with only its API stubbed): `TargetScrollerTest`
+  `aKeyStaysHeldThroughAFailedBottomAndGoesOutOnceAfterOneSucceeds` (replaces
+  `aFailedCallStillReleasesTheTyping`: held through two failed `Bottom`s, out exactly once after the
+  third succeeds), `aFailedBottomIsRetriedWithABoundedBackoffWhileInputIsHeld` (sends at 0, 250 ms,
+  1.25 s, 3.25 s, then every 4 s; none after `close`), `aFailedDownKeepsTheTypingHeldUntilABottomSucceeds`,
+  `aFailedUpLeavesThePositionUnconfirmed`, `heldInputWaitsOutAConnectionDropAndGoesOutWhenItIsBack`
+  (no try while not live, however long), `heldInputIsCappedAndTheNewestPastTheCapIsDropped`,
+  `closingDropsTheHeldInputAndStopsRetrying`, `theButtonStaysWhileUnconfirmedAndTappingItTriesAtOnce`;
+  `HostConnectionsTerminalInputTest`
+  `inputHeldBehindAFailedBottomWaitsOutAHostDropAndReachesTheSurvivingMoshTerminalOnReconnect` (no
+  try while the host is closed, then the `Bottom` and the key over the new connection, once) and
+  `closingTheTerminalDropsItsHeldInputAndStopsRetrying`.
 
 ## Tap links and OSC 52 (lane Links)
 
@@ -3905,7 +3947,9 @@ probe host answers every move `Ok`, except one from a `pane_id` its view lacks (
   (`tmux::NavClients`, on `SshHost`); later window and pane moves act on the session that client
   shows now (one `list-clients` more), session moves keep switching it, and a client that is no
   longer listed (the terminal reattached) is forgotten. Before any session move a window or pane
-  move is one exec. A session move with no client attached to the target is `CommandFailed`.
+  move is one exec. A session move with no client attached to the target is `CommandFailed`
+  (superseded: a session move whose client is not identified is nothing to do, see "Fix: exact tmux
+  client identity").
   "Nowhere to go" (`no next window`, `no previous window`, `can't find next|previous session`) is
   `Ok`; tmux itself wraps windows and sessions around.
 - **herdr** (`or2_core::herdr::navigate_in`, the socket from the connection's `Directory` with the
@@ -3990,7 +4034,8 @@ state: `SessionHandle::client_id()` / `SessionDriver::client_id()`, FFI `Session
 (`None` for shell and herdr). An SSH session and the mosh session that replaces it are two sessions
 with two ids.
 
-**The attach records its client.** `tmux::attach_command(tmux, name, Some(id))` is `tmux -u
+**The attach records its client** (only on a tmux that takes `set-option -F`, 2.6 and later; see
+"Fix: exact tmux client identity"). `tmux::attach_command(tmux, name, Some(id))` is `tmux -u
 new-session -A -s <name> ; set-option -s -F @or2-client-<id> '#{client_name}'`: the second command
 of the same command list runs as the client that just attached, so the tmux server option
 `@or2-client-<id>` holds exactly that terminal's client name. The same argv goes to `mosh-server`
@@ -4005,7 +4050,8 @@ option name). `tmux::navigate` lists clients with `#{client_activity}:#{@or2-cli
 #{client_session}:#{client_name}`; the client whose name equals the recorded one is the terminal's
 (`TmuxClient.recorded`). The client of a session move is, in order: the recorded one; else (a tmux
 that could not run `set-option -F`) the one this terminal's earlier switch remembered, while it is
-listed; else the most recently active client on the target that no other terminal has claimed.
+listed; else the most recently active client on the target that no other terminal has claimed
+(superseded: only the recorded one, see "Fix: exact tmux client identity").
 `NavClients` is keyed by the client id (`NavKey::Client`), so two terminals on one target are two
 entries; a caller without an id keeps the old per-target key (`NavKey::Target`). Window and pane
 moves still cost one exec until this terminal's first session move, then one `list-clients` more
@@ -4046,3 +4092,61 @@ replaces it, then the mosh id), `HostContractTest.navigationCrossesTheFfi...` (`
 through the real FFI, a malformed id refused). The live two-terminal test fails with the identity
 withheld (`None`: "A after its next session: or2-a, expected or2-b"), and the JVM tests fail with
 `navigate` passing `null`.
+
+### Fix: exact tmux client identity, or no session move (branch `v011/fix-2`)
+
+Codex v0.1.1 fix check, P2: the old-tmux fallback guessed. Without a record, a terminal's first session
+move switched the most recently active unclaimed client on the target, which need not be its own; and
+the `set-option -F` step was appended to every attach, so a tmux that cannot parse it would reject the
+whole command list, attach included.
+
+**The step only where tmux takes it.** The program probe now also runs `tmux -V` (only when tmux is
+found, standard input closed, errors silenced) inside `PROBE_SCRIPT`, printing
+`or2:tmux-version:<answer>`: no extra exec or round trip, cached with the program probe for the
+connection's life. `probe::parse` sets the core-only `HostCapabilities.tmux_records_clients`
+(`tmux::records_clients`; not exported over the FFI, `API_VERSION` stays 14). `set-option -F` came in
+**tmux 2.6** (tmux CHANGES, "2.5 to 2.6": "add -F flag to expand them in option values");
+`#{client_name}` (2.4), user options (1.8) and server options (1.2) are older, so 2.6 is the bar
+(`RECORDS_CLIENTS_SINCE`). Accepted: `tmux X.Y` with any suffix (`3.3a`, `3.0-rc5`) at 2.6 or later,
+`tmux next-X.Y` the same, `tmux master`, and `tmux openbsd-X.Y` from OpenBSD 6.3 (its base tmux is
+newer than 2.6). Anything else, an older version, or no answer: `false`.
+*Decision:* a version gate rather than probing the option itself. A probe of `set-option -F` needs a
+tmux server (starting one, or touching the user's, as a side effect of connecting), and an old tmux
+client rejects an unknown flag before it ever reaches a server while tmux 3.x defers parsing to the
+server, so a server-less parse check cannot tell the two apart. `tmux -V` is answered by the client
+alone on every version, costs nothing extra in the probe, and a wrong "no" only disables session
+moves, never breaks an attach. A tmux that passes the gate but still fails the step at run time
+(after the attach, as the attached client) only shows tmux's message on its status line; nothing is
+recorded and the identity is unknown, handled as below.
+- `terminal_session::plan` (SSH and mosh alike) passes the client id to `tmux::attach_command` only
+  when `tmux_records_clients`; otherwise the attach is the plain `tmux -u new-session -A -s <name>`.
+  The session still has its client id (`Session.client_id()` is unchanged), and Kotlin still passes it.
+- The release (`release_tmux_client`) runs `set-option -u` only for a tmux that records; the
+  connection's `NavClients` entry is always dropped.
+
+**No guess: an unknown client is nothing to do.** `tmux::navigate` returns `NavOutcome { Ran,
+ClientUnknown }`. A session move (`switch-client`) needs the terminal's own client, the one listed
+with its recorded name; with no client id (none given, or one dropped because the host's tmux cannot
+record), or nothing recorded under it (no server, the record gone), it is `ClientUnknown`: nothing is
+switched and no error. `HostHandle::navigate` (so `HostConnection.navigate`) maps it to `Ok(())`, the
+FFI's existing "nothing to do" (as for a `Shell` target or a move with nowhere to go), so Kotlin needs
+no change: no move, no error (a gesture has no error UI anyway). The "most recently active unclaimed
+client" guess, `NavKey::Target` and `NavClients::others` are gone; `NavClients` is keyed by client id
+only, and a remembered client whose record is no longer listed is forgotten (window and pane moves
+then act on the target). Window and pane moves act on a session, not a client, and are unchanged:
+on the target, or on the session the terminal's recorded client was switched to.
+
+**Tests.** Rust: `probe::tests::tmux_records_clients_only_from_a_version_that_can`; `tmux` unit tests
+`only_a_tmux_that_takes_set_option_f_records_clients` (versions), `clients_parse_and_only_the_recorded_one_is_the_terminals`,
+`a_session_move_switches_the_recorded_client_and_later_moves_follow_it`,
+`moves_with_nowhere_to_go_succeed_and_real_failures_are_reported`,
+`without_a_record_a_session_move_switches_nothing` (no id: nothing runs; an id with nothing recorded:
+one `list-clients`, no `switch-client`, though the target has clients; window and pane moves still run),
+and the two-terminal test keyed by id; `tests/host_nav.rs`
+`an_old_tmux_attaches_plainly_and_its_session_moves_do_nothing` (a `tmux` wrapper first on the sshd
+sessions' `PATH` answers `-V` with `tmux 2.5` and refuses any command list with `set-option -F`, like an
+old tmux client: the attach is the plain argv and attaches, session moves return `Ok` and switch
+nothing, window and pane moves act on the target, nothing ever runs `set-option` or `switch-client`;
+against the previous code the attach never attached), the first live test now passes the terminal's
+id (and checks that a session move without one switches nothing), and the live two-client test still
+passes.
