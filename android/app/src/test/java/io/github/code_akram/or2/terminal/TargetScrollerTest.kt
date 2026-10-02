@@ -7,8 +7,11 @@ import io.github.code_akram.or2.ffi.TerminalTarget
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.plus
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
@@ -67,7 +70,7 @@ class TargetScrollerTest {
     }
 
     private fun TestScope.scroller(calls: Calls, away: MutableList<Boolean> = mutableListOf()) =
-        TargetScroller(this, calls::send) { away += it }
+        TargetScroller(this, calls::send, onAwayChanged = { away += it })
 
     @Test fun swipesAreCoalescedWithOneCallInFlight() = runTest {
         val gate = CompletableDeferred<Unit>()
@@ -165,21 +168,213 @@ class TargetScrollerTest {
         assertEquals(listOf(TargetScroll.Up(1u), TargetScroll.Down(3u)), calls.sent)
     }
 
-    @Test fun aFailedCallStillReleasesTheTyping() = runTest {
+    @Test fun aKeyStaysHeldThroughAFailedBottomAndGoesOutOnceAfterOneSucceeds() = runTest {
         val calls = Calls()
         val scroller = scroller(calls)
         scroller.scroll(-4)
         runCurrent()
         calls.failure = IllegalStateException("the host did not answer in time")
         val typed = mutableListOf<String>()
-        scroller.input { typed += "z" }
+        assertTrue(scroller.input { typed += "z" })
         runCurrent()
-        assertEquals(listOf("z"), typed)
         assertEquals(listOf(TargetScroll.Up(4u), TargetScroll.Bottom), calls.sent)
+        // tmux may still be in copy mode: the key waits, the button shows.
+        assertTrue("held while the target may be away", typed.isEmpty())
+        assertTrue(scroller.unconfirmed)
+        assertTrue(scroller.awayState.value)
+        assertFalse(scroller.idle)
+        // The retry fails too: still held.
+        advanceTimeBy(TargetScroller.RETRY_DELAYS_MS[0])
+        runCurrent()
+        assertEquals(3, calls.sent.size)
+        assertTrue(typed.isEmpty())
+        // The next one succeeds: the key goes out, exactly once.
+        calls.failure = null
+        advanceTimeBy(TargetScroller.RETRY_DELAYS_MS[1])
+        runCurrent()
+        assertEquals(listOf(TargetScroll.Up(4u), TargetScroll.Bottom, TargetScroll.Bottom, TargetScroll.Bottom), calls.sent)
+        assertEquals(listOf("z"), typed)
+        assertFalse(scroller.away)
         assertTrue(scroller.idle)
-        // tmux may still be in copy mode: the button stays and the next input tries Bottom again.
+        advanceUntilIdle()
+        assertEquals(listOf("z"), typed)
+        assertEquals(4, calls.sent.size)
+    }
+
+    @Test fun aFailedBottomIsRetriedWithABoundedBackoffWhileInputIsHeld() = runTest {
+        val times = mutableListOf<Long>()
+        val failing = Calls()
+        val timed = TargetScroller(this, { scroll -> times += testScheduler.currentTime; failing.send(scroll) })
+        timed.scroll(-1)
+        runCurrent()
+        failing.failure = IllegalStateException("not connected")
+        timed.input { }
+        runCurrent()
+        advanceTimeBy(20_000)
+        runCurrent()
+        val bottoms = times.drop(1)
+        // At once, then 250 ms, 1 s, 2 s and every 4 s after.
+        assertEquals(listOf(0L, 250L, 1_250L, 3_250L, 7_250L, 11_250L, 15_250L, 19_250L), bottoms)
+        timed.close()
+        advanceTimeBy(60_000)
+        assertEquals(8, times.size - 1)
+    }
+
+    @Test fun aFailedDownKeepsTheTypingHeldUntilABottomSucceeds() = runTest {
+        val calls = Calls()
+        val scroller = scroller(calls)
+        scroller.scroll(-3)
+        runCurrent()
+        val gate = CompletableDeferred<Unit>()
+        calls.gate = gate
+        scroller.scroll(3) // Down to the bottom, as far as this terminal knows...
+        runCurrent()
+        assertFalse(scroller.away)
+        val typed = mutableListOf<String>()
+        scroller.input { typed += "x" }
+        // ...but the Down fails: the target may not have moved, so the key needs a Bottom that succeeds.
+        calls.failure = IllegalStateException("the host did not answer in time")
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(listOf(TargetScroll.Up(3u), TargetScroll.Down(3u), TargetScroll.Bottom), calls.sent)
+        assertTrue(typed.isEmpty())
+        assertTrue(scroller.unconfirmed)
+        assertTrue(scroller.awayState.value)
+        calls.failure = null
+        advanceTimeBy(TargetScroller.RETRY_DELAYS_MS[0])
+        runCurrent()
+        assertEquals(listOf("x"), typed)
+        assertFalse(scroller.away)
+    }
+
+    @Test fun aFailedUpLeavesThePositionUnconfirmed() = runTest {
+        val calls = Calls()
+        val scroller = scroller(calls)
+        calls.failure = IllegalStateException("not connected")
+        scroller.scroll(-2)
+        runCurrent()
         assertTrue(scroller.unconfirmed)
         assertTrue(scroller.away)
+        // A swipe back down is sent (how far up is unknown) and does not confirm anything.
+        calls.failure = null
+        scroller.scroll(2)
+        runCurrent()
+        assertEquals(0L, scroller.awayLines)
+        assertTrue(scroller.away)
+        val typed = mutableListOf<String>()
+        scroller.input { typed += "u" }
+        runCurrent()
+        assertEquals(listOf(TargetScroll.Up(2u), TargetScroll.Down(2u), TargetScroll.Bottom), calls.sent)
+        assertEquals(listOf("u"), typed)
+        assertFalse(scroller.away)
+    }
+
+    @Test fun heldInputWaitsOutAConnectionDropAndGoesOutWhenItIsBack() = runTest {
+        val calls = Calls()
+        val live = MutableStateFlow(true)
+        val scroller = TargetScroller(this, calls::send, live)
+        scroller.scroll(-2)
+        runCurrent()
+        live.value = false
+        calls.failure = IllegalStateException("not connected")
+        val typed = mutableListOf<String>()
+        scroller.input { typed += "a" }
+        scroller.input { typed += "b" }
+        runCurrent()
+        assertEquals(listOf(TargetScroll.Up(2u), TargetScroll.Bottom), calls.sent)
+        // No retries while the connection is down, however long.
+        advanceTimeBy(600_000)
+        runCurrent()
+        assertEquals(2, calls.sent.size)
+        assertTrue(typed.isEmpty())
+        // Back: the next Bottom goes at once and the input follows it, in order, once.
+        calls.failure = null
+        live.value = true
+        runCurrent()
+        assertEquals(listOf(TargetScroll.Up(2u), TargetScroll.Bottom, TargetScroll.Bottom), calls.sent)
+        assertEquals(listOf("a", "b"), typed)
+        advanceUntilIdle()
+        assertEquals(listOf("a", "b"), typed)
+    }
+
+    @Test fun heldInputIsCappedAndTheNewestPastTheCapIsDropped() = runTest {
+        val calls = Calls()
+        val scroller = scroller(calls)
+        scroller.scroll(-1)
+        runCurrent()
+        val gate = CompletableDeferred<Unit>()
+        calls.gate = gate
+        val typed = mutableListOf<String>()
+        val max = TargetScroller.MAX_HELD_BYTES
+        assertTrue(scroller.input(max - 10) { typed += "big" })
+        assertFalse("past the cap", scroller.input(11) { typed += "over" })
+        assertTrue(scroller.input(10) { typed += "fits" })
+        assertEquals(max, scroller.heldSize)
+        assertFalse(scroller.input(1) { typed += "full" })
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(listOf("big", "fits"), typed)
+        assertEquals(0, scroller.heldSize)
+        // Room again once released.
+        assertTrue(scroller.input(max) { typed += "again" })
+        assertEquals("at the bottom it goes at once", "again", typed.last())
+    }
+
+    @Test fun inputIsCountedInUtf8Bytes() {
+        assertEquals(1 + 2 + 3 + 4, utf8Length("aé€😀"))
+        assertEquals(0, utf8Length(""))
+    }
+
+    @Test fun closingDropsTheHeldInputAndStopsRetrying() = runTest {
+        val calls = Calls()
+        val scroller = scroller(calls)
+        scroller.scroll(-1)
+        runCurrent()
+        calls.failure = IllegalStateException("not connected")
+        val typed = mutableListOf<String>()
+        scroller.input { typed += "q" }
+        runCurrent()
+        assertEquals(2, calls.sent.size)
+        scroller.close()
+        assertEquals(0, scroller.heldSize)
+        calls.failure = null
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals("no retry after the close", 2, calls.sent.size)
+        assertTrue("dropped, never sent", typed.isEmpty())
+        // Nothing is held for a closed terminal: its session refuses what comes.
+        scroller.input { typed += "late" }
+        assertEquals(listOf("late"), typed)
+        scroller.bottom()
+        runCurrent()
+        assertEquals(2, calls.sent.size)
+    }
+
+    @Test fun theButtonStaysWhileUnconfirmedAndTappingItTriesAtOnce() = runTest {
+        val calls = Calls()
+        val scroller = scroller(calls)
+        scroller.scroll(-5)
+        runCurrent()
+        calls.failure = IllegalStateException("not connected")
+        val typed = mutableListOf<String>()
+        scroller.input { typed += "t" }
+        runCurrent()
+        assertTrue(scroller.awayState.value)
+        // The tap: a Bottom now, without waiting for the retry's delay. The button stays while it is out.
+        calls.failure = null
+        val gate = CompletableDeferred<Unit>()
+        calls.gate = gate
+        scroller.bottom()
+        runCurrent()
+        assertEquals(listOf(TargetScroll.Up(5u), TargetScroll.Bottom, TargetScroll.Bottom), calls.sent)
+        assertTrue("still unconfirmed while it is out", scroller.awayState.value)
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(listOf("t"), typed)
+        assertFalse(scroller.awayState.value)
+        // The retry it replaced never fires.
+        advanceUntilIdle()
+        assertEquals(3, calls.sent.size)
     }
 
     @Test fun aFailedBottomKeepsTheTargetAwayUntilABottomSucceeds() = runTest {
@@ -190,7 +385,7 @@ class TargetScrollerTest {
         runCurrent()
         calls.failure = IllegalStateException("not connected")
         scroller.bottom()
-        assertFalse("optimistic while the Bottom is out", scroller.away)
+        assertFalse("optimistic while the first Bottom is out", scroller.away)
         runCurrent()
         assertTrue(scroller.away)
         assertTrue(scroller.awayState.value)

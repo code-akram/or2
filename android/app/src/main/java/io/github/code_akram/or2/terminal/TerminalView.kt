@@ -116,8 +116,8 @@ class TerminalView(context: Context) : View(context) {
     val horizontalInset = Or2Dimens.TerminalInset.value * resources.displayMetrics.density
     private var inputConnection: TerminalInputConnection? = null
     val input = TerminalInput(
-        { text -> clearSelection(); atBottom { sessionCall { sendText(text) } } },
-        { key -> clearSelection(); atBottom { sessionCall { sendKey(key) } } },
+        { text -> clearSelection(); atBottom(utf8Length(text)) { sessionCall { sendText(text) } } },
+        { key -> clearSelection(); atBottom(TargetScroller.KEY_BYTES) { sessionCall { sendKey(key) } } },
         { invalidate(); onInputChanged() },
     )
     var selection: TerminalSelection? = null
@@ -313,9 +313,10 @@ class TerminalView(context: Context) : View(context) {
         clearSelection()
         input.discardComposition()
         var taken: Boolean? = null
-        atBottom { taken = sessionCall { submitText(text) } }
+        val accepted = atBottom(utf8Length(text) + 1) { taken = sessionCall { submitText(text) } }
         // Held behind the target's Bottom: it goes out once tmux or herdr is back at the live screen.
-        return taken ?: (connected && !session.gone)
+        // Past the held-input cap it was dropped: the composer keeps the message.
+        return taken ?: (accepted && connected && !session.gone)
     }
 
     fun showKeyboard() {
@@ -565,10 +566,14 @@ class TerminalView(context: Context) : View(context) {
     /** Whether the scroll-to-bottom button should show now (what [onScrolledAwayChanged] last reported). */
     val scrolledAway get() = reportedAway
 
-    /** Runs [send] at once, or after the target's `Bottom` while it is scrolled away (no typing into copy mode). */
-    private fun atBottom(send: () -> Unit) {
-        val targets = targetScroller
-        if (targets == null) send() else targets.input(send)
+    /**
+     * Runs [send] at once, or once the target's `Bottom` has succeeded while it is (or may be) scrolled
+     * away: no typing into copy mode. [bytes] counts against the held-input cap; false when it was
+     * dropped there.
+     */
+    private fun atBottom(bytes: Int, send: () -> Unit): Boolean {
+        val targets = targetScroller ?: return true.also { send() }
+        return targets.input(bytes, send)
     }
 
     private fun updateScrolledAway() {

@@ -1,11 +1,14 @@
 package io.github.code_akram.or2.connection
 
+import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.TransportPref
+import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.KeyInput
 import io.github.code_akram.or2.ffi.KeyModifiers
+import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TargetScroll
 import io.github.code_akram.or2.ffi.TerminalKey
@@ -17,7 +20,9 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
 import org.junit.Test
@@ -32,7 +37,9 @@ import org.junit.Test
 class HostConnectionsTerminalInputTest {
     private val tmux = TerminalTarget.Tmux("main")
 
-    private class Rig(val holder: HostConnections, val port: FakePort, val active: ActiveHost)
+    private class Rig(
+        val holder: HostConnections, val port: FakePort, val active: ActiveHost, val host: Host, val listener: () -> HostListener,
+    )
 
     /** An AUTO host whose UDP is untested: a tmux terminal opens over SSH with mosh in the background. */
     private suspend fun TestScope.rig(): Rig {
@@ -46,7 +53,7 @@ class HostConnectionsTerminalInputTest {
         port.nativeState = HostState.Connected(0u)
         listener!!.onHostStateChanged(HostState.Connected(0u))
         advanceUntilIdle()
-        return Rig(holder, port, holder.host(host.id)!!)
+        return Rig(holder, port, holder.host(host.id)!!, host) { listener!! }
     }
 
     private fun TestScope.state(rig: Rig, index: Int, state: SessionState) {
@@ -215,7 +222,7 @@ class HostConnectionsTerminalInputTest {
         assertTrue(scroller.unconfirmed)
         assertTrue(scroller.awayState.value)
 
-        // The next key waits for a Bottom that succeeds, then goes out.
+        // The next key waits for a Bottom that succeeds, then goes out (never after a failed one).
         rig.port.scrollFailure = null
         rig.port.scrollGate = CompletableDeferred()
         val ssh = rig.port.terminals[0].third
@@ -246,6 +253,65 @@ class HostConnectionsTerminalInputTest {
         assertTrue(scroller.idle)
         assertFalse(scroller.unconfirmed)
         assertFalse(scroller.awayState.value)
+    }
+
+    @Test
+    fun inputHeldBehindAFailedBottomWaitsOutAHostDropAndReachesTheSurvivingMoshTerminalOnReconnect() = runTest {
+        val rig = rig()
+        val terminal = rig.holder.openTerminal(rig.active, tmux)
+        state(rig, 0, SessionState.Connected)
+        state(rig, 1, SessionState.Connected) // Swapped to mosh, which outlives the SSH connection.
+        val mosh = rig.port.terminals[1].third
+        val scroller = terminal.targetScroller!!
+        scroller.scroll(-3)
+        advanceUntilIdle()
+
+        // The host connection drops; a key typed meanwhile is held behind a Bottom that fails.
+        rig.listener().onHostStateChanged(HostState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("reset"))))
+        runCurrent()
+        rig.port.scrollFailure = HostException.NotConnected()
+        type(terminal, view(terminal), "k")
+        runCurrent()
+        assertEquals(listOf(TargetScroll.Up(3u), TargetScroll.Bottom), scrolls(rig))
+        // No retries while there is no connection to retry on, however long; the key stays held.
+        advanceTimeBy(600_000)
+        runCurrent()
+        assertEquals(2, rig.port.scrolls.size)
+        assertTrue(mosh.inputs.isEmpty())
+        assertTrue(scroller.awayState.value)
+
+        // Reconnected: the Bottom goes at once over the new connection, then the key, once.
+        rig.port.scrollFailure = null
+        rig.holder.connect(rig.host, byteArrayOf(1))
+        rig.port.nativeState = HostState.Connected(0u)
+        rig.listener().onHostStateChanged(HostState.Connected(0u))
+        advanceUntilIdle()
+        assertEquals(listOf(TargetScroll.Up(3u), TargetScroll.Bottom, TargetScroll.Bottom), scrolls(rig))
+        assertEquals(listOf("text:k"), mosh.inputs)
+        assertFalse(scroller.awayState.value)
+    }
+
+    @Test
+    fun closingTheTerminalDropsItsHeldInputAndStopsRetrying() = runTest {
+        val rig = rig()
+        val terminal = rig.holder.openTerminal(rig.active, tmux)
+        state(rig, 0, SessionState.Connected)
+        val ssh = rig.port.terminals[0].third
+        val scroller = terminal.targetScroller!!
+        scroller.scroll(-2)
+        advanceUntilIdle()
+        rig.port.scrollFailure = HostException.NotConnected()
+        type(terminal, view(terminal), "z")
+        runCurrent()
+        assertEquals(listOf(TargetScroll.Up(2u), TargetScroll.Bottom), scrolls(rig))
+        rig.port.terminals[0].second.onStateChanged(SessionState.Closed(CloseReason.Disconnected))
+        runCurrent()
+        assertTrue(scroller.closed)
+        assertEquals(0, scroller.heldSize)
+        rig.port.scrollFailure = null
+        advanceUntilIdle()
+        assertEquals("no retry after the close", 2, rig.port.scrolls.size)
+        assertTrue(ssh.inputs.isEmpty())
     }
 
     @Test

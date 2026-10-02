@@ -35,15 +35,21 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -847,6 +853,18 @@ class HostConnections(
         port.scrollTarget(terminal.target, focusedHerdrPane(current, terminal.target), scroll)
     }
 
+    /**
+     * Whether [hostId]'s current connection (whichever [scrollTarget] would use) is up: a terminal's
+     * input held behind a failed `Bottom` retries while it is, and as soon as it is again.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun hostLive(hostId: Long): Flow<Boolean> = mutableHosts
+        .flatMapLatest { hosts ->
+            val current = hosts[hostId] ?: return@flatMapLatest flowOf(false)
+            combine(current.state, current.mutablePort) { state, port -> state is HostState.Connected && port != null }
+        }
+        .distinctUntilChanged()
+
     private fun focusedHerdrPane(current: ActiveHost, target: TerminalTarget): String? {
         val herdr = target as? TerminalTarget.Herdr ?: return null
         val watch = current.mutableWatches.value.firstOrNull { it.session == herdr.session }
@@ -878,7 +896,9 @@ class HostConnections(
         val session = port.openTerminal(target, plan.transport, 80u, 24u, plan.moshBudgetMs, sessionListener(terminal, current, attempt = 0))
         nextTerminalId++
         // The holder's scope, not a view's: a Bottom sent as the terminal is hidden is not cancelled with the view.
-        if (target !is TerminalTarget.Shell) terminal.targetScroller = TargetScroller(scope, { scroll -> scrollTarget(terminal, scroll) })
+        if (target !is TerminalTarget.Shell) {
+            terminal.targetScroller = TargetScroller(scope, { scroll -> scrollTarget(terminal, scroll) }, hostLive(current.host.id))
+        }
         terminal.mutableTransport.value = session.transport()
         terminal.mutableHandle.value = session
         mutableTerminals.value += terminal
@@ -1071,8 +1091,12 @@ class HostConnections(
             // Any mosh terminal that connects shows UDP gets through on this connection.
             if (terminal.mutableTransport.value == TerminalTransport.MOSH) setVerdict(current, UdpVerdict.OK)
         }
-        // The terminal is over: its background attempt has nothing left to replace.
-        if (state is SessionState.Closed) cancelBackground(terminal)
+        // The terminal is over: its background attempt has nothing left to replace, and input held
+        // behind its target's Bottom has no session left to go to.
+        if (state is SessionState.Closed) {
+            cancelBackground(terminal)
+            terminal.targetScroller?.close()
+        }
         terminal.mutableState.value = state
         if (state is SessionState.Closed) timing.forgetTerminal(terminal.id)
         // Nothing is heard on a closed session: its last health must not keep saying "Last heard N s ago".
@@ -1273,7 +1297,7 @@ class HostConnections(
      * left; not the swap's new view, which shows the same terminal): a tmux or herdr target scrolled
      * into its history goes back to its live screen, best effort, in the holder's scope. When that
      * fails the terminal stays scrolled away (`TargetScroller.unconfirmed`): the button shows when it is
-     * shown again, and the next input sends `Bottom` first.
+     * shown again, and the next input waits for a `Bottom` that succeeds.
      */
     fun hideTerminal(terminal: ActiveTerminal) {
         terminal.targetScroller?.leave()
@@ -1291,6 +1315,7 @@ class HostConnections(
         terminal.retired = true
         terminal.disconnectRequested = true
         cancelBackground(terminal)
+        terminal.targetScroller?.close()
         terminal.mutableHandle.value?.disconnect()
         closeRetired(terminal)
     }
