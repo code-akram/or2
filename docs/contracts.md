@@ -4477,6 +4477,70 @@ timeout.
   (not connected; success updates the notification; failure keeps Reply; nothing logged). Device (compile):
   the action exists with a RemoteInput.
 
+**Implemented (lane Reply).**
+
+- **Rust.** `herdr::reply_in` (`core/or2-core/src/herdr/reply.rs`) sends `agent.prompt` (target: the pane id, no
+  wait) and returns `Prompted`. On `agent_blocked` **or `agent_not_ready`** it sends `pane.send_text`, sleeps
+  `submit::SUBMIT_ENTER_DELAY` (100 ms, the composer's), then `pane.send_keys ["Enter"]`: `Typed`. On
+  `agent_not_found` it is `PaneNotFound` and nothing is typed. Every request uses the connection's `Directory`
+  and the scroll module's one-request helper (now `call`/`call_raw`), so a stale cached socket is rediscovered
+  once. `HostHandle::reply_to_pane` validates first: names as for terminal targets, an empty text is
+  `InvalidName` (Enter alone could answer a dialog), and more than `MAX_REPLY_BYTES` (4096 bytes of UTF-8) is the
+  new `HostError::TooLarge`. Then `HostCommand::ReplyToPane` goes to the connection, which waits only for the
+  program probe (as the other herdr calls do), and the call is bounded by `QUERY_TIMEOUT`. FFI:
+  `HostConnection.reply_to_pane`, `ReplyRoute { Prompted, Typed }`, `HostError::TooLarge`. The contract probe
+  answers `Typed` for its blocked agent `w1:p1`, `Prompted` for `w1:p2` and `w2:p1`, and `PaneNotFound` for any
+  other pane.
+- **Deviation: `agent_not_ready` is typed too.** herdr 0.9.3 refuses `agent.prompt` with `agent_not_ready` ("not
+  an active named agent") for every agent it did not start itself with `herdr agent start`. That includes reported
+  agents and Claude Code panes detected through herdr's hooks. Without the fallback, a reply to a Done or idle
+  agent of that kind would fail. `agent_not_found` (no agent in the pane, or no pane) is the one refusal that
+  never types: a reply must not run as a command in a shell.
+- **Kotlin.** Every agent notification carries a **Reply** action:
+  - It has a `RemoteInput` (`Reply to <agent>`), `SEMANTIC_ACTION_REPLY` and no generated replies.
+  - Its PendingIntent is a mutable broadcast with an explicit component: `notify.AgentReplyReceiver`, declared
+    `exported="false"`.
+  - The pane is named only in the intent's data (`or2-agent-reply:<tag>`), which a fill-in cannot change. The
+    title, status and host in the extras are used only for display. A fill-in's extras never override ours.
+  - The receiver (`goAsync`) hands the alert and the RemoteInput text to `AgentReplies` on the main dispatcher.
+  - `AgentReplies` calls `HostConnections.replyToPane(hostId, session, paneId, text)`. That uses the host's
+    current connection only when it is live and `Connected`, else `HostException.NotConnected`, and it never
+    connects.
+  - The outcome replaces the notification through `AgentAlerts.replied`, only while it is still up. A pane that
+    went back to `Working` (often because of the reply) or was opened stays cancelled. Every re-post is
+    `setOnlyAlertOnce` and keeps the Reply action.
+  - On success: `Sent`, with a `MessagingStyle` history of the agent's line (`Needs input`/`Done`) and the reply
+    from "You".
+  - On failure: `Not sent: <host> is not connected` (also for `Closed`), `the agent is gone` (`PaneNotFound`),
+    `the reply is too long`, `<program> is not installed on <host>`, the `CommandFailed` reason (80 characters at
+    most), or `herdr refused it`. A blank reply is `Not sent: the reply is empty` and is not sent. A 45 s Kotlin
+    bound (above Rust's 30 s query timeout) gives `Not sent: the host did not answer`.
+  - The text is not logged anywhere, and `AgentAlert.toString()` leaves the reply out. After sending it is kept
+    only in the notification's quote.
+- **Tests.**
+  - Rust (herdr fake), `herdr::reply`: a working or idle agent is `Prompted`, one or several lines, with nothing
+    typed. `agent_blocked` and `agent_not_ready` each lead to `Typed`: the text, then Enter at least the pause
+    later (paused clock). `agent_not_found`, and a pane gone before the typing, are `PaneNotFound` with no Enter.
+    Other refusals are `Failed`.
+  - Rust, `host`: validation (names, empty, 4 KiB allowed, one byte more `TooLarge`, `NotConnected`) and the
+    command's reply.
+  - Rust, `ssh::connection` (in-process SSH server playing herdr): `Prompted`, then `Typed` as prompt, text and
+    `["Enter"]` in that order, then `PaneNotFound` with nothing typed, then `Closed` after a disconnect. A host
+    without herdr is `NotInstalled`.
+  - Live herdr suite, `a_reply_reaches_an_agent_panes_input_and_is_submitted`: `cat` runs in an isolated pane.
+    A reply to a reported agent that is blocked (then working, refused as `agent_not_ready`) is `Typed`, and `cat`
+    prints it a second time, so the Enter arrived. A plain shell pane and a missing pane are `PaneNotFound`, with
+    nothing typed.
+  - JVM: `AgentRepliesTest` covers not connected, sent (both routes), every failure reason with Reply kept,
+    blank, timeout, `launch` finishing the broadcast, the reply never printed, the intent parse, and an outcome
+    replacing only a notification that is still up. `HostConnectionsReplyTest` covers no connection, connecting,
+    connected, a failure, lost with no reconnect, and no text in the timing log. `HostContractTest` crosses the
+    FFI to the probe (routes, `PaneNotFound`, `TooLarge`, `InvalidName`, `Closed`). `SessionMessagesTest` covers
+    the `TooLarge` message.
+  - Device (compile), `AgentNotificationsDeviceTest`: the alert, a failure and a sent update each have one Reply
+    action with the RemoteInput and a mutable broadcast PendingIntent of the app. The intent round-trips. A sent
+    update is only-alert-once and quotes two messages.
+
 ## Image paste (lane Paste)
 
 - **Sources**, each ending in the same upload:

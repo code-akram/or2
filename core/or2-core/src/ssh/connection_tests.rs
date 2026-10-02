@@ -295,6 +295,9 @@ struct Shared {
     herdr_list: Mutex<HerdrList>,
     /// The panes herdr was asked to focus, in order (`w9:p9` does not exist).
     focused: Mutex<Vec<String>>,
+    /// The reply requests herdr received, in order, as `<method> <pane>`. Its `agent.prompt`
+    /// refuses `w1:p1` as blocked and does not find `w9:p9`.
+    replies: Mutex<Vec<String>>,
     /// The capability probe starts (and is counted) but never finishes.
     probe_hangs: AtomicBool,
     /// Refuse session channels like an sshd at `MaxSessions`.
@@ -435,6 +438,42 @@ impl server::Handler for Server {
                 return Ok(());
             }
             session.data(channel, reply.as_bytes().to_vec())?;
+        } else if let Some(method) = ["agent.prompt", "pane.send_text", "pane.send_keys"]
+            .into_iter()
+            .find(|method| request.contains(&format!("\"method\":\"{method}\"")))
+        {
+            let value: serde_json::Value =
+                serde_json::from_str(request.trim_end()).expect("one JSON request");
+            let params = &value["params"];
+            let pane = params["target"]
+                .as_str()
+                .or(params["pane_id"].as_str())
+                .unwrap_or("")
+                .to_owned();
+            let error = |code: &str| {
+                format!(
+                    "{{\"id\":{},\"error\":{{\"code\":\"{code}\",\"message\":\"refused\"}}}}\n",
+                    value["id"]
+                )
+            };
+            let reply = match (method, pane.as_str()) {
+                ("agent.prompt", "w1:p1") => error("agent_blocked"),
+                ("agent.prompt", "w9:p9") => error("agent_not_found"),
+                _ => format!(
+                    "{{\"id\":{},\"result\":{{\"type\":\"ok\"}}}}\n",
+                    value["id"]
+                ),
+            };
+            let detail = match method {
+                "pane.send_keys" => params["keys"].to_string(),
+                _ => params["text"].as_str().unwrap_or("").to_owned(),
+            };
+            self.shared
+                .replies
+                .lock()
+                .unwrap()
+                .push(format!("{method} {pane} {detail}"));
+            session.data(channel, reply.into_bytes())?;
         } else if request.contains("session.snapshot") {
             session.data(
                 channel,
@@ -701,6 +740,7 @@ impl Fixture {
             probe: Mutex::new(probe),
             herdr_list: Mutex::new(HerdrList::Fixture),
             focused: Mutex::new(Vec::new()),
+            replies: Mutex::new(Vec::new()),
             probe_hangs: AtomicBool::new(false),
             refuse_channels: AtomicBool::new(false),
             stall_auth: AtomicBool::new(false),
@@ -1803,6 +1843,56 @@ fn focusing_a_herdr_pane_needs_herdr() {
         })
     );
     assert!(fixture.shared.focused.lock().unwrap().is_empty());
+    fixture.handle.disconnect();
+}
+
+#[test]
+fn a_reply_goes_through_the_probed_herdr_prompted_or_typed_then_enter() {
+    let fixture = Fixture::connected_with(Duration::from_secs(5), PROBE_WITH_HERDR);
+    let reply = |pane: &str, text: &str| {
+        runtime().block_on(fixture.handle.reply_to_pane(
+            Some("work".into()),
+            pane.to_owned(),
+            text.to_owned(),
+        ))
+    };
+    assert_eq!(reply("w1:p2", "go on"), Ok(herdr::ReplyRoute::Prompted));
+    // The blocked agent: refused as a prompt, so typed, then Enter on its own.
+    assert_eq!(
+        reply("w1:p1", "yes\nand more"),
+        Ok(herdr::ReplyRoute::Typed)
+    );
+    // Gone: nothing is typed.
+    assert_eq!(reply("w9:p9", "hello"), Err(HostError::PaneNotFound));
+    assert_eq!(
+        *fixture.shared.replies.lock().unwrap(),
+        [
+            "agent.prompt w1:p2 go on",
+            "agent.prompt w1:p1 yes\nand more",
+            "pane.send_text w1:p1 yes\nand more",
+            "pane.send_keys w1:p1 [\"Enter\"]",
+            "agent.prompt w9:p9 hello",
+        ]
+    );
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+    assert_eq!(reply("w1:p2", "late"), Err(HostError::Closed));
+}
+
+#[test]
+fn a_reply_needs_herdr() {
+    let fixture = Fixture::connected(Duration::from_secs(5));
+    assert_eq!(
+        runtime().block_on(
+            fixture
+                .handle
+                .reply_to_pane(None, "w1:p1".into(), "hi".into())
+        ),
+        Err(HostError::NotInstalled {
+            program: "herdr".into()
+        })
+    );
+    assert!(fixture.shared.replies.lock().unwrap().is_empty());
     fixture.handle.disconnect();
 }
 

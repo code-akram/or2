@@ -93,4 +93,5 @@ class UiPort(
     override suspend fun stopMoshServer(pid: UInt) = Unit
     override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll) = Unit
     override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) = Unit
+    override suspend fun replyToPane(session: String?, paneId: String, text: String) = ReplyRoute.PROMPTED
 }

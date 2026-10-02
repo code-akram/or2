@@ -164,6 +164,10 @@ pub enum HostError {
     /// would clash with `Throwable.message` in the generated Kotlin exception.)
     #[error("command failed: {reason}")]
     CommandFailed { reason: String },
+    /// (API 16) What was to be sent is over its limit (`reply_to_pane`: more than 4 KiB of
+    /// UTF-8); nothing was sent.
+    #[error("too large to send")]
+    TooLarge,
 }
 
 impl From<core::HostError> for HostError {
@@ -177,6 +181,26 @@ impl From<core::HostError> for HostError {
             core::HostError::NotInstalled { program } => Self::NotInstalled { program },
             core::HostError::PaneNotFound => Self::PaneNotFound,
             core::HostError::CommandFailed { message } => Self::CommandFailed { reason: message },
+            core::HostError::TooLarge => Self::TooLarge,
+        }
+    }
+}
+
+/// Which herdr path carried a `reply_to_pane` (API 16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ReplyRoute {
+    /// herdr's `agent.prompt` submitted it like the agent's own input.
+    Prompted,
+    /// herdr refused the prompt (the agent is blocked, or herdr does not drive it): the text was
+    /// typed into the pane, then Enter after the composer's pause.
+    Typed,
+}
+
+impl From<or2_core::herdr::ReplyRoute> for ReplyRoute {
+    fn from(route: or2_core::herdr::ReplyRoute) -> Self {
+        match route {
+            or2_core::herdr::ReplyRoute::Prompted => Self::Prompted,
+            or2_core::herdr::ReplyRoute::Typed => Self::Typed,
         }
     }
 }
@@ -546,6 +570,30 @@ impl HostConnection {
             .await?)
     }
 
+    /// Sends `text` to the agent in herdr pane `pane_id` of `session` (`None` is the default
+    /// session) and submits it, with no terminal open (API 16; contracts.md, "Reply from a
+    /// notification"). herdr's `agent.prompt` first (`Prompted`); when herdr refuses it because
+    /// the agent is blocked at a dialog (`agent_blocked`) or is not one herdr drives
+    /// (`agent_not_ready`), the text is typed into the pane (`pane.send_text`) and Enter follows
+    /// after the composer's pause (`Typed`). Several lines are sent as they are. Runs on this
+    /// connection, bounded by the query timeout. `InvalidName` for a malformed session or pane id
+    /// or an empty text, `TooLarge` above 4 KiB of UTF-8, `NotInstalled` without herdr,
+    /// `PaneNotFound` when the pane or its agent is gone (nothing is typed), `NotConnected` /
+    /// `Closed` without a live connection, `CommandFailed` otherwise. The text is never logged.
+    /// Cancelling the coroutine drops the reply only.
+    pub async fn reply_to_pane(
+        &self,
+        session: Option<String>,
+        pane_id: String,
+        text: String,
+    ) -> Result<ReplyRoute, HostError> {
+        Ok(self
+            .handle
+            .reply_to_pane(session, pane_id, text)
+            .await?
+            .into())
+    }
+
     /// Watches a herdr session (`None` is the default session); it ends with the connection.
     pub fn watch_herdr(
         &self,
@@ -680,6 +728,18 @@ mod tests {
         assert_eq!(
             HostError::from(core::HostError::PaneNotFound),
             HostError::PaneNotFound
+        );
+        assert_eq!(
+            HostError::from(core::HostError::TooLarge),
+            HostError::TooLarge
+        );
+        assert_eq!(
+            ReplyRoute::from(or2_core::herdr::ReplyRoute::Prompted),
+            ReplyRoute::Prompted
+        );
+        assert_eq!(
+            ReplyRoute::from(or2_core::herdr::ReplyRoute::Typed),
+            ReplyRoute::Typed
         );
         assert_eq!(
             core::TerminalTarget::from(TerminalTarget::Herdr {

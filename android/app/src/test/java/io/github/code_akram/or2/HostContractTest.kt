@@ -13,6 +13,7 @@ import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.NavDirection
+import io.github.code_akram.or2.ffi.ReplyRoute
 import io.github.code_akram.or2.ffi.Session
 import io.github.code_akram.or2.ffi.SessionException
 import io.github.code_akram.or2.ffi.SessionFailure
@@ -482,6 +483,26 @@ class HostContractTest {
     }
 
     @Test
+    fun aReplyToAPaneCrossesTheFfiWithItsRouteAndItsLimits() {
+        val host = connectedHost()
+        runBlocking {
+            // The probe's blocked agent is typed into; the working and idle ones are prompted.
+            assertEquals(ReplyRoute.TYPED, host.replyToPane(null, "w1:p1", "yes, go on"))
+            assertEquals(ReplyRoute.PROMPTED, host.replyToPane("work", "w1:p2", "and then\nthe tests"))
+            assertEquals(ReplyRoute.PROMPTED, host.replyToPane(null, "w2:p1", "x".repeat(4096)))
+        }
+        assertThrows(HostException.PaneNotFound::class.java) { runBlocking { host.replyToPane(null, "w9:p9", "hello") } }
+        // 4 KiB of UTF-8 at most, checked by Rust before anything is sent.
+        assertThrows(HostException.TooLarge::class.java) { runBlocking { host.replyToPane(null, "w1:p1", "é".repeat(2049)) } }
+        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.replyToPane(null, "w1:p1", "") } }
+        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.replyToPane("a b", "w1:p1", "hello") } }
+        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.replyToPane(null, "w1 p1", "hello") } }
+        assertEquals(HostState.Connected(0u), host.state())
+        host.disconnect()
+        host.close()
+    }
+
+    @Test
     fun disconnectingTheHostClosesItsTerminalsAndWatchesFirst() {
         // One timeline for all three sources, so the order itself is asserted.
         val timeline: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
@@ -514,6 +535,7 @@ class HostContractTest {
         }
         assertThrows(HostException.Closed::class.java) { host.watchHerdr(null, HerdrRecorder()) }
         assertThrows(HostException.Closed::class.java) { runBlocking { host.focusHerdrPane(null, "w1:p1") } }
+        assertThrows(HostException.Closed::class.java) { runBlocking { host.replyToPane(null, "w1:p1", "late") } }
         assertThrows(HostException.Closed::class.java) { host.rejectHostKey() }
         host.disconnect() // Idempotent.
         recorder.assertQuiet()

@@ -1174,6 +1174,22 @@ fn dispatch<D: DatagramTransport>(
                 }
             });
         }
+        HostCommand::ReplyToPane {
+            session,
+            pane_id,
+            text,
+            reply,
+        } => {
+            let host = Arc::clone(host);
+            let (mut closing, tracker) = (closing.clone(), tracker.clone());
+            runtime().spawn(async move {
+                let _tracker = tracker;
+                tokio::select! {
+                    result = reply_to_pane(&host, session, pane_id, text) => { let _ = reply.send(result); }
+                    _ = closed_reason(&mut closing) => {}
+                }
+            });
+        }
         HostCommand::WatchHerdr { session, driver } => {
             let host = Arc::clone(host);
             let (mut closing, tracker) = (closing.clone(), tracker.clone());
@@ -1298,6 +1314,38 @@ async fn focus_herdr_pane(
                 message: error.to_string(),
             },
         })
+}
+
+/// `HostHandle::reply_to_pane`: `agent.prompt`, or the text typed and Enter, through the probed
+/// herdr path. Waits for the program probe only, never for herdr's session listing.
+async fn reply_to_pane(
+    host: &Arc<SshHost>,
+    session: Option<String>,
+    pane_id: String,
+    text: String,
+) -> Result<herdr::ReplyRoute, HostError> {
+    let capabilities = host.programs().await.map_err(host_error)?;
+    let Some(path) = &capabilities.herdr else {
+        return Err(HostError::NotInstalled {
+            program: "herdr".into(),
+        });
+    };
+    herdr::reply_in(
+        &**host,
+        path,
+        host.sessions.directory(),
+        session.as_deref(),
+        &pane_id,
+        &text,
+    )
+    .await
+    .map_err(|error| match error {
+        herdr::HerdrError::PaneNotFound => HostError::PaneNotFound,
+        herdr::HerdrError::Remote(error) => host_error(error),
+        error @ herdr::HerdrError::Failed(_) => HostError::CommandFailed {
+            message: error.to_string(),
+        },
+    })
 }
 
 /// `HostHandle::scroll_target`: tmux through exec, herdr through `pane.scroll`, each with the

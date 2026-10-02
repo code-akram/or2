@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use serde_json::Value;
 use tokio::io::{DuplexStream, duplex};
 use tokio::sync::{Notify, mpsc};
+use tokio::time::Instant;
 
 use super::wire::LineReader;
 use crate::remote::{ExecOutput, RemoteError, RemoteHost};
@@ -34,6 +35,23 @@ pub(super) enum Served {
     Scroll {
         pane_id: String,
         offset: u64,
+    },
+    /// `agent.prompt` of `target` with `text`.
+    Prompt {
+        target: String,
+        text: String,
+    },
+    /// `pane.send_text` of `text` to `pane_id`, received `at` (tokio's clock).
+    SendText {
+        pane_id: String,
+        text: String,
+        at: Instant,
+    },
+    /// `pane.send_keys` of `keys` to `pane_id`, received `at` (tokio's clock).
+    SendKeys {
+        pane_id: String,
+        keys: Vec<String>,
+        at: Instant,
     },
     Other(String),
 }
@@ -83,6 +101,10 @@ struct State {
     current: (String, u64),
     /// Where each pane is, as `pane.get` reports it: set by `pane.scroll` (clamped) or by a test.
     pane_offsets: HashMap<String, u64>,
+    /// `agent.prompt` answers with this error from now on.
+    prompt_error: Option<(String, String)>,
+    /// `pane.send_text` answers with this error from now on.
+    send_text_error: Option<(String, String)>,
     streams: Vec<mpsc::UnboundedSender<Command>>,
     served: Vec<Served>,
 }
@@ -115,6 +137,8 @@ impl FakeHost {
                 scroll_error: None,
                 current: ("w1:p1".into(), 0),
                 pane_offsets: HashMap::new(),
+                prompt_error: None,
+                send_text_error: None,
                 streams: Vec::new(),
                 served: Vec::new(),
             })),
@@ -207,6 +231,16 @@ impl FakeHost {
     /// `pane.scroll` answers with this error from now on.
     pub fn fail_scroll(&self, code: &str, message: &str) {
         lock(&self.state).scroll_error = Some((code.to_owned(), message.to_owned()));
+    }
+
+    /// `agent.prompt` answers with this error from now on (`agent_blocked`, ...).
+    pub fn fail_prompt(&self, code: &str, message: &str) {
+        lock(&self.state).prompt_error = Some((code.to_owned(), message.to_owned()));
+    }
+
+    /// `pane.send_text` answers with this error from now on.
+    pub fn fail_send_text(&self, code: &str, message: &str) {
+        lock(&self.state).send_text_error = Some((code.to_owned(), message.to_owned()));
     }
 
     /// `pane_id` is now `offset` rows above its bottom, as new output moves a scrolled pane.
@@ -437,6 +471,59 @@ async fn serve(state: Arc<Mutex<State>>, stream: DuplexStream) {
                             pane_info(pane, offset, state.scroll_max, "pane_info")
                         }
                     }
+                }
+            };
+            let _ = conn.send(reply.as_bytes()).await;
+        }
+        // Shaped like herdr 0.9.3's answers (captured from an isolated session): `agent.prompt`
+        // with `agent_prompted`, the pane writes with `ok`.
+        "agent.prompt" | "pane.send_text" | "pane.send_keys" => {
+            let params = &request["params"];
+            let string = |name: &str| params[name].as_str().unwrap_or("").to_owned();
+            let reply = {
+                let mut state = lock(&state);
+                let (served, failure, result) = match method.as_str() {
+                    "agent.prompt" => (
+                        Served::Prompt {
+                            target: string("target"),
+                            text: string("text"),
+                        },
+                        state.prompt_error.clone(),
+                        serde_json::json!({"type": "agent_prompted", "agent": {
+                            "agent": "claude", "agent_status": "working",
+                            "pane_id": string("target"), "revision": 0, "state_change_seq": 1,
+                            "tab_id": "w1:t1", "terminal_id": "term_1", "workspace_id": "w1",
+                            "focused": false,
+                        }}),
+                    ),
+                    "pane.send_text" => (
+                        Served::SendText {
+                            pane_id: string("pane_id"),
+                            text: string("text"),
+                            at: Instant::now(),
+                        },
+                        state.send_text_error.clone(),
+                        serde_json::json!({"type": "ok"}),
+                    ),
+                    _ => (
+                        Served::SendKeys {
+                            pane_id: string("pane_id"),
+                            keys: params["keys"]
+                                .as_array()
+                                .expect("keys")
+                                .iter()
+                                .map(|key| key.as_str().expect("a key name").to_owned())
+                                .collect(),
+                            at: Instant::now(),
+                        },
+                        None,
+                        serde_json::json!({"type": "ok"}),
+                    ),
+                };
+                state.served.push(served);
+                match failure {
+                    Some((code, message)) => error(&code, &message),
+                    None => serde_json::json!({"id": id, "result": result}).to_string() + "\n",
                 }
             };
             let _ = conn.send(reply.as_bytes()).await;

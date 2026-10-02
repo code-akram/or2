@@ -232,6 +232,18 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         navigationClients += clientId
         navigateFailure?.let { throw it }
     }
+    /** `reply_to_pane` calls in order: session, pane and text; a failure is thrown after the call is recorded. */
+    val replies = mutableListOf<Triple<String?, String, String>>()
+    var replyRoute = ReplyRoute.PROMPTED
+    var replyFailure: Exception? = null
+    var replyGate: CompletableDeferred<Unit>? = null
+    override suspend fun replyToPane(session: String?, paneId: String, text: String): ReplyRoute {
+        events += "reply:$session:$paneId"
+        replies += Triple(session, paneId, text)
+        replyGate?.await()
+        replyFailure?.let { throw it }
+        return replyRoute
+    }
     override suspend fun focusHerdrPane(session: String?, paneId: String) {
         events += "focus:$session:$paneId"
         focusGate?.await()

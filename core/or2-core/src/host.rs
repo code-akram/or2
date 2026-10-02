@@ -333,6 +333,10 @@ pub enum HostError {
     /// A command ran but failed; the message is a diagnostic without secrets.
     #[error("command failed: {message}")]
     CommandFailed { message: String },
+    /// What was to be sent is over its limit (`reply_to_pane`: more than
+    /// [`herdr::MAX_REPLY_BYTES`]); nothing was sent.
+    #[error("too large to send")]
+    TooLarge,
 }
 
 /// What the host driver is asked to do.
@@ -409,6 +413,16 @@ pub enum HostCommand {
         client_id: Option<String>,
         nav: TargetNav,
         reply: oneshot::Sender<Result<(), HostError>>,
+    },
+    /// Send `text` to the agent in herdr pane `pane_id` of `session` and submit it
+    /// ([`HostHandle::reply_to_pane`], [`herdr::reply_in`]) with the probed herdr path. Names and
+    /// text are validated. Reply `NotInstalled` without herdr, `PaneNotFound` when the pane or its
+    /// agent is gone, `CommandFailed` for other failures. `text` is never logged.
+    ReplyToPane {
+        session: Option<String>,
+        pane_id: String,
+        text: String,
+        reply: oneshot::Sender<Result<herdr::ReplyRoute, HostError>>,
     },
     /// Run [`herdr::run`] (or an equivalent) on `driver`, with the herdr path from the probe.
     /// The session name is validated. With no herdr found, move `driver` to
@@ -732,6 +746,42 @@ impl HostHandle {
             pane_id,
             client_id,
             nav,
+            reply,
+        })?;
+        await_reply(response, QUERY_TIMEOUT).await
+    }
+
+    /// Sends `text` to the agent in herdr pane `pane_id` of `session` (`None` is the default
+    /// session) and submits it, with no terminal open (contracts.md, "Reply from a
+    /// notification"): through herdr's `agent.prompt` ([`herdr::ReplyRoute::Prompted`]), or, when
+    /// herdr refuses that because the agent is blocked or not driven by herdr, typed into the pane
+    /// and followed by Enter after the composer's pause ([`herdr::ReplyRoute::Typed`]). Several
+    /// lines are sent as they are. Names are validated like [`TerminalTarget`]'s, and an empty text
+    /// is `InvalidName` (Enter alone could answer a dialog); a text over
+    /// [`herdr::MAX_REPLY_BYTES`] is [`HostError::TooLarge`]. A host without herdr is
+    /// `NotInstalled`; a pane that is gone, or no longer has an agent, `PaneNotFound`. Bounded by
+    /// [`QUERY_TIMEOUT`]. The text is never logged.
+    pub async fn reply_to_pane(
+        &self,
+        session: Option<String>,
+        pane_id: String,
+        text: String,
+    ) -> Result<herdr::ReplyRoute, HostError> {
+        if !session.as_deref().is_none_or(is_valid_herdr_session_name)
+            || !is_valid_herdr_pane_id(&pane_id)
+            || text.is_empty()
+        {
+            return Err(HostError::InvalidName);
+        }
+        if text.len() > herdr::MAX_REPLY_BYTES {
+            return Err(HostError::TooLarge);
+        }
+        let (reply, response) = oneshot::channel();
+        self.require_connected()?;
+        self.send(HostCommand::ReplyToPane {
+            session,
+            pane_id,
+            text,
             reply,
         })?;
         await_reply(response, QUERY_TIMEOUT).await
@@ -1349,6 +1399,68 @@ mod tests {
         let focus = || handle.focus_herdr_pane(Some("work".into()), "w1:p2".into());
         assert_eq!(focus().await, Ok(()));
         assert_eq!(focus().await, Err(HostError::PaneNotFound));
+        drop(answers.join().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_reply_is_validated_and_answered_through_its_reply() {
+        let (_recorder, handle, mut driver) = setup(false);
+        let reply = |session: Option<&str>, pane: &str, text: String| {
+            handle.reply_to_pane(session.map(str::to_owned), pane.to_owned(), text)
+        };
+        // Refused before anything is sent, connected or not: names, an empty and an over-long text.
+        let at_limit = "é".repeat(herdr::MAX_REPLY_BYTES / 2);
+        assert_eq!(
+            reply(Some("a b"), "w1:p1", "hi".into()).await,
+            Err(HostError::InvalidName)
+        );
+        assert_eq!(
+            reply(None, "w1 p1", "hi".into()).await,
+            Err(HostError::InvalidName)
+        );
+        assert_eq!(
+            reply(None, "w1:p1", String::new()).await,
+            Err(HostError::InvalidName)
+        );
+        assert_eq!(
+            reply(None, "w1:p1", format!("{at_limit}x")).await,
+            Err(HostError::TooLarge)
+        );
+        assert_eq!(
+            reply(None, "w1:p1", "hi".into()).await,
+            Err(HostError::NotConnected)
+        );
+        connect(&mut driver);
+        let answers = std::thread::spawn(move || {
+            for answer in [
+                Ok(herdr::ReplyRoute::Prompted),
+                Ok(herdr::ReplyRoute::Typed),
+                Err(HostError::PaneNotFound),
+            ] {
+                let HostCommand::ReplyToPane {
+                    session,
+                    pane_id,
+                    text,
+                    reply,
+                } = driver.blocking_next_command()
+                else {
+                    panic!("unexpected command")
+                };
+                assert_eq!(session.as_deref(), Some("work"));
+                assert_eq!(pane_id, "w1:p2");
+                assert_eq!(
+                    text.len(),
+                    herdr::MAX_REPLY_BYTES,
+                    "4 KiB exactly is allowed"
+                );
+                reply.send(answer).unwrap();
+            }
+            driver
+        });
+        let send = || reply(Some("work"), "w1:p2", at_limit.clone());
+        assert_eq!(send().await, Ok(herdr::ReplyRoute::Prompted));
+        assert_eq!(send().await, Ok(herdr::ReplyRoute::Typed));
+        assert_eq!(send().await, Err(HostError::PaneNotFound));
         drop(answers.join().unwrap());
     }
 

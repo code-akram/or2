@@ -14,7 +14,9 @@ import io.github.code_akram.or2.service.ConnectionService
 import io.github.code_akram.or2.service.ServiceRunState
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -62,6 +64,39 @@ class AgentNotificationsDeviceTest {
         assertNotNull("the agents channel", channel)
         assertEquals("Agents", channel.name.toString())
         await("the service to stop itself") { !ServiceRunState.Process.running }
+    }
+
+    /** Built, not posted: needs no `POST_NOTIFICATIONS`. */
+    @Test
+    fun everyAgentNotificationHasAReplyActionWithARemoteInput() {
+        val notifications = AgentNotifications(context, MemoryPrefStore())
+        val alert = AgentAlert(key, "Claude Code", "Needs input", "Device fixture")
+        for (shown in listOf(alert, alert.copy(outcome = "Not sent: Device fixture is not connected"), alert.copy(outcome = "Sent", reply = "go on"))) {
+            val built = notifications.build(shown)
+            val reply = built.actions.orEmpty().single()
+            assertEquals("Reply", reply.title.toString())
+            assertEquals(Notification.Action.SEMANTIC_ACTION_REPLY, reply.semanticAction)
+            val input = reply.remoteInputs.single()
+            assertEquals(AgentNotifications.KEY_REPLY, input.resultKey)
+            assertEquals("Reply to Claude Code", input.label.toString())
+            assertTrue(input.allowFreeFormInput)
+            // RemoteInput needs a mutable PendingIntent; it is a broadcast to the app's own receiver.
+            assertTrue(reply.actionIntent.isBroadcast)
+            assertFalse(reply.actionIntent.isImmutable)
+            assertEquals(context.packageName, reply.actionIntent.creatorPackage)
+        }
+        // The intent names the pane in its data and is honoured; anything else is not.
+        val intent = AgentNotifications.replyIntent(context, alert)
+        assertEquals(AgentReplyReceiver::class.java.name, intent.component?.className)
+        assertEquals(alert, AgentNotifications.replyOf(intent))
+        assertNull(AgentNotifications.replyOf(AgentNotifications.openIntent(context, key, "token")))
+        // After a reply the notification does not alert again, and a sent one quotes the reply.
+        val sent = notifications.build(alert.copy(outcome = "Sent", reply = "go on"))
+        assertTrue(sent.flags and Notification.FLAG_ONLY_ALERT_ONCE != 0)
+        val messages = sent.extras.getParcelableArray(Notification.EXTRA_MESSAGES, android.os.Parcelable::class.java).orEmpty()
+        assertEquals(2, messages.size)
+        assertEquals("Not sent: Device fixture is not connected",
+            notifications.build(alert.copy(outcome = "Not sent: Device fixture is not connected")).extras.getCharSequence(Notification.EXTRA_TEXT).toString())
     }
 
     @Test

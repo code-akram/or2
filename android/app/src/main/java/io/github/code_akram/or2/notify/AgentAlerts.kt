@@ -68,8 +68,26 @@ data class AgentPaneKey(val hostId: Long, val session: String?, val paneId: Stri
     }
 }
 
-/** What one notification says. Nothing from the pane's output. */
-data class AgentAlert(val key: AgentPaneKey, val title: String, val text: String, val subText: String)
+/**
+ * What one notification says. Nothing from the pane's output. Every agent notification carries a Reply action
+ * ([AgentReplies]); after a reply it is posted again with [outcome] (and, once sent, [reply]), which never alerts.
+ */
+data class AgentAlert(
+    val key: AgentPaneKey,
+    val title: String,
+    /** `Needs input` or `Done`: the edge that posted it. */
+    val text: String,
+    /** The host's label. */
+    val subText: String,
+    /** After a reply from the notification, what came of it: `Sent`, or `Not sent: <reason>`. Null for the alert itself. */
+    val outcome: String? = null,
+    /** The reply that was sent, quoted as the notification's reply history (MessagingStyle); null when none was. */
+    val reply: String? = null,
+) {
+    /** Never the reply's text: nothing a reply says is logged. */
+    override fun toString() =
+        "AgentAlert(key=$key, title=$title, text=$text, subText=$subText, outcome=$outcome, reply=${if (reply == null) "null" else "…"})"
+}
 
 /** Where alerts go: the system's notifications in the app, a list in tests. */
 interface AgentAlertSink {
@@ -189,6 +207,18 @@ class AgentAlerts(private val sink: AgentAlertSink, private val enabled: () -> B
     fun opened(key: AgentPaneKey) {
         posted -= key
         sink.cancel(key)
+    }
+
+    /**
+     * A reply's outcome for its pane ([alert] with [AgentAlert.outcome] set, [AgentReplies]): replaces the pane's
+     * notification, without alerting, while it is still up (this process's, or one the system still shows). One the
+     * pane's own edges took away meanwhile (it went back to `Working`, was opened, disappeared) stays away: the next
+     * Blocked or Done edge posts a fresh alert, as before.
+     */
+    fun replied(alert: AgentAlert) {
+        if (alert.key !in posted && alert.key !in sink.shown()) return
+        posted += alert.key
+        sink.post(alert)
     }
 
     /** The setting changed: switched off, every agent notification goes, this process's and any the system still shows. */

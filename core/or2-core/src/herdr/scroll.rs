@@ -143,7 +143,7 @@ fn scroll_info(answer: &Value) -> Option<PaneScrollInfo> {
 
 /// One request on a short-lived stream, the socket from `directory`; a cached socket that no
 /// longer opens makes it read the listing again and try once more.
-async fn call<H: RemoteHost>(
+pub(super) async fn call<H: RemoteHost>(
     host: &H,
     herdr: &str,
     directory: &Directory,
@@ -151,6 +151,21 @@ async fn call<H: RemoteHost>(
     id: &str,
     body: &RequestBody,
 ) -> Result<Value, HerdrError> {
+    call_raw(host, herdr, directory, session, id, body)
+        .await?
+        .map_err(wire_error)
+}
+
+/// [`call`] with herdr's answer unmapped, for a caller that acts on a particular error code:
+/// the outer error is the socket's discovery failing, the inner one the request's.
+pub(super) async fn call_raw<H: RemoteHost>(
+    host: &H,
+    herdr: &str,
+    directory: &Directory,
+    session: Option<&str>,
+    id: &str,
+    body: &RequestBody,
+) -> Result<Result<Value, WireError>, HerdrError> {
     let mut fresh = false;
     loop {
         let cached = if fresh {
@@ -167,12 +182,12 @@ async fn call<H: RemoteHost>(
                 .map_err(discovery_error)?,
         };
         match wire::call(host, &socket, id, body, Timing::default().request).await {
-            Ok(answer) => return Ok(answer),
+            Ok(answer) => return Ok(Ok(answer)),
             Err(WireError::Unreachable(_)) if from_cache => {
                 directory.invalidate();
                 fresh = true;
             }
-            Err(error) => return Err(wire_error(error)),
+            Err(error) => return Ok(Err(error)),
         }
     }
 }

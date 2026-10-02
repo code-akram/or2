@@ -5,9 +5,13 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.Person
+import android.app.RemoteInput
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.drawable.Icon
 import android.net.Uri
 import io.github.code_akram.or2.MainActivity
 import io.github.code_akram.or2.R
@@ -16,8 +20,8 @@ import java.util.UUID
 
 /**
  * Posts agent alerts ([AgentAlertSink]) on the `agents` channel: one notification per pane (tag [AgentPaneKey.tag],
- * id [NOTIFICATION_ID]), whose tap opens [MainActivity] with the pane ([openIntent]). Nothing is posted without
- * `POST_NOTIFICATIONS`.
+ * id [NOTIFICATION_ID]), whose tap opens [MainActivity] with the pane ([openIntent]) and whose Reply action sends
+ * text to the agent ([replyIntent], [AgentReplies]). Nothing is posted without `POST_NOTIFICATIONS`.
  */
 class AgentNotifications(private val context: Context, private val store: PrefStore) : AgentAlertSink {
     private val manager get() = context.getSystemService(NotificationManager::class.java)
@@ -43,22 +47,57 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
         emptySet()
     }
 
-    private fun build(alert: AgentAlert): Notification {
+    /**
+     * The notification for [alert]: its tap opens the pane, its Reply action takes a RemoteInput. After a reply
+     * ([AgentAlert.outcome]) it shows the outcome, quotes a sent reply (MessagingStyle reply history) and does not
+     * alert again.
+     */
+    internal fun build(alert: AgentAlert): Notification {
         val key = alert.key
         val open = PendingIntent.getActivity(
             context, key.tag.hashCode(), openIntent(context, key, token(store)),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        return Notification.Builder(context, CHANNEL_ID)
+        val now = System.currentTimeMillis()
+        val builder = Notification.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_or2)
             .setContentTitle(alert.title)
-            .setContentText(alert.text)
+            .setContentText(alert.outcome ?: alert.text)
             .setSubText(alert.subText)
             .setCategory(Notification.CATEGORY_STATUS)
             .setShowWhen(true)
-            .setWhen(System.currentTimeMillis())
+            .setWhen(now)
             .setAutoCancel(true)
             .setContentIntent(open)
+            .addAction(replyAction(alert))
+        if (alert.outcome != null) builder.setOnlyAlertOnce(true)
+        alert.reply?.let { reply ->
+            val agent = Person.Builder().setName(alert.title).build()
+            builder.setStyle(
+                Notification.MessagingStyle(Person.Builder().setName(YOU).build())
+                    .addMessage(alert.text, now, agent)
+                    // A null sender is the user: the reply, quoted.
+                    .addMessage(reply, now, null as Person?),
+            )
+        }
+        return builder.build()
+    }
+
+    /**
+     * The Reply action: a RemoteInput (`Reply to <agent>`) whose text reaches [AgentReplyReceiver]. RemoteInput needs a
+     * mutable PendingIntent; it is explicit (the receiver's component, not exported) and names the pane in its data,
+     * which a fill-in cannot change, so nothing but the RemoteInput's text is taken from the fill-in.
+     */
+    private fun replyAction(alert: AgentAlert): Notification.Action {
+        val reply = PendingIntent.getBroadcast(
+            context, alert.key.tag.hashCode(), replyIntent(context, alert),
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val input = RemoteInput.Builder(KEY_REPLY).setLabel("Reply to ${alert.title}").build()
+        return Notification.Action.Builder(Icon.createWithResource(context, R.drawable.ic_stat_or2), "Reply", reply)
+            .addRemoteInput(input)
+            .setSemanticAction(Notification.Action.SEMANTIC_ACTION_REPLY)
+            .setAllowGeneratedReplies(false)
             .build()
     }
 
@@ -74,6 +113,39 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
         private const val EXTRA_TOKEN = "io.github.code_akram.or2.extra.TOKEN"
         private const val EXTRA_TAP = "io.github.code_akram.or2.extra.TAP"
         private const val TOKEN_KEY = "agent_open_token"
+        const val ACTION_REPLY = "io.github.code_akram.or2.action.REPLY_TO_AGENT"
+
+        /** The RemoteInput's result key: the reply's text. */
+        const val KEY_REPLY = "io.github.code_akram.or2.extra.REPLY"
+        private const val REPLY_SCHEME = "or2-agent-reply"
+        private const val EXTRA_TITLE = "io.github.code_akram.or2.extra.TITLE"
+        private const val EXTRA_TEXT = "io.github.code_akram.or2.extra.TEXT"
+        private const val EXTRA_HOST = "io.github.code_akram.or2.extra.HOST"
+        private const val YOU = "You"
+
+        /**
+         * The Reply action's intent: explicitly [AgentReplyReceiver], the pane's tag as its data (each pane's pending
+         * intent distinct), and what the notification showed (title, `Needs input`/`Done`, host), for the update.
+         */
+        fun replyIntent(context: Context, alert: AgentAlert): Intent = Intent(ACTION_REPLY)
+            .setComponent(ComponentName(context, AgentReplyReceiver::class.java))
+            .setData(Uri.fromParts(REPLY_SCHEME, alert.key.tag, null))
+            .putExtra(EXTRA_TITLE, alert.title)
+            .putExtra(EXTRA_TEXT, alert.text)
+            .putExtra(EXTRA_HOST, alert.subText)
+
+        /** The alert a Reply intent is about ([replyIntent]), or null for any other intent. */
+        fun replyOf(intent: Intent?): AgentAlert? {
+            if (intent?.data?.scheme != REPLY_SCHEME) return null
+            return agentReplyFrom(
+                intent.action, intent.data?.schemeSpecificPart,
+                intent.getStringExtra(EXTRA_TITLE), intent.getStringExtra(EXTRA_TEXT), intent.getStringExtra(EXTRA_HOST),
+            )
+        }
+
+        /** The reply's text in a Reply intent's RemoteInput results, or null. */
+        fun replyTextOf(intent: Intent): String? =
+            RemoteInput.getResultsFromIntent(intent)?.getCharSequence(KEY_REPLY)?.toString()
 
         /** The `agents` channel ("Agents", high importance); creating it again is harmless. */
         fun createChannel(manager: NotificationManager) {

@@ -17,7 +17,7 @@ use or2_core::frame::{
     Cell, CellStyle, CellWidth, Cursor, CursorShape, Frame, Rgb, Row, Scrollback, Underline,
 };
 use or2_core::herdr::{
-    Agent, AgentStatus, HerdrState, HerdrView, HerdrWatchDriver, Pane, Tab, Workspace,
+    Agent, AgentStatus, HerdrState, HerdrView, HerdrWatchDriver, Pane, ReplyRoute, Tab, Workspace,
 };
 use or2_core::host::TerminalTransport as CoreTransport;
 use or2_core::host::{
@@ -258,8 +258,10 @@ fn publish(driver: &mut SessionDriver, frame: Frame) {
 /// alone, or after the latest text echo as `text 61 | roams N`. SSH probe terminals never
 /// report health and ignore `roam()`. `watch_herdr` goes `Live`, updates once and closes on
 /// `stop()`. `navigate` (API 14) succeeds for every tmux and herdr move, except one from a
-/// `pane_id` the probe view does not have (`PaneNotFound`). Closing the host closes its
-/// terminals and watches first.
+/// `pane_id` the probe view does not have (`PaneNotFound`). `reply_to_pane` (API 16) is `Typed`
+/// for the blocked agent's pane `w1:p1`, `Prompted` for `w1:p2` and `w2:p1`, and `PaneNotFound`
+/// for any other pane; the validation (`InvalidName`, `TooLarge` above 4 KiB) is the real one.
+/// Closing the host closes its terminals and watches first.
 #[uniffi::export]
 pub fn contract_probe_host(
     request: HostConnectRequest,
@@ -413,6 +415,15 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                     _ => Ok(()),
                 });
             }
+            HostCommand::ReplyToPane { pane_id, reply, .. } => {
+                // As herdr would: the blocked agent's reply is typed, the others' prompted. The
+                // text is not echoed anywhere.
+                let _ = reply.send(match pane_id.as_str() {
+                    PROBE_BLOCKED_PANE => Ok(ReplyRoute::Typed),
+                    pane if PROBE_PANES.contains(&pane) => Ok(ReplyRoute::Prompted),
+                    _ => Err(core_host::HostError::PaneNotFound),
+                });
+            }
             HostCommand::WatchHerdr {
                 session,
                 driver: watcher,
@@ -474,6 +485,8 @@ pub const PROBE_SERVER_PID: u32 = 4242;
 /// A pid whose `stop_mosh_server` fails on a probe host, whatever else is true.
 pub const PROBE_UNSTOPPABLE_PID: u32 = 13;
 const PROBE_PANES: [&str; 3] = ["w1:p1", "w1:p2", "w2:p1"];
+/// The probe view's blocked agent (until its second view resolves it): a reply to it is typed.
+const PROBE_BLOCKED_PANE: &str = "w1:p1";
 
 /// One blocked, one working and one idle agent; `resolved` turns the blocked one into working;
 /// `focus` is the focused pane.

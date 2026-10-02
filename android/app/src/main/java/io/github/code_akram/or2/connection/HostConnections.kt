@@ -17,6 +17,7 @@ import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.LinkHealth
+import io.github.code_akram.or2.ffi.ReplyRoute
 import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionListener
@@ -110,6 +111,13 @@ interface HostPort : AutoCloseable {
      * tmux client, however many terminals show the same tmux session. A shell target does nothing.
      */
     suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?)
+
+    /**
+     * API 16: sends [text] to the agent in herdr pane [paneId] of [session] and submits it, with no terminal open:
+     * herdr's `agent.prompt`, or (the agent is blocked) the text typed then Enter. `PaneNotFound` when the pane or
+     * its agent is gone, `TooLarge` above 4 KiB. The text is never logged.
+     */
+    suspend fun replyToPane(session: String?, paneId: String, text: String): ReplyRoute
 }
 
 class NativeHostPort(private val connection: HostConnection) : HostPort {
@@ -131,6 +139,7 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
         connection.scrollTarget(target, paneId, scroll)
     override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) =
         connection.navigate(target, paneId, nav, clientId)
+    override suspend fun replyToPane(session: String?, paneId: String, text: String) = connection.replyToPane(session, paneId, text)
     override fun close() = connection.close()
 }
 
@@ -844,6 +853,18 @@ class HostConnections(
         if (!owns(current) || current.retired) throw HostException.Closed()
         val port = current.mutablePort.value ?: throw HostException.NotConnected()
         port.focusHerdrPane(session, paneId)
+    }
+
+    /**
+     * A reply from an agent notification (API 16, `reply_to_pane`): sends [text] to the agent in herdr pane
+     * [paneId] of [session] on [hostId]'s live connection and submits it. Only a connection that is up now is
+     * used; nothing connects from here (a reply comes from the background). Throws [HostException.NotConnected]
+     * when the host has none, and the reply's own [HostException] otherwise. The text is never logged.
+     */
+    suspend fun replyToPane(hostId: Long, session: String?, paneId: String, text: String): ReplyRoute {
+        val current = mutableHosts.value[hostId]?.takeIf { it.isLive && !it.retired && it.state.value is HostState.Connected }
+        val port = current?.mutablePort?.value ?: throw HostException.NotConnected()
+        return port.replyToPane(session, paneId, text)
     }
 
     /**
