@@ -34,6 +34,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -436,29 +437,42 @@ class HostContractTest {
     fun navigationCrossesTheFfiValidatesNamesAndAShellDoesNothing() {
         val host = connectedHost()
         val tmux = TerminalTarget.Tmux("main")
+        // Each tmux terminal has a client id of its own (a gesture names its terminal by it); others none.
+        val terminal = host.openTerminal(tmux, TerminalTransport.SSH, 80u, 24u, null, RecordingListener())
+        val other = host.openTerminal(tmux, TerminalTransport.MOSH, 80u, 24u, null, RecordingListener())
+        val shell = host.openTerminal(TerminalTarget.Shell, TerminalTransport.SSH, 80u, 24u, null, RecordingListener())
+        assertTrue(terminal.clientId()!!.matches(Regex("[0-9a-f]{32}")))
+        assertNotEquals(terminal.clientId(), other.clientId())
+        assertNull(shell.clientId())
         runBlocking {
             for (nav in listOf(
                 TargetNav.NextWindow, TargetNav.PreviousWindow, TargetNav.NextSession, TargetNav.PreviousSession,
                 TargetNav.Pane(NavDirection.LEFT), TargetNav.Pane(NavDirection.RIGHT),
                 TargetNav.Pane(NavDirection.UP), TargetNav.Pane(NavDirection.DOWN),
             )) {
-                host.navigate(tmux, null, nav)
-                host.navigate(TerminalTarget.Herdr("work", null), "w1:p2", nav)
+                host.navigate(tmux, null, nav, null)
+                host.navigate(tmux, null, nav, terminal.clientId())
+                host.navigate(TerminalTarget.Herdr("work", null), "w1:p2", nav, null)
             }
             // A shell has nothing to move: answered at once, whatever the move.
-            host.navigate(TerminalTarget.Shell, null, TargetNav.NextSession)
+            host.navigate(TerminalTarget.Shell, null, TargetNav.NextSession, null)
         }
         // A herdr pane that has gone, and names validated like terminal targets.
         assertThrows(HostException.PaneNotFound::class.java) {
-            runBlocking { host.navigate(TerminalTarget.Herdr(null, null), "w9:p9", TargetNav.Pane(NavDirection.LEFT)) }
+            runBlocking { host.navigate(TerminalTarget.Herdr(null, null), "w9:p9", TargetNav.Pane(NavDirection.LEFT), null) }
         }
         assertThrows(HostException.InvalidName::class.java) {
-            runBlocking { host.navigate(TerminalTarget.Tmux("a:b"), null, TargetNav.NextWindow) }
+            runBlocking { host.navigate(TerminalTarget.Tmux("a:b"), null, TargetNav.NextWindow, null) }
         }
         assertThrows(HostException.InvalidName::class.java) {
-            runBlocking { host.navigate(TerminalTarget.Herdr(null, null), "w1 p1", TargetNav.NextWindow) }
+            runBlocking { host.navigate(TerminalTarget.Herdr(null, null), "w1 p1", TargetNav.NextWindow, null) }
+        }
+        // A client id becomes part of a tmux option's name: only one Rust made is accepted.
+        assertThrows(HostException.InvalidName::class.java) {
+            runBlocking { host.navigate(tmux, null, TargetNav.NextSession, "not-an-id") }
         }
         assertEquals(HostState.Connected(0u), host.state())
+        listOf(terminal, other, shell).forEach { it.disconnect(); it.close() }
         host.disconnect()
         host.close()
     }

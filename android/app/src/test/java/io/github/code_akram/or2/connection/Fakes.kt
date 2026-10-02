@@ -52,8 +52,12 @@ class FakeSession(val events: MutableList<String> = mutableListOf(), val transpo
         listOf(TerminalRow(0u, false, listOf(TerminalCell("L", CellWidth.NARROW, 0u), TerminalCell("R", CellWidth.NARROW, 0u)))),
         null, 0u, Scrollback(1uL, 0uL), TerminalModes(false, false))
     var pending: TerminalFrame? = lastFrame
+
+    /** What `clientId()` answers: one of its own for a tmux terminal (see [FakePort.openTerminal]). */
+    var client: String? = null
     override fun transport() = transport
     override fun serverPid() = pid
+    override fun clientId() = client
     override fun roam() { roams++ }
     override fun approveHostKey(fingerprint: String) = Unit
     override fun rejectHostKey() = Unit
@@ -136,6 +140,8 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         budgets += moshBudgetMs
         return FakeSession(transport = transport).also {
             if (transport == TerminalTransport.MOSH) it.pid = nextServerPid
+            // Like Rust: every tmux session has a client id of its own.
+            if (target is TerminalTarget.Tmux) it.client = "client-${terminals.size}"
             terminals += Triple(target, listener, it)
         }
     }
@@ -174,12 +180,16 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
 
     /** `navigate` calls in order; a failure is thrown after the call is recorded. */
     val navigations = mutableListOf<Triple<TerminalTarget, String?, TargetNav>>()
+
+    /** The client id each `navigate` call carried, in the same order as [navigations]. */
+    val navigationClients = mutableListOf<String?>()
     var navigateFailure: Exception? = null
     var navigateGate: CompletableDeferred<Unit>? = null
-    override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav) {
+    override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) {
         events += "navigate"
         navigateGate?.await()
         navigations += Triple(target, paneId, nav)
+        navigationClients += clientId
         navigateFailure?.let { throw it }
     }
     override suspend fun focusHerdrPane(session: String?, paneId: String) {

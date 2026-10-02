@@ -96,10 +96,11 @@ interface HostPort : AutoCloseable {
 
     /**
      * API 14: moves what a terminal on [target] shows (tmux window, pane or session; herdr tab, pane or
-     * workspace). [paneId] is the herdr pane to move from, null for the focused one. A shell target
-     * does nothing.
+     * workspace). [paneId] is the herdr pane to move from, null for the focused one. [clientId] is the
+     * moving terminal's shown session's `clientId()`: a tmux move then acts on exactly that terminal's
+     * tmux client, however many terminals show the same tmux session. A shell target does nothing.
      */
-    suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav)
+    suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?)
 }
 
 class NativeHostPort(private val connection: HostConnection) : HostPort {
@@ -119,7 +120,8 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
     override suspend fun stopMoshServer(pid: UInt) = connection.stopMoshServer(pid)
     override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll) =
         connection.scrollTarget(target, paneId, scroll)
-    override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav) = connection.navigate(target, paneId, nav)
+    override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) =
+        connection.navigate(target, paneId, nav, clientId)
     override fun close() = connection.close()
 }
 
@@ -1103,9 +1105,11 @@ class HostConnections(
      * A navigation swipe on [terminal]: moves the tmux window, pane or session, or the herdr tab, pane
      * or workspace, it shows, on its host's live connection, one move at a time per terminal. herdr
      * moves start from herdr's focused pane (the one a herdr client shows), not from the pane the
-     * terminal was opened on, which may no longer be focused. Returns whether the move ran: a shell
-     * target, a host that is not connected, and a failed move (a gesture has no error to show) are
-     * false.
+     * terminal was opened on, which may no longer be focused. A tmux move carries the client id of the
+     * session the terminal shows now (its [ActiveTerminal.handle]: during the SSH-to-mosh swap the SSH
+     * one until the mosh one replaces it), so it moves this terminal's own tmux client, never that of
+     * another terminal on the same tmux session. Returns whether the move ran: a shell target, a host
+     * that is not connected, and a failed move (a gesture has no error to show) are false.
      */
     suspend fun navigate(terminal: ActiveTerminal, nav: TargetNav): Boolean {
         if (terminal.target is TerminalTarget.Shell) return false
@@ -1113,7 +1117,7 @@ class HostConnections(
             val current = mutableHosts.value[terminal.host.id]?.takeIf { it.isLive && !it.retired }
             val port = current?.mutablePort?.value ?: return@withLock false
             try {
-                port.navigate(terminal.target, null, nav)
+                port.navigate(terminal.target, null, nav, terminal.mutableHandle.value?.clientId())
                 true
             } catch (_: HostException) {
                 false

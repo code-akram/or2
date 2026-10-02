@@ -111,6 +111,8 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
         )));
         return;
     };
+    // Dropped (released) when this returns, after the session's `Closed`.
+    let _release = host.tmux_release(driver.client_id(), &closing);
     let shutdown = Arc::new(Notify::new());
     let (done, finished) = oneshot::channel::<()>();
     runtime().spawn(watch_host(
@@ -130,7 +132,14 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
     // itself: the pane focus beside the bootstrap can still be pending when the start is given
     // up, and the dropped `prepare` takes the bootstrap's result with it.
     let started = Started::default();
-    let mut prepare: Prepare<'_> = Box::pin(prepare(&host, &target, size, &cancelled, &started));
+    let mut prepare: Prepare<'_> = Box::pin(prepare(
+        &host,
+        &target,
+        driver.client_id().map(str::to_owned),
+        size,
+        &cancelled,
+        &started,
+    ));
     let mut abandoned = false;
     let mut expired = false;
     // Never fires without a budget.
@@ -260,6 +269,7 @@ fn owes_cleanup(connected: bool, reason: &CloseReason, server_gone: bool) -> boo
 async fn prepare(
     shared: &Arc<SshHost>,
     target: &TerminalTarget,
+    client_id: Option<String>,
     size: TerminalSize,
     cancelled: &AtomicBool,
     started: &Started,
@@ -272,7 +282,7 @@ async fn prepare(
     if cancelled.load(Ordering::SeqCst) {
         return Ok(None);
     }
-    let Planned { command, focus } = plan(host, target).await?;
+    let Planned { command, focus } = plan(host, target, client_id.as_deref()).await?;
     let argv = match command {
         // The command goes to mosh-server as its arguments, where an environment has no
         // place; SSH would run it. Today's targets have none, and one that did must not

@@ -46,8 +46,20 @@ pub(super) async fn drive(
     };
     let (events, mut incoming) = mpsc::channel(32);
     let (shutdown, stop) = watch::channel(false);
+    let client_id = driver.client_id().map(str::to_owned);
+    // Dropped (released) when this returns, after the session's `Closed`.
+    let _release = host.tmux_release(client_id.as_deref(), &closing);
     let mut network = tokio::spawn(async move {
-        let reason = channel_task(host, target, &events, outgoing, latest_size, stop).await;
+        let reason = channel_task(
+            host,
+            target,
+            client_id,
+            &events,
+            outgoing,
+            latest_size,
+            stop,
+        )
+        .await;
         let _ = events.send(Event::Closed(reason)).await;
     });
     let mut pending_event = None;
@@ -137,6 +149,7 @@ impl PaneFocus {
 pub(super) async fn plan(
     host: &SshHost,
     target: &TerminalTarget,
+    client_id: Option<&str>,
 ) -> Result<Planned, SessionFailure> {
     let (command, focus) = match target {
         TerminalTarget::Shell => (None, None),
@@ -148,7 +161,10 @@ pub(super) async fn plan(
                 .tmux
                 .as_deref()
                 .ok_or_else(|| not_installed("tmux"))?;
-            (Some(tmux::attach_command(path, session_name)), None)
+            (
+                Some(tmux::attach_command(path, session_name, client_id)),
+                None,
+            )
         }
         TerminalTarget::Herdr { session, pane_id } => {
             let path = host
@@ -210,6 +226,7 @@ fn herdr_failure(error: HerdrError) -> SessionFailure {
 pub(super) async fn channel_task(
     host: Arc<SshHost>,
     target: TerminalTarget,
+    client_id: Option<String>,
     events: &mpsc::Sender<Event>,
     mut writes: mpsc::UnboundedReceiver<Write>,
     size: watch::Receiver<TerminalSize>,
@@ -217,7 +234,7 @@ pub(super) async fn channel_task(
 ) -> CloseReason {
     // Everything before the channel exists (the probe) is abandoned on stop.
     let planned = tokio::select! {
-        planned = plan(&host, &target) => match planned {
+        planned = plan(&host, &target, client_id.as_deref()) => match planned {
             Ok(planned) => planned,
             Err(failure) => return CloseReason::Failed(failure),
         },

@@ -3254,7 +3254,8 @@ only its own exports below.
 | `HostConnection.scroll_target(target: TerminalTarget, pane_id: Option<String>, scroll: TargetScroll) async -> Result<(), HostError>`, `TargetScroll { Up { lines: u32 }, Down { lines: u32 }, Bottom }` | Scroll |
 | `ResolvedRow.links: Vec<CellLink { start_column: u16, end_column: u16, uri: String }>` (OSC 8 hyperlinks; empty when none) | Links |
 | `SessionListener.on_clipboard_write(text: String)` (OSC 52 and OSC 1337 copy; reads are never answered) | Links |
-| `HostConnection.navigate(target: TerminalTarget, pane_id: Option<String>, nav: TargetNav) async -> Result<(), HostError>`, `TargetNav { NextWindow, PreviousWindow, Pane { direction: NavDirection }, NextSession, PreviousSession }`, `NavDirection { Left, Right, Up, Down }` | Gestures |
+| `HostConnection.navigate(target: TerminalTarget, pane_id: Option<String>, nav: TargetNav, client_id: Option<String>) async -> Result<(), HostError>`, `TargetNav { NextWindow, PreviousWindow, Pane { direction: NavDirection }, NextSession, PreviousSession }`, `NavDirection { Left, Right, Up, Down }` (`client_id`: the moving terminal's shown `Session.client_id()`; review fix, see "Fix: navigation by terminal identity") | Gestures |
+| `Session.client_id() -> Option<String>`: a tmux terminal's own opaque client id (32 lowercase hex digits, fixed for the session's life; `None` for shell and herdr) | Gestures |
 
 Both transports (the SSH pump and the mosh driver's engine) behave the same for every frame and
 callback field above. A target with nothing to do (a `Shell` target for `scroll_target` or
@@ -3753,7 +3754,8 @@ probe host answers every move `Ok`, except one from a `pane_id` its view lacks (
   <client> -n|-p`. Targets are `=name`, tmux's exact match, so `main` never reaches `main2`.
   *Which client* is the terminal's: `list-clients -F
   '#{client_activity}:#{client_session}:#{client_name}'`, the most recently active client showing
-  the target session. *Decision:* the client's **name** rather than `#{client_tty}`: they are the
+  the target session (superseded: the client the terminal's attach recorded under its client id,
+  and the memory below is per terminal; see "Fix: navigation by terminal identity"). *Decision:* the client's **name** rather than `#{client_tty}`: they are the
   same for a terminal client, and the name also works for a client without a tty. *Decision:* after
   a session move the terminal's client shows another session, which the target's name no longer
   finds, so the host connection remembers the switched client per target name
@@ -3828,5 +3830,76 @@ test was added (the lane runs without the phone).
 **Open.** A herdr pane move or tab move changes herdr's focus behind the connection's `FocusGate`,
 which may still remember an acknowledged focus for up to 2 s; a terminal opened on that same pane
 within that window could be answered from memory although the focus moved. Rare (a swipe and an
-open of the previous pane within 2 s), not handled. Two or2 terminals on the same tmux target
-session of one host share the session-move memory (the most recently active client is taken).
+open of the previous pane within 2 s), not handled. (Two or2 terminals on the same tmux target
+used to share the session-move memory; fixed below.)
+
+### Fix: navigation by terminal identity (branch `v011/fix-nav-identity`)
+
+Review finding (Codex, P2): two terminals for the same tmux target shared one remembered client, so
+a gesture on one could move the other. Rust remembered the switched client by target name,
+`terminal_client` preferred it whoever asked, and Kotlin dropped the terminal's identity at the FFI.
+The SSH/mosh overlap of the background swap had the same ambiguity with one `ActiveTerminal`.
+
+**Identity.** Every tmux terminal session gets a **client id** when it is opened
+(`HostHandle::open_terminal_within`: `tmux::new_client_id()`, 32 random lowercase hex digits, unique
+across connections, processes and devices sharing a tmux server), kept in the session's shared
+state: `SessionHandle::client_id()` / `SessionDriver::client_id()`, FFI `Session.client_id()`
+(`None` for shell and herdr). An SSH session and the mosh session that replaces it are two sessions
+with two ids.
+
+**The attach records its client.** `tmux::attach_command(tmux, name, Some(id))` is `tmux -u
+new-session -A -s <name> ; set-option -s -F @or2-client-<id> '#{client_name}'`: the second command
+of the same command list runs as the client that just attached, so the tmux server option
+`@or2-client-<id>` holds exactly that terminal's client name. The same argv goes to `mosh-server`
+for a mosh terminal (the live mosh test checks the record). *Decision:* identify the client at the
+source rather than guess among the target's clients (the most recently active one is not the one
+under the user's fingers: a gesture is not tmux input, so it leaves no activity). A server user
+option was chosen because it is readable from any `list-clients` format and costs no extra exec.
+
+**Navigation.** `HostHandle::navigate(target, pane_id, nav, client_id)`; FFI
+`HostConnection.navigate(..., client_id)`; a malformed id is `InvalidName` (it becomes part of an
+option name). `tmux::navigate` lists clients with `#{client_activity}:#{@or2-client-<id>}:
+#{client_session}:#{client_name}`; the client whose name equals the recorded one is the terminal's
+(`TmuxClient.recorded`). The client of a session move is, in order: the recorded one; else (a tmux
+that could not run `set-option -F`) the one this terminal's earlier switch remembered, while it is
+listed; else the most recently active client on the target that no other terminal has claimed.
+`NavClients` is keyed by the client id (`NavKey::Client`), so two terminals on one target are two
+entries; a caller without an id keeps the old per-target key (`NavKey::Target`). Window and pane
+moves still cost one exec until this terminal's first session move, then one `list-clients` more
+(acting on the session its recorded client shows; a remembered tty that is no longer listed is
+re-resolved from the record, or forgotten).
+
+**Release.** When a tmux terminal's session ends (either transport, any reason), a drop guard
+(`SshHost::tmux_release`) removes its `NavClients` entry and, unless the connection is closing,
+runs `tmux -u set-option -s -q -u @or2-client-<id>` in the background (best effort, 5 s bound,
+never delaying the session's `Closed`). A connection that closes, or a host that is unreachable,
+leaves the option behind: a few bytes on the tmux server, never consulted again (no other terminal
+has that id).
+
+**The swap.** Kotlin's `HostConnections.navigate(terminal, nav)` passes
+`terminal.handle.value?.clientId()`: the session the terminal shows. During the SSH/mosh overlap
+that is the SSH session until the swap publishes the mosh one, then the mosh one: always the client
+on screen, with no transfer state. *Not changed:* the mosh client attaches to the terminal's
+target, so a terminal whose SSH client had been switched to another session shows the target again
+after the swap (as before this fix).
+
+**Decision: the host screen keeps opening a new terminal for a tmux target that is already open.**
+With each terminal's moves now its own, two terminals on one session are consistent, and reusing
+would be wrong after a session move: the open terminal may show another session than the one the
+user tapped. The inbox and reattach keep reusing (their target identifies one herdr pane or the last
+terminal). Unchanged code, so no new test.
+
+**Tests.** Rust: `tmux` unit tests (the attach and release commands, client ids and their
+validation, the format with the recorded field, the choice order, two terminals on one target
+alternating session and window moves, re-resolution after a reattach, release, the fallback never
+taking another terminal's client); `host` unit tests (`each_tmux_terminal_gets_its_own_client_id`,
+`navigate` validating and carrying the id); `tests/host_nav.rs`
+`two_terminals_on_one_tmux_session_each_move_only_their_own_client` (two real SSH tmux clients on
+one session, the second made the more recently active, alternating session moves and window moves
+each move only their own client; closing one releases its record); `tests/host_mosh.rs` (a mosh
+tmux terminal records its client and releases it on close). JVM: `HostConnectionsNavigateTest`
+(two terminals on one target pass their own ids; across the swap the SSH id until the mosh session
+replaces it, then the mosh id), `HostContractTest.navigationCrossesTheFfi...` (`Session.client_id`
+through the real FFI, a malformed id refused). The live two-terminal test fails with the identity
+withheld (`None`: "A after its next session: or2-a, expected or2-b"), and the JVM tests fail with
+`navigate` passing `null`.
