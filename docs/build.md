@@ -78,10 +78,12 @@ android/gradlew -p android :app:assembleDebug :app:testDebugUnitTest :app:assemb
 Repository tooling is the `core/xtask` crate (Rust; no scripts in other languages). Inside `core/` the
 cargo alias in `core/.cargo/config.toml` makes it `cargo xtask <task>`; from the repository root run the
 same task as `cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- <task>` (the form
-used above). The tasks are `gen-herdr-types` and `gen-licenses`; each regenerates checked-in files and
-has a `--check` mode that writes nothing and fails when they are stale. `xtask` is a workspace member
+used above). The generators are `gen-herdr-types` and `gen-licenses`; each regenerates checked-in files and
+has a `--check` mode that writes nothing and fails when they are stale. `dist` builds the `or2-pair` release
+binaries (below; it generates nothing that is checked in). `xtask` is a workspace member
 but is not linked into the app library, so it never appears in the licence data. Its unit tests run
-with the rest of the workspace.
+with the rest of the workspace, and so does its integration test `core/xtask/tests/install_or2_pair.rs`,
+which runs `scripts/install-or2-pair.sh` (see "or2-pair release binaries" below).
 
 `core/or2-pair` (the Easy pair host CLI, a workspace crate that does not depend on `or2-core` at run
 time) has unit tests next to the code and seven integration suites. `tests/code_agreement.rs`: the host's
@@ -115,6 +117,44 @@ drawn code back. `cargo build -p or2-pair --release` builds the tool for the hos
 Kotlin end-to-end test below. `cargo clippy -p or2-pair --lib --bins --all-features --target
 x86_64-pc-windows-gnu` cross-checks the non-Unix build (the dev-dependency `russh` needs a C toolchain for
 that target, so the tests are not cross-checked).
+
+The checks' fixes for a host (`hints.rs`: the package manager, the sshd unit, the service manager and the
+firewall, read from files under a root directory) are unit-tested on fake trees in a temporary directory and on
+fabricated facts, never on the machine running the tests.
+
+**or2-pair release binaries.** From the repository root:
+
+```sh
+cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- dist
+```
+
+builds `core/target/dist/or2-pair-<target>` and `core/target/dist/SHA256SUMS` for the targets this host can
+build: on Linux `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (static, linked with the toolchain's
+own `rust-lld`, so no C cross toolchain or musl install is needed; `rustup target add` both first), on macOS
+`x86_64-apple-darwin` and `aarch64-apple-darwin` (Apple's linker and SDK). `--target` picks some, `--out` another
+directory, `--expect-version` fails unless the workspace version is that one. Symbols are stripped, the
+checkout's and cargo home's paths are mapped to `/or2` and `/cargo`, and the binary for the builder's own
+OS and CPU is run once (`--version`). macOS targets are refused on Linux: linking Mach-O here would need the
+SDK, or zig's stand-ins for it, which lack `libiconv` (tried with zig 0.16 as the linker: it fails there), do
+not record the SDK version, and give a binary that cannot be run here to check it. The Arch runner builds
+both Linux targets (`file`: x86-64 static-pie and aarch64 statically linked, both stripped); the aarch64 one is
+not run here (no qemu).
+
+`.github/workflows/or2-pair-release.yml` runs `dist` on an Ubuntu and a macOS runner (Rust 1.98.1) on a tag
+`or2-pair-v<version>` or by hand; on a tag a third job joins the two `SHA256SUMS`, checks every binary
+against it (`sha256sum --check --strict`, all four targets present) and creates the release of that tag with
+the five files (`gh release create --verify-tag`, `GITHUB_TOKEN` with `contents: write` in that job only; the
+build jobs read only). Actions are pinned to commit SHAs. A manual run on a branch only keeps the binaries
+as workflow artifacts.
+
+`scripts/install-or2-pair.sh` (POSIX `sh`, clean under ShellCheck 0.11) installs a release (see
+[Pair a host](pairing.md) and [contracts](contracts.md#host-cli), "Distribution").
+`core/xtask/tests/install_or2_pair.rs` runs it with `sh` against a fixture release in a temporary directory
+(`OR2_PAIR_DOWNLOAD_BASE` and `OR2_PAIR_RELEASES_URL` set to `file://` URLs, a fake `uname` first on `PATH`,
+`HOME` in the fixture): the newest `or2-pair-v*` tag among other tags, every OS and CPU spelling, the three
+`--version` spellings, `--dir`, `OR2_PAIR_INSTALL_DIR`, the `PATH` hint, a checksum mismatch and a missing
+`SHA256SUMS` line (nothing installed), a missing release, and an unsupported CPU or OS (refused before any
+download). It needs `curl` (`wget` cannot read `file://`) and skips, printing `SKIP`, without it.
 
 Rust integration tests (`core/or2-core/tests/`): `host.rs` runs host connections against a
 disposable loopback `sshd` (trust, address racing, probe, exec caps and timeout, streamlocal (missing socket, forbidden

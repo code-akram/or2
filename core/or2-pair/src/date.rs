@@ -75,7 +75,10 @@ impl DateTime {
     pub fn local_from_unix(seconds: i64) -> Self {
         #[cfg(unix)]
         {
-            #[allow(irrefutable_let_patterns)] // `time_t` is narrower than `i64` on 32-bit targets
+            // `time_t` is narrower than `i64` on 32-bit targets. On musl the libc crate marks it
+            // deprecated (it is to follow musl 1.2's 64-bit `time_t`); it is the type
+            // `localtime_r` takes either way, and 64-bit on the musl targets that are released.
+            #[allow(irrefutable_let_patterns, deprecated)]
             if let Ok(time) = libc::time_t::try_from(seconds) {
                 // SAFETY: `tm` is plain old data that `localtime_r` fills in; both pointers are
                 // valid for the call.

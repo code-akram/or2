@@ -31,6 +31,7 @@ fn manual(
         program_dirs: Vec::new(),
         interfaces: interfaces(),
         platform,
+        facts: or2_pair::hints::HostFacts::default(),
         net: &net,
         keyscan: &NoKeyscan,
         shell: &FakeShell,

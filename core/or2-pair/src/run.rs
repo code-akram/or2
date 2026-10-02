@@ -76,6 +76,8 @@ pub struct Env<'a> {
     pub program_dirs: Vec<PathBuf>,
     pub interfaces: Vec<Iface>,
     pub platform: Platform,
+    /// What the host has, for the exact fix of what is missing ([`crate::hints`]).
+    pub facts: crate::hints::HostFacts,
     pub net: &'a dyn Net,
     pub keyscan: &'a dyn Keyscan,
     /// Runs the login shell for the checks ([`checks::SystemShell`]).
@@ -241,6 +243,7 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
         exe: &env.exe,
         program_dirs: &env.program_dirs,
         platform: env.platform,
+        facts: &env.facts,
         pairing: !manual,
         manual_keys: !env.install_keys,
         stale: &stale,

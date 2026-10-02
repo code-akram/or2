@@ -283,6 +283,7 @@ pub fn pair<R>(
                 program_dirs: Vec::<PathBuf>::new(),
                 interfaces: interfaces(),
                 platform: setup.platform,
+                facts: or2_pair::hints::HostFacts::default(),
                 net: &net,
                 keyscan: &NoKeyscan,
                 shell: &FakeShell,

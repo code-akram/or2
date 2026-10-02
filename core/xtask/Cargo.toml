@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Repository tooling: generated herdr types and licence data (cargo xtask <task>)"
+description = "Repository tooling: generated herdr types, licence data and or2-pair release binaries (cargo xtask <task>)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,3 +11,6 @@ flate2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+
+[dev-dependencies]
+tempfile = "=3.27.0"

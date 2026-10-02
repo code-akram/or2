@@ -9,6 +9,8 @@
 //! - are tmux, herdr and mosh-server installed (all optional),
 //! - a firewall hint for mosh's UDP ports.
 //!
+//! What is missing or failing comes with the exact fix for this host ([`crate::hints`]).
+//!
 //! A [`Level::Fail`] is something that makes automatic pairing impossible here (the run refuses
 //! and points to `--manual`); a [`Level::Warn`] is something that may get in the way.
 
@@ -19,6 +21,7 @@ use std::path::{Path, PathBuf};
 use crate::account::Account;
 use crate::authorized_keys::{self, Writable};
 use crate::bootstrap::{self, Dialect, DialectError};
+use crate::hints::{self, HostFacts, Program};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -88,6 +91,8 @@ pub struct CheckInput<'a> {
     /// Directories searched for programs: `PATH` plus the usual user and package-manager ones.
     pub program_dirs: &'a [PathBuf],
     pub platform: Platform,
+    /// What the host has (package manager, sshd unit, firewall), for the exact fixes.
+    pub facts: &'a HostFacts,
     /// Whether this run pairs automatically (so that what blocks it is a `Fail`). Off for
     /// `--manual` and for platforms that install no keys.
     pub pairing: bool,
@@ -262,10 +267,22 @@ pub fn run(input: &CheckInput<'_>) -> Vec<Check> {
     }
     let mosh = find_program("mosh-server", input.program_dirs);
     let mut found = Vec::new();
-    for (name, note) in [
-        ("tmux", "optional: or2 can attach to its sessions"),
-        ("herdr", "optional: the agents inbox needs it"),
-        ("mosh-server", "optional: terminals survive network changes"),
+    for (name, program, note) in [
+        (
+            "tmux",
+            Program::Tmux,
+            "optional: or2 can attach to its sessions",
+        ),
+        (
+            "herdr",
+            Program::Herdr,
+            "optional: the agents inbox needs it",
+        ),
+        (
+            "mosh-server",
+            Program::MoshServer,
+            "optional: terminals survive network changes",
+        ),
     ] {
         let path = if name == "mosh-server" {
             mosh.clone()
@@ -274,7 +291,13 @@ pub fn run(input: &CheckInput<'_>) -> Vec<Check> {
         };
         match path {
             Some(_) => found.push(name),
-            None => out.push(check(Level::Info, format!("{name}: not found ({note})"))),
+            None => out.push(check(
+                Level::Info,
+                format!(
+                    "{name}: not found ({note}); install it: {}",
+                    hints::install(program, input.platform, input.facts)
+                ),
+            )),
         }
     }
     if !found.is_empty() {
@@ -283,7 +306,7 @@ pub fn run(input: &CheckInput<'_>) -> Vec<Check> {
             check(Level::Ok, format!("{} found", found.join(", "))),
         );
     }
-    if let Some(hint) = firewall_hint(input.platform, mosh.is_some()) {
+    if let Some(hint) = hints::firewall(input.platform, input.facts, mosh.is_some()) {
         out.push(check(Level::Info, hint));
     }
     out
@@ -341,24 +364,9 @@ fn sshd(input: &CheckInput<'_>, blocking: Level) -> Check {
             format!(
                 "sshd is not answering on port {}: {}",
                 input.ssh_port,
-                sshd_hint(input.platform)
+                hints::sshd(input.platform, input.facts)
             ),
         ),
-    }
-}
-
-fn sshd_hint(platform: Platform) -> &'static str {
-    match platform {
-        Platform::MacOs => {
-            "turn on Remote Login (System Settings > General > Sharing > Remote Login)"
-        }
-        Platform::Linux => {
-            "start it (sudo systemctl enable --now sshd, or ssh on Debian and Ubuntu)"
-        }
-        Platform::Windows => {
-            "install and start OpenSSH Server (Settings > Optional features, then Start-Service sshd)"
-        }
-        Platform::Other => "start your SSH server",
     }
 }
 
@@ -766,7 +774,9 @@ fn key_alone_is_enough(methods: &str) -> bool {
 /// `AuthorizedKeysFile` without `~/.ssh/authorized_keys` (unless an `AuthorizedKeysCommand` may
 /// read that file itself), a `ForceCommand`. What it may do (a `Match` block that cannot be
 /// evaluated, an `Include` that cannot be read) and what may get in the way otherwise (an
-/// `AuthorizedKeysCommand`, `AuthenticationMethods` that need more than a key) is a `warn`.
+/// `AuthorizedKeysCommand` when the file may not be read, `AuthenticationMethods` that need more
+/// than a key) is a `warn`. An `AuthorizedKeysCommand` next to an `AuthorizedKeysFile` that
+/// includes `~/.ssh/authorized_keys` is no finding: sshd reads both.
 fn config(input: &CheckInput<'_>, blocking: Level) -> Vec<Check> {
     let Some(config) = read_sshd_config(input.etc_ssh) else {
         return Vec::new();
@@ -822,10 +832,14 @@ fn config(input: &CheckInput<'_>, blocking: Level) -> Vec<Check> {
             ),
         ));
     }
-    if command_verdict != Verdict::Fine {
+    // sshd consults an AuthorizedKeysCommand in addition to the AuthorizedKeysFile, not instead
+    // of it: with `.ssh/authorized_keys` among the files (systemd's standard
+    // `20-systemd-userdb.conf` snippet, for one) the temporary key is found there whatever the
+    // command says. Only when the file may not be read does the command matter.
+    if command_verdict != Verdict::Fine && excluded != Verdict::Fine {
         out.push(check(
             Level::Warn,
-            "sshd_config sets an AuthorizedKeysCommand; pairing would likely fail here, use --manual",
+            "sshd_config sets an AuthorizedKeysCommand and its AuthorizedKeysFile may leave out .ssh/authorized_keys; pairing would likely fail here, use --manual",
         ));
     }
 
@@ -857,18 +871,6 @@ fn config(input: &CheckInput<'_>, blocking: Level) -> Vec<Check> {
         ));
     }
     out
-}
-
-fn firewall_hint(platform: Platform, mosh: bool) -> Option<String> {
-    let ports = "mosh needs UDP ports 60000-61000 open on this host";
-    let how = match platform {
-        Platform::MacOs => "allow mosh-server in System Settings > Network > Firewall",
-        Platform::Linux => {
-            "for ufw: sudo ufw allow 60000:61000/udp; for firewalld: sudo firewall-cmd --add-port=60000-61000/udp"
-        }
-        Platform::Windows | Platform::Other => return None,
-    };
-    mosh.then(|| format!("{ports} if a firewall is on ({how})"))
 }
 
 /// The first executable called `name` in `dirs`.
@@ -940,6 +942,7 @@ mod tests {
         exe: Result<PathBuf, String>,
         dirs: Vec<PathBuf>,
         platform: Platform,
+        facts: HostFacts,
         pairing: bool,
         account_shell: Option<String>,
         shell_says: Result<&'static str, &'static str>,
@@ -954,6 +957,7 @@ mod tests {
                 exe: Ok(PathBuf::from("/home/dev/.cargo/bin/or2-pair")),
                 dirs: Vec::new(),
                 platform: Platform::Linux,
+                facts: HostFacts::default(),
                 pairing: true,
                 account_shell: Some("/bin/bash".into()),
                 shell_says: Ok("or2-pair test\n"),
@@ -971,6 +975,7 @@ mod tests {
                 exe: &self.exe,
                 program_dirs: &self.dirs,
                 platform: self.platform,
+                facts: &self.facts,
                 pairing: self.pairing,
                 manual_keys: false,
                 stale: &[],
@@ -1061,6 +1066,61 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn what_is_missing_comes_with_this_hosts_fix() {
+        let bin = tempfile::tempdir().unwrap();
+        executable(bin.path(), "mosh-server");
+        let mut setup = Setup::new(Err(io::ErrorKind::ConnectionRefused.into()));
+        setup.dirs = vec![bin.path().to_path_buf()];
+        setup.facts = HostFacts {
+            package_manager: Some(hints::PackageManager::Apt),
+            service_manager: Some(hints::ServiceManager::Systemd),
+            sshd_unit: Some("ssh".into()),
+            sshd_installed: Some(true),
+            firewall: Some(hints::Firewall::Ufw),
+            superuser: false,
+        };
+        let checks = setup.run();
+        assert_eq!(
+            checks[0].text,
+            "sshd is not answering on port 22: start it with `sudo systemctl enable --now ssh`; if sshd listens on another port, pass --ssh-port"
+        );
+        let infos = texts(&checks, Level::Info);
+        assert!(
+            infos.contains(
+                &"tmux: not found (optional: or2 can attach to its sessions); install it: `sudo apt install tmux`"
+            ),
+            "{infos:?}"
+        );
+        assert!(
+            infos
+                .iter()
+                .any(|t| t.starts_with("herdr: not found") && t.contains("herdr's install docs")),
+            "{infos:?}"
+        );
+        assert!(
+            infos
+                .iter()
+                .any(|t| t.contains("ufw is on: `sudo ufw allow 60000:61000/udp`")),
+            "{infos:?}"
+        );
+        // On a Mac with Homebrew.
+        setup.platform = Platform::MacOs;
+        setup.facts = HostFacts {
+            package_manager: Some(hints::PackageManager::Brew),
+            ..HostFacts::default()
+        };
+        let checks = setup.run();
+        assert!(checks[0].text.contains("Remote Login"));
+        assert!(
+            texts(&checks, Level::Info)
+                .iter()
+                .any(|t| t.starts_with("tmux: not found") && t.ends_with("`brew install tmux`")),
+            "{checks:?}"
+        );
+    }
+
     #[test]
     fn something_that_is_not_sshd_blocks_pairing() {
         let checks = Setup::new(banner("HTTP/1.1 400")).run();
@@ -1107,6 +1167,7 @@ mod tests {
             exe: &setup.exe,
             program_dirs: &[],
             platform: Platform::Linux,
+            facts: &HostFacts::default(),
             pairing: true,
             manual_keys: false,
             stale: &[],
@@ -1240,6 +1301,7 @@ mod tests {
             exe: &setup.exe,
             program_dirs: &[],
             platform: Platform::Linux,
+            facts: &HostFacts::default(),
             pairing: true,
             manual_keys: false,
             stale: &stale,
@@ -1321,8 +1383,10 @@ mod tests {
         }
         // What only may get in the way warns and suggests --manual.
         for (config, word) in [
+            // The file may not be read for this account (a block that cannot be evaluated), so
+            // the command may be all sshd asks.
             (
-                "AuthorizedKeysCommand /usr/bin/fetch %u\n",
+                "AuthorizedKeysCommand /usr/bin/fetch %u\nMatch Group wheel\n  AuthorizedKeysFile /k/%u\n",
                 "AuthorizedKeysCommand",
             ),
             // The command may read the file itself.
@@ -1388,6 +1452,11 @@ mod tests {
             "AuthorizedKeysFile ~/.ssh/authorized_keys\n".to_owned(),
             format!("AuthorizedKeysFile {home}/.ssh/authorized_keys\n"),
             "AuthorizedKeysCommand none\n".to_owned(),
+            // sshd reads the file as well as the command's output: the default file list (or
+            // one that includes ~/.ssh/authorized_keys) still finds the temporary key.
+            "AuthorizedKeysCommand /usr/bin/fetch %u\n".to_owned(),
+            "AuthorizedKeysFile .ssh/authorized_keys\nAuthorizedKeysCommand /usr/bin/fetch %u\n"
+                .to_owned(),
             "ForceCommand none\n".to_owned(),
             "AuthenticationMethods any\n".to_owned(),
             "AuthenticationMethods publickey\n".to_owned(),
@@ -1413,6 +1482,60 @@ mod tests {
                 "{config}: {fails:?} {warnings:?}"
             );
         }
+    }
+
+    #[test]
+    fn systemds_userdb_snippet_is_not_a_finding() {
+        // Owner report: every host with systemd's standard snippet (Arch, Fedora, ...) was
+        // warned "sshd_config sets an AuthorizedKeysCommand; pairing would likely fail". sshd
+        // consults the command in addition to AuthorizedKeysFile, whose default includes
+        // ~/.ssh/authorized_keys, so the temporary key is found there.
+        let setup = Setup::new(banner("SSH-2.0-OpenSSH_9.9"));
+        let dir = setup.etc.path().join("sshd_config.d");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("20-systemd-userdb.conf"),
+            "# SPDX-License-Identifier: LGPL-2.1-or-later\n#\n# Make sure SSH authorized keys recorded in user records can be consumed by SSH\n#\nAuthorizedKeysCommand /usr/bin/userdbctl ssh-authorized-keys %u\nAuthorizedKeysCommandUser root\n",
+        )
+        .unwrap();
+        for main in [
+            "Include sshd_config.d/*.conf\n",
+            "Include sshd_config.d/*.conf\nAuthorizedKeysFile .ssh/authorized_keys\nPasswordAuthentication no\n",
+        ] {
+            setup.config(main);
+            assert_eq!(
+                read_sshd_config(setup.etc.path())
+                    .unwrap()
+                    .global
+                    .authorized_keys_command,
+                Some(true)
+            );
+            let checks = setup.run();
+            assert!(
+                checks
+                    .iter()
+                    .filter(|c| matches!(c.level, Level::Warn | Level::Fail))
+                    .all(|c| !c.text.contains("sshd_config")),
+                "{main}: {checks:?}"
+            );
+        }
+        // The same command next to a file list without ~/.ssh/authorized_keys still warns: only
+        // the command could find the key then (it reads user records, so it will not).
+        setup.config("Include sshd_config.d/*.conf\nAuthorizedKeysFile /etc/ssh/keys/%u\n");
+        let checks = setup.run();
+        let warnings = texts(&checks, Level::Warn);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("AuthorizedKeysFile (/etc/ssh/keys/%u)")),
+            "{checks:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("AuthorizedKeysCommand") && w.contains("--manual")),
+            "{checks:?}"
+        );
     }
 
     #[test]

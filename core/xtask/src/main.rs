@@ -6,6 +6,7 @@
 //! generator has a `--check` mode. Nothing here is shipped: the crate is outside the licence
 //! data of the Android library.
 
+mod dist;
 mod herdr;
 mod json;
 mod licenses;
@@ -37,13 +38,17 @@ Tasks:
   gen-herdr-types [--herdr PATH] [--offline] [--check]
       regenerate core/or2-core/src/herdr/{schema.json,generated.rs}
   gen-licenses [--check]
-      regenerate the open-source licence data (Android assets, core/or2-pair/THIRD_PARTY.md)";
+      regenerate the open-source licence data (Android assets, core/or2-pair/THIRD_PARTY.md)
+  dist [--target TRIPLE]... [--out DIR] [--expect-version VERSION]
+      build the or2-pair release binaries this host can build (Linux: static musl, x86_64 and
+      aarch64; macOS: x86_64 and aarch64) into core/target/dist, with SHA256SUMS";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("gen-herdr-types") => herdr::run(&args[1..]).map_err(|e| ("gen-herdr-types", e)),
         Some("gen-licenses") => licenses::run(&args[1..]).map_err(|e| ("gen-licenses", e)),
+        Some("dist") => dist::run(&args[1..]).map_err(|e| ("dist", e)),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);

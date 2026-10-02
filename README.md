@@ -10,6 +10,19 @@ See [the design](docs/design.md), [contracts](docs/contracts.md) and [build inst
 To add a host, [pair it with one command and a QR scan](docs/pairing.md) (`or2-pair`), or
 [set it up manually](docs/manual-setup.md).
 
+Install `or2-pair` on a Linux or macOS host (into `~/.local/bin`, checksum verified, no sudo), then run it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/code-akram/or2/main/scripts/install-or2-pair.sh | sh
+or2-pair
+```
+
+To read the script before it runs, download it first:
+`curl -fsSLO https://raw.githubusercontent.com/code-akram/or2/main/scripts/install-or2-pair.sh`, read
+`install-or2-pair.sh`, then `sh install-or2-pair.sh`. The binaries come from the
+[`or2-pair-v*` releases](https://github.com/code-akram/or2/releases); none is published yet, so until
+then build it from source (see [Pair a host](docs/pairing.md#1-install-or2-pair-on-the-host)).
+
 License: GPL-3.0-or-later.
 
 ## Acknowledgements

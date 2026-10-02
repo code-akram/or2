@@ -9,6 +9,7 @@
 //!
 //! - [`checks`]: report sshd (and its version), `authorized_keys`, `sshd_config`, the login shell
 //!   and the program's path, tmux/herdr/mosh-server and firewall hints,
+//! - [`hints`]: the exact fix of what is missing or failing, for this host,
 //! - [`addresses`], [`hostkey`]: what the phone needs to reach and recognise this host,
 //! - [`payload`], [`qr`]: the pairing code (QR text) and its terminal drawing,
 //! - [`code`], [`bootstrap`], [`prompt`]: the code `K`, the key and `authorized_keys` line derived
@@ -29,6 +30,7 @@ pub mod code;
 pub mod date;
 #[cfg(unix)]
 pub mod exchange;
+pub mod hints;
 pub mod hostkey;
 pub mod keyline;
 pub mod net;
@@ -150,9 +152,17 @@ pub fn run_main(options: &args::Options, code_from_stdin: bool) -> Result<Exit, 
     let exe = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(|error| error.to_string());
+    let program_dirs = checks::program_dirs(path.as_deref(), &account.home);
+    let facts = hints::HostFacts::detect(
+        Platform::current(),
+        std::path::Path::new("/"),
+        &program_dirs,
+        cfg!(unix) && account.uid == 0,
+    );
     let env = Env {
         version: env!("CARGO_PKG_VERSION"),
-        program_dirs: checks::program_dirs(path.as_deref(), &account.home),
+        program_dirs,
+        facts,
         account,
         hostname: Some(hostname),
         etc_ssh,

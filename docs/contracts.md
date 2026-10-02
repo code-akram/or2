@@ -2797,6 +2797,35 @@ cannot run commands or does not start this program, a program path sshd's shell 
 are installed) the same findings are `warn`. `--check` prints them either way and exits 0. An sshd
 older than OpenSSH 9.1 is a `warn` that says the key is written without an expiry.
 
+**Fixes for this host** (`hints.rs`). A missing or failing prerequisite prints the exact command for this
+host; `or2-pair` only prints it, never runs it, and never runs `sudo` (commands are shown without `sudo`
+when it runs as root, and Homebrew's never have it). What the host has is read once, from files only,
+under a root directory that tests replace with a fake tree (`HostFacts::detect`): the package manager
+(macOS: `brew` in `/opt/homebrew/bin` or `/usr/local/bin`; Linux, the first of `apt-get`, `dnf`, `yum`,
+`zypper`, `pacman`, `apk` on `PATH` or in the usual `bin`/`sbin` directories), the service manager
+(systemd when `/run/systemd/system` is a directory, OpenRC when `/run/openrc` is), the SSH server's unit
+(`ssh.service`, Debian's, wins over `sshd.service` in `/usr/lib/systemd/system`, `/lib/systemd/system`,
+`/etc/systemd/system`), whether an `sshd` program is installed, and the active firewall (ufw when
+`/etc/ufw/ufw.conf` says `ENABLED=yes`, else firewalld, else nftables when its service is enabled:
+systemd's `multi-user.target.wants` link or an OpenRC `default`/`boot` runlevel entry).
+- sshd not answering: macOS, Remote Login (System Settings > General > Sharing > Remote Login) or
+  `sudo systemsetup -setremotelogin on`, noting it needs Full Disk Access for the terminal app; Linux,
+  `sudo systemctl enable --now <unit>` with the unit found (else the package manager's: `ssh` for apt,
+  `sshd` for the others; else `sshd`, naming `ssh` for Debian and Ubuntu), or `sudo rc-update add sshd &&
+  sudo rc-service sshd start` on OpenRC, preceded by the install command of the OpenSSH server
+  (`openssh-server`; `openssh` for pacman and apk) when no `sshd` is installed; both add "if sshd listens
+  on another port, pass --ssh-port". Windows unchanged.
+- tmux or mosh-server not found (`info`): `install it:` and the package manager's command (`brew
+  install`, `apt install`, `dnf install`, `yum install`, `pacman -S`, `zypper install`, `apk add`; the
+  package `tmux`, or `mosh` for mosh-server); without a package manager, Homebrew on macOS
+  (`https://brew.sh`) or "with your package manager" on Linux. herdr: "see herdr's install docs
+  (https://github.com/herdrdev/herdr)", whatever the package manager.
+- mosh's UDP ports 60000-61000 (`info`, only when mosh-server is found): ufw `ufw allow 60000:61000/udp`;
+  firewalld `firewall-cmd --permanent --add-port=60000-61000/udp && firewall-cmd --reload`; nftables an
+  `nft add rule inet filter input udp dport 60000-61000 accept` example to adapt to the ruleset and keep in
+  `/etc/nftables.conf`; none found: only another firewall (a router's, a cloud provider's) could block
+  them. macOS: allow mosh-server in System Settings > Network > Firewall.
+
 **The `sshd_config` reading.** `Include` patterns are relative to `/etc/ssh` (a `*`/`?` in the file
 name, at most four levels deep, each file once); an `Include` inside a `Match` block belongs to that
 block, and a `Match` inside an included file ends with that file. The first value of a keyword wins, as
@@ -2817,11 +2846,39 @@ those two were taken for enabled and for a command).
   `AuthorizedKeysCommand` is also set (it might read that file itself: then `warn`); a `ForceCommand`
   (not `none`), global or in a block that applies.
 - **`warn`**, suggesting `--manual`: any of those that is only possible (the message says it is in a
-  `Match` block or an `Include` that cannot be evaluated); an `AuthorizedKeysCommand`; an
+  `Match` block or an `Include` that cannot be evaluated); an `AuthorizedKeysCommand` when the
+  `AuthorizedKeysFile` may not include `.ssh/authorized_keys` (certainly or possibly); an
   `AuthenticationMethods` that needs more than a key.
+- **No finding**: an `AuthorizedKeysCommand` next to an `AuthorizedKeysFile` that includes
+  `.ssh/authorized_keys` (the default does). sshd consults the command in addition to the files, not
+  instead of them, so the temporary key is found in the file. (Owner report: systemd's standard snippet
+  `/usr/lib/systemd/sshd_config.d/20-systemd-userdb.conf`, `AuthorizedKeysCommand /usr/bin/userdbctl
+  ssh-authorized-keys %u`, included on Arch, Fedora and others, made every such host warn "pairing would
+  likely fail".)
 - A block that does not apply (`Match User` for someone else) is ignored. (Review of the v2 integration:
   `Match` blocks were all ignored and these findings were all warnings, so a person typed a code for a
   run that could not work.)
+
+**Distribution.** A tag `or2-pair-v<version>` (the workspace version) makes the GitHub release of that tag
+(`.github/workflows/or2-pair-release.yml`) with five assets: `or2-pair-<target>` for
+`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` (static, linked with `rust-lld`),
+`x86_64-apple-darwin` and `aarch64-apple-darwin` (built on a macOS runner), each the bare executable, and
+`SHA256SUMS` (`sha256sum` format, by name). All are built by `cargo xtask dist`, which strips symbols, maps the
+build's paths to `/or2` and `/cargo`, and runs the binary that matches the builder (`--version` must print
+`or2-pair <version>`; `--expect-version` makes the tag and the workspace version agree).
+`scripts/install-or2-pair.sh` (POSIX `sh`) maps `uname -s`/`uname -m` to a target (`x86_64`/`amd64`,
+`aarch64`/`arm64`; Linux and Darwin; an Intel shell under Rosetta gets the Apple silicon binary) and refuses
+anything else before downloading; finds the newest release whose tag starts `or2-pair-v` in
+`https://api.github.com/repos/code-akram/or2/releases` (the first such `tag_name`; the app's releases have
+other tags), unless `--version` names one (`0.2.0`, `v0.2.0` and `or2-pair-v0.2.0` are the same);
+downloads `<base>/<tag>/or2-pair-<target>` and `<base>/<tag>/SHA256SUMS` with `curl` (HTTPS only, also
+after redirects) or `wget`; refuses unless `SHA256SUMS` lists the asset and its SHA-256 (`sha256sum` or
+`shasum -a 256`) matches, installing nothing; then copies it to `--dir`, else `$OR2_PAIR_INSTALL_DIR`, else
+`~/.local/bin` (created), as a new file renamed over `or2-pair`, runs `or2-pair --version`, warns when the
+directory's path has characters `or2-pair` refuses, prints the `PATH` line to add when it is not on `PATH`, and
+tells the person to run `or2-pair`. It never runs `sudo` and writes nothing else.
+`OR2_PAIR_DOWNLOAD_BASE` (default `https://github.com/code-akram/or2/releases/download`) and
+`OR2_PAIR_RELEASES_URL` point it at a mirror; the tests point them at `file://` fixtures.
 
 **Kept from version 1 unchanged:** the account (`getpwuid_r(geteuid())`, `$HOME`/`$USER` ignored,
 `--user` only repeating it); the phone's `authorized_keys` line, rebuilt from the validated key, with the

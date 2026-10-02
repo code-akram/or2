@@ -12,7 +12,39 @@ file: you add the phone's key by hand (see [Windows](#windows-add-the-key-by-han
 
 You need `sshd` running on the host (macOS: System Settings > General > Sharing > Remote Login; Linux:
 `sudo systemctl enable --now sshd`, or `ssh` on Debian and Ubuntu; Windows: the OpenSSH Server optional
-feature). `or2-pair` checks this for you and says what to do.
+feature). `or2-pair` checks this for you and prints the exact command for your host.
+
+On Linux (x86_64 or aarch64) or macOS (Intel or Apple silicon), in a terminal on the host:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/code-akram/or2/main/scripts/install-or2-pair.sh | sh
+```
+
+The script ([`scripts/install-or2-pair.sh`](../scripts/install-or2-pair.sh), POSIX `sh`) picks the binary for
+your OS and CPU from the newest `or2-pair-v*` [release](https://github.com/code-akram/or2/releases), downloads
+it and the release's `SHA256SUMS` (with `curl` or `wget`), refuses it unless the SHA-256 matches (`sha256sum`
+or `shasum -a 256`), and puts it in `~/.local/bin`, which it creates. It never uses `sudo` and changes nothing
+else: no shell startup file, nothing in `~/.ssh`. If `~/.local/bin` is not on your `PATH` it says so and shows
+the line to add; then it tells you to run `or2-pair`. Options: `--version 0.2.0` (or `v0.2.0`) installs that
+release, `--dir <directory>` (or `OR2_PAIR_INSTALL_DIR`) installs elsewhere.
+
+Prefer to read it first? Download it, read it, then run it:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/code-akram/or2/main/scripts/install-or2-pair.sh
+less install-or2-pair.sh
+sh install-or2-pair.sh
+```
+
+Or skip the script: download `or2-pair-<target>` and `SHA256SUMS` from the release, check them with
+`grep ' or2-pair-<target>$' SHA256SUMS | sha256sum -c` (macOS: `shasum -a 256 -c` in place of `sha256sum -c`),
+make the file executable and put it on your `PATH` as `or2-pair`. The targets are `x86_64-unknown-linux-musl`,
+`aarch64-unknown-linux-musl`, `x86_64-apple-darwin` and `aarch64-apple-darwin`.
+
+No release is published yet (the first is `or2-pair-v0.1.0` when it is tagged); until then, and on other systems,
+build it from source. The Linux binaries are static (musl), so they run on any distribution, but they find your
+account only in `/etc/passwd`: an account that exists only in a directory service (LDAP, SSSD, systemd-homed)
+needs the source build, which uses the system's own account lookup.
 
 From a checkout of this repository, with a Rust toolchain:
 
@@ -110,8 +142,11 @@ list). If you can't `ssh` to the host from the phone's network, pairing can't wo
 
 ### `or2-pair` says "fail" and stops
 
-Each `fail` line says why automatic pairing can't work here: sshd isn't answering (it prints how to start it; on a
-non-standard port pass `--ssh-port`), the SSH server isn't OpenSSH, `authorized_keys` (or `~/.ssh`, where the new
+Each `fail` line says why automatic pairing can't work here: sshd isn't answering (it prints the command for this
+host: on Linux `sudo systemctl enable --now ssh` or `sshd` by the unit your distribution installs, `rc-service` on
+OpenRC, and the install command of your package manager first when no OpenSSH server is installed; on macOS Remote
+Login in System Settings > General > Sharing, or `sudo systemsetup -setremotelogin on`, which needs Full Disk Access
+for the terminal app; on a non-standard port pass `--ssh-port`), the SSH server isn't OpenSSH, `authorized_keys` (or `~/.ssh`, where the new
 file is written) can't be written, the home directory or `~/.ssh` is writable by others (sshd would ignore the
 file: `chmod go-w ~ && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys`), your login shell is `nologin` or
 `false` or cannot start `or2-pair` (the check runs `<your shell> -c "<or2-pair> --version"`, as sshd will; a
@@ -132,9 +167,13 @@ every attempt that reached the host), `or2-pair` has stopped or timed out, or ss
 `AuthorizedKeysFile` that doesn't include `.ssh/authorized_keys`, or a `ForceCommand` (it would run instead of the
 pairing command), set globally or in a `Match User <you>` (or `Match all`) block. It only warns, and suggests
 `--manual`, when it can't be sure: the setting is in a `Match` block on something it can't check (a group, the
-phone's address), an included file can't be read, or an `AuthorizedKeysCommand` is set (which might read the file
-itself); and for `AuthenticationMethods` that need more than a key. `Match User` blocks for other accounts are
-ignored. If you can't read `sshd_config` (not root), these are only discovered when the phone is refused (for a
+phone's address), an included file can't be read, or an `AuthorizedKeysCommand` is set while the
+`AuthorizedKeysFile` may leave out `.ssh/authorized_keys` (the command might read the file itself); and for
+`AuthenticationMethods` that need more than a key. An `AuthorizedKeysCommand` next to the default
+`AuthorizedKeysFile` (or one that includes `.ssh/authorized_keys`) is fine and not reported: sshd consults the
+command in addition to the file, so systemd's standard `20-systemd-userdb.conf` snippet
+(`AuthorizedKeysCommand /usr/bin/userdbctl ssh-authorized-keys %u`) does not get in the way. `Match User` blocks for
+other accounts are ignored. If you can't read `sshd_config` (not root), these are only discovered when the phone is refused (for a
 `ForceCommand` the phone says "something other than or2-pair answered").
 
 ### An old sshd
@@ -177,8 +216,20 @@ code; addresses are dropped from the end to keep it within the phone's limits (a
 
 ### mosh
 
-mosh needs UDP 60000-61000 open for terminals that survive network changes; the checks print the command for ufw or
-firewalld, and on macOS you allow `mosh-server` in System Settings > Network > Firewall. Pairing itself does not need it.
+mosh needs UDP 60000-61000 open for terminals that survive network changes. When `mosh-server` is installed the
+checks print the rule for the firewall that is on: ufw (`sudo ufw allow 60000:61000/udp`, when `/etc/ufw/ufw.conf`
+says `ENABLED=yes`), firewalld (`sudo firewall-cmd --permanent --add-port=60000-61000/udp && sudo firewall-cmd
+--reload`) or nftables (an `nft add rule` example to adapt to your ruleset), found by their enabled services; with
+none of them it says only a router's or a cloud provider's firewall could block the ports. On macOS you allow
+`mosh-server` in System Settings > Network > Firewall. Pairing itself does not need it.
+
+### Missing tmux, herdr or mosh-server
+
+They are optional, and each one that is missing comes with its install command for your package manager
+(Homebrew, apt, dnf or yum, pacman, zypper or apk; `sudo` left out when you run as root): for example
+``tmux: not found (optional: or2 can attach to its sessions); install it: `sudo apt install tmux` ``. For herdr it
+points to [herdr's own install instructions](https://github.com/herdrdev/herdr) rather than guess a package.
+`or2-pair` only prints these commands; it never runs them, or `sudo`.
 
 ## How it stays safe
 

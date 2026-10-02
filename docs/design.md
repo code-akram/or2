@@ -472,7 +472,15 @@ address) the extra port was unreachable although SSH worked. Version 2 pairs ove
   the device tests are still to run on the phone.
 - [ ] Phone acceptance of Easy pair: a real `or2-pair` code on a host reached over its public address
   and on a LAN host, with the battery step, then connect.
-- [ ] Installer: release binaries for Linux and macOS and a POSIX `sh` installer (after v2).
+- [x] Installer, Linux part: `cargo xtask dist` builds the static x86_64 and aarch64 Linux binaries with
+  `SHA256SUMS` (built on the Arch runner; the x86_64 one runs, the aarch64 one is checked by `file` only), and
+  `scripts/install-or2-pair.sh` (POSIX `sh`, ShellCheck-clean) installs one with its checksum verified, tested
+  against fixture releases (`install_or2_pair.rs`: checksum OK and mismatch, unsupported CPU and OS). The checks
+  print the exact fix for the host (sshd unit, package manager, firewall), and systemd's userdb
+  `AuthorizedKeysCommand` snippet no longer warns ([contracts](contracts.md#host-cli)).
+- [ ] Installer, release: the macOS binaries are built only by `.github/workflows/or2-pair-release.yml` (on a
+  macOS runner), which has not run yet, and no `or2-pair-v*` release is published, so the one-liner has nothing to
+  install until the owner tags one.
 
 ## Decisions
 
