@@ -108,6 +108,7 @@ internal fun HomePickerSheet(
         resume = { id -> dismiss(); resume(id) },
         refresh = source.refresh, dismiss = dismiss,
         gate = pickerGate(host, source.state, unlocking, busy),
+        title = host.label,
         gateAction = { action ->
             when (action) {
                 GateAction.SELECT_KEY -> { dismiss(); edit() }

@@ -246,6 +246,8 @@ fun SessionPickerSheet(
     initialTab: PickerTab? = null,
     gate: PickerGate? = null,
     gateAction: (GateAction) -> Unit = {},
+    /** The host's name, over Home, where nothing else on screen says which host the sheet is for. */
+    title: String? = null,
 ) {
     var chosen by remember { mutableStateOf(initialTab) }
     val tab = chosen ?: if (caps != null && caps.herdr == null && caps.tmux != null) PickerTab.TMUX else PickerTab.HERDR
@@ -256,6 +258,12 @@ fun SessionPickerSheet(
             if (gate != null) {
                 GatePane(gate, gateAction)
                 return@Column
+            }
+            if (title != null) {
+                Text(
+                    title, style = Or2Type.Secondary, color = Or2Colors.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = Or2Dimens.Gutter + 4.dp, end = Or2Dimens.Gutter, bottom = 8.dp).testTag("picker-title"),
+                )
             }
             Row(Modifier.fillMaxWidth().padding(horizontal = Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
                 Segmented(

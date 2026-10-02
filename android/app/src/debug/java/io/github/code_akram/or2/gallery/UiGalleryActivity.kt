@@ -314,7 +314,7 @@ class UiGalleryActivity : ComponentActivity() {
             SessionPickerSheet(
                 caps, null, tmux,
                 recent = listOf(HostTerminalItem(1, "tmux main", false), HostTerminalItem(3, "shell", true)),
-                openShell = {}, openTmux = {}, openHerdr = {}, resume = {}, refresh = {}, dismiss = {}, gate = gate,
+                openShell = {}, openTmux = {}, openHerdr = {}, resume = {}, refresh = {}, dismiss = {}, gate = gate, title = "build-box",
             )
         }
     }

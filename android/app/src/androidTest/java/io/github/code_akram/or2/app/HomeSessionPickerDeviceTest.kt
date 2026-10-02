@@ -127,6 +127,7 @@ class HomeSessionPickerDeviceTest {
         compose.onNodeWithContentDescription("Open a session on Alpha").performClick()
         compose.onNodeWithTag("session-picker").assertIsDisplayed()
         compose.onNodeWithTag("picker-gate").assertDoesNotExist() // Connected: the lists at once.
+        compose.onNodeWithTag("picker-title").assertTextEquals("Alpha") // Over Home, the sheet names its host.
         compose.onNodeWithTag("host-detail").assertDoesNotExist() // Over Home, not the host screen.
         compose.onNodeWithTag("home-list").assertExists()
         waitFor("herdr-open:default")

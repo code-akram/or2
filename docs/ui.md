@@ -276,7 +276,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   state: while the host is not connected the sheet holds, instead of its lists, a compact row like the host's card
   (the name in `CardTitle`, the card's own progress line in mono `accent` with an accent spinner in the icon's
   20 dp slot: `Unlocking key…`, `Checking server…`, `Authenticating…`; `Waiting for host-key approval` in
-  `attention` without a spinner while the trust dialog is up over the sheet); then the lists in the same sheet.
+  `attention` without a spinner while the trust dialog is up over the sheet); then the lists in the same sheet,
+  under the host's name in muted `Secondary` (over Home nothing else says which host the sheet is for; the host
+  screen's picker has no such line).
   A failure shows its reason in `danger` (what each address did in muted mono under it) and a compact **Retry**
   pill; an asleep host `Asleep` in muted text with **Retry**; a host that is simply not connected (a cancelled
   unlock) `Not connected` with **Unlock and connect**; a host without a key **Select a key**, which opens the
