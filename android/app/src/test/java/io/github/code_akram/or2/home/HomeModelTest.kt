@@ -7,6 +7,7 @@ import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.PublicKeyInfo
 import io.github.code_akram.or2.ffi.SessionFailure
+import io.github.code_akram.or2.inbox.LinkStatus
 import io.github.code_akram.or2.session.hostStateMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -116,5 +117,19 @@ class HomeModelTest {
         val rejected = hostCardStatus(HostState.Closed(CloseReason.Failed(SessionFailure.AuthenticationRejected)), false, 0, sleeps = true)
         assertFalse(rejected.asleep)
         assertNotNull(rejected.failure)
+    }
+
+    @Test
+    fun aTapOrTheSessionButtonConnectsOnlyAHostThatHasAKeyAndIsNotAlreadyOnItsWay() {
+        val keyed = Host(HostRecord(1, "Box", "dev", "k"), listOf(HostEndpoint("box.invalid", 22)))
+        val keyless = Host(HostRecord(2, "Bare", "dev", null), listOf(HostEndpoint("bare.invalid", 22)))
+        assertTrue(tapConnects(keyed, LinkStatus.NOT_CONNECTED, busy = false))
+        assertTrue(tapConnects(keyed, LinkStatus.FAILED, busy = false))
+        assertTrue(tapConnects(keyed, LinkStatus.ASLEEP, busy = false)) // The user knows it woke up.
+        assertFalse(tapConnects(keyed, LinkStatus.CONNECTED, busy = false))
+        assertFalse(tapConnects(keyed, LinkStatus.CONNECTING, busy = false))
+        assertFalse(tapConnects(keyed, LinkStatus.NEEDS_HOST_KEY, busy = false))
+        assertFalse(tapConnects(keyed, LinkStatus.NOT_CONNECTED, busy = true)) // Another unlock is running.
+        assertFalse(tapConnects(keyless, LinkStatus.NOT_CONNECTED, busy = false))
     }
 }

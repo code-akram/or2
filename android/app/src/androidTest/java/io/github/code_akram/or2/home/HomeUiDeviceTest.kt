@@ -15,6 +15,7 @@ import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -67,6 +68,7 @@ class HomeUiDeviceTest {
                 HomeScreen(
                     sessions, hosts, keyCount, blocked, working, canConnectAll, busy,
                     openSession = { calls += "session:${it.id}" }, openHost = { calls += "open:${it.id}" },
+                    openSessions = { calls += "sessions:${it.id}" },
                     addHost = { calls += "add" }, easyPair = { calls += "easy" }, manualHost = { calls += "manual" }, editHost = { calls += "edit:${it.id}" }, connectHost = { calls += "connect:${it.id}" },
                     disconnectHost = { calls += "disconnect:${it.id}" }, deleteHost = { calls += "delete:${it.id}" },
                     openInbox = { calls += "inbox" }, openKeys = { calls += "keys" }, connectAll = { calls += "all" },
@@ -181,6 +183,24 @@ class HomeUiDeviceTest {
         compose.runOnIdle { assertFalse("delete:2" in calls) }
         compose.onNodeWithTag("delete-confirm").performClick()
         compose.runOnIdle { assertEquals(listOf("open:1", "connect:1", "edit:1", "disconnect:2", "delete:2"), calls) }
+    }
+
+    @Test
+    fun theCardBodyOpensTheHostAndItsSessionButtonOpensThePickerConnectedOrNot() {
+        show(listOf(card(one, HostState.Connected(0u)), card(two, null)))
+        // Every card has the button, in place of the chevron: a compact `>_` disc with a full touch target.
+        compose.onNodeWithTag("host-session:1").assertIsDisplayed().assertTouchTargetAtLeast(48)
+        compose.onNodeWithTag("host-session:2").assertIsDisplayed().assertTouchTargetAtLeast(48)
+        compose.onNodeWithContentDescription("Open a session on Alpha").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Open a session on Beta").assertIsDisplayed()
+        // One thing per tap: the body opens the host screen, the button the session picker, never both.
+        compose.onNodeWithTag("host:1").performClick()
+        compose.onNodeWithTag("host-session:1").performClick()
+        compose.onNodeWithTag("host-session:2").performClick()
+        compose.runOnIdle { assertEquals(listOf("open:1", "sessions:1", "sessions:2"), calls) }
+        // Long press still opens the options, from the body.
+        compose.onNodeWithTag("host:2").performTouchInput { longClick() }
+        compose.onNodeWithTag("option-connect").assertIsDisplayed()
     }
 
     @Test

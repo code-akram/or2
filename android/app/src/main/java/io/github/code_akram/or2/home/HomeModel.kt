@@ -57,3 +57,9 @@ fun hostAddressLine(host: Host): String {
     val more = host.addresses.size - 1
     return "${host.username}@${first.hostname}:${first.port}" + if (more > 0) " +$more" else ""
 }
+
+/**
+ * Whether a tap on [host]'s card, or on its session button, starts its connection (the usual unlock): it has a
+ * key, nothing is connecting or connected ([link]), and no other unlock runs ([busy]).
+ */
+fun tapConnects(host: Host, link: LinkStatus, busy: Boolean): Boolean = !busy && host.keyId != null && link.canConnect

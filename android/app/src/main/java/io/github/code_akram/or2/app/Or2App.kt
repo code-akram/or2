@@ -24,7 +24,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -33,7 +32,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.saveable.Saver
-import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -55,11 +53,9 @@ import io.github.code_akram.or2.connection.reconnectOffer
 import io.github.code_akram.or2.connection.ReconnectOffer
 import io.github.code_akram.or2.connection.terminalClosedStates
 import io.github.code_akram.or2.connection.transports
-import io.github.code_akram.or2.connection.UdpVerdict
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.ffi.AgentStatus
-import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalTarget
@@ -68,9 +64,8 @@ import io.github.code_akram.or2.home.HomeScreen
 import io.github.code_akram.or2.home.HomeSession
 import io.github.code_akram.or2.home.HostCard
 import io.github.code_akram.or2.home.hostCardStatus
+import io.github.code_akram.or2.home.tapConnects
 import io.github.code_akram.or2.host.HostScreen
-import io.github.code_akram.or2.host.HostTerminalItem
-import io.github.code_akram.or2.host.TmuxList
 import io.github.code_akram.or2.hosts.HostFormScreen
 import io.github.code_akram.or2.inbox.InboxScreen
 import io.github.code_akram.or2.inbox.InboxState
@@ -94,7 +89,6 @@ import io.github.code_akram.or2.pair.PairState
 import io.github.code_akram.or2.pair.ShownCode
 import io.github.code_akram.or2.session.HostTrustDialog
 import io.github.code_akram.or2.session.SessionScreen
-import io.github.code_akram.or2.session.hostErrorMessage
 import io.github.code_akram.or2.terminal.TerminalThumbnail
 import io.github.code_akram.or2.terminal.display
 import io.github.code_akram.or2.ui.IconAction
@@ -108,7 +102,6 @@ import io.github.code_akram.or2.ui.Or2Type
 import io.github.code_akram.or2.ui.Spinner
 import io.github.code_akram.or2.ui.TopBar
 import io.github.code_akram.or2.ui.or2Background
-import kotlinx.coroutines.CancellationException
 
 /** What the screens can ask for; the activity implements them (biometrics, storage, ...). */
 class AppActions(
@@ -225,15 +218,12 @@ fun Or2App(
         actions.connect(list)
     }
 
-    // Hosts whose session picker was already offered for the connection they have now, so Back from
-    // a terminal returns to the host page without covering it with the picker again.
-    var offered by rememberSaveable(stateSaver = listSaver<Set<Long>, Long>(save = { it.toList() }, restore = { it.toSet() })) {
-        mutableStateOf(emptySet<Long>())
-    }
-    fun openHostPage(hostId: Long) {
-        offered = offered - hostId // A fresh visit offers the picker again.
-        navigate(nav.push(Destination.HostPage(hostId)))
-    }
+    fun openHostPage(hostId: Long) = navigate(nav.push(Destination.HostPage(hostId)))
+
+    // The session picker over Home, from a host card's session button: the host it is for, or null. It belongs to
+    // Home: anything that leaves Home (a terminal opening, a notification's tap) closes it.
+    var homePicker by rememberSaveable { mutableStateOf<Long?>(null) }
+    LaunchedEffect(current) { if (current != Destination.Home) homePicker = null }
 
     // The focus finished: show the terminal (reading the stack now: the screen may have moved on), or
     // explain why not and stay where we are.
@@ -488,11 +478,16 @@ fun Or2App(
                         canConnectAll = connectable.size > 1, busy = busy,
                         openSession = { resumeTerminal(it.id) },
                         openHost = { host ->
-                            val link = linkStatus(states[host.id], host.sleeps)
-                            // Tapping a host that is not connected unlocks and connects it; the host screen
-                            // is where its host-key prompts and the session picker live.
-                            if (!busy && host.keyId != null && link.canConnect) connect(listOf(host))
+                            // Tapping a host that is not connected unlocks and connects it, and opens the host screen
+                            // only: its session picker opens from its own "Open a session", never by itself.
+                            if (tapConnects(host, linkStatus(states[host.id], host.sleeps), busy)) connect(listOf(host))
                             openHostPage(host.id)
+                        },
+                        openSessions = { host ->
+                            // The session button: the picker over Home at once, connecting the host first when it is not
+                            // (the same unlock as a tap); the sheet shows the progress, then the lists.
+                            if (tapConnects(host, linkStatus(states[host.id], host.sleeps), busy)) connect(listOf(host))
+                            homePicker = host.id
                         },
                         addHost = ::addHost, easyPair = ::easyPair, manualHost = ::manualHost,
                         editHost = { navigate(nav.push(Destination.HostForm(it.id))) },
@@ -555,8 +550,6 @@ fun Or2App(
                 )
                 is Destination.HostPage -> HostPage(
                     current.hostId, hosts, terminals, connections, busy, actions, ::openTerminal, back = ::pop,
-                    pickerOffered = current.hostId in offered,
-                    setPickerOffered = { value -> offered = if (value) offered + current.hostId else offered - current.hostId },
                     edit = { navigate(nav.push(Destination.HostForm(current.hostId))) },
                     resume = { resumeTerminal(it) },
                 )
@@ -584,6 +577,16 @@ fun Or2App(
     if (addSheet) {
         AddHostSheet(easyPair = ::easyPair, manual = ::manualHost, dismiss = { addSheet = false })
     }
+    val pickerHost = homePicker?.let { id -> hosts.find { it.id == id } }
+    if (current == Destination.Home && pickerHost != null) {
+        HomePickerSheet(
+            pickerHost, terminals, connections, unlocking = pickerHost.id in unlocking, busy = busy,
+            openTerminal = ::openTerminal, resume = { resumeTerminal(it) },
+            connect = { connect(listOf(pickerHost)) },
+            edit = { navigate(nav.push(Destination.HostForm(pickerHost.id))) },
+            dismiss = { homePicker = null },
+        )
+    }
     // Paired: the host and its trusted key are saved. Once the stored list shows it, go to its page and connect
     // (the unlock is the usual one; the host key is already trusted, so no first-use prompt). When the battery step
     // is still to be asked, it comes first, as the last step of adding the host: it then opens the page and connects.
@@ -592,7 +595,6 @@ fun Or2App(
         val host = paired ?: return@LaunchedEffect
         if (hosts.none { it.id == host.id } || busy) return@LaunchedEffect
         pairFlow?.consume()
-        offered = offered - host.id
         val keepAlive = actions.battery.shouldOffer()
         navigate(NavStack.afterPaired(host.id, keepAlive))
         if (!keepAlive) connect(listOf(host))
@@ -606,7 +608,6 @@ fun Or2App(
         if (keepAliveStep != KeepAliveStep.DONE || !loaded || busy) return@LaunchedEffect
         navigate(NavStack.decode(saved).afterKeepAlive())
         val host = hostsNow.value.find { it.id == hostId } ?: return@LaunchedEffect
-        offered = offered - host.id
         connect(listOf(host))
     }
     // A prompt for a host whose screen is not showing still needs an answer, one dialog at a time:
@@ -691,7 +692,6 @@ private fun Notices(
 private fun HostPage(
     hostId: Long, hosts: List<Host>, terminals: List<ActiveTerminal>, connections: HostConnections, busy: Boolean, actions: AppActions,
     openTerminal: (ActiveHost, TerminalTarget) -> Unit, back: () -> Unit, edit: () -> Unit, resume: (Long) -> Unit,
-    pickerOffered: Boolean, setPickerOffered: (Boolean) -> Unit,
 ) {
     val host = hosts.find { it.id == hostId }
     if (host == null) {
@@ -703,52 +703,21 @@ private fun HostPage(
     }
     val active = connections.hosts.collectAsStateWithLifecycle().value[hostId]
     key(active) {
-        val state = active?.state?.collectAsStateWithLifecycle()?.value
-        val caps = active?.capabilities?.collectAsStateWithLifecycle()?.value
-        val capsError = active?.capabilitiesError?.collectAsStateWithLifecycle()?.value
-        val verdict = active?.udpVerdict?.collectAsStateWithLifecycle()?.value
-        val moshServer = active?.moshServer?.collectAsStateWithLifecycle()?.value
-        var refreshes by remember { mutableIntStateOf(0) }
-        var tmux by remember { mutableStateOf<TmuxList>(TmuxList.Loading) }
-        val connected = state is HostState.Connected
-        LaunchedEffect(active, connected, refreshes) {
-            if (active == null || !connected) return@LaunchedEffect
-            tmux = try {
-                TmuxList.Loaded(connections.listTmuxSessions(active))
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: HostException) {
-                TmuxList.Failed(hostErrorMessage(error))
-            }
-        }
+        val source = pickerSource(active, connections, openTerminal)
         val items = hostTerminalItems(terminals.filter { it.host.id == hostId })
         HostScreen(
-            host, state, caps, capsError, tmux, busy,
+            host, source.state, source.caps, source.capsError, source.tmux, busy,
             connect = { actions.connect(listOf(host)) },
             disconnect = { connections.disconnect(hostId) },
             approve = { prompt -> active?.let { actions.approve(it, prompt) } },
             reject = { active?.let(actions.reject) },
-            openShell = { active?.let { openTerminal(it, TerminalTarget.Shell) } },
-            openTmux = { name -> active?.let { openTerminal(it, TerminalTarget.Tmux(name)) } },
-            openHerdr = { session -> active?.let { openTerminal(it, TerminalTarget.Herdr(session, null)) } },
-            refresh = { refreshes++ },
+            openShell = { source.open(TerminalTarget.Shell) },
+            openTmux = { name -> source.open(TerminalTarget.Tmux(name)) },
+            openHerdr = { session -> source.open(TerminalTarget.Herdr(session, null)) },
+            refresh = source.refresh,
             terminals = items, resume = resume, back = back, edit = edit,
-            pickerOffered = pickerOffered, setPickerOffered = setPickerOffered,
-            // A host without mosh-server is not a UDP problem: only say so when mosh is there and blocked.
-            udpBlocked = verdict == UdpVerdict.BLOCKED && (moshServer == null || moshServer.path != null),
+            udpBlocked = source.udpBlocked,
         )
-        // Refreshing re-probes capabilities (new herdr sessions) as well as the tmux list.
-        LaunchedEffect(active, refreshes) {
-            if (active != null && refreshes > 0) connections.refresh(active)
-        }
-    }
-}
-
-@Composable
-private fun hostTerminalItems(terminals: List<ActiveTerminal>): List<HostTerminalItem> = terminals.map { terminal ->
-    key(terminal.id) {
-        val state by terminal.state.collectAsStateWithLifecycle()
-        HostTerminalItem(terminal.id, terminal.title, state is SessionState.Closed)
     }
 }
 

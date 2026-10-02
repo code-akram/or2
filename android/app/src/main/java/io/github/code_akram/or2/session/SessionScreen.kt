@@ -103,7 +103,14 @@ fun SessionScreen(
         val transport by terminal.transport.collectAsStateWithLifecycle()
         val linkHealth by terminal.linkHealth.collectAsStateWithLifecycle()
         val closed = state is SessionState.Closed
-        val endSession = { if (closed) { holder.dismissTerminal(terminal); minimise() } else holder.disconnectTerminal(terminal) }
+        // "Close session" ends the terminal in one tap: an open one is disconnected (the usual cleanup: its mosh server
+        // is told to stop, the ledger cleared on its Closed) and dismissed together, a closed one only dismissed; then
+        // Home. A terminal that closed by itself (a lost connection, a remote exit) keeps its final frame until then.
+        val endSession = {
+            if (!closed) holder.disconnectTerminal(terminal)
+            holder.dismissTerminal(terminal)
+            minimise()
+        }
         var switcher by remember { mutableStateOf(false) }
         val scope = rememberCoroutineScope()
         val haptics = LocalHapticFeedback.current
@@ -126,10 +133,10 @@ fun SessionScreen(
                     closeTerminal = { holder.dismissTerminal(terminal); minimise() }) }
             }
         } else {
-            PendingTerminal(terminal, state, closed, endSession, minimise, open, select)
+            PendingTerminal(terminal, state, endSession, minimise, open, select)
         }
         if (switcher) {
-            SessionSwitcher(terminal, open, closed, select = { switcher = false; select(it) }, endSession = { switcher = false; endSession() },
+            SessionSwitcher(terminal, open, select = { switcher = false; select(it) }, endSession = { switcher = false; endSession() },
                 dismiss = { switcher = false })
         }
     }
@@ -209,7 +216,7 @@ fun transportBadgeColors(transport: Transport, stale: Boolean): Pair<Color, Colo
 /** A terminal that has not connected yet, or closed before it did: no terminal, no keys. */
 @Composable
 private fun PendingTerminal(
-    terminal: ActiveTerminal, state: SessionState, closed: Boolean, endSession: () -> Unit, minimise: () -> Unit,
+    terminal: ActiveTerminal, state: SessionState, endSession: () -> Unit, minimise: () -> Unit,
     open: List<ActiveTerminal>, select: (ActiveTerminal) -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
@@ -217,7 +224,7 @@ private fun PendingTerminal(
         Column(Modifier.padding(horizontal = Or2Dimens.Gutter), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(terminal.title + " · " + sessionMessage(state), style = Or2Type.Mono, color = Or2Colors.TextMuted,
                 modifier = Modifier.testTag("terminal-status"))
-            PillButton(if (closed) "Close session" else "Disconnect", endSession, Modifier.testTag("terminal-end"))
+            PillButton("Close session", endSession, Modifier.testTag("terminal-end"))
             if (open.size > 1) SessionList(terminal, open, select)
         }
     }
@@ -246,10 +253,10 @@ private fun SessionList(current: ActiveTerminal, open: List<ActiveTerminal>, sel
     }
 }
 
-/** The panes/sidebar sheet: switch between open sessions, or end this one. */
+/** The panes/sidebar sheet: switch between open sessions, or close this one ("Close session": one tap, then Home). */
 @Composable
 private fun SessionSwitcher(
-    current: ActiveTerminal, open: List<ActiveTerminal>, closed: Boolean, select: (ActiveTerminal) -> Unit,
+    current: ActiveTerminal, open: List<ActiveTerminal>, select: (ActiveTerminal) -> Unit,
     endSession: () -> Unit, dismiss: () -> Unit,
 ) {
     Or2Sheet(dismiss, title = "Sessions") {
@@ -257,8 +264,8 @@ private fun SessionSwitcher(
             SessionList(current, open, select)
             GroupCard {
                 ListRow(
-                    if (closed) "Close session" else "Disconnect session", icon = if (closed) Or2Icons.Close else Or2Icons.Power,
-                    titleColor = Or2Colors.Danger, modifier = Modifier.testTag("terminal-disconnect"), onClick = endSession,
+                    "Close session", icon = Or2Icons.Close, titleColor = Or2Colors.Danger,
+                    modifier = Modifier.testTag("terminal-close-session"), onClick = endSession,
                 )
             }
         }

@@ -4182,7 +4182,9 @@ after the swap (as before this fix).
 With each terminal's moves now its own, two terminals on one session are consistent, and reusing
 would be wrong after a session move: the open terminal may show another session than the one the
 user tapped. The inbox and reattach keep reusing (their target identifies one herdr pane or the last
-terminal). Unchanged code, so no new test.
+terminal). Unchanged code, so no new test. *(Superseded by the owner, 2026-10-02: the session picker
+now reuses an open tmux or herdr session's terminal; see "One terminal per session" under "Home: the
+host card's two actions".)*
 
 **Tests.** Rust: `tmux` unit tests (the attach and release commands, client ids and their
 validation, the format with the recorded field, the choice order, two terminals on one target
@@ -4256,3 +4258,60 @@ nothing, window and pane moves act on the target, nothing ever runs `set-option`
 against the previous code the attach never attached), the first live test now passes the terminal's
 id (and checks that a session move without one switches nothing), and the live two-client test still
 passes.
+
+## Home: the host card's two actions (owner feedback)
+
+Owner feedback of 2026-10-02: a tap on a Home host card did two things at once, pushing the host screen
+and opening the session picker over it (by itself, once per connection: `pickerOffered`). Both views
+stay; each now has its own button. Android only: no FFI, schema or Rust change.
+
+- **Card body:** opens the host screen, nothing else. A host that is not connected still starts its
+  connection on the tap (`tapConnects`: it has a key, nothing is connecting or connected, no unlock is
+  running), as before. The host screen's picker opens only from its own **Open a session**; it never
+  opens by itself, on arrival or when the host connects. `HostScreen` loses `pickerOffered` and
+  `setPickerOffered`, and `Or2App` its `offered` set.
+- **Session button** (`host-session:<id>`, described "Open a session on <host>"): replaces the chevron
+  and opens the session picker over Home without pushing the host screen. It starts the connection on
+  the same rule as the body (the same unlock, biometric included) and the sheet shows at once. Until the
+  host is connected the sheet shows a `PickerGate` (`host/PickerGate.kt`, `pickerGate(host, state,
+  unlocking, busy)`) instead of its lists: `Connecting` (the card's own progress line, spinner unless a
+  host-key decision waits, whose dialog shows over the sheet as on any screen but the host's own) or
+  `Stopped` (the reason, a failure in `danger`, the per-address detail, and one `GateAction`: **Retry**
+  for a failed or asleep host, **Unlock and connect** for one that is simply not connected, **Select a
+  key**, which opens the host form, for one without a key; off while another unlock runs). Once
+  connected the same sheet shows the lists. Long press keeps the options sheet.
+- **One picker:** `SessionPickerSheet` is shared, with an optional `gate`. Its data and actions come from
+  one place, `app/HostPicker.kt`: `pickerSource(active, connections, openTerminal)` (state, capabilities,
+  the tmux listing and its refresh, the UDP line, and `open(target)` through `Or2App.openTerminal`,
+  that is `TerminalActivations.launchOpen`) feeds both the host screen and `HomePickerSheet`. A choice
+  closes the sheet and opens the terminal on the same path from either place; Recent resumes through
+  the same `resumeTerminal`. The sheet over Home is `Or2App` state (`homePicker`, saved) that belongs
+  to Home: leaving Home closes it, and dismissing it changes nothing else (a connect already started
+  carries on, shown on the card).
+- **One terminal per session** (supersedes the M3 decision above for the picker): every picker choice
+  goes through `TerminalActivations.open`, whose rule lives in `TerminalActivations.reusable(hostId,
+  target)`. `Tmux(name)` reuses the open terminal on that host and session; `Herdr(session, null)` the
+  open herdr terminal on that session, whatever pane it was opened on (a pane-less one first), and a
+  pane terminal reused this way is focused again first (`reuse`, as from the switcher); `Herdr(session,
+  pane)` goes the inbox tap's way (`openAgent`: focus, then reuse or open); `Shell` always opens a new
+  terminal. A terminal that is closed, retired or being closed is never reused
+  (`HostConnections.openTerminals(hostId, matches)`, which `findOpenTerminal` now uses too). A session
+  moved to another tmux session in an open terminal is still that terminal's target: the picker brings
+  it back as it is.
+- **Close session** (the terminal's sessions sheet): one action in every state. An open terminal is
+  disconnected (`disconnectTerminal`, so Rust stops its mosh server and the ledger is cleared on its
+  `Closed`, which still reaches the listener after the dismissal) and dismissed (`dismissTerminal`)
+  together, a closed one only dismissed, then the app returns to Home (the calmer landing than the
+  next terminal). The closed strip's **Close** remains for a session that closed by itself.
+
+**Tests.** JVM: `PickerGateTest` (connected: no gate; the progress lines; failure, asleep, not
+connected and keyless with their actions; busy disables), `HomeModelTest.aTapOrTheSessionButton...`
+(`tapConnects`), `TerminalActivationsTest.thePickerReusesAnOpenTmuxOrHerdrSessionAndAlwaysOpensANewShell`
+and `aClosedOrClosingTerminalIsNotReusedByThePicker`, `HostConnectionsMoshServerTest.closingAnOpenTerminalInOneTapStillStopsAndForgetsItsServer`.
+Device (compiled in the gate; run on the phone): `HostScreenUiDeviceTest` (the picker never opens by
+itself; every picker test opens it with **Open a session**; the gate's progress, reason, detail and
+action), `HomeUiDeviceTest.theCardBodyOpensTheHostAndItsSessionButtonOpensThePickerConnectedOrNot`
+(48 dp target, description), `HomeSessionPickerDeviceTest` (the whole `Or2App` over fakes: body to the
+host screen with no picker; button to the picker over Home, a choice opening the terminal; a host that
+is not connected connects and shows progress, then the lists; a failure with **Retry**; dismissing
+leaves Home), `EntryUiDeviceTest.closeSessionInThePanesSheetEndsAnOpenTerminalInOneTapAndReturnsHome`.

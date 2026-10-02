@@ -119,7 +119,12 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 - **Host card:** `surface` card, leading 20 dp server icon (no tile fill; Moshi draws it bare) with
   a status dot (attention when an agent is blocked or a host-key decision waits, accent while
   connecting, green when connected, danger on failure), name (15 sp) and mono
-  `user@host:port` subtitle, trailing chevron. Connection progress replaces the subtitle in
+  `user@host:port` subtitle, and a trailing **session button** (no chevron): the `>_` prompt glyph
+  (`Or2Icons.Terminal`, 18 dp, `accent`) on a 32 dp `accentMuted` disc, centred in a 48 dp touch box that fits
+  the card's own height (the text column carries the card's 12 dp vertical padding), described
+  "Open a session on <host>". Two actions, one per tap: the card body opens the host screen (and, for a host
+  that is not connected, starts its connection, the usual unlock), never the picker; the button opens the
+  session picker over Home (see "Session picker sheet"); a long press opens the options sheet. Connection progress replaces the subtitle in
   place (`Checking server...`, `Unlocking key...`, `Authenticating...`) with an accent spinner in
   the icon's own 20 dp slot (the spinner is exactly the icon's size, so the leading column lines up), on a faint `surfaceTrack` ring, so the glyph never jumps sideways; no
   modal progress dialogs. The card's semantics carry the state ("Connected", "Needs attention", ...)
@@ -200,7 +205,8 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   an unavailable session in muted mono). Sections in order: SESSIONS
   (open sessions as live terminal thumbnail cards, ~38 % width, rounded 16 dp, the terminal inset
   8 dp so corners never slice glyphs, with a compact host pill and a transport pill — `SSH`/`Mosh`
-  — overlaid, 13 sp title and mono path below; tap resumes), CONNECTIONS (host cards, "Long press for options." hint right-aligned in the
+  — overlaid, 13 sp title and mono path below; tap resumes), CONNECTIONS (host cards: the body opens the host
+  screen, the `>_` button the session picker over Home; "Long press for options." hint right-aligned in the
   section header), then status chips. A FAB adds a host (the add-host sheet). Without hosts, CONNECTIONS holds the
   empty state (**No connections yet**) with the add-host chooser under it, and nothing else: no key card (the
   keys icon still opens **SSH keys** for import and management). When the last terminal can be resumed
@@ -260,13 +266,31 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   line shows in place (above the content, at the top of a full-screen terminal), never a dialog.
   A gone pane or a failed focus replaces it with the usual dismissible message and the screen
   stays where it was.
-- **Session picker sheet:** opens after a host connects (and from the host screen): a
+- **Host screen:** the status card (address, state, the address used), then **Unlock and connect** while not
+  connected, or **Open a session** (which opens the session picker sheet) and **Disconnect** once connected, then
+  the host's open sessions. The picker never opens by itself, on arrival or when the host connects: reaching the
+  screen from Home's card shows the screen alone.
+- **Session picker sheet:** opens from a Home host card's `>_` button (over Home, without pushing the host screen)
+  and from the host screen's **Open a session**; never by itself. From Home it shows at once, whatever the host's
+  state: while the host is not connected the sheet holds, instead of its lists, a compact row like the host's card
+  (the name in `CardTitle`, the card's own progress line in mono `accent` with an accent spinner in the icon's
+  20 dp slot: `Unlocking key…`, `Checking server…`, `Authenticating…`; `Waiting for host-key approval` in
+  `attention` without a spinner while the trust dialog is up over the sheet); then the lists in the same sheet.
+  A failure shows its reason in `danger` (what each address did in muted mono under it) and a compact **Retry**
+  pill; an asleep host `Asleep` in muted text with **Retry**; a host that is simply not connected (a cancelled
+  unlock) `Not connected` with **Unlock and connect**; a host without a key **Select a key**, which opens the
+  host form. Choosing a target opens the terminal exactly as from the host screen; dismissing leaves Home as it
+  was (a connect already started carries on, and the card shows it). The sheet: a
   segmented control (`herdr` / `tmux` / `Recent`) with a trailing **Shell** pill (`surfaceTrack`,
   the `>_` prompt glyph before the label) that opens a plain shell; below, one grouped list of herdr sessions (`● Running`), tmux sessions (`●
   Attached`, with a "new session" field) or, under Recent, the open terminals of the host. A herdr
   row is title-only (44 dp) with its state at the right (`● Running`, or a dim `● Not running` and a
   muted title for a stopped one), never as a second caption line as well. The "Refresh" row's icon
-  starts at the rows' text inset.
+  starts at the rows' text inset. **One terminal per tmux or herdr session:** choosing a tmux session or a herdr
+  session that already has an open terminal on that host brings that terminal to the front instead of opening a
+  second one (a herdr terminal opened on one of the session's panes counts, and its pane is focused again first);
+  **Shell** always opens a new shell; a terminal that has closed is never reused (a fresh one opens). Recent
+  resumes the terminal chosen.
 - **Terminal screen:** the terminal sits in a full-height card with a 24 dp top radius: the terminal
   header (below), then the terminal edge to edge with a thin `accent` scroll indicator on the right. The
   card below the header follows the terminal's own background (the remote can change it with OSC 11).
@@ -283,7 +307,7 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
     sheet (`done` green, a sidebar glyph), 16 dp discs with a 10 dp glyph in `background`, 10 dp apart,
     the first disc's edge on the 12 dp gutter. Each sits in a 26 x 36 dp box that meets its neighbour's at
     the midpoint (see "Touch targets"). The minimise disc returns to Home (the session keeps running as a
-    SESSIONS thumbnail); the green one opens the sessions sheet (switch session, disconnect).
+    SESSIONS thumbnail); the green one opens the sessions sheet (switch session, or **Close session**).
   - **Title, centred on the card's full width** (not on the space left between the sides): `host ·
     target`, the host in `text` sans 12 sp medium, the `·` in `subtle`, the target (`shell`, `tmux main`,
     `herdr work w1:p2`) in mono 11 `textMuted`. It lives in a slot symmetric about the centre (the width less,
@@ -302,6 +326,13 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   - **Notice strip under it:** while the session is not connected, a `NoticeStrip` (see Components) on the
     same `terminalHeader` tone, above the hairline: `Connecting…` / `Authenticating…` muted with a spinner,
     or a closed session's reason in `attention` with **Close**. It takes layout space.
+- **Sessions sheet** (the green disc): the open sessions (the current one marked; a tap switches) and one
+  `danger` row, **Close session**, the same in every state: one tap ends this terminal (an open one is
+  disconnected, with its usual cleanup, and dismissed together; a closed one is dismissed) and returns to Home,
+  the calm place to land, rather than jumping into another terminal. There is no separate "Disconnect" step and
+  no closed strip to dismiss afterwards; that strip, with its **Close**, remains for a session that closed by
+  itself (a lost connection, a remote exit), whose final frame stays readable until then. A terminal that never
+  connected shows the same **Close session** pill.
 - **Terminal toolbar:** a floating pill (`background` at ~85 %) of rounded keys (`surface`),
   30 dp wide (text keys as wide as their label) and 30 dp tall inside a 40 dp tall pill, each with
   a 34 x 40 dp touch box (the platform grows the hit area to 48 dp):

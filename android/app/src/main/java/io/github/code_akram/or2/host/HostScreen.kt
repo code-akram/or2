@@ -19,10 +19,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -31,7 +29,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.connection.UDP_BLOCKED_LINE
 import io.github.code_akram.or2.data.Host
@@ -84,13 +86,11 @@ fun tmuxNameError(name: String): String? = when {
 data class HostTerminalItem(val id: Long, val title: String, val closed: Boolean)
 
 /**
- * One host: its connection and, once connected, the session picker sheet (herdr, tmux or a
- * recent session, or "Shell" for a plain shell). Stateless: the caller owns the connection and
- * supplies what it knows. The sheet opens by itself when the host connects, once per connection:
- * [pickerOffered] (kept by the caller, so it survives leaving and re-entering this screen, e.g. Back
- * from a terminal) says it already did, and [setPickerOffered] records it, or resets it when the
- * connection ends. [udpBlocked]: mosh's UDP does not reach the host on this connection, so its
- * terminals use SSH; one muted line says so and how to fix it.
+ * One host: its connection and, once connected, "Open a session", which opens the session picker sheet
+ * (herdr, tmux or a recent session, or "Shell" for a plain shell). Stateless: the caller owns the connection
+ * and supplies what it knows. The sheet never opens by itself: Home's card opens this screen only, and its
+ * session button opens the picker over Home instead. [udpBlocked]: mosh's UDP does not reach the host on this
+ * connection, so its terminals use SSH; one muted line says so and how to fix it.
  */
 @Composable
 fun HostScreen(
@@ -113,25 +113,10 @@ fun HostScreen(
     resume: (Long) -> Unit = {},
     back: () -> Unit = {},
     edit: () -> Unit = {},
-    pickerOffered: Boolean = false,
-    setPickerOffered: (Boolean) -> Unit = {},
     udpBlocked: Boolean = false,
 ) {
     val link = linkStatus(hostState, host.sleeps)
     var pickerOpen by rememberSaveable { mutableStateOf(false) }
-    val offered by rememberUpdatedState(pickerOffered)
-    LaunchedEffect(link) {
-        // The picker opens when the host becomes connected, and stays closed once dismissed or
-        // once the user has been through it (Back from a terminal must not cover the page again).
-        if (link == LinkStatus.CONNECTED) {
-            if (!offered) {
-                pickerOpen = true
-                setPickerOffered(true)
-            }
-        } else {
-            setPickerOffered(false)
-        }
-    }
     Column(modifier.fillMaxSize()) {
         TopBar(title = host.label, back = back, actions = {
             IconAction(Or2Icons.Pencil, "Edit host", edit, Modifier.testTag("host-edit"), enabled = !busy)
@@ -242,7 +227,9 @@ enum class PickerTab(val label: String) { HERDR("herdr"), TMUX("tmux"), RECENT("
 /**
  * The session picker: a segmented control (herdr, tmux, Recent) with a "Shell" pill (a prompt glyph) that opens a
  * plain shell, and one grouped list below. Hosts without tmux or herdr, failed listings and
- * errors are explained in muted text, never hidden.
+ * errors are explained in muted text, never hidden. While [gate] is set (opened from Home before the host has
+ * connected) the sheet shows it instead: the host's progress, or why it is not connected with [gateAction]'s
+ * pill; the lists follow in the same sheet once the gate is null.
  */
 @Composable
 fun SessionPickerSheet(
@@ -257,6 +244,8 @@ fun SessionPickerSheet(
     refresh: () -> Unit,
     dismiss: () -> Unit,
     initialTab: PickerTab? = null,
+    gate: PickerGate? = null,
+    gateAction: (GateAction) -> Unit = {},
 ) {
     var chosen by remember { mutableStateOf(initialTab) }
     val tab = chosen ?: if (caps != null && caps.herdr == null && caps.tmux != null) PickerTab.TMUX else PickerTab.HERDR
@@ -264,6 +253,10 @@ fun SessionPickerSheet(
     val minHeight = (LocalConfiguration.current.screenHeightDp * 0.4f).dp
     Or2Sheet(dismiss, title = null, done = null) {
         Column(Modifier.imePadding().heightIn(min = minHeight).testTag("session-picker")) {
+            if (gate != null) {
+                GatePane(gate, gateAction)
+                return@Column
+            }
             Row(Modifier.fillMaxWidth().padding(horizontal = Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
                 Segmented(
                     PickerTab.entries.map { it.label }, tab.ordinal, { chosen = PickerTab.entries[it] },
@@ -295,6 +288,50 @@ fun SessionPickerSheet(
                     }
                 }
                 Spacer(Modifier.height(12.dp))
+            }
+        }
+    }
+}
+
+/**
+ * The picker before its host is connected, laid out like the host's Home card: the host's name, then its
+ * progress (mono `accent`, an accent spinner in the icon slot) or why it is not connected (`danger` for a
+ * failure, muted otherwise; what each address did in muted mono) with one compact pill to move on.
+ */
+@Composable
+private fun GatePane(gate: PickerGate, act: (GateAction) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = Or2Dimens.Gutter + 4.dp, vertical = 8.dp).testTag("picker-gate"),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Box(Modifier.padding(top = 2.dp).size(Or2Dimens.Spinner), contentAlignment = Alignment.Center) {
+            if (gate is PickerGate.Connecting && gate.spinning) {
+                Spinner(Modifier.testTag("picker-spinner"), size = Or2Dimens.Spinner)
+            } else {
+                Icon(Or2Icons.Server, null, Modifier.size(Or2Dimens.Spinner), tint = Or2Colors.TextMuted)
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(gate.host, style = Or2Type.CardTitle, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            when (gate) {
+                is PickerGate.Connecting -> Text(
+                    gate.progress, style = Or2Type.Mono, color = if (gate.spinning) Or2Colors.Accent else Or2Colors.Attention, maxLines = 1,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }.testTag("picker-progress"),
+                )
+                is PickerGate.Stopped -> {
+                    Text(
+                        gate.reason, style = Or2Type.Secondary, color = if (gate.failed) Or2Colors.Danger else Or2Colors.TextMuted,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }.testTag("picker-reason"),
+                    )
+                    gate.detail?.let {
+                        Text(it, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.testTag("picker-detail"))
+                    }
+                    PillButton(
+                        gate.action.label, { act(gate.action) }, Modifier.padding(top = 8.dp).testTag("picker-retry"),
+                        enabled = gate.enabled, compact = true,
+                    )
+                }
             }
         }
     }

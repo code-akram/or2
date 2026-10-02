@@ -109,10 +109,34 @@ class TerminalActivations(private val connections: HostConnections, private val 
     }
 
     /**
-     * A terminal opened from the host screen (shell, tmux, a herdr session) on a connected host: it
-     * opens at once, never waiting for the probe or for UDP (see [HostConnections.openTerminal]).
+     * The session picker's reuse rule (the host screen's picker and the one over Home): the terminal already open on
+     * [hostId] that a choice of [target] brings to the front instead of opening a second one, or null to open a new
+     * one. A tmux session reuses the open terminal on that session; a herdr session (no pane) the open herdr terminal
+     * on that session, whatever pane it was opened on (one opened without a pane first); a herdr pane the open
+     * terminal on that pane (the inbox tap's rule, [openOrReuse]); a shell never. A closed terminal, or one being
+     * closed, is never reused ([HostConnections.openTerminals]).
+     */
+    fun reusable(hostId: Long, target: TerminalTarget): ActiveTerminal? = when (target) {
+        TerminalTarget.Shell -> null
+        is TerminalTarget.Tmux -> connections.findOpenTerminal(hostId, target)
+        is TerminalTarget.Herdr -> if (target.paneId != null) {
+            connections.findOpenTerminal(hostId, target)
+        } else {
+            val open = connections.openTerminals(hostId) { it is TerminalTarget.Herdr && it.session == target.session }
+            open.firstOrNull { (it.target as TerminalTarget.Herdr).paneId == null } ?: open.firstOrNull()
+        }
+    }
+
+    /**
+     * A choice in the session picker (shell, tmux, a herdr session) on a connected host. A target already open there
+     * is brought to the front ([reusable]; a herdr pane terminal is focused again first, as from the switcher); a
+     * herdr pane goes the inbox tap's way ([openAgent]); anything else opens at once, never waiting for the probe or
+     * for UDP (see [HostConnections.openTerminal]).
      */
     suspend fun open(active: ActiveHost, target: TerminalTarget): Activation {
+        val pane = (target as? TerminalTarget.Herdr)?.paneId
+        if (target is TerminalTarget.Herdr && pane != null) return openAgent(active.host.id, active.host.label, target.session, pane)
+        reusable(active.host.id, target)?.let { return reuse(it) }
         try {
             return Activation.Ready(connections.openTerminal(active, target))
         } catch (error: CancellationException) {

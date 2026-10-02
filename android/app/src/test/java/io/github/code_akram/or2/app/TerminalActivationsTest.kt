@@ -1,5 +1,6 @@
 package io.github.code_akram.or2.app
 
+import io.github.code_akram.or2.connection.ActiveTerminal
 import io.github.code_akram.or2.connection.FakePort
 import io.github.code_akram.or2.connection.Timing
 import io.github.code_akram.or2.connection.UdpVerdict
@@ -433,6 +434,50 @@ class TerminalActivationsTest {
         )
         // Host ids and herdr pane ids only: no label, address or user name in a marker.
         assertTrue(lines.none { "Fixture" in it || "fixture" in it })
+        s.holder.dismissHost(7)
+    }
+
+    /** What the session picker's choice of [target] activates on host 7 (the host screen's and Home's picker alike). */
+    private suspend fun pick(s: Setup, target: TerminalTarget): ActiveTerminal =
+        (s.activations.open(s.holder.host(7)!!, target) as Activation.Ready).terminal
+
+    @Test
+    fun thePickerReusesAnOpenTmuxOrHerdrSessionAndAlwaysOpensANewShell() = runTest {
+        val s = setup()
+        val tmux = pick(s, TerminalTarget.Tmux("work"))
+        assertSame(tmux, pick(s, TerminalTarget.Tmux("work"))) // The same session: brought to the front.
+        assertNotSame(tmux, pick(s, TerminalTarget.Tmux("other")))
+        val herdr = pick(s, TerminalTarget.Herdr("personal", null))
+        assertSame(herdr, pick(s, TerminalTarget.Herdr("personal", null)))
+        assertNotSame(herdr, pick(s, TerminalTarget.Herdr(null, null))) // The default session is another session.
+        // A herdr terminal opened on a pane (an inbox tap) is that session's terminal too: its pane is focused again first.
+        val pane = s.open(TerminalTarget.Herdr("work", "w1:p3"))
+        s.events.clear()
+        assertSame(pane, pick(s, TerminalTarget.Herdr("work", null)))
+        assertEquals(listOf("focus:work:w1:p3"), s.events)
+        // A herdr pane chosen directly goes the inbox tap's way: focus, then reuse.
+        s.events.clear()
+        assertSame(pane, pick(s, TerminalTarget.Herdr("work", "w1:p3")))
+        assertEquals(listOf("focus:work:w1:p3"), s.events)
+        // A shell is never reused.
+        val shell = pick(s, TerminalTarget.Shell)
+        assertNotSame(shell, pick(s, TerminalTarget.Shell))
+        assertEquals(7, s.holder.terminals.value.size) // tmux x2, herdr x2, the pane, shell x2.
+        s.holder.dismissHost(7)
+    }
+
+    @Test
+    fun aClosedOrClosingTerminalIsNotReusedByThePicker() = runTest {
+        val s = setup()
+        val first = pick(s, TerminalTarget.Tmux("work"))
+        s.port.terminals.single().second.onStateChanged(SessionState.Closed(CloseReason.Disconnected))
+        advanceUntilIdle()
+        val second = pick(s, TerminalTarget.Tmux("work"))
+        assertNotSame(first, second) // Closed: a fresh terminal.
+        val herdr = pick(s, TerminalTarget.Herdr(null, null))
+        s.holder.disconnectTerminal(herdr) // Being closed: not reused either.
+        assertNotSame(herdr, pick(s, TerminalTarget.Herdr(null, null)))
+        assertSame(second, pick(s, TerminalTarget.Tmux("work")))
         s.holder.dismissHost(7)
     }
 

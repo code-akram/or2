@@ -282,7 +282,9 @@ hidden hosts are not watched), and a key array shared by several hosts being wip
 last `connect_host` call. Fakes implement the app's `HostPort` (the generated `HostConnection`
 returns concrete `Session`/`HerdrWatch` classes). `TerminalActivationsTest` covers the pane focus every agent-terminal entry point awaits (inbox
 A to B to A reusing A's terminal after focusing A, switcher and thumbnail resume, `PaneNotFound`
-and other errors not navigating, progress, cancellation) on fakes, and `TerminalActivationsProbeTest`
+and other errors not navigating, progress, cancellation) and the session picker's reuse rule (a tmux or herdr
+session already open is brought to the front, a shell always opens anew, a closed or closing terminal is never
+reused) on fakes, and `TerminalActivationsProbeTest`
 the same over the real FFI against `contract_probe_host`'s deterministic answers. `UnlockPlanTest` covers biometric grouping
 (one prompt per distinct key record), `InboxModelTest` the inbox ordering and the flow that
 assembles it, `HostRecordsTest` trust clearing on any address-list change and the clearing of the mosh failure
@@ -463,7 +465,9 @@ vanished pane against the session's own snapshot.
 state with fake data: no network, no biometrics, no database. Without an extra it lists the
 screens; `am start -n io.github.code_akram.or2/.gallery.UiGalleryActivity --es screen <name>`
 opens one directly. Names: `home`, `home-empty`, `home-notices` (the battery and notification cards), `host-cards` (unlocking, checking,
-authenticating, connected with a blocked agent, failed, idle), `inbox`, `inbox-empty`,
+authenticating, connected with a blocked agent, failed, idle; each card with its `>_` session button), `home-picker` (the
+session picker over Home for a connected host), `home-picker-connecting` (over Home while its host connects:
+spinner and progress line), `home-picker-failed` (the failure and **Retry**), `inbox`, `inbox-empty`,
 `picker-herdr`, `picker-tmux`, `picker-recent`, `host-form`, `host-form-new-key` (no stored key: **New key** chosen), `host-form-edit`, `keys`,
 `keys-empty`, `about`, `licenses`, `hostkey-first`, `hostkey-changed`, `add-host` (the add-host chooser in its sheet; `home-empty` shows it inline), `pair-scan`,
 `pair-scan-denied`, `pair-review`, `pair-review-new` (with a failure), `pair-progress`, `pair-install`
@@ -578,12 +582,17 @@ biometric policy, non-exportability and rejection without authentication (skips 
 biometrics are not enrolled). `EntryUiDeviceTest` displays first-use/changed-key dialogs using
 fake public-key metadata without a network or production DB writes, checks the terminal screen
 and its switcher against fake host connections, and that the integrated screen retains the same
-terminal view and final grid through `Closed` until the session is closed. `InboxUiDeviceTest`,
+terminal view and final grid through a `Closed` of its own until the session is closed, while the sessions
+sheet's **Close session** ends an open terminal in one tap and returns Home. `InboxUiDeviceTest`,
 `HostScreenUiDeviceTest` and `HostFormUiDeviceTest` render the inbox, host screen (connection
-state, host-key prompt, the session picker sheet with herdr, tmux and Recent, "Shell" for a plain shell,
+state, host-key prompt, the session picker sheet with herdr, tmux and Recent, "Shell" for a plain shell, never
+opened by itself, and its gate before the host connects (progress, then the reason with one action),
 name validation) and the address-list host form (with **New key**) from fabricated state; `HomeUiDeviceTest` the Home
-screen (card progress and failure in place, long-press options, session thumbnails, chips, FAB, the empty
-state's add-host chooser matching the sheet's)
+screen (card progress and failure in place, the card body opening the host and its `>_` button the picker, long-press
+options, session thumbnails, chips, FAB, the empty state's add-host chooser matching the sheet's);
+`HomeSessionPickerDeviceTest` the whole app over fakes (the card body opens the host screen with no picker; the button
+opens the picker over Home for a connected host, or connects one that is not and shows its progress, then the lists;
+a failure with **Retry**; a choice opens the terminal; dismissing leaves Home)
 and that a thumbnail holds the terminal's native handle until it leaves composition;
 `TerminalChromeDeviceTest` the key toolbar, latched modifiers, the arrow pad with auto-repeat (floating with no
 backing, closed by the toolbar's key), the
