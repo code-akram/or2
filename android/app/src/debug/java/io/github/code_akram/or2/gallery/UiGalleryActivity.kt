@@ -146,8 +146,9 @@ class UiGalleryActivity : ComponentActivity() {
             "picker-herdr" -> Picker(PickerTab.HERDR)
             "picker-tmux" -> Picker(PickerTab.TMUX)
             "picker-recent" -> Picker(PickerTab.RECENT)
-            "host-form" -> HostFormScreen(null, listOf(key1, key2), false, {}, {})
-            "host-form-edit" -> HostFormScreen(multiHost, listOf(key1, key2), false, {}, {})
+            "host-form" -> HostFormScreen(null, listOf(key1, key2), false, {}, {}, createKey = { _, _ -> key1 }, deviceLabel = "Pixel")
+            "host-form-new-key" -> HostFormScreen(null, emptyList(), false, {}, {}, createKey = { _, _ -> key1 }, deviceLabel = "Pixel")
+            "host-form-edit" -> HostFormScreen(multiHost, listOf(key1, key2), false, {}, {}, createKey = { _, _ -> key1 }, deviceLabel = "Pixel")
             "add-host" -> AddHostSheet(easyPair = {}, manual = {}, dismiss = {})
             "pair-scan" -> PairScanScreen(GALLERY_PAIR_CODE, null, CameraAccess(granted = false, denied = false) {}, {}, back = {})
             "pair-scan-denied" -> PairScanScreen(GALLERY_PAIR_CODE, "That is not an or2 pairing code. Run or2-pair on the host and scan the code it prints.",
@@ -246,7 +247,7 @@ class UiGalleryActivity : ComponentActivity() {
             sessions, hosts, keyCount = if (variant == HomeVariant.Empty) 0 else 2,
             blocked = if (variant == HomeVariant.Empty) 0 else 1, working = if (variant == HomeVariant.Empty) 0 else 2,
             canConnectAll = false, busy = false,
-            openSession = {}, openHost = {}, addHost = {}, editHost = {}, connectHost = {}, disconnectHost = {}, deleteHost = {},
+            openSession = {}, openHost = {}, addHost = {}, easyPair = {}, manualHost = {}, editHost = {}, connectHost = {}, disconnectHost = {}, deleteHost = {},
             openInbox = {}, openKeys = {}, connectAll = {},
         )
     }
@@ -370,7 +371,7 @@ class UiGalleryActivity : ComponentActivity() {
     companion object {
         val screens = listOf(
             "home", "home-empty", "host-cards", "inbox", "inbox-empty", "picker-herdr", "picker-tmux", "picker-recent",
-            "host-form", "host-form-edit", "keys", "keys-empty", "about", "licenses", "hostkey-first", "hostkey-changed",
+            "host-form", "host-form-new-key", "host-form-edit", "keys", "keys-empty", "about", "licenses", "hostkey-first", "hostkey-changed",
             "add-host", "pair-scan", "pair-scan-denied", "pair-review", "pair-review-new", "pair-progress", "pair-install",
             "terminal", "terminal-arrowpad", "terminal-composer",
         )

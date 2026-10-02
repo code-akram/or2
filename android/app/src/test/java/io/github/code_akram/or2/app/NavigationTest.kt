@@ -68,6 +68,20 @@ class NavigationTest {
     }
 
     @Test
+    fun theAddHostChooserPushesEasyPairOrTheNewHostFormOnTheScreenThatShowsIt() {
+        // Home's empty state and "+" sheet, and the inbox's empty state, push the same two screens; Back returns.
+        for (start in listOf(NavStack(), NavStack().push(Destination.Inbox))) {
+            for (target in listOf(Destination.EasyPair, Destination.HostForm(0))) {
+                val pushed = start.push(target)
+                assertEquals(target, pushed.current)
+                assertEquals(start, pushed.back())
+                assertEquals(pushed, NavStack.decode(pushed.encode()))
+            }
+        }
+        assertEquals("home|inbox|pair", NavStack().push(Destination.Inbox).push(Destination.EasyPair).encode())
+    }
+
+    @Test
     fun aboutAndTheLicenseListArePushedOnHomeAndSurviveSavedState() {
         val stack = NavStack().push(Destination.About).push(Destination.Licenses)
         assertEquals("home|about|licenses", stack.encode())

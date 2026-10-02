@@ -8,8 +8,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.longClick
@@ -32,6 +34,9 @@ import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.inbox.linkStatus
+import io.github.code_akram.or2.pair.AddHostOptions
+import io.github.code_akram.or2.pair.AddHostRoute
+import io.github.code_akram.or2.pair.AddHostSheet
 import io.github.code_akram.or2.terminal.TerminalThumbnail
 import io.github.code_akram.or2.terminal.Transport
 import io.github.code_akram.or2.ui.Or2Theme
@@ -61,7 +66,7 @@ class HomeUiDeviceTest {
                 HomeScreen(
                     sessions, hosts, keyCount, blocked, working, canConnectAll, busy,
                     openSession = { calls += "session:${it.id}" }, openHost = { calls += "open:${it.id}" },
-                    addHost = { calls += "add" }, editHost = { calls += "edit:${it.id}" }, connectHost = { calls += "connect:${it.id}" },
+                    addHost = { calls += "add" }, easyPair = { calls += "easy" }, manualHost = { calls += "manual" }, editHost = { calls += "edit:${it.id}" }, connectHost = { calls += "connect:${it.id}" },
                     disconnectHost = { calls += "disconnect:${it.id}" }, deleteHost = { calls += "delete:${it.id}" },
                     openInbox = { calls += "inbox" }, openKeys = { calls += "keys" }, connectAll = { calls += "all" },
                     openAbout = { calls += "about" },
@@ -197,13 +202,39 @@ class HomeUiDeviceTest {
     }
 
     @Test
-    fun withoutHostsHomeExplainsAndOffersTheFirstSteps() {
+    fun withoutHostsHomeOffersTheAddHostChooserAndNoSeparateKeyStep() {
         show(emptyList(), keyCount = 0)
         compose.onNodeWithTag("home-empty").assertIsDisplayed()
         compose.onNodeWithText("No connections yet").assertIsDisplayed()
-        compose.onNodeWithTag("home-add-key").performScrollTo().performClick()
-        compose.onNodeWithTag("home-add-host-card").performScrollTo().performClick()
-        compose.runOnIdle { assertEquals(listOf("keys", "add"), calls) }
+        // Both paths make the key on the phone: there is no "Add an SSH key" first step.
+        compose.onNodeWithTag("home-add-key").assertDoesNotExist()
+        compose.onNodeWithText("Add an SSH key").assertDoesNotExist()
+        compose.onNodeWithTag("home-add-host-easy").performScrollTo().assertTextContains("FASTEST", substring = true).performClick()
+        compose.onNodeWithTag("home-add-host-manual").performScrollTo().assertTextContains("Set up manually", substring = true).performClick()
+        compose.runOnIdle { assertEquals(listOf("easy", "manual"), calls) }
+    }
+
+    /** The merged text of each chooser card, in [AddHostOptions] order, after checking the cards are stacked in it. */
+    private fun chooserTexts(prefix: String, scroll: Boolean): List<List<String>> {
+        val nodes = AddHostOptions.map { option ->
+            compose.onNodeWithTag("$prefix-${option.tag}").apply { if (scroll) performScrollTo() }.assertIsDisplayed().fetchSemanticsNode()
+        }
+        nodes.zipWithNext().forEach { (above, below) -> assertTrue(above.boundsInRoot.top < below.boundsInRoot.top) }
+        return nodes.map { node -> node.config.getOrElse(SemanticsProperties.Text) { emptyList() }.map { it.text } }
+    }
+
+    @Test
+    fun theEmptyStateAndTheAddHostSheetShowTheSameChooser() {
+        show(emptyList(), keyCount = 0)
+        val inline = chooserTexts("home-add-host", scroll = true)
+        compose.runOnUiThread {
+            compose.activity.setContent { Or2Theme { AddHostSheet(easyPair = {}, manual = {}, dismiss = {}) } }
+        }
+        val sheet = chooserTexts("add-host", scroll = false)
+        assertEquals(inline, sheet)
+        // The same cards, copy and order as the one definition: Easy pair first.
+        assertEquals(AddHostOptions.map { listOf(it.kicker.uppercase(), it.title, it.body, it.meta) }, inline)
+        assertEquals(AddHostRoute.EASY_PAIR, AddHostOptions.first().route)
     }
 
     @Test

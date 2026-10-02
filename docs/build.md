@@ -325,8 +325,8 @@ state with fake data: no network, no biometrics, no database. Without an extra i
 screens; `am start -n io.github.code_akram.or2/.gallery.UiGalleryActivity --es screen <name>`
 opens one directly. Names: `home`, `home-empty`, `host-cards` (unlocking, checking,
 authenticating, connected with a blocked agent, failed, idle), `inbox`, `inbox-empty`,
-`picker-herdr`, `picker-tmux`, `picker-recent`, `host-form`, `host-form-edit`, `keys`,
-`keys-empty`, `about`, `licenses`, `hostkey-first`, `hostkey-changed`, `add-host` (the two-card sheet), `pair-scan`,
+`picker-herdr`, `picker-tmux`, `picker-recent`, `host-form`, `host-form-new-key` (no stored key: **New key** chosen), `host-form-edit`, `keys`,
+`keys-empty`, `about`, `licenses`, `hostkey-first`, `hostkey-changed`, `add-host` (the add-host chooser in its sheet; `home-empty` shows it inline), `pair-scan`,
 `pair-scan-denied`, `pair-review`, `pair-review-new` (with a failure), `pair-progress`, `pair-install`
 (Easy pair; the camera preview itself is not in the gallery), `terminal`, `terminal-arrowpad`,
 `terminal-composer` (opens with a message typed and the keyboard up, to show the caret and the
@@ -434,8 +434,9 @@ and its switcher against fake host connections, and that the integrated screen r
 terminal view and final grid through `Closed` until the session is closed. `InboxUiDeviceTest`,
 `HostScreenUiDeviceTest` and `HostFormUiDeviceTest` render the inbox, host screen (connection
 state, host-key prompt, the session picker sheet with herdr, tmux and Recent, "Skip" for a shell,
-name validation) and the address-list host form from fabricated state; `HomeUiDeviceTest` the Home
-screen (card progress and failure in place, long-press options, session thumbnails, chips, FAB)
+name validation) and the address-list host form (with **New key**) from fabricated state; `HomeUiDeviceTest` the Home
+screen (card progress and failure in place, long-press options, session thumbnails, chips, FAB, the empty
+state's add-host chooser matching the sheet's)
 and that a thumbnail holds the terminal's native handle until it leaves composition;
 `TerminalChromeDeviceTest` the key toolbar, latched modifiers, the arrow pad with auto-repeat, the
 composer's `submit_text` send and pinch-to-zoom persistence (with its own preferences file).
@@ -457,6 +458,9 @@ Manual phone checks still required:
   Pair saves the host and connects with no first-use prompt, and `or2-pair` prints the pairing; a mistyped code
   on the host is asked again; Ctrl-C on the host removes its temporary key (the phone then says the host
   stopped); `--manual` shows the key line to install. Over a host's public address with only port 22 open.
+- First run (fresh install, no key): the empty Home shows the same two cards as **+** and no key step; **Set up
+  manually** has **New key** chosen; **Save** asks for the biometric once, then shows the key line to install;
+  cancelling the prompt saves nothing and says so.
 - Upgrade: install the M1 build, add a key and a host, trust its key, then install the M2 build
   over it. The host, key and trusted key must all survive (the key must still unlock), and the
   host must reconnect without a new host-key prompt.

@@ -5,6 +5,7 @@ import io.github.code_akram.or2.ffi.ClientKeyMaterial
 import io.github.code_akram.or2.ffi.KeyException
 import io.github.code_akram.or2.ffi.importPrivateKey
 import java.io.InputStream
+import java.security.GeneralSecurityException
 import javax.crypto.Cipher
 
 /**
@@ -60,4 +61,17 @@ fun keyErrorMessage(error: KeyException): String = when (error) {
     is KeyException.UnsupportedFormat -> "Only OpenSSH private keys are supported. Convert PEM/PKCS#8 with ssh-keygen -p first."
     is KeyException.Malformed -> "The file is not a readable OpenSSH private key."
     is KeyException.UnsupportedAlgorithm -> "This key algorithm is not supported. Import Ed25519, ECDSA or RSA."
+}
+
+/** The label of a key made for a host by **New key** (Easy pair's review, the host form): `Key for Work Mac`. */
+fun newKeyLabel(hostName: String) = "Key for ${hostName.trim()}"
+
+/** Its public-key comment: `or2@<the phone's model>`. */
+fun newKeyComment(device: String) = "or2@${device.trim()}"
+
+/** What a screen says when its **New key** could not be made (the biometric was cancelled, the vault refused). */
+fun newKeyErrorMessage(error: Throwable): String = when (error) {
+    is KeyException -> keyErrorMessage(error)
+    is VaultException, is GeneralSecurityException -> vaultErrorMessage(error)
+    else -> "The key could not be created. Try again."
 }

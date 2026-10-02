@@ -147,7 +147,8 @@ maps windows and panes to native tabs, comes later.
 
 ### Keys
 
-- Generate Ed25519 in-app or import OpenSSH keys (with passphrase).
+- Generate Ed25519 in-app (in the host form and the pairing review as **New key**, or on the Keys screen) or
+  import OpenSSH keys (with passphrase).
 - "Install on host" appends the public key to `authorized_keys` over an existing connection.
 - Trust on first use with the fingerprint shown. Agent forwarding off by default.
 - Later: non-exportable P-256 in the secure element, FIDO2 `sk-` keys.
@@ -452,6 +453,11 @@ address) the extra port was unreachable although SSH worked. Version 2 pairs ove
   and the device suite (`PairUiDeviceTest`, with screenshots of the three screens).
 - [x] Docs: ["Pair a host"](pairing.md) rewritten for v2 (no ports, no firewall workarounds) and the
   [manual setup guide](manual-setup.md).
+- [x] One add-host chooser (owner feedback against Moshi): the empty Home, the empty inbox and the **+** sheet show
+  the same two cards (Easy pair with QR, Set up manually) and Home has no "Add an SSH key" step; the manual form
+  offers **New key** like the pairing review ([contracts](contracts.md#first-run-one-add-host-chooser)). Verified
+  by `AddHostOptionsTest`, `NavigationTest`, `KeyOperationsTest` and the compiled device tests; to be run on the
+  phone.
 - [ ] Phone acceptance of Easy pair: a real `or2-pair` code on a host reached over its public address
   and on a LAN host, with the permission dialog, then connect.
 - [ ] Installer: release binaries for Linux and macOS and a POSIX `sh` installer (after v2).

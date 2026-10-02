@@ -27,6 +27,19 @@ class KeyOperationsTest {
     }
 
     @Test
+    fun aNewKeyIsNamedForItsHostAndThePhoneWhereverItIsMade() {
+        // Easy pair's review and the host form name their New key alike.
+        assertEquals("Key for Work Mac", newKeyLabel("  Work Mac "))
+        assertEquals("or2@Pixel 9", newKeyComment(" Pixel 9"))
+    }
+
+    @Test
+    fun aNewKeyThatCouldNotBeMadeIsExplainedInOneLine() {
+        assertEquals("Biometric authentication was cancelled.", newKeyErrorMessage(VaultException("Biometric authentication was cancelled.")))
+        assertEquals("The key could not be created. Try again.", newKeyErrorMessage(IllegalStateException("boom")))
+    }
+
+    @Test
     fun importedInputIsWipedOnSuccessAndTypedFailure() {
         val generated = generateEd25519Key("")
         try {

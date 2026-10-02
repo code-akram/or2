@@ -16,6 +16,8 @@ import io.github.code_akram.or2.ffi.pairNewCode
 import io.github.code_akram.or2.ffi.parsePairPayload
 import io.github.code_akram.or2.hosts.AddressDraft
 import io.github.code_akram.or2.hosts.validHost
+import io.github.code_akram.or2.keys.newKeyComment
+import io.github.code_akram.or2.keys.newKeyLabel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -270,7 +272,7 @@ class PairFlow(
             when (val choice = review.choice) {
                 is KeyChoice.Existing -> keys.find { it.id == choice.keyId } ?: return fail(review, "That key was deleted. Choose another.")
                 KeyChoice.New -> try {
-                    generateKey("Key for ${review.name.trim()}", "or2@${device.trim()}")
+                    generateKey(newKeyLabel(review.name), newKeyComment(device))
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {

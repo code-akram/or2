@@ -11,23 +11,20 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.data.Host
@@ -35,7 +32,11 @@ import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.HostRecord
 import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.data.TransportPref
-import io.github.code_akram.or2.keys.shortFingerprint
+import io.github.code_akram.or2.keys.KeyPicker
+import io.github.code_akram.or2.keys.newKeyComment
+import io.github.code_akram.or2.keys.newKeyErrorMessage
+import io.github.code_akram.or2.keys.newKeyLabel
+import io.github.code_akram.or2.pair.PairInstallKeyScreen
 import io.github.code_akram.or2.ui.BottomInsetSpacer
 import io.github.code_akram.or2.ui.GroupCard
 import io.github.code_akram.or2.ui.GroupDivider
@@ -51,15 +52,22 @@ import io.github.code_akram.or2.ui.PillButton
 import io.github.code_akram.or2.ui.PrimaryButton
 import io.github.code_akram.or2.ui.Segmented
 import io.github.code_akram.or2.ui.TopBar
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 
 /**
  * Add or edit a host: filled fields with labels above and mono placeholders, an ordered address
  * list (each with its own port), the key choice, the inbox toggle, a full-width pill and a
- * mirrored top-bar check. Stateless storage-wise: [save] gets the finished host.
+ * mirrored top-bar check. Stateless storage-wise: [save] gets the finished host, then the form [close]s.
+ *
+ * The key choice ends with **New key**, as on the Easy pair review (preselected when the phone has no key): Save
+ * first makes and stores it with [createKey] (the biometric prompt), selects it, saves the host with it and then
+ * shows its public line to add to `authorized_keys` on the host.
  */
 @Composable
 fun HostFormScreen(
-    previous: Host?, keys: List<KeyRecord>, busy: Boolean, save: (Host) -> Unit, close: () -> Unit, openKeys: () -> Unit = {},
+    previous: Host?, keys: List<KeyRecord>, busy: Boolean, save: (Host) -> Unit, close: () -> Unit,
+    createKey: suspend (label: String, comment: String) -> KeyRecord, deviceLabel: String,
 ) {
     // Typed input survives rotation and process death, and is re-seeded when a different host is edited.
     val identity = previous?.id ?: 0L
@@ -69,22 +77,64 @@ fun HostFormScreen(
     }
     var username by rememberSaveable(identity) { mutableStateOf(previous?.username ?: "") }
     var keyId by rememberSaveable(identity) { mutableStateOf(if (previous == null) keys.singleOrNull()?.id else previous.keyId) }
+    var newKey by rememberSaveable(identity) { mutableStateOf(previous == null && keys.isEmpty()) }
     var showInInbox by rememberSaveable(identity) { mutableStateOf(previous?.showInInbox ?: true) }
     var transport by rememberSaveable(identity) { mutableStateOf(previous?.transport ?: TransportPref.AUTO) }
     var sleeps by rememberSaveable(identity) { mutableStateOf(previous?.sleeps ?: false) }
+    // Making the new key: its biometric prompt is up. Not saved: a recreated screen's prompt is gone with the old one.
+    var working by remember { mutableStateOf(false) }
+    var keyError by rememberSaveable(identity) { mutableStateOf<String?>(null) }
+    // The host is saved with a key made here: the form shows that key's line to install on the host.
+    var installKeyId by rememberSaveable(identity) { mutableStateOf<String?>(null) }
+    var madeKey by remember { mutableStateOf<KeyRecord?>(null) }
+    val scope = rememberCoroutineScope()
     val usernameError = if (username.isEmpty()) null else hostFieldError(username)
-    val valid = validHost(label, addresses, username) && keys.any { it.id == keyId }
+    val valid = validHost(label, addresses, username) && (newKey || keys.any { it.id == keyId })
+
+    installKeyId?.let { id ->
+        val key = keys.find { it.id == id } ?: madeKey?.takeIf { it.id == id }
+        if (key != null) {
+            PairInstallKeyScreen(label.trim(), key.openssh, key.fingerprint, done = close, trusted = false)
+            return
+        }
+    }
+
+    fun host(key: String?) = Host(
+        HostRecord(previous?.id ?: 0, label.trim(), username, key, showInInbox, transport, sleeps, previous?.moshFailedUntil ?: 0),
+        addresses.map { HostEndpoint(it.hostname, it.port.toInt()) },
+    )
     fun submit() {
-        if (!valid || busy) return
-        save(Host(
-            HostRecord(previous?.id ?: 0, label.trim(), username, keyId, showInInbox, transport, sleeps, previous?.moshFailedUntil ?: 0),
-            addresses.map { HostEndpoint(it.hostname, it.port.toInt()) },
-        ))
+        if (!valid || busy || working) return
+        if (!newKey) {
+            save(host(keyId))
+            close()
+            return
+        }
+        working = true
+        keyError = null
+        scope.launch {
+            val key = try {
+                createKey(newKeyLabel(label), newKeyComment(deviceLabel))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                keyError = newKeyErrorMessage(error)
+                working = false
+                return@launch
+            }
+            // The key is stored: from here on it is an ordinary choice, so a second Save never makes another.
+            madeKey = key
+            keyId = key.id
+            newKey = false
+            working = false
+            save(host(key.id))
+            installKeyId = key.id
+        }
     }
     Column(Modifier.fillMaxSize()) {
         TopBar(
             title = if (previous == null) "New Connection" else "Edit Connection", back = close, backIcon = Or2Icons.Close, backDescription = "Close",
-            actions = { IconAction(Or2Icons.Check, "Save", ::submit, Modifier.testTag("host-form-save"), tint = Or2Colors.Accent, enabled = valid && !busy) },
+            actions = { IconAction(Or2Icons.Check, "Save", ::submit, Modifier.testTag("host-form-save"), tint = Or2Colors.Accent, enabled = valid && !busy && !working) },
         )
         Column(
             Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).testTag("host-form"),
@@ -113,25 +163,17 @@ fun HostFormScreen(
                 errorText = usernameError, tag = "host-username")
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("SSH key", style = Or2Type.Body, color = Or2Colors.Text)
-                if (keys.isEmpty()) {
-                    Text("Generate or import a key on the Keys screen first.", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
-                    PillButton("Add a key", openKeys, Modifier.testTag("host-add-key"), icon = Or2Icons.Key)
-                } else {
-                    // A fresh form is calm: the hint is muted, not an error, until a key is chosen.
-                    if (keys.none { it.id == keyId }) Text("Choose a key", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
-                    GroupCard(Modifier.selectableGroup()) {
-                        keys.forEachIndexed { index, key ->
-                            if (index > 0) GroupDivider(inset = 44.dp)
-                            ListRow(
-                                key.label, subtitle = shortFingerprint(key.fingerprint), subtitleMono = true, icon = Or2Icons.Key,
-                                modifier = Modifier.testTag("host-key:${key.id}").semantics(mergeDescendants = true) {}
-                                    .selectable(selected = keyId == key.id, role = Role.RadioButton, onClick = { keyId = key.id }),
-                                trailing = if (keyId == key.id) ({
-                                    Icon(Or2Icons.Check, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Accent)
-                                }) else null,
-                            )
-                        }
-                    }
+                // A fresh form is calm: the hint is muted, not an error, until a key is chosen.
+                if (!newKey && keys.none { it.id == keyId }) Text("Choose a key", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
+                KeyPicker(
+                    keys, selectedKeyId = keyId, newSelected = newKey, enabled = !working,
+                    choose = { keyId = it; newKey = false }, chooseNew = { newKey = true }, tagPrefix = "host-key",
+                )
+                if (newKey) {
+                    Text(
+                        "Made when you save. Its public key, to add to authorized_keys on the host, is shown next.",
+                        style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.testTag("host-key-new-note"),
+                    )
                 }
             }
             Column(verticalArrangement = Arrangement.spacedBy(Or2Dimens.SectionHeaderGap)) {
@@ -158,8 +200,9 @@ fun HostFormScreen(
             if (previous != null) {
                 Text("Changing any address or port clears previous host-key trust.", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
             }
+            keyError?.let { Text(it, style = Or2Type.Secondary, color = Or2Colors.Danger, modifier = Modifier.testTag("host-form-error")) }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                PrimaryButton("Save", ::submit, Modifier.testTag("host-form-primary"), enabled = valid && !busy)
+                PrimaryButton(if (working) "Working…" else "Save", ::submit, Modifier.testTag("host-form-primary"), enabled = valid && !busy && !working)
                 Text(
                     "Private keys stay encrypted in hardware-backed storage on this device. Connecting always needs your biometric.",
                     style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp),

@@ -27,6 +27,7 @@ import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.HostRecord
 import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.data.TransportPref
+import io.github.code_akram.or2.keys.VaultException
 import io.github.code_akram.or2.ui.Or2Theme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -41,12 +42,16 @@ class HostFormUiDeviceTest {
 
     private val key = KeyRecord("fixture-key", "Fixture key", "test", "public", "SHA256:fingerprint", "", byteArrayOf(), byteArrayOf())
 
-    private fun show(previous: Host?, keys: List<KeyRecord> = listOf(key), save: (Host) -> Unit = {}, close: () -> Unit = {}) =
-        compose.runOnUiThread {
-            val generation = ++generations
-            // A new key per call: remember state must not leak from the previous show().
-            compose.activity.setContent { key(generation) { Or2Theme { HostFormScreen(previous, keys, false, save, close) } } }
+    private fun show(
+        previous: Host?, keys: List<KeyRecord> = listOf(key), save: (Host) -> Unit = {}, close: () -> Unit = {},
+        createKey: suspend (String, String) -> KeyRecord = { _, _ -> error("no key is made in this test") },
+    ) = compose.runOnUiThread {
+        val generation = ++generations
+        // A new key per call: remember state must not leak from the previous show().
+        compose.activity.setContent {
+            key(generation) { Or2Theme { HostFormScreen(previous, keys, false, save, close, createKey, deviceLabel = "Fixture phone") } }
         }
+    }
 
     private fun keyChoice(key: KeyRecord) = compose.onNodeWithTag("host-key:${key.id}")
         .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.RadioButton))
@@ -124,6 +129,8 @@ class HostFormUiDeviceTest {
         var saved: Host? = null
         show(null, save = { saved = it })
         keyChoice(key).performScrollTo().assertIsSelected()
+        // New key is offered beside the stored keys, and not chosen while one is.
+        compose.onNodeWithTag("host-key-new").performScrollTo().assertIsNotSelected()
         compose.onNodeWithText("Choose a key").assertDoesNotExist()
         fillHostFields()
         compose.onNodeWithTag("host-form-primary").performScrollTo().assertIsEnabled().performClick()
@@ -154,14 +161,46 @@ class HostFormUiDeviceTest {
     }
 
     @Test
-    fun withoutKeysTheFormPointsToTheKeysScreen() {
-        var keysOpened = false
-        compose.runOnUiThread {
-            compose.activity.setContent { Or2Theme { HostFormScreen(null, emptyList(), false, {}, {}, openKeys = { keysOpened = true }) } }
+    fun withoutKeysNewKeyIsPreselectedAndSaveMakesItSavesTheHostAndShowsItsLine() {
+        val made = key.copy(id = "made-key", openssh = "ssh-ed25519 AAAAmade or2@Fixture phone", fingerprint = "SHA256:made")
+        var asked: Pair<String, String>? = null
+        var saved: Host? = null
+        var closed = 0
+        show(null, emptyList(), save = { saved = it }, close = { closed++ }, createKey = { label, comment -> asked = label to comment; made })
+        compose.onNodeWithTag("host-key-new").performScrollTo()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.RadioButton)).assertIsSelected()
+        compose.onNodeWithText("Choose a key").assertDoesNotExist()
+        compose.onNodeWithTag("host-key-new-note").performScrollTo().assertIsDisplayed()
+        fillHostFields()
+        compose.onNodeWithTag("host-form-primary").performScrollTo().assertIsEnabled().performClick()
+        // The key is made (and stored) first, with the same names as Easy pair's; then the host is saved with it.
+        compose.runOnIdle {
+            assertEquals("Key for Fixture" to "or2@Fixture phone", asked)
+            assertEquals("made-key", saved!!.keyId)
+            assertEquals(0, closed)
         }
-        compose.onNodeWithText("Generate or import a key on the Keys screen first.").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithTag("host-add-key").performScrollTo().performClick()
-        compose.runOnIdle { assertEquals(true, keysOpened) }
+        // Then its public line, to add to authorized_keys on the host; Done closes the form.
+        compose.onNodeWithTag("pair-install").assertIsDisplayed()
+        compose.onNodeWithTag("pair-install-note").assertTextContains("Fixture is saved.", substring = true)
+        compose.onNodeWithText(made.openssh).assertExists()
+        compose.onNodeWithTag("pair-install-done").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(1, closed) }
+    }
+
+    @Test
+    fun aNewKeyThatCouldNotBeMadeSavesNothingAndSaysWhy() {
+        var saved = 0
+        var closed = 0
+        show(null, emptyList(), save = { saved++ }, close = { closed++ }, createKey = { _, _ -> throw VaultException("Biometric authentication was cancelled.") })
+        fillHostFields()
+        compose.onNodeWithTag("host-form-primary").performScrollTo().performClick()
+        compose.onNodeWithTag("host-form-error").performScrollTo().assertTextContains("Biometric authentication was cancelled.")
+        compose.onNodeWithTag("host-key-new").performScrollTo().assertIsSelected()
+        compose.onNodeWithTag("host-form-primary").performScrollTo().assertIsEnabled()
+        compose.runOnIdle {
+            assertEquals(0, saved)
+            assertEquals(0, closed)
+        }
     }
 
     @Test

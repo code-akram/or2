@@ -126,10 +126,11 @@ class AppActions(
     val answerBatteryExplanation: (allow: Boolean) -> Unit = {},
     /** True once per process when the previous one died with sessions open ([SessionMarker]): the launcher resumes. */
     val takeColdResume: () -> Boolean = { false },
-    /** Easy pair: the flow (its state outlives the activity), the phone's name for the host, and key generation. */
+    /** Easy pair: the flow (its state outlives the activity), and the phone's name for the host and for new keys. */
     val pair: PairFlow? = null,
     val deviceLabel: String = "phone",
-    val generatePairKey: suspend (label: String, comment: String) -> KeyRecord = { _, _ -> error("pairing is not available") },
+    /** **New key** on the pairing review and the host form: makes and stores an Ed25519 key (one biometric prompt). */
+    val createKey: suspend (label: String, comment: String) -> KeyRecord = { _, _ -> error("key creation is not available") },
 )
 
 /**
@@ -174,12 +175,22 @@ fun Or2App(
     val batteryExplaining by actions.battery.explaining.collectAsStateWithLifecycle()
     val batteryCard by actions.battery.card.collectAsStateWithLifecycle()
 
-    // "Add host" opens the two-card sheet: Easy pair (scan) or the manual form, which is unchanged.
+    // "Add host" (the FAB) opens the add-host chooser in a sheet; the empty Home and inbox show the same chooser
+    // inline. Its two cards lead to Easy pair (scan) or the manual form.
     var addSheet by rememberSaveable { mutableStateOf(false) }
     fun addHost() { addSheet = true }
     val pairFlow = actions.pair
     val pairState by (pairFlow?.state ?: remember { kotlinx.coroutines.flow.MutableStateFlow<PairState>(PairState.Scanning(ShownCode.None)) })
         .collectAsStateWithLifecycle()
+    fun easyPair() {
+        addSheet = false
+        pairFlow?.start()
+        navigate(nav.push(Destination.EasyPair))
+    }
+    fun manualHost() {
+        addSheet = false
+        navigate(nav.push(Destination.HostForm(0)))
+    }
 
     // Hosts between the tap and the key being unlocked: their card says "Unlocking key...".
     var unlocking by remember { mutableStateOf(emptySet<Long>()) }
@@ -407,7 +418,7 @@ fun Or2App(
                             if (!busy && host.keyId != null && link.canConnect) connect(listOf(host))
                             openHostPage(host.id)
                         },
-                        addHost = ::addHost,
+                        addHost = ::addHost, easyPair = ::easyPair, manualHost = ::manualHost,
                         editHost = { navigate(nav.push(Destination.HostForm(it.id))) },
                         connectHost = { host ->
                             connect(listOf(host))
@@ -435,21 +446,21 @@ fun Or2App(
                     },
                     openHome = { navigate(nav.top(Destination.Home)) },
                     openKeys = { navigate(nav.push(Destination.Keys)) },
-                    addHost = ::addHost,
+                    easyPair = ::easyPair, manualHost = ::manualHost,
                 )
                 Destination.About -> AboutRoute(back = ::pop, openLicenses = { navigate(nav.push(Destination.Licenses)) })
                 Destination.Licenses -> LicensesRoute(back = ::pop)
                 Destination.Keys -> KeysScreen(keys, busy, actions.generateKey, actions.importKey, actions.deleteKey, back = ::pop)
                 Destination.EasyPair -> if (pairFlow == null) Column { TopBar(back = ::pop) } else PairDestination(
-                    pairState, keys, pairFlow, actions.deviceLabel, actions.generatePairKey,
+                    pairState, keys, pairFlow, actions.deviceLabel, actions.createKey,
                     close = ::pop,
                     // A code made with --manual ends on the key to install: Done returns Home with the host saved.
                     done = { pairFlow.consume(); navigate(NavStack()) },
                 )
                 is Destination.HostForm -> {
                     val previous = hosts.find { it.id == current.hostId }
-                    HostFormScreen(previous, keys, busy, save = { host -> actions.saveHost(host, previous); pop() }, close = ::pop,
-                        openKeys = { navigate(nav.push(Destination.Keys)) })
+                    HostFormScreen(previous, keys, busy, save = { host -> actions.saveHost(host, previous) }, close = ::pop,
+                        createKey = actions.createKey, deviceLabel = actions.deviceLabel)
                 }
                 is Destination.HostPage -> HostPage(
                     current.hostId, hosts, terminals, connections, busy, actions, ::openTerminal, back = ::pop,
@@ -480,11 +491,7 @@ fun Or2App(
         }
     }
     if (addSheet) {
-        AddHostSheet(
-            easyPair = { addSheet = false; pairFlow?.start(); navigate(nav.push(Destination.EasyPair)) },
-            manual = { addSheet = false; navigate(nav.push(Destination.HostForm(0))) },
-            dismiss = { addSheet = false },
-        )
+        AddHostSheet(easyPair = ::easyPair, manual = ::manualHost, dismiss = { addSheet = false })
     }
     // Paired: the host and its trusted key are saved. Once the stored list shows it, go to its page and connect
     // (the unlock is the usual one; the host key is already trusted, so no first-use prompt).

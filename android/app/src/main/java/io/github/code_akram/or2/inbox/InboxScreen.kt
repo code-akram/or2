@@ -29,7 +29,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.ffi.AgentStatus
-import io.github.code_akram.or2.ui.ActionCard
+import io.github.code_akram.or2.pair.AddHostChooser
 import io.github.code_akram.or2.ui.BottomInsetSpacer
 import io.github.code_akram.or2.ui.EmptyState
 import io.github.code_akram.or2.ui.GroupCard
@@ -84,7 +84,9 @@ fun InboxScreen(
     modifier: Modifier = Modifier,
     openHome: () -> Unit = {},
     openKeys: () -> Unit = {},
-    addHost: () -> Unit = {},
+    /** The add-host chooser's two cards, shown when no host shows agents here. */
+    easyPair: () -> Unit = {},
+    manualHost: () -> Unit = {},
 ) {
     val connectable = state.hosts.filter {
         it.host.keyId != null && it.link.canConnect
@@ -111,8 +113,7 @@ fun InboxScreen(
                             Or2Icons.Inbox, "No agents to watch",
                             "No hosts show agents here. Add a host and leave \"Show agents in the inbox\" on.",
                         )
-                        ActionCard("First step", "Add a host", "Hostname, user and the key to use.", meta = "~3 min · needs hostname + key",
-                            onClick = addHost)
+                        AddHostChooser(easyPair, manualHost, tagPrefix = "inbox-add-host")
                     }
                 }
             } else if (state.groups.isEmpty()) {
