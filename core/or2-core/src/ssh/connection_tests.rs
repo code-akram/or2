@@ -2977,15 +2977,27 @@ fn too_large_empty_and_unknown_images_are_refused_before_anything_is_sent() {
 fn a_cancelled_upload_removes_its_temporary_file() {
     let (fixture, _home, root) = sftp_fixture();
     *fixture.shared.sftp_first_write_delay.lock().unwrap() = Some(Duration::from_millis(500));
-    // The caller gives up while the host is still taking the first write.
+    // The caller gives up once the temporary file exists, while the host still takes the first write.
+    let created = || {
+        fixture
+            .shared
+            .sftp_log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request == "open")
+    };
     let upload = runtime().block_on(async {
-        timeout(
-            Duration::from_millis(250),
-            fixture.handle.upload_image(image_bytes(200_000), "png"),
-        )
-        .await
+        tokio::select! {
+            result = fixture.handle.upload_image(image_bytes(200_000), "png") => Some(result),
+            () = async {
+                while !created() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            } => None,
+        }
     });
-    assert!(upload.is_err(), "still running when cancelled");
+    assert!(upload.is_none(), "still running when cancelled: {upload:?}");
     let directory = root.join(".cache/or2/images");
     assert!(directory.is_dir());
     wait_for(|| {
