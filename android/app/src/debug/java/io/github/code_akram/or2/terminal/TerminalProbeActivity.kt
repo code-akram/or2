@@ -79,6 +79,7 @@ class TerminalProbeActivity : ComponentActivity() {
                     }
                     override fun onFrameReady() { frames.trySend(Unit) }
                     override fun onLinkHealth(health: LinkHealth) = Unit
+                    override fun onClipboardWrite(text: String) = Unit
                 },
             )
         } finally {

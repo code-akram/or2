@@ -673,6 +673,9 @@ mod tests {
             ) -> Result<(), crate::session::ListenerError> {
                 Ok(())
             }
+            fn on_clipboard_write(&self, _: String) -> Result<(), crate::session::ListenerError> {
+                Ok(())
+            }
         }
         struct Quiet;
         impl HostListener for Quiet {

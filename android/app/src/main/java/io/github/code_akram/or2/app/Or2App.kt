@@ -95,7 +95,6 @@ import io.github.code_akram.or2.pair.ShownCode
 import io.github.code_akram.or2.session.HostTrustDialog
 import io.github.code_akram.or2.session.SessionScreen
 import io.github.code_akram.or2.session.hostErrorMessage
-import io.github.code_akram.or2.settings.SettingsScreen
 import io.github.code_akram.or2.terminal.TerminalThumbnail
 import io.github.code_akram.or2.terminal.display
 import io.github.code_akram.or2.ui.IconAction
@@ -533,7 +532,7 @@ fun Or2App(
                 Destination.Licenses -> LicensesRoute(back = ::pop)
                 Destination.Settings -> {
                     val agentAlerts by actions.agentAlerts.enabled.collectAsStateWithLifecycle()
-                    SettingsScreen(agentAlerts, actions.setAgentAlerts, back = ::pop)
+                    SettingsRoute(agentAlerts, actions.setAgentAlerts, back = ::pop)
                 }
                 Destination.Keys -> KeysScreen(keys, busy, actions.generateKey, actions.importKey, actions.deleteKey, back = ::pop)
                 Destination.EasyPair -> if (pairFlow == null) Column { TopBar(back = ::pop) } else PairDestination(

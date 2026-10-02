@@ -128,7 +128,7 @@ class NavigationTest {
     }
 
     @Test
-    fun settingsIsPushedOnHomeAndSurvivesSavedState() {
+    fun settingsArePushedOnHomeAndSurviveSavedState() {
         val stack = NavStack().push(Destination.Settings)
         assertEquals("home|settings", stack.encode())
         assertEquals(stack, NavStack.decode(stack.encode()))

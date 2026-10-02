@@ -577,3 +577,110 @@ fn submit_follows_the_bracketed_paste_and_key_modes() {
     assert!(!terminal.bracketed_paste().unwrap());
     assert_eq!(terminal.submit_enter_bytes().unwrap(), b"\r");
 }
+
+#[test]
+fn osc8_hyperlinks_reach_the_row_as_column_runs() {
+    let mut terminal = engine(20, 3);
+    terminal.write(b"see \x1b]8;;https://example.org/a\x1b\\docs\x1b]8;;\x1b\\ and ");
+    terminal.write("\x1b]8;id=x;https://example.org/b\x07界z\x1b]8;;\x07!".as_bytes());
+    let frame = terminal.frame().unwrap();
+    let row = &frame.rows()[0];
+    assert_eq!(text(row).trim_end(), "see docs and 界 z!");
+    assert_eq!(
+        row.links(),
+        [
+            CellLink {
+                start_column: 4,
+                end_column: 7,
+                uri: "https://example.org/a".into()
+            },
+            // The wide character's tail is part of the run.
+            CellLink {
+                start_column: 13,
+                end_column: 15,
+                uri: "https://example.org/b".into()
+            },
+        ]
+    );
+    assert!(frame.rows()[1].links().is_empty());
+
+    // Two adjacent links stay two runs; a long URI is read whole.
+    let long = format!("https://example.org/{}", "x".repeat(600));
+    terminal.write(
+        format!("\r\n\x1b]8;;https://a.example\x07ab\x1b]8;;{long}\x07cd\x1b]8;;\x07").as_bytes(),
+    );
+    let frame = terminal.frame().unwrap();
+    let row = frame.rows().iter().find(|row| row.index() == 1).unwrap();
+    let runs: Vec<(u16, u16, &str)> = row
+        .links()
+        .iter()
+        .map(|link| (link.start_column, link.end_column, link.uri.as_str()))
+        .collect();
+    assert_eq!(runs, [(0, 1, "https://a.example"), (2, 3, long.as_str())]);
+}
+
+#[test]
+fn osc52_clipboard_writes_are_decoded_and_bad_ones_dropped() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let mut terminal = engine(20, 3);
+    assert_eq!(terminal.take_clipboard_write(), None);
+    // "hello world" in base64, BEL-terminated.
+    terminal.write(b"\x1b]52;c;aGVsbG8gd29ybGQ=\x07");
+    assert_eq!(
+        terminal.take_clipboard_write().as_deref(),
+        Some("hello world")
+    );
+    assert_eq!(terminal.take_clipboard_write(), None, "taken once");
+    // The newest of several wins, ST-terminated, whichever destination they name.
+    terminal.write(b"\x1b]52;c;b25l\x1b\\\x1b]52;p;dHdv\x1b\\");
+    assert_eq!(terminal.take_clipboard_write().as_deref(), Some("two"));
+    // A read request is never answered and is not a write.
+    let replies = Rc::new(RefCell::new(Vec::new()));
+    let sent = replies.clone();
+    let mut asked = TerminalEngine::new(TerminalSize::new(20, 3).unwrap(), move |bytes| {
+        sent.borrow_mut().extend_from_slice(bytes)
+    })
+    .unwrap();
+    asked.write(b"\x1b]52;c;?\x07");
+    assert_eq!(asked.take_clipboard_write(), None);
+    assert!(replies.borrow().is_empty());
+    // Invalid base64, bytes that are not UTF-8 ("//4=" is FF FE) and a clear request.
+    for bad in [
+        &b"\x1b]52;c;!!!not base64\x07"[..],
+        b"\x1b]52;c;//4=\x07",
+        b"\x1b]52;c;\x07",
+    ] {
+        terminal.write(bad);
+        assert_eq!(terminal.take_clipboard_write(), None, "{bad:?}");
+    }
+    // Over the cap is dropped whole; at the cap passes.
+    let encode = |length: usize| {
+        let mut sequence = b"\x1b]52;c;".to_vec();
+        sequence.extend(STANDARD.encode(vec![b'a'; length]).bytes());
+        sequence.push(0x07);
+        sequence
+    };
+    terminal.write(&encode(MAX_CLIPBOARD_BYTES + 3));
+    assert_eq!(terminal.take_clipboard_write(), None);
+    terminal.write(&encode(MAX_CLIPBOARD_BYTES));
+    assert_eq!(
+        terminal.take_clipboard_write().map(|text| text.len()),
+        Some(MAX_CLIPBOARD_BYTES)
+    );
+    // The screen is untouched by any of it.
+    let frame = terminal.frame().unwrap();
+    assert!(frame.rows().iter().all(|row| text(row).trim().is_empty()));
+}
+
+#[test]
+fn a_restored_engine_still_reports_clipboard_writes() {
+    let terminal = engine(20, 3);
+    let mut restored =
+        TerminalEngine::from_snapshot(&terminal.snapshot().unwrap(), |_| {}).unwrap();
+    restored.write(b"\x1b]52;c;aGk=\x07");
+    assert_eq!(restored.take_clipboard_write().as_deref(), Some("hi"));
+}

@@ -12,11 +12,16 @@ use libghostty_vt::snapshot::Decoder;
 use libghostty_vt::style::{
     Palette, PaletteIndex, RgbColor, StyleColor, Underline as GhosttyUnderline,
 };
-use libghostty_vt::terminal::{Mode, ScrollViewport};
+use libghostty_vt::terminal::{
+    ClipboardWrite, ClipboardWriteError, Mode, Point, PointCoordinate, ScrollViewport,
+};
 use libghostty_vt::{RenderState, Terminal};
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::frame::{
-    Cell, CellStyle, CellWidth, Cursor, CursorShape, Frame, Rgb, Row, Scrollback, TerminalModes,
+    Cell, CellLink, CellStyle, CellWidth, Cursor, CursorShape, Frame, Rgb, Row, Scrollback, TerminalModes,
     Underline,
 };
 use crate::input::{Key, KeyInput, Modifiers, ViewportScroll};
@@ -72,6 +77,26 @@ fn mocha_palette(base: Palette) -> Palette {
     palette
 }
 
+/// The largest clipboard write from the host (OSC 52, OSC 1337 Copy) passed on, in bytes of
+/// decoded text; a larger one is dropped whole.
+pub const MAX_CLIPBOARD_BYTES: usize = 1 << 20;
+
+/// The text of a host's clipboard write, or `None` to drop it: a request to clear the
+/// clipboard (no representation), no text representation, text that is not UTF-8, or text
+/// over [`MAX_CLIPBOARD_BYTES`]. Every destination (clipboard, selection, primary) counts:
+/// the phone has one clipboard.
+fn clipboard_text(write: &ClipboardWrite<'_>) -> Option<String> {
+    let mut contents = write.contents();
+    let text = contents
+        .clone()
+        .find(|content| content.mime.starts_with("text/plain"))
+        .or_else(|| contents.find(|content| content.mime.starts_with("text/")))?;
+    if text.data.len() > MAX_CLIPBOARD_BYTES {
+        return None;
+    }
+    String::from_utf8(text.data.to_vec()).ok()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TerminalError {
     #[error(transparent)]
@@ -92,6 +117,10 @@ pub struct TerminalEngine {
     size: TerminalSize,
     full: bool,
     colors: Option<(RgbColor, RgbColor)>,
+    /// The newest clipboard write from the host not yet taken ([`TerminalEngine::take_clipboard_write`]).
+    clipboard: Rc<RefCell<Option<String>>>,
+    /// Scratch space for hyperlink URIs while building a frame.
+    uri: Vec<u8>,
 }
 
 impl TerminalEngine {
@@ -139,6 +168,18 @@ impl TerminalEngine {
         let base = terminal.default_color_palette()?;
         terminal.set_default_color_palette(Some(mocha_palette(base)))?;
         terminal.on_pty_write(move |_, bytes| reply(bytes))?;
+        let clipboard = Rc::new(RefCell::new(None));
+        let written = clipboard.clone();
+        // libghostty decodes OSC 52's base64 (dropping an invalid payload) and never forwards a
+        // read request ("?"), so the host never learns the phone's clipboard.
+        terminal.on_clipboard_write(move |_, write| {
+            if let Some(text) = clipboard_text(&write) {
+                *written.borrow_mut() = Some(text);
+                Ok(())
+            } else {
+                Err(ClipboardWriteError::Unsupported)
+            }
+        })?;
         Ok(Self {
             terminal,
             render: RenderState::new()?,
@@ -151,11 +192,20 @@ impl TerminalEngine {
             size,
             full: true,
             colors: None,
+            clipboard,
+            uri: Vec::new(),
         })
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
         self.terminal.vt_write(bytes);
+    }
+
+    /// The newest clipboard write the host made (OSC 52 or OSC 1337 Copy) since the last call,
+    /// as text: earlier ones in between are superseded. See [`MAX_CLIPBOARD_BYTES`] for what is
+    /// dropped. A snapshot does not carry it.
+    pub fn take_clipboard_write(&mut self) -> Option<String> {
+        self.clipboard.borrow_mut().take()
     }
 
     /// The grid size the engine publishes frames at.
@@ -220,12 +270,40 @@ impl TerminalEngine {
             let changed = full || row.dirty()?;
             let cursor_row = position.is_some_and(|position| position.y == index);
             if changed || cursor_row {
-                let wrapped = row.raw_row()?.is_wrapped()?;
+                let raw_row = row.raw_row()?;
+                let wrapped = raw_row.is_wrapped()?;
+                // May be a false positive; cells are checked one by one.
+                let linked = changed && raw_row.has_hyperlink()?;
+                let mut links: Vec<CellLink> = Vec::new();
                 let mut cell_iter = self.cell_iter.update(row)?;
                 let mut cells = Vec::new();
                 let mut column = 0;
                 while let Some(cell) = cell_iter.next() {
-                    let wide = cell.raw_cell()?.wide()?;
+                    let raw_cell = cell.raw_cell()?;
+                    let wide = raw_cell.wide()?;
+                    if linked {
+                        let open = links
+                            .last_mut()
+                            .filter(|link| link.end_column + 1 == column);
+                        if matches!(wide, CellWide::SpacerTail) {
+                            // A wide character's tail belongs to its head's link.
+                            if let Some(link) = open {
+                                link.end_column = column;
+                            }
+                        } else if raw_cell.has_hyperlink()?
+                            && let Some(uri) =
+                                hyperlink_uri(&self.terminal, &mut self.uri, column, index)?
+                        {
+                            match open {
+                                Some(link) if link.uri == uri => link.end_column = column,
+                                _ => links.push(CellLink {
+                                    start_column: column,
+                                    end_column: column,
+                                    uri,
+                                }),
+                            }
+                        }
+                    }
                     if position.is_some_and(|position| position.y == index && position.x == column)
                     {
                         cursor_wide = matches!(wide, CellWide::Wide | CellWide::SpacerTail);
@@ -281,7 +359,7 @@ impl TerminalEngine {
                     column += 1;
                 }
                 if changed {
-                    rows.push(Row::new(index, wrapped, cells));
+                    rows.push(Row::new(index, wrapped, cells).with_links(links));
                 }
             }
             row.set_dirty(false)?;
@@ -528,6 +606,36 @@ impl TerminalEngine {
         let count = rows.unsigned_abs().min(u32::from(grid_rows));
         Ok(one.repeat(count as usize))
     }
+}
+
+/// The OSC 8 URI of the viewport cell at `column`, `row`, or `None` when it has none (or it
+/// is not UTF-8). `buffer` is reused across calls and grows to the longest URI met.
+fn hyperlink_uri(
+    terminal: &Terminal<'static, 'static>,
+    buffer: &mut Vec<u8>,
+    column: u16,
+    row: u16,
+) -> Result<Option<String>, libghostty_vt::Error> {
+    let cell = terminal.grid_ref(Point::Viewport(PointCoordinate {
+        x: column,
+        y: u32::from(row),
+    }))?;
+    if buffer.is_empty() {
+        buffer.resize(256, 0);
+    }
+    let length = match cell.hyperlink_uri(buffer) {
+        Err(libghostty_vt::Error::OutOfSpace { required }) if required > buffer.len() => {
+            buffer.resize(required, 0);
+            cell.hyperlink_uri(buffer)?
+        }
+        result => result?,
+    };
+    if length == 0 {
+        return Ok(None);
+    }
+    Ok(std::str::from_utf8(&buffer[..length])
+        .ok()
+        .map(str::to_owned))
 }
 
 fn rgb(color: RgbColor) -> Rgb {

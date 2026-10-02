@@ -75,6 +75,8 @@ class NativeDeviceTest {
 
         override fun onLinkHealth(health: LinkHealth) = Unit
 
+        override fun onClipboardWrite(text: String) = Unit
+
         fun next(): SessionState {
             val state = states.poll(5, TimeUnit.SECONDS)
             assertNotNull("timed out waiting for a state change", state)

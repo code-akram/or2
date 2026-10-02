@@ -37,6 +37,18 @@ pub struct TerminalRow {
     pub wrapped: bool,
     /// Exactly `columns` cells.
     pub cells: Vec<TerminalCell>,
+    /// OSC 8 hyperlinks, ascending by column and not overlapping; empty when none.
+    #[uniffi(default)]
+    pub links: Vec<CellLink>,
+}
+
+/// An OSC 8 hyperlink over the cells `start_column..=end_column` of a row (both inclusive; a
+/// wide character's spacer tail is part of the run).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CellLink {
+    pub start_column: u16,
+    pub end_column: u16,
+    pub uri: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -123,6 +135,15 @@ impl From<core::TakenFrame> for TerminalFrame {
                             styles.push(CellStyle::from(cell.style));
                             u32::try_from(styles.len() - 1).expect("styles are bounded by cells")
                         }),
+                    })
+                    .collect(),
+                links: row
+                    .links()
+                    .iter()
+                    .map(|link| CellLink {
+                        start_column: link.start_column,
+                        end_column: link.end_column,
+                        uri: link.uri.clone(),
                     })
                     .collect(),
             })
@@ -229,7 +250,12 @@ mod tests {
                 cell("", core::CellWidth::SpacerTail, plain),
                 cell("!", core::CellWidth::Narrow, red),
             ],
-        );
+        )
+        .with_links(vec![core::CellLink {
+            start_column: 1,
+            end_column: 2,
+            uri: "https://example.org".into(),
+        }]);
         let frame = core::Frame::delta(
             TerminalSize::new(4, 3).unwrap(),
             vec![row],
@@ -266,6 +292,14 @@ mod tests {
         assert_eq!(styles, [0, 1, 1, 0]);
         assert_eq!(row.cells[1].width, CellWidth::Wide);
         assert_eq!(row.cells[2].width, CellWidth::SpacerTail);
+        assert_eq!(
+            row.links,
+            [CellLink {
+                start_column: 1,
+                end_column: 2,
+                uri: "https://example.org".into()
+            }]
+        );
         assert_eq!(ffi.background, 0x10);
         assert_eq!(
             ffi.scrollback,

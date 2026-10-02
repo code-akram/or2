@@ -1,14 +1,17 @@
 package io.github.code_akram.or2.terminal
 
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Intent
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Picture
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.net.Uri
 import android.text.InputType
 import android.util.LruCache
 import android.util.TypedValue
@@ -22,6 +25,7 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.OverScroller
+import android.widget.Toast
 import androidx.compose.ui.graphics.toArgb
 import io.github.code_akram.or2.ffi.CellStyle
 import io.github.code_akram.or2.ffi.CellWidth
@@ -40,6 +44,9 @@ import io.github.code_akram.or2.ui.Or2Dimens
 import kotlinx.coroutines.CoroutineScope
 import kotlin.math.ceil
 import kotlin.math.roundToInt
+
+/** How long a tapped link stays underlined. */
+private const val LINK_FLASH_MS = 300L
 
 /** Canvas is the only renderer. The cache retains glyph commands, not terminal bitmaps. */
 class TerminalView(context: Context) : View(context) {
@@ -129,8 +136,14 @@ class TerminalView(context: Context) : View(context) {
             return true
         }
         override fun onSingleTapUp(e: MotionEvent): Boolean {
-            clearSelection()
+            // A selection is cleared by a tap, never followed through a link under it.
+            val link = if (selection == null) position(e.x, e.y)?.let { TerminalLinks.at(grid.rows, it) } else null
             performClick()
+            if (link != null) {
+                openLink(link)
+                return true
+            }
+            clearSelection()
             showKeyboard()
             return true
         }
@@ -402,6 +415,32 @@ class TerminalView(context: Context) : View(context) {
         invalidate()
     }
 
+    /** The link a tap is opening, underlined for a moment as the tap's feedback. */
+    private var tappedLink: TerminalLink? = null
+    private val endLinkFlash = Runnable {
+        tappedLink = null
+        invalidate()
+    }
+
+    /**
+     * Opens a tapped link in the app that handles it (Android asks which when there is no default), after
+     * underlining it. No confirmation: only `http` and `https` get here ([TerminalLinks]).
+     */
+    private fun openLink(link: TerminalLink) {
+        tappedLink = link
+        invalidate()
+        removeCallbacks(endLinkFlash)
+        postDelayed(endLinkFlash, LINK_FLASH_MS)
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(link.uri))
+            .addCategory(Intent.CATEGORY_BROWSABLE)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            context.startActivity(intent)
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(context, "No app can open this link", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     fun copySelection() {
         selection?.let {
             context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Terminal selection", it.text()))
@@ -509,6 +548,8 @@ class TerminalView(context: Context) : View(context) {
 
     override fun onDetachedFromWindow() {
         removeCallbacks(blink)
+        removeCallbacks(endLinkFlash)
+        tappedLink = null
         scroller.forceFinished(true)
         inputConnection?.cancelComposition()
         inputConnection = null
@@ -586,6 +627,15 @@ class TerminalView(context: Context) : View(context) {
                     canvas.drawRect(range.first * cellWidth, row * cellHeight,
                         (range.last + 1) * cellWidth, (row + 1) * cellHeight, paint)
                 }
+            }
+        }
+        tappedLink?.takeIf { selection == null }?.let { link ->
+            paint.style = Paint.Style.FILL
+            paint.color = Or2Colors.Accent.toArgb()
+            val thickness = 1.5f * resources.displayMetrics.density
+            link.spans.forEach { span ->
+                val bottom = (span.row + 1) * cellHeight
+                canvas.drawRect(span.columns.first * cellWidth, bottom - thickness, (span.columns.last + 1) * cellWidth, bottom, paint)
             }
         }
         if (input.composing.isNotEmpty() && selection == null) {

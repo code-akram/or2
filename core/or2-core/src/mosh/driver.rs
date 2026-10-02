@@ -321,6 +321,13 @@ async fn run<T: DatagramTransport>(
                                             .transition(SessionState::Connected)
                                             .map_err(internal)?;
                                     }
+                                    // Taken per datagram: a later one may replace the live
+                                    // screen (a diff from an older state) and its write with it.
+                                    if let Some(text) =
+                                        session.terminal().live().engine().take_clipboard_write()
+                                    {
+                                        driver.publish_clipboard(text);
+                                    }
                                 }
                                 Err(Fault::Dropped(_)) => {}
                                 Err(Fault::Screen(error)) => return Err(internal(error)),

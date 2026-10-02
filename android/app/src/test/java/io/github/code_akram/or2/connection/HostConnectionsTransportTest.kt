@@ -677,4 +677,21 @@ class HostConnectionsTransportTest {
         assertEquals(1_000L, testScheduler.currentTime - started)
         assertNotNull(slow.active.capabilities.value)
     }
+
+    @Test
+    fun clipboardWritesArePassedOnWithTheTerminalOnlyFromItsCurrentSession() = runTest {
+        val rig = rig()
+        val copies = mutableListOf<Pair<Long, String>>()
+        rig.holder.clipboardWrite = { id, text -> copies += id to text }
+        val terminal = rig.holder.openTerminal(rig.active, shell)
+        sessionListener(rig, 0).onClipboardWrite("from mosh")
+        advanceUntilIdle()
+        assertEquals(listOf(terminal.id to "from mosh"), copies)
+
+        fail(rig, 0, SessionFailure.TimedOut) // AUTO falls back to SSH: a new session for the same terminal.
+        sessionListener(rig, 0).onClipboardWrite("stale")
+        sessionListener(rig, 1).onClipboardWrite("from ssh")
+        advanceUntilIdle()
+        assertEquals(listOf(terminal.id to "from mosh", terminal.id to "from ssh"), copies)
+    }
 }

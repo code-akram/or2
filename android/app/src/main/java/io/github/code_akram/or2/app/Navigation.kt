@@ -13,7 +13,7 @@ sealed interface Destination {
     data object About : Destination
     data object Licenses : Destination
 
-    /** App-wide switches (agent notifications), pushed from Home. */
+    /** The app's settings (Agent notifications, Copy from the host), pushed from Home. */
     data object Settings : Destination
     data class HostPage(val hostId: Long) : Destination
 

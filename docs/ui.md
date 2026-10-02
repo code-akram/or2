@@ -159,11 +159,12 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 - **Stepper:** pill `− value +` in `surfaceTrack`.
 - **Text field:** filled `surface`, 44 dp tall, 12 dp radius, no outline; label above in `text`;
   placeholder in mono `placeholder`.
-- **Settings:** pushed from Home's third trailing icon (`Settings`, a sliders glyph). A `TopBar` titled
-  "Settings", then grouped cards under section headers; each switch is a row with the toggle at the right and
-  a muted `Secondary` sentence under its card. NOTIFICATIONS holds `Agent notifications` (on by default: one
+- **Settings:** pushed from Home's third trailing icon (`Settings`, three sliders). A `TopBar` titled
+  "Settings", then grouped cards of switch rows under section headers (`ListRow` with an `Or2Toggle` trailing and a
+  muted subtitle; tapping the row flips it). NOTIFICATIONS holds `Agent notifications` (on by default: one
   notification when an agent needs input or finishes, on every host shown in the inbox, none for the pane on
-  screen). Every switch is on by default; the screen is the off-ramp, never a setup step.
+  screen); TERMINAL holds `Copy from the host` (on by default). Every default is the zero-configuration choice;
+  a switch is only the off-ramp, never a setup step.
 - **About or2:** pushed from Home's last trailing icon (`Info`, "About or2"). A `TopBar` titled
   "About or2", the name in `ScreenTitle` with a muted `Secondary` line, then grouped cards in the
   usual order: VERSION (`Version`, `API version`, `Native core`, values muted at the right),

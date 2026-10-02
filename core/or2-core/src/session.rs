@@ -186,6 +186,9 @@ pub trait SessionObserver: Send + Sync {
     /// mosh only: how long the server has been silent. Called from the driver's thread, in
     /// order with the other callbacks. Other transports never call it.
     fn link_health(&self, _health: LinkHealth) {}
+    /// The host's program set the clipboard (OSC 52 or OSC 1337 Copy), decoded to text. Only
+    /// while connected; both transports call it.
+    fn clipboard_write(&self, _text: String) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -465,6 +468,15 @@ impl SessionDriver {
             && let Some(observer) = &self.observer
         {
             observer.link_health(health);
+        }
+    }
+
+    /// Passes a clipboard write from the host to the observer while the session is connected.
+    pub fn publish_clipboard(&mut self, text: String) {
+        if *lock(&self.shared.state) == SessionState::Connected
+            && let Some(observer) = &self.observer
+        {
+            observer.clipboard_write(text);
         }
     }
 
@@ -805,6 +817,27 @@ mod tests {
         driver.close(CloseReason::Disconnected);
         driver.publish_link_health(sample);
         assert_eq!(*lock(&health.0), [sample], "not after Closed");
+    }
+
+    #[test]
+    fn clipboard_writes_reach_the_observer_only_while_connected() {
+        #[derive(Default)]
+        struct Clipboard(Mutex<Vec<String>>);
+        impl SessionObserver for Clipboard {
+            fn state_changed(&self, _: &SessionState) {}
+            fn frame_ready(&self) {}
+            fn clipboard_write(&self, text: String) {
+                lock(&self.0).push(text);
+            }
+        }
+        let clipboard = Arc::new(Clipboard::default());
+        let (_handle, mut driver) = channel(clipboard.clone());
+        driver.publish_clipboard("early".into());
+        driver.transition(SessionState::Connected).unwrap();
+        driver.publish_clipboard("copied".into());
+        driver.close(CloseReason::Disconnected);
+        driver.publish_clipboard("late".into());
+        assert_eq!(*lock(&clipboard.0), ["copied"]);
     }
 
     #[test]
