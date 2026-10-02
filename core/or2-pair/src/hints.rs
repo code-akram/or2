@@ -3,11 +3,16 @@
 //! these; it never runs them, and never `sudo`.
 //!
 //! What the host has is read once ([`HostFacts::detect`], from files under a root directory so
-//! that tests can fake a host) and the hints are pure functions of it.
+//! that tests can fake a host) and the hints are pure functions of it. The one exception to
+//! "files only" is the macOS firewall, which has no file to read: its read-only
+//! `socketfilterfw --get…` queries are run through [`Commands`], which tests replace with
+//! captured outputs.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use crate::checks::{Platform, find_program};
+use crate::checks::{Level, Platform, find_program};
 
 /// The package manager that installs things on this host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +123,239 @@ pub enum Firewall {
     Nftables,
 }
 
+/// What the macOS application firewall does, as `socketfilterfw` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MacFirewall {
+    Off,
+    On {
+        /// "Block all incoming connections", which overrides every application rule; `None`
+        /// when its answer could not be read.
+        block_all: Option<bool>,
+        /// The rule for mosh-server, when mosh-server was found.
+        mosh_server: Option<MoshServerRule>,
+    },
+}
+
+/// The firewall's rule for mosh-server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoshServerRule {
+    /// mosh-server's real path (symbolic links resolved: Homebrew's `bin/mosh-server` links into
+    /// `Cellar/`), which is what the firewall's rules name.
+    pub path: PathBuf,
+    /// `None` when the answer could not be read.
+    pub rule: Option<AppRule>,
+}
+
+/// What the firewall's list says of one program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppRule {
+    /// Incoming connections are permitted.
+    Allowed,
+    /// Incoming connections are blocked.
+    Blocked,
+    /// Not in the list: macOS would ask in a dialog, which nobody answers for a program started
+    /// over SSH, so its incoming UDP is dropped.
+    NotListed,
+}
+
+/// The macOS firewall's command-line tool. Only its read-only queries are run.
+pub const SOCKETFILTERFW: &str = "/usr/libexec/ApplicationFirewall/socketfilterfw";
+
+/// Runs a read-only command and returns what it printed (standard output, then standard error),
+/// whatever its exit status, or `None` when it could not be run or did not finish in time. The
+/// seam that lets tests feed captured outputs instead of running anything.
+pub trait Commands {
+    fn run(&self, program: &Path, args: &[&OsStr]) -> Option<String>;
+}
+
+/// The real [`Commands`]: the program is run directly (no shell), with no input, for at most
+/// `timeout`, and at most [`COMMAND_OUTPUT_LIMIT`] bytes of each output stream are kept.
+#[derive(Debug, Clone, Copy)]
+pub struct SystemCommands {
+    pub timeout: Duration,
+}
+
+impl Default for SystemCommands {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(3),
+        }
+    }
+}
+
+/// At most this much of a command's output stream is kept.
+pub const COMMAND_OUTPUT_LIMIT: u64 = 64 * 1024;
+
+impl Commands for SystemCommands {
+    fn run(&self, program: &Path, args: &[&OsStr]) -> Option<String> {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        use std::sync::mpsc::{self, Receiver};
+
+        fn reader(stream: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
+            let (sender, receiver) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut text = Vec::new();
+                let _ = stream.take(COMMAND_OUTPUT_LIMIT).read_to_end(&mut text);
+                let _ = sender.send(text);
+            });
+            receiver
+        }
+
+        let deadline = Instant::now() + self.timeout;
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .ok()?;
+        let outputs = [
+            child.stdout.take().map(reader),
+            child.stderr.take().map(reader),
+        ];
+        let finished = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break true,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                _ => break false,
+            }
+        };
+        if !finished {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        // Something it left running could still hold a pipe: the reading is inside the same
+        // time limit.
+        let mut text = Vec::new();
+        for output in outputs.into_iter().flatten() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            text.extend(output.recv_timeout(left).ok()?);
+        }
+        Some(String::from_utf8_lossy(&text).into_owned())
+    }
+}
+
+/// The lower-case words of `text` (letters only), for reading answers whose exact wording is not
+/// pinned down.
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphabetic())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Whether the words say on or off: `Some` only when they say one and not the other.
+fn on_or_off(words: &[String]) -> Option<bool> {
+    let has = |list: &[&str]| words.iter().any(|word| list.contains(&word.as_str()));
+    match (
+        has(&["enabled", "on", "active"]),
+        has(&["disabled", "off", "inactive"]),
+    ) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        _ => None,
+    }
+}
+
+/// The lines that are not about stealth mode or logging (which say nothing of what is
+/// blocked).
+fn relevant_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().filter(|line| {
+        let line = line.to_lowercase();
+        !line.contains("stealth") && !line.contains("logging")
+    })
+}
+
+/// `socketfilterfw --getglobalstate`: whether the firewall is on, and whether that state is
+/// "block all" (state 2). `(State = N)` decides when it is there (0 off, 1 on, 2 block all);
+/// otherwise the words do (`Firewall is enabled.`). `None` when it cannot be read.
+pub fn parse_global_state(text: &str) -> Option<(bool, bool)> {
+    let text: String = relevant_lines(text).collect::<Vec<_>>().join("\n");
+    let lower = text.to_lowercase();
+    if let Some(at) = lower.find("state") {
+        let rest = lower[at + "state".len()..].trim_start();
+        if let Some(value) = rest.strip_prefix('=').map(str::trim_start) {
+            let digits: String = value.chars().take_while(char::is_ascii_digit).collect();
+            match digits.as_str() {
+                "0" => return Some((false, false)),
+                "1" => return Some((true, false)),
+                "2" => return Some((true, true)),
+                "" => {}
+                _ => return None,
+            }
+        }
+    }
+    let words = words(&text);
+    if words.iter().any(|word| word == "blocking") && words.iter().any(|word| word == "all") {
+        return Some((true, true));
+    }
+    on_or_off(&words).map(|on| (on, false))
+}
+
+/// `socketfilterfw --getblockall`: `Firewall has block all state set to enabled.` (older:
+/// `Block all ENABLED!`). `None` when it cannot be read.
+pub fn parse_block_all(text: &str) -> Option<bool> {
+    let words = words(&relevant_lines(text).collect::<Vec<_>>().join("\n"));
+    if !words.iter().any(|word| word == "block") {
+        return None;
+    }
+    on_or_off(&words)
+}
+
+/// `socketfilterfw --getappblocked <path>`: the program's rule. The path is taken out of the
+/// text first (a directory could be called `blocked`). `None` when it cannot be read.
+pub fn parse_app_rule(text: &str, path: &Path) -> Option<AppRule> {
+    let text = text.replace(&*path.to_string_lossy(), " ");
+    let lower = text.to_lowercase();
+    if lower.contains("not part of the firewall")
+        || lower.contains("not in the firewall")
+        || lower.contains("not found in the firewall")
+    {
+        return Some(AppRule::NotListed);
+    }
+    let words = words(&text);
+    let has = |list: &[&str]| words.iter().any(|word| list.contains(&word.as_str()));
+    match (
+        has(&["permitted", "allowed", "allow", "unblocked"]),
+        has(&["blocked", "blocking", "denied"]),
+    ) {
+        (true, false) => Some(AppRule::Allowed),
+        (false, true) => Some(AppRule::Blocked),
+        _ => None,
+    }
+}
+
+/// Asks `socketfilterfw` (under `root`) what the macOS firewall does to mosh-server, found in
+/// `dirs` and resolved to its real path. `None` when the tool is missing or its first answer
+/// cannot be read: then nothing is known, and nothing is said.
+fn mac_firewall(root: &Path, dirs: &[PathBuf], commands: &dyn Commands) -> Option<MacFirewall> {
+    let tool = root.join(SOCKETFILTERFW.trim_start_matches('/'));
+    let ask = |args: &[&OsStr]| commands.run(&tool, args);
+    let (on, state_blocks_all) = parse_global_state(&ask(&[OsStr::new("--getglobalstate")])?)?;
+    if !on {
+        return Some(MacFirewall::Off);
+    }
+    let block_all = ask(&[OsStr::new("--getblockall")])
+        .and_then(|text| parse_block_all(&text))
+        .map(|blocks| blocks || state_blocks_all)
+        .or(state_blocks_all.then_some(true));
+    let mosh_server = find_program("mosh-server", dirs)
+        .and_then(|path| std::fs::canonicalize(path).ok())
+        .map(|path| {
+            let rule = ask(&[OsStr::new("--getappblocked"), path.as_os_str()])
+                .and_then(|text| parse_app_rule(&text, &path));
+            MoshServerRule { path, rule }
+        });
+    Some(MacFirewall::On {
+        block_all,
+        mosh_server,
+    })
+}
+
 /// What this host has, as far as the hints need it. `Default` knows nothing, and the hints then
 /// fall back to generic advice.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -137,6 +375,9 @@ pub struct HostFacts {
     /// The firewall in front of mosh's UDP ports, the first found of ufw (enabled in its
     /// config), firewalld and nftables (their services enabled).
     pub firewall: Option<Firewall>,
+    /// macOS: what the application firewall does to mosh-server; `None` when it could not be
+    /// asked or its answer read (and on every other system).
+    pub mac_firewall: Option<MacFirewall>,
     /// This runs as root: commands are shown without `sudo`.
     pub superuser: bool,
 }
@@ -151,12 +392,14 @@ const UNIT_DIRS: [&str; 3] = [
 impl HostFacts {
     /// Reads the facts of the host whose file system starts at `root` (`/`, or a fake tree in
     /// tests). `program_dirs` are searched for package managers as well as the usual
-    /// directories under `root`. Only looks: nothing is run or written.
+    /// directories under `root`. Only looks: nothing is written, and the only thing run is the
+    /// macOS firewall's read-only queries, through `commands` (never `sudo`).
     pub fn detect(
         platform: Platform,
         root: &Path,
         program_dirs: &[PathBuf],
         superuser: bool,
+        commands: &dyn Commands,
     ) -> Self {
         let mut facts = Self {
             superuser,
@@ -170,6 +413,10 @@ impl HostFacts {
                 if find_program("brew", &dirs).is_some() {
                     facts.package_manager = Some(PackageManager::Brew);
                 }
+                // mosh-server as the checks find it (PATH first), then Homebrew's.
+                let mut mosh_dirs = program_dirs.to_vec();
+                mosh_dirs.extend(under(&["opt/homebrew/bin", "usr/local/bin"]));
+                facts.mac_firewall = mac_firewall(root, &mosh_dirs, commands);
             }
             Platform::Linux => {
                 let mut dirs = program_dirs.to_vec();
@@ -397,6 +644,96 @@ pub fn firewall(platform: Platform, facts: &HostFacts, mosh: bool) -> Option<Str
     })
 }
 
+/// Starts each further line of a check, under its text (after `  warn  `).
+const CONTINUED: &str = "\n        ";
+
+/// `path` for a POSIX shell: in double quotes, or in single quotes when it has a character
+/// double quotes do not keep.
+fn quoted(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if text.contains(['"', '$', '`', '\\', '!']) {
+        format!("'{}'", text.replace('\'', r"'\''"))
+    } else {
+        format!("\"{text}\"")
+    }
+}
+
+/// What the macOS firewall does to mosh's UDP, when it is known: `Ok` lines when it lets
+/// mosh-server through, `Warn` lines with the exact fix when it would block it (pairing goes on:
+/// SSH works). Empty when nothing is known (no `socketfilterfw`, an answer that cannot be read,
+/// mosh-server not installed, not macOS): the generic [`firewall`] hint is printed then.
+pub fn mac_firewall_checks(
+    platform: Platform,
+    facts: &HostFacts,
+    mosh: bool,
+) -> Vec<(Level, String)> {
+    if platform != Platform::MacOs || !mosh {
+        return Vec::new();
+    }
+    let (block_all, mosh_server) = match &facts.mac_firewall {
+        None => return Vec::new(),
+        Some(MacFirewall::Off) => {
+            return vec![(
+                Level::Ok,
+                "the macOS firewall is off (it does not block mosh's UDP)".to_owned(),
+            )];
+        }
+        Some(MacFirewall::On {
+            block_all,
+            mosh_server,
+        }) => (*block_all, mosh_server.as_ref()),
+    };
+    let sudo = facts.sudo();
+    let mut out = Vec::new();
+    if block_all == Some(true) {
+        out.push((
+            Level::Warn,
+            format!(
+                "the macOS firewall blocks all incoming connections, which overrides any rule, so mosh cannot reach this host and terminals use SSH (it also blocks sharing services such as Remote Login from other machines); turn off \"Block all incoming connections\" in System Settings > Network > Firewall > Options, or run:{CONTINUED}{sudo}{SOCKETFILTERFW} --setblockall off"
+            ),
+        ));
+    }
+    if let Some(MoshServerRule {
+        path,
+        rule: Some(rule @ (AppRule::Blocked | AppRule::NotListed)),
+    }) = mosh_server
+    {
+        let shown = path.display();
+        let what = match rule {
+            AppRule::Blocked => format!("the macOS firewall blocks mosh-server ({shown})"),
+            _ => format!("the macOS firewall is on and has no rule for mosh-server ({shown})"),
+        };
+        let quoted = quoted(path);
+        let upgrade = if path.to_string_lossy().contains("/Cellar/") {
+            "`brew upgrade mosh` installs a new mosh-server at another path, so add the rule again after an upgrade (or2-pair --check shows it)"
+        } else {
+            "upgrading mosh replaces this binary, so add the rule again after an upgrade (or2-pair --check shows it)"
+        };
+        out.push((
+            Level::Warn,
+            format!(
+                "{what}, so mosh cannot reach this host and terminals use SSH; allow it:{CONTINUED}{sudo}{SOCKETFILTERFW} --add {quoted}{CONTINUED}{sudo}{SOCKETFILTERFW} --unblockapp {quoted}{CONTINUED}{upgrade}"
+            ),
+        ));
+    }
+    if out.is_empty()
+        && block_all == Some(false)
+        && let Some(MoshServerRule {
+            path,
+            rule: Some(AppRule::Allowed),
+        }) = mosh_server
+    {
+        out.push((
+            Level::Ok,
+            format!(
+                "the macOS firewall is on and allows mosh-server ({})",
+                path.display()
+            ),
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,8 +783,453 @@ mod tests {
         }
 
         fn detect(&self, platform: Platform) -> HostFacts {
-            HostFacts::detect(platform, self.root(), &[], false)
+            self.detect_with(platform, &Captured::missing())
         }
+
+        fn detect_with(&self, platform: Platform, commands: &Captured) -> HostFacts {
+            HostFacts::detect(platform, self.root(), &[], false, commands)
+        }
+    }
+
+    /// `socketfilterfw`'s answers as captured (by its first argument), or `None` for a missing
+    /// tool; remembers every command it was asked to run.
+    #[derive(Default)]
+    struct Captured {
+        global: Option<&'static str>,
+        block_all: Option<&'static str>,
+        /// `{}` stands for the path asked about.
+        app: Option<&'static str>,
+        asked: std::cell::RefCell<Vec<(PathBuf, Vec<String>)>>,
+    }
+
+    impl Captured {
+        /// No `socketfilterfw` on this host.
+        fn missing() -> Self {
+            Self::default()
+        }
+
+        fn new(global: &'static str, block_all: &'static str, app: &'static str) -> Self {
+            Self {
+                global: Some(global),
+                block_all: Some(block_all),
+                app: Some(app),
+                ..Self::default()
+            }
+        }
+
+        fn asked(&self) -> Vec<Vec<String>> {
+            self.asked
+                .borrow()
+                .iter()
+                .map(|(_, args)| args.clone())
+                .collect()
+        }
+    }
+
+    impl Commands for Captured {
+        fn run(&self, program: &Path, args: &[&OsStr]) -> Option<String> {
+            let args: Vec<String> = args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            self.asked
+                .borrow_mut()
+                .push((program.to_path_buf(), args.clone()));
+            match args.first().map(String::as_str) {
+                Some("--getglobalstate") => self.global.map(str::to_owned),
+                Some("--getblockall") => self.block_all.map(str::to_owned),
+                Some("--getappblocked") => self.app.map(|text| text.replace("{}", &args[1])),
+                _ => None,
+            }
+        }
+    }
+
+    // What `socketfilterfw` prints, as far as it could be gathered (no Mac ran these tests):
+    // current macOS, and older wordings, which the parsing reads too.
+    const OFF: &str = "Firewall is disabled. (State = 0)\n";
+    const ON: &str = "Firewall is enabled. (State = 1)\n";
+    const ON_STEALTH: &str = "Firewall is enabled. (State = 1)\nFirewall stealth mode is on\n";
+    const STATE_BLOCK_ALL: &str =
+        "Firewall is blocking all non-essential connections. (State = 2)\n";
+    const BLOCK_ALL_OFF: &str = "Firewall has block all state set to disabled.\n";
+    const BLOCK_ALL_ON: &str = "Firewall has block all state set to enabled.\n";
+    const APP_ALLOWED: &str = "The application {} is permitted\n";
+    const APP_BLOCKED: &str = "The application {} is blocked\n";
+    const APP_NOT_LISTED: &str = "The application {} is not part of the firewall\n";
+
+    /// Homebrew's layout on Apple silicon: `bin/mosh-server` is a relative link into `Cellar/`.
+    #[cfg(unix)]
+    fn homebrew_mosh(tree: &Tree) -> PathBuf {
+        tree.program("opt/homebrew/Cellar/mosh/1.4.0_31/bin/mosh-server")
+            .program("opt/homebrew/bin/brew")
+            .link(
+                "opt/homebrew/bin/mosh-server",
+                "../Cellar/mosh/1.4.0_31/bin/mosh-server",
+            );
+        std::fs::canonicalize(
+            tree.root()
+                .join("opt/homebrew/Cellar/mosh/1.4.0_31/bin/mosh-server"),
+        )
+        .unwrap()
+    }
+
+    fn mac_on(block_all: Option<bool>, rule: Option<AppRule>, path: &str) -> HostFacts {
+        HostFacts {
+            package_manager: Some(PackageManager::Brew),
+            mac_firewall: Some(MacFirewall::On {
+                block_all,
+                mosh_server: Some(MoshServerRule {
+                    path: PathBuf::from(path),
+                    rule,
+                }),
+            }),
+            ..HostFacts::default()
+        }
+    }
+
+    const CELLAR: &str = "/opt/homebrew/Cellar/mosh/1.4.0_31/bin/mosh-server";
+
+    #[test]
+    fn socketfilterfw_answers_are_parsed_in_every_wording() {
+        for (text, expected) in [
+            (OFF, Some((false, false))),
+            (ON, Some((true, false))),
+            (STATE_BLOCK_ALL, Some((true, true))),
+            ("Firewall is enabled. (State = 2)\n", Some((true, true))),
+            // Stealth mode drops pings and probes of closed ports, not mosh: ignored.
+            (ON_STEALTH, Some((true, false))),
+            (
+                "Firewall is enabled.\nStealth mode enabled\n",
+                Some((true, false)),
+            ),
+            (
+                "Firewall is disabled.\nStealth mode disabled\n",
+                Some((false, false)),
+            ),
+            ("Firewall is enabled.\n", Some((true, false))),
+            ("Firewall is disabled.\n", Some((false, false))),
+            ("firewall is ON\r\n", Some((true, false))),
+            // Garbage, an error, an unknown state: nothing known.
+            ("", None),
+            (
+                "socketfilterfw: unrecognized option `--getglobalstate'\n",
+                None,
+            ),
+            ("Firewall is enabled. (State = 7)\n", None),
+            ("Firewall is enabled or disabled\n", None),
+            ("\u{fffd}\u{fffd}\u{0}", None),
+        ] {
+            assert_eq!(parse_global_state(text), expected, "{text:?}");
+        }
+        for (text, expected) in [
+            (BLOCK_ALL_OFF, Some(false)),
+            (BLOCK_ALL_ON, Some(true)),
+            ("Block all DISABLED!\n", Some(false)),
+            ("Block all ENABLED!\n", Some(true)),
+            ("", None),
+            ("Firewall is enabled. (State = 1)\n", None),
+            ("Block all: who knows\n", None),
+        ] {
+            assert_eq!(parse_block_all(text), expected, "{text:?}");
+        }
+        let path = Path::new(CELLAR);
+        for (text, expected) in [
+            (APP_ALLOWED, Some(AppRule::Allowed)),
+            (APP_BLOCKED, Some(AppRule::Blocked)),
+            (APP_NOT_LISTED, Some(AppRule::NotListed)),
+            (
+                "Incoming connection to the application is permitted\n",
+                Some(AppRule::Allowed),
+            ),
+            (
+                "Incoming connection to the application is blocked\n",
+                Some(AppRule::Blocked),
+            ),
+            (
+                "The application at path ( {} ) is not part of the firewall\n",
+                Some(AppRule::NotListed),
+            ),
+            ("", None),
+            ("usage: socketfilterfw ...\n", None),
+            ("The application {} is permitted and blocked\n", None),
+        ] {
+            let text = text.replace("{}", CELLAR);
+            assert_eq!(parse_app_rule(&text, path), expected, "{text:?}");
+        }
+        // A word in the path says nothing.
+        let odd = Path::new("/Users/dev/blocked/bin/mosh-server");
+        assert_eq!(
+            parse_app_rule(
+                "The application /Users/dev/blocked/bin/mosh-server is permitted\n",
+                odd
+            ),
+            Some(AppRule::Allowed)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_mac_firewall_is_asked_about_mosh_servers_real_path() {
+        let tree = Tree::new();
+        let real = homebrew_mosh(&tree);
+        let tool = tree
+            .root()
+            .join("usr/libexec/ApplicationFirewall/socketfilterfw");
+
+        // On, with Homebrew's link: the rule is asked of the Cellar binary.
+        let commands = Captured::new(ON, BLOCK_ALL_OFF, APP_BLOCKED);
+        let facts = tree.detect_with(Platform::MacOs, &commands);
+        assert_eq!(
+            facts.mac_firewall,
+            Some(MacFirewall::On {
+                block_all: Some(false),
+                mosh_server: Some(MoshServerRule {
+                    path: real.clone(),
+                    rule: Some(AppRule::Blocked),
+                }),
+            })
+        );
+        assert_eq!(
+            commands.asked(),
+            [
+                vec!["--getglobalstate".to_owned()],
+                vec!["--getblockall".to_owned()],
+                vec![
+                    "--getappblocked".to_owned(),
+                    real.to_string_lossy().into_owned()
+                ],
+            ]
+        );
+        assert!(
+            commands
+                .asked
+                .borrow()
+                .iter()
+                .all(|(program, _)| *program == tool)
+        );
+        assert!(real.ends_with("opt/homebrew/Cellar/mosh/1.4.0_31/bin/mosh-server"));
+
+        // Off: nothing more is asked.
+        let commands = Captured::new(OFF, BLOCK_ALL_ON, APP_BLOCKED);
+        assert_eq!(
+            tree.detect_with(Platform::MacOs, &commands).mac_firewall,
+            Some(MacFirewall::Off)
+        );
+        assert_eq!(commands.asked().len(), 1);
+
+        // Allowed, with stealth mode on.
+        let commands = Captured::new(ON_STEALTH, BLOCK_ALL_OFF, APP_ALLOWED);
+        let Some(MacFirewall::On { mosh_server, .. }) =
+            tree.detect_with(Platform::MacOs, &commands).mac_firewall
+        else {
+            panic!("on");
+        };
+        assert_eq!(mosh_server.unwrap().rule, Some(AppRule::Allowed));
+
+        // Block all, by state 2 even when --getblockall cannot be read.
+        let commands = Captured::new(STATE_BLOCK_ALL, "garbage", APP_ALLOWED);
+        let Some(MacFirewall::On { block_all, .. }) =
+            tree.detect_with(Platform::MacOs, &commands).mac_firewall
+        else {
+            panic!("on");
+        };
+        assert_eq!(block_all, Some(true));
+
+        // Unreadable answers past the first: unknown, not a verdict.
+        let commands = Captured::new(ON, "", "");
+        assert_eq!(
+            tree.detect_with(Platform::MacOs, &commands).mac_firewall,
+            Some(MacFirewall::On {
+                block_all: None,
+                mosh_server: Some(MoshServerRule {
+                    path: real.clone(),
+                    rule: None
+                }),
+            })
+        );
+
+        // Missing tool, or a first answer that cannot be read: nothing known.
+        assert_eq!(tree.detect(Platform::MacOs).mac_firewall, None);
+        let commands = Captured::new("Segmentation fault\n", BLOCK_ALL_ON, APP_BLOCKED);
+        assert_eq!(
+            tree.detect_with(Platform::MacOs, &commands).mac_firewall,
+            None
+        );
+        assert_eq!(commands.asked().len(), 1);
+
+        // No mosh-server: no rule is asked about.
+        let tree = Tree::new();
+        let commands = Captured::new(ON, BLOCK_ALL_OFF, APP_BLOCKED);
+        assert_eq!(
+            tree.detect_with(Platform::MacOs, &commands).mac_firewall,
+            Some(MacFirewall::On {
+                block_all: Some(false),
+                mosh_server: None
+            })
+        );
+        assert_eq!(commands.asked().len(), 2);
+
+        // Not macOS: nothing is run.
+        let commands = Captured::new(ON, BLOCK_ALL_ON, APP_BLOCKED);
+        assert_eq!(
+            tree.detect_with(Platform::Linux, &commands).mac_firewall,
+            None
+        );
+        assert!(commands.asked().is_empty());
+    }
+
+    #[test]
+    fn the_mac_firewall_prints_the_exact_fix_when_it_would_block_mosh() {
+        let tool = SOCKETFILTERFW;
+        // Blocked, or not in the list: a warning with both commands and the upgrade note.
+        for (rule, opening) in [
+            (
+                AppRule::Blocked,
+                format!("the macOS firewall blocks mosh-server ({CELLAR})"),
+            ),
+            (
+                AppRule::NotListed,
+                format!("the macOS firewall is on and has no rule for mosh-server ({CELLAR})"),
+            ),
+        ] {
+            let checks = mac_firewall_checks(
+                Platform::MacOs,
+                &mac_on(Some(false), Some(rule), CELLAR),
+                true,
+            );
+            assert_eq!(checks.len(), 1, "{checks:?}");
+            let (level, text) = &checks[0];
+            assert_eq!(*level, Level::Warn);
+            assert_eq!(
+                *text,
+                format!(
+                    "{opening}, so mosh cannot reach this host and terminals use SSH; allow it:\n        sudo {tool} --add \"{CELLAR}\"\n        sudo {tool} --unblockapp \"{CELLAR}\"\n        `brew upgrade mosh` installs a new mosh-server at another path, so add the rule again after an upgrade (or2-pair --check shows it)"
+                )
+            );
+        }
+        // As root, no sudo; a path outside Homebrew gets the plain upgrade note; a path with
+        // a `$` is single-quoted.
+        let facts = HostFacts {
+            superuser: true,
+            ..mac_on(None, Some(AppRule::Blocked), "/opt/local/bin/mosh-server")
+        };
+        let (_, text) = &mac_firewall_checks(Platform::MacOs, &facts, true)[0];
+        assert!(
+            text.contains(&format!(
+                "\n        {tool} --add \"/opt/local/bin/mosh-server\""
+            )),
+            "{text}"
+        );
+        assert!(!text.contains("sudo") && !text.contains("brew"), "{text}");
+        assert!(text.ends_with("upgrading mosh replaces this binary, so add the rule again after an upgrade (or2-pair --check shows it)"));
+        let odd = mac_on(
+            Some(false),
+            Some(AppRule::Blocked),
+            "/Users/dev/it's $here/mosh-server",
+        );
+        let (_, text) = &mac_firewall_checks(Platform::MacOs, &odd, true)[0];
+        assert!(
+            text.contains(r"--add '/Users/dev/it'\''s $here/mosh-server'"),
+            "{text}"
+        );
+
+        // Block all: its own warning, whatever the rule says, and the rule's too when needed.
+        let checks = mac_firewall_checks(
+            Platform::MacOs,
+            &mac_on(Some(true), Some(AppRule::Allowed), CELLAR),
+            true,
+        );
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].0, Level::Warn);
+        assert!(
+            checks[0].1.starts_with(
+                "the macOS firewall blocks all incoming connections, which overrides any rule"
+            ) && checks[0]
+                .1
+                .ends_with(&format!("\n        sudo {tool} --setblockall off")),
+            "{}",
+            checks[0].1
+        );
+        let checks = mac_firewall_checks(
+            Platform::MacOs,
+            &mac_on(Some(true), Some(AppRule::NotListed), CELLAR),
+            true,
+        );
+        assert_eq!(checks.len(), 2);
+        assert!(checks.iter().all(|(level, _)| *level == Level::Warn));
+        assert!(checks[1].1.contains("--unblockapp"));
+
+        // Allowed (stealth mode or not): ok. Off: ok.
+        let checks = mac_firewall_checks(
+            Platform::MacOs,
+            &mac_on(Some(false), Some(AppRule::Allowed), CELLAR),
+            true,
+        );
+        assert_eq!(
+            checks,
+            [(
+                Level::Ok,
+                format!("the macOS firewall is on and allows mosh-server ({CELLAR})")
+            )]
+        );
+        let off = HostFacts {
+            mac_firewall: Some(MacFirewall::Off),
+            ..HostFacts::default()
+        };
+        assert_eq!(
+            mac_firewall_checks(Platform::MacOs, &off, true)[0].0,
+            Level::Ok
+        );
+
+        // Nothing certain, nothing known, no mosh-server, not macOS: nothing (the generic
+        // advice is printed instead).
+        for (platform, facts, mosh) in [
+            (
+                Platform::MacOs,
+                mac_on(None, Some(AppRule::Allowed), CELLAR),
+                true,
+            ),
+            (Platform::MacOs, mac_on(Some(false), None, CELLAR), true),
+            (Platform::MacOs, HostFacts::default(), true),
+            (
+                Platform::MacOs,
+                mac_on(Some(true), Some(AppRule::Blocked), CELLAR),
+                false,
+            ),
+            (
+                Platform::Linux,
+                mac_on(Some(true), Some(AppRule::Blocked), CELLAR),
+                true,
+            ),
+        ] {
+            assert!(
+                mac_firewall_checks(platform, &facts, mosh).is_empty(),
+                "{facts:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_commands_capture_both_outputs_and_give_up_in_time() {
+        let commands = SystemCommands::default();
+        let sh = Path::new("/bin/sh");
+        let arg = |text: &'static str| OsStr::new(text);
+        // Any exit status: socketfilterfw's are not documented.
+        assert_eq!(
+            commands.run(sh, &[arg("-c"), arg("echo out; echo err >&2; exit 3")]),
+            Some("out\nerr\n".to_owned())
+        );
+        assert_eq!(
+            commands.run(Path::new("/nonexistent/socketfilterfw"), &[]),
+            None
+        );
+        let quick = SystemCommands {
+            timeout: Duration::from_millis(200),
+        };
+        let started = Instant::now();
+        assert_eq!(quick.run(sh, &[arg("-c"), arg("sleep 10")]), None);
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     fn linux(manager: Option<PackageManager>) -> HostFacts {
@@ -504,6 +1286,7 @@ mod tests {
             &tree.root().join("nowhere"),
             &[tree.root().join("custom/bin")],
             false,
+            &Captured::missing(),
         );
         assert_eq!(facts.package_manager, Some(PackageManager::Pacman));
         // A file that is not executable is not a program.

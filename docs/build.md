@@ -125,7 +125,8 @@ that target, so the tests are not cross-checked).
 
 The checks' fixes for a host (`hints.rs`: the package manager, the sshd unit, the service manager and the
 firewall, read from files under a root directory) are unit-tested on fake trees in a temporary directory and on
-fabricated facts, never on the machine running the tests.
+fabricated facts, never on the machine running the tests. The macOS firewall's `socketfilterfw` answers are fed
+from captured outputs through the `Commands` seam; no test runs the real command.
 
 **or2-pair release binaries.** From the repository root:
 

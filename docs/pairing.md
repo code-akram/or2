@@ -235,8 +235,20 @@ checks print the rule for the firewall that is on: ufw (`sudo ufw allow 60000:61
 says `ENABLED=yes`), firewalld (`sudo firewall-cmd --permanent --add-port=60000-61000/udp && sudo firewall-cmd
 --reload`) or nftables (an `nft add rule` example to adapt to your ruleset), found by their enabled services; with
 none of them found it says that a firewall in the way would be another one (on the host, a router's or a cloud
-provider's), where the ports are to be opened. On macOS you allow
-`mosh-server` in System Settings > Network > Firewall. Pairing itself does not need it.
+provider's), where the ports are to be opened. On macOS the checks ask the firewall (read-only
+`socketfilterfw --get…` queries, no `sudo`) about `mosh-server`'s real path (Homebrew's link resolved into its
+`Cellar`). When the firewall is on and blocks it, or has no rule for it (macOS would ask in a dialog nobody sees
+for a program started over SSH), they warn and print the fix:
+
+```sh
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add "/opt/homebrew/Cellar/mosh/<version>/bin/mosh-server"
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp "/opt/homebrew/Cellar/mosh/<version>/bin/mosh-server"
+```
+
+`brew upgrade mosh` installs a new `mosh-server` at another path, so add the rule again after an upgrade
+(`or2-pair --check` shows it). "Block all incoming connections" overrides every rule and gets its own warning.
+When the firewall cannot be asked, allow `mosh-server` in System Settings > Network > Firewall. Pairing itself
+does not need any of this: without mosh, terminals use SSH.
 
 ### Missing tmux, herdr or mosh-server
 

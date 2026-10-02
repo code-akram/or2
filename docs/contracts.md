@@ -2810,7 +2810,11 @@ lists the OpenSSH server (dpkg's `var/lib/dpkg/info/openssh-server.list`, pacman
 apk's `P:openssh-server` in `lib/apk/db/installed`; the RPM database is not read), NixOS (`/etc/NIXOS` or
 `ID=nixos` in `os-release`) or Guix System (`ID=guix`), and the active firewall (ufw when
 `/etc/ufw/ufw.conf` says `ENABLED=yes`, else firewalld, else nftables when its service is enabled:
-systemd's `multi-user.target.wants` link or an OpenRC `default`/`boot` runlevel entry).
+systemd's `multi-user.target.wants` link or an OpenRC `default`/`boot` runlevel entry). **The one exception to
+"files only"** (v0.1.1): the macOS application firewall has no file to read, so on macOS `HostFacts::detect` runs
+its read-only queries `socketfilterfw --getglobalstate`, `--getblockall` and `--getappblocked <mosh-server>`
+(never `sudo`, never a `--set…`), through a `Commands` seam that tests replace with captured outputs; see
+"or2-pair on macOS: the firewall". Nothing is run on any other system.
 - sshd not answering: macOS, Remote Login (System Settings > General > Sharing > Remote Login) or
   `sudo systemsetup -setremotelogin on`, noting it needs Full Disk Access for the terminal app; Linux with
   systemd, `sudo systemctl enable --now <unit>` with the unit found (else the package manager's: `ssh` for apt,
@@ -2832,7 +2836,8 @@ systemd's `multi-user.target.wants` link or an OpenRC `default`/`boot` runlevel 
   firewalld `firewall-cmd --permanent --add-port=60000-61000/udp && firewall-cmd --reload`; nftables an
   `nft add rule inet filter input udp dport 60000-61000 accept` example to adapt to the ruleset and keep in
   `/etc/nftables.conf`; none found: a firewall in the way would be another one (on this host, a router's or a
-  cloud provider's), to open them there. macOS: allow mosh-server in System Settings > Network > Firewall.
+  cloud provider's), to open them there. macOS: what `socketfilterfw` says of mosh-server (v0.1.1, below);
+  when it cannot be asked or read, allow mosh-server in System Settings > Network > Firewall.
 
 **The `sshd_config` reading.** `Include` patterns are relative to `/etc/ssh` (a `*`/`?` in the file
 name, at most four levels deep, each file once); an `Include` inside a `Match` block belongs to that
@@ -3313,6 +3318,61 @@ and say that `brew upgrade mosh` replaces the binary, so the rule must be added 
 --check` shows it). "Block all incoming connections" gets its own sentence (it overrides any rule). A
 missing `socketfilterfw` or unreadable output is silence, not an error. Unit tests on captured outputs;
 no test runs the real command.
+
+**Implemented** (`core/or2-pair/src/hints.rs`, branch `v011/pair-macos`):
+
+- `HostFacts::detect` takes a `&dyn Commands` (`run(program, args) -> Option<String>`: standard output
+  then standard error, whatever the exit status, `None` when it cannot be started or does not finish).
+  The real one, `SystemCommands`, runs the program directly (no shell, no `sudo`, standard input
+  closed) with a 3 s limit (killed at the limit; answer `None`) and keeps at most 64 KiB of each stream.
+  On every system but macOS nothing is run. `socketfilterfw` is looked for under the fake root in tests.
+- mosh-server is found as the checks find it (`PATH` and the usual directories first, then
+  `/opt/homebrew/bin`, `/usr/local/bin`) and resolved with `canonicalize` (Homebrew's relative link
+  `bin/mosh-server` → `Cellar/mosh/<version>/bin/mosh-server`); that path is what `--getappblocked`,
+  the printed commands and the messages name. `--getblockall` and `--getappblocked` are asked only
+  when the global state is on; the rule only when mosh-server was found.
+- **Parsing** (no Mac ran this lane: the wordings are what could be gathered, so the reading is
+  deliberately loose and anything ambiguous is "unknown"). Global state: `(State = N)` decides when
+  present (0 off, 1 on, 2 on with block all; any other number unknown), else the words
+  (`enabled`/`on` versus `disabled`/`off`; both or neither is unknown; `blocking … all` is block all).
+  Block all: needs the word `block`, then the same on/off words (`Firewall has block all state set to
+  enabled.`, older `Block all ENABLED!`). App rule: mosh-server's path is cut out of the text first (a
+  directory named `blocked` says nothing); `not part of the firewall` is "not listed"; else
+  `permitted`/`allowed`/`unblocked` versus `blocked`/`denied`, both or neither unknown. Lines about
+  **stealth mode** (and logging) are ignored: stealth mode drops pings and probes of closed ports, not
+  traffic to an allowed program, so it is never a finding and is not queried.
+- **Verdict.** A program that is **not in the list** is treated as blocked: macOS would ask in a dialog
+  on the Mac's screen, and nobody answers it for a mosh-server started over SSH. Checks printed (only when
+  mosh-server is found, in place of the generic macOS line):
+  - firewall off: `ok    the macOS firewall is off (it does not block mosh's UDP)`;
+  - on, block all off, mosh-server allowed: `ok    the macOS firewall is on and allows mosh-server (<path>)`;
+  - block all on: a `warn` of its own ("blocks all incoming connections, which overrides any rule"; it
+    also says sharing services such as Remote Login are blocked from other machines) with the
+    System Settings path (Network > Firewall > Options) and `sudo …/socketfilterfw --setblockall off`;
+  - mosh-server blocked or not listed: a `warn` ending "so mosh cannot reach this host and terminals use
+    SSH; allow it:" followed by the two commands of this contract, each on its own line indented under
+    the text, then the upgrade note. Both warnings appear when both apply.
+  - anything else (tool missing, first answer unreadable, block all or the rule unreadable with no
+    warning to give): the generic macOS line as before.
+  Commands drop `sudo` when `or2-pair` runs as root. The path is double-quoted as in this contract, or
+  single-quoted (with `'\''`) when it holds `"`, `$`, `` ` ``, `\` or `!`.
+- **Deviation:** the `brew upgrade mosh` sentence is printed only when the real path is in a Homebrew
+  `Cellar/` ("`brew upgrade mosh` installs a new mosh-server at another path, so add the rule again after
+  an upgrade (or2-pair --check shows it)"); another install (MacPorts, a source build) gets "upgrading
+  mosh replaces this binary, so add the rule again …", because naming `brew` there would be wrong.
+- **Tests** (`hints.rs`): `socketfilterfw_answers_are_parsed_in_every_wording` (off, on, state 2,
+  stealth lines, older wordings, garbage, errors, unknown states, a path containing `blocked`);
+  `the_mac_firewall_is_asked_about_mosh_servers_real_path` (a fake Homebrew tree with the relative
+  Cellar link: exactly the three queries in order, the Cellar path asked; off asks nothing more; block
+  all from state 2 when `--getblockall` is unreadable; unreadable answers are unknown; missing tool or a
+  garbage first answer is `None`; no mosh-server asks no rule; Linux runs nothing);
+  `the_mac_firewall_prints_the_exact_fix_when_it_would_block_mosh` (blocked and not-listed texts in full,
+  root without `sudo`, the non-Homebrew note, quoting, block all alone and with a rule, allowed and off
+  are `ok`, unknowns print nothing); `system_commands_capture_both_outputs_and_give_up_in_time` (both
+  streams, a non-zero exit, a missing program, the time limit). `checks.rs`:
+  `a_mac_firewall_that_blocks_mosh_warns_with_the_fix_and_pairing_goes_on` (a `warn`, no `fail`, no
+  generic line; with nothing known the generic line as before). Not run on macOS; the real command is
+  never run by a test.
 
 ## Agent notifications (lane Notify)
 

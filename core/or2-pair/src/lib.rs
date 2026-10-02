@@ -158,6 +158,7 @@ pub fn run_main(options: &args::Options, code_from_stdin: bool) -> Result<Exit, 
         std::path::Path::new("/"),
         &program_dirs,
         cfg!(unix) && account.uid == 0,
+        &hints::SystemCommands::default(),
     );
     let env = Env {
         version: env!("CARGO_PKG_VERSION"),

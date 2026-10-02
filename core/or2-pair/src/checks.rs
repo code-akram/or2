@@ -306,7 +306,11 @@ pub fn run(input: &CheckInput<'_>) -> Vec<Check> {
             check(Level::Ok, format!("{} found", found.join(", "))),
         );
     }
-    if let Some(hint) = hints::firewall(input.platform, input.facts, mosh.is_some()) {
+    // What the macOS firewall does to mosh-server, when it could be asked; else the advice.
+    let mac = hints::mac_firewall_checks(input.platform, input.facts, mosh.is_some());
+    if !mac.is_empty() {
+        out.extend(mac.into_iter().map(|(level, text)| check(level, text)));
+    } else if let Some(hint) = hints::firewall(input.platform, input.facts, mosh.is_some()) {
         out.push(check(Level::Info, hint));
     }
     out
@@ -1090,6 +1094,7 @@ mod tests {
             sshd_packaged: Some(true),
             declarative: None,
             firewall: Some(hints::Firewall::Ufw),
+            mac_firewall: None,
             superuser: false,
         };
         let checks = setup.run();
@@ -1128,6 +1133,57 @@ mod tests {
             texts(&checks, Level::Info)
                 .iter()
                 .any(|t| t.starts_with("tmux: not found") && t.ends_with("`brew install tmux`")),
+            "{checks:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mac_firewall_that_blocks_mosh_warns_with_the_fix_and_pairing_goes_on() {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        executable(bin.path(), "mosh-server");
+        let mut setup = Setup::new(banner("SSH-2.0-OpenSSH_9.9"));
+        std::fs::set_permissions(setup.home.path(), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        setup.dirs = vec![bin.path().to_path_buf()];
+        setup.platform = Platform::MacOs;
+        let cellar = "/opt/homebrew/Cellar/mosh/1.4.0_31/bin/mosh-server";
+        setup.facts = HostFacts {
+            mac_firewall: Some(hints::MacFirewall::On {
+                block_all: Some(false),
+                mosh_server: Some(hints::MoshServerRule {
+                    path: cellar.into(),
+                    rule: Some(hints::AppRule::Blocked),
+                }),
+            }),
+            ..HostFacts::default()
+        };
+        let checks = setup.run();
+        assert!(texts(&checks, Level::Fail).is_empty(), "{checks:?}");
+        let warnings = texts(&checks, Level::Warn);
+        assert_eq!(warnings.len(), 1, "{checks:?}");
+        assert!(
+            warnings[0].contains(&format!(
+                "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp \"{cellar}\""
+            )),
+            "{}",
+            warnings[0]
+        );
+        // The generic advice is not printed next to it.
+        assert!(!checks.iter().any(|c| c.text.contains("60000-61000")));
+
+        // Nothing known (no socketfilterfw, an answer that cannot be read): the advice as before.
+        setup.facts = HostFacts::default();
+        let checks = setup.run();
+        assert!(texts(&checks, Level::Warn).is_empty(), "{checks:?}");
+        assert!(
+            checks.last().unwrap().level == Level::Info
+                && checks
+                    .last()
+                    .unwrap()
+                    .text
+                    .contains("allow mosh-server in System Settings > Network > Firewall"),
             "{checks:?}"
         );
     }
