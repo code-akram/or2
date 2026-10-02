@@ -109,7 +109,8 @@ impl Sshd {
     }
 
     /// [`Sshd::new`] with extra `sshd_config` lines appended (for example
-    /// `AllowStreamLocalForwarding no`).
+    /// `AllowStreamLocalForwarding no`). `{home}` in them stands for [`Sshd::home`] (for example
+    /// `Subsystem sftp internal-sftp -d {home}`: SFTP starts there, not in the real home).
     pub fn with_config(certificate_only: bool, extra: &str) -> Self {
         Self::with_environment(certificate_only, extra, "")
     }
@@ -198,7 +199,7 @@ impl Sshd {
                 path.join("host-cert.pub").display()
             ));
         }
-        config.push_str(extra);
+        config.push_str(&extra.replace("{home}", &path.display().to_string()));
         config.push('\n');
         // A free port is found by binding and releasing it, so another process (often a loopback
         // client's ephemeral port) can take it before sshd binds. sshd then exits with "Cannot

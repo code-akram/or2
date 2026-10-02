@@ -1423,3 +1423,60 @@ fn herdr_terminals_run_the_probed_herdr_with_the_session_and_report_a_failed_foc
     let _ = herdr;
     host.disconnect();
 }
+
+// --- image upload over OpenSSH's internal-sftp (contracts.md, "Image paste") -------------
+
+#[test]
+fn an_image_uploads_over_internal_sftp_into_a_private_cache_directory() {
+    require_sshd!();
+    // SFTP starts in the fixture's home (`-d`), never the real one.
+    let sshd = Sshd::with_config(false, "Subsystem sftp internal-sftp -d {home}");
+    let live = Live::with_key(sshd, &ClientKey::generate_ed25519(""));
+    let home = fs::canonicalize(live.sshd.home()).unwrap();
+    let bytes: Vec<u8> = (0..150_000).map(|index| (index * 7 % 253) as u8).collect();
+    let path = block_on(live.host.upload_image(bytes.clone(), "jpg")).unwrap();
+    let directory = home.join(".cache/or2/images");
+    let name = path
+        .strip_prefix(&format!("{}/", directory.display()))
+        .unwrap_or_else(|| panic!("in the home's image directory: {path}"));
+    assert!(name.starts_with("or2-") && name.ends_with(".jpg"), "{name}");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let mode = |path: &std::path::Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode(std::path::Path::new(&path)), 0o600);
+    assert_eq!(mode(&directory), 0o700);
+    // Nothing else is left in the directory (the temporary name was renamed).
+    let names: Vec<_> = fs::read_dir(&directory).unwrap().collect();
+    assert_eq!(names.len(), 1);
+
+    // An old upload goes with the next one; a recent one stays.
+    let old = directory.join("or2-20000101-000000-000000.png");
+    fs::write(&old, b"old").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(8 * 24 * 3600))
+        .unwrap();
+    let second = block_on(live.host.upload_image(b"\x89PNG".to_vec(), "png")).unwrap();
+    assert!(!old.exists(), "swept");
+    assert!(std::path::Path::new(&path).exists() && std::path::Path::new(&second).exists());
+    live.host.disconnect();
+    assert_eq!(closed(&live.states), CloseReason::Disconnected);
+}
+
+#[test]
+fn a_host_without_an_sftp_subsystem_is_sftp_unavailable() {
+    require_sshd!();
+    // The fixture's sshd_config configures no subsystem at all.
+    let live = Live::new();
+    assert_eq!(
+        block_on(live.host.upload_image(b"\x89PNG".to_vec(), "png")),
+        Err(HostError::SftpUnavailable)
+    );
+    assert!(!live.sshd.home().join(".cache").exists());
+    // The connection carries on.
+    let caps = block_on(live.host.capabilities());
+    assert!(caps.is_ok(), "{caps:?}");
+    live.host.disconnect();
+    assert_eq!(closed(&live.states), CloseReason::Disconnected);
+}

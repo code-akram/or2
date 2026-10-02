@@ -41,6 +41,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -88,6 +89,11 @@ import io.github.code_akram.or2.pair.PairDestination
 import io.github.code_akram.or2.pair.PairFlow
 import io.github.code_akram.or2.pair.PairState
 import io.github.code_akram.or2.pair.ShownCode
+import io.github.code_akram.or2.paste.ImageShares
+import io.github.code_akram.or2.paste.NO_TERMINAL_FOR_IMAGE
+import io.github.code_akram.or2.paste.ShareTarget
+import io.github.code_akram.or2.paste.SharePickerSheet
+import io.github.code_akram.or2.paste.imageFromUri
 import io.github.code_akram.or2.session.HostTrustDialog
 import io.github.code_akram.or2.session.SessionScreen
 import io.github.code_akram.or2.terminal.TerminalThumbnail
@@ -149,6 +155,8 @@ class AppActions(
     val agentOpens: AgentOpenRequests = AgentOpenRequests(),
     /** The terminal on screen while the app is resumed, else null: its herdr pane gets no notification. */
     val onScreen: (OnScreen?) -> Unit = {},
+    /** Images shared from another app: the user picks the open terminal each goes to. */
+    val imageShares: ImageShares = ImageShares(),
 )
 
 /**
@@ -395,6 +403,16 @@ fun Or2App(
         }
     }
 
+    // --- images shared from another app: the open terminal they go to ------------------------------
+    // Saved state: a rotation while the picker is open keeps the image (its read grant belongs to the activity).
+    val shareOffer by actions.imageShares.request.collectAsStateWithLifecycle()
+    var sharing by rememberSaveable { mutableStateOf<Uri?>(null) }
+    LaunchedEffect(shareOffer) {
+        if (shareOffer == null) return@LaunchedEffect
+        val uri = actions.imageShares.take() ?: return@LaunchedEffect
+        if (connections.shareTargets().isEmpty()) actions.message(NO_TERMINAL_FOR_IMAGE) else sharing = uri
+    }
+
     // Leaving and returning: see the contract's reattach, battery and reconnect rules. The flags
     // are saved state: the foreground service keeps the process alive, so the system can destroy
     // and recreate the activity while it is in the background (memory pressure, "don't keep
@@ -587,6 +605,29 @@ fun Or2App(
             edit = { navigate(nav.push(Destination.HostForm(pickerHost.id))) },
             dismiss = { homePicker = null },
         )
+    }
+    // The share picker: the open terminals, the last used first. A pick shows that terminal and uploads the image to it.
+    val appContext = LocalContext.current.applicationContext
+    sharing?.let { uri ->
+        val targets = remember(terminals) { connections.shareTargets() }
+        if (targets.isEmpty()) {
+            LaunchedEffect(Unit) {
+                sharing = null
+                actions.message(NO_TERMINAL_FOR_IMAGE)
+            }
+        } else {
+            SharePickerSheet(
+                targets.map { ShareTarget(it.id, it.host.label, it.title) },
+                pick = { target ->
+                    sharing = null
+                    connections.terminal(target.id)?.let { terminal ->
+                        resumeTerminal(terminal.id, replace = NavStack.decode(saved).current is Destination.Terminal)
+                        terminal.imagePaste?.start(imageFromUri(appContext, uri))
+                    }
+                },
+                dismiss = { sharing = null },
+            )
+        }
     }
     // Paired: the host and its trusted key are saved. Once the stored list shows it, go to its page and connect
     // (the unlock is the usual one; the host key is already trusted, so no first-use prompt). When the battery step

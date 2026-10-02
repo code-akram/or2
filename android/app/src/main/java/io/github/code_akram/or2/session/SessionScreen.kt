@@ -45,6 +45,10 @@ import io.github.code_akram.or2.connection.linkStaleLabel
 import io.github.code_akram.or2.ffi.LinkHealth
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalTarget
+import io.github.code_akram.or2.paste.NO_UPLOAD
+import io.github.code_akram.or2.paste.UploadNotice
+import io.github.code_akram.or2.paste.UploadState
+import io.github.code_akram.or2.paste.uploadNotice
 import io.github.code_akram.or2.terminal.TerminalScreen
 import io.github.code_akram.or2.terminal.Transport
 import io.github.code_akram.or2.terminal.display
@@ -102,6 +106,8 @@ fun SessionScreen(
         val hasConnected by terminal.hasConnected.collectAsStateWithLifecycle()
         val transport by terminal.transport.collectAsStateWithLifecycle()
         val linkHealth by terminal.linkHealth.collectAsStateWithLifecycle()
+        val paste = terminal.imagePaste
+        val upload by (paste?.state ?: NO_UPLOAD).collectAsStateWithLifecycle()
         val closed = state is SessionState.Closed
         // "Close session" ends the terminal in one tap: an open one is disconnected (the usual cleanup: its mosh server
         // is told to stop, the ledger cleared on its Closed) and dismissed together, a closed one only dismissed; then
@@ -118,7 +124,8 @@ fun SessionScreen(
         var background by remember { mutableStateOf(Or2Colors.TerminalBackground) }
         if (hasConnected) {
             TerminalCard(terminal.host.label, terminal.title, transport.display(), state, minimise, openSwitcher = { switcher = true }, endSession,
-                background = background, linkHealth = linkHealth) {
+                background = background, linkHealth = linkHealth, upload = uploadNotice(upload),
+                uploadAction = { if (upload is UploadState.Uploading) paste?.cancel() else paste?.dismiss() }) {
                 // Keep the borrowed handle composed through Closed so its final frame stays visible.
                 handle?.let { TerminalScreen(it, terminal.state, terminal.frameReady, Modifier.weight(1f),
                     composerHint = "Message " + terminal.host.label + "…", openPanes = { switcher = true },
@@ -130,7 +137,7 @@ fun SessionScreen(
                         scope.launch { holder.navigate(terminal, swipeNav(swipe)) }
                     },
                     switchTo = { index -> open.getOrNull(index)?.let { if (it !== terminal) select(it) } },
-                    closeTerminal = { holder.dismissTerminal(terminal); minimise() }) }
+                    closeTerminal = { holder.dismissTerminal(terminal); minimise() }, imagePaste = paste) }
             }
         } else {
             PendingTerminal(terminal, state, endSession, minimise, open, select)
@@ -145,7 +152,8 @@ fun SessionScreen(
 /**
  * The full-height card: the [TerminalHeader] (drag handle, the two discs, the centred `host · target`
  * title, the [transport] pill) on the header's tonal step, a [NoticeStrip] under it while the session
- * is not connected, a `crust` hairline, and the terminal below. A drag down anywhere on the header
+ * is not connected (else while an image uploads or failed to: [upload], its action [uploadAction],
+ * Cancel or Dismiss), a `crust` hairline, and the terminal below. A drag down anywhere on the header
  * minimises. A mosh session that has not heard from the server for more than five seconds
  * ([linkHealth]) greys its pill and says how long ago, in the header row itself: nothing is ever drawn
  * over the terminal's rows, and a flapping link does not resize the grid (the title gives way).
@@ -154,6 +162,7 @@ fun SessionScreen(
 fun TerminalCard(
     host: String, target: String, transport: Transport, state: SessionState, minimise: () -> Unit, openSwitcher: () -> Unit,
     endSession: () -> Unit, modifier: Modifier = Modifier, background: Color = Or2Colors.TerminalBackground, linkHealth: LinkHealth? = null,
+    upload: UploadNotice? = null, uploadAction: () -> Unit = {},
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val stale = linkStaleLabel(linkHealth)
@@ -181,6 +190,12 @@ fun TerminalCard(
                         notice.text, Modifier.testTag("terminal-notice"), tone = notice.tone, busy = notice.busy,
                         actionLabel = if (notice.closable) "Close" else null, onAction = endSession,
                         actionModifier = Modifier.testTag("terminal-close"), textModifier = Modifier.testTag("terminal-status"),
+                    )
+                } else if (upload != null) {
+                    NoticeStrip(
+                        upload.notice.text, Modifier.testTag("upload-notice"), tone = upload.notice.tone, busy = upload.notice.busy,
+                        actionLabel = upload.action, onAction = uploadAction,
+                        actionModifier = Modifier.testTag("upload-action"), textModifier = Modifier.testTag("upload-status"),
                     )
                 }
             }

@@ -38,6 +38,8 @@ import io.github.code_akram.or2.ffi.KeyException
 import io.github.code_akram.or2.ffi.generateEd25519Key
 import io.github.code_akram.or2.keys.VaultException
 import io.github.code_akram.or2.pair.PairViewModel
+import io.github.code_akram.or2.paste.ImageShares
+import io.github.code_akram.or2.paste.sharedImage
 import io.github.code_akram.or2.keys.authenticateCipher
 import io.github.code_akram.or2.keys.encryptKey
 import io.github.code_akram.or2.keys.importAndWipe
@@ -68,6 +70,9 @@ class MainActivity : FragmentActivity() {
     /** The notification taps this activity (and the ones it was recreated from) acted on. */
     private lateinit var agentTaps: AgentTaps
 
+    /** Images shared to this activity; the UI keeps a pending one in its saved state once taken. */
+    private val imageShares = ImageShares()
+
     /**
      * Android's `POST_NOTIFICATIONS` dialog, opened only from an in-context offer (Home's "Show connection
      * notification"), never on connect. Its result goes to whichever activity instance exists when it returns, and
@@ -93,6 +98,8 @@ class MainActivity : FragmentActivity() {
         // with the killed one's state, for a new tap. A recreation handing back a tap already taken does not repeat it.
         agentTaps = AgentTaps(savedInstanceState?.getStringArray(AGENT_TAPS))
         openAgentFrom(intent)
+        // A recreation hands back the intent it was started with: that share was taken already.
+        if (savedInstanceState == null) shareFrom(intent)
         enableEdgeToEdge(
             // Dark only: transparent bars with light icons over the app's own background.
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
@@ -131,6 +138,7 @@ class MainActivity : FragmentActivity() {
             setAgentAlerts = ::setAgentAlerts,
             agentOpens = app.agentOpens,
             onScreen = app.agentAlerts::screenChanged,
+            imageShares = imageShares,
         )
         setContent {
             val hosts by model.hosts.collectAsStateWithLifecycle()
@@ -150,6 +158,13 @@ class MainActivity : FragmentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         openAgentFrom(intent)
+        shareFrom(intent)
+    }
+
+    /** An image shared from another app (`ACTION_SEND`, any image type): the UI asks which open terminal it goes to. */
+    private fun shareFrom(intent: Intent?) {
+        if (intent == null || intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
+        sharedImage(intent)?.let(imageShares::offer)
     }
 
     /**

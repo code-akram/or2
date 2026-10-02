@@ -1,10 +1,15 @@
 package io.github.code_akram.or2.terminal
 
+import android.net.Uri
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.content.MediaType
+import androidx.compose.foundation.content.consume
+import androidx.compose.foundation.content.contentReceiver
+import androidx.compose.foundation.content.hasMediaType
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
@@ -24,6 +29,10 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.clearText
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -79,7 +88,14 @@ import kotlinx.coroutines.launch
 class TerminalChromeState(padOpen: Boolean = false, composerOpen: Boolean = false, composerText: String = "") {
     var padOpen by mutableStateOf(padOpen)
     var composerOpen by mutableStateOf(composerOpen)
-    var composerText by mutableStateOf(composerText)
+
+    /** The composer's field (a state-based text field: it takes a keyboard's images, [Composer]). */
+    val composer = TextFieldState(composerText)
+
+    /** The composer's text; setting it puts the caret at its end. */
+    var composerText: String
+        get() = composer.text.toString()
+        set(value) = composer.setTextAndPlaceCursorAtEnd(value)
 }
 
 /**
@@ -313,35 +329,48 @@ fun ArrowPad(actions: PadActions, alt: Boolean, toggleAlt: () -> Unit, modifier:
 
 /**
  * The chat input: a rounded 20 dp card in `crust` (darker than the toolbar around it) docked above
- * the IME, in one row: the mono text (a placeholder while empty), a close action and a circular send
- * button, `surfaceTrack` until there is text, then `accent`. Paste and the panes sheet are one tap
- * away in the toolbar beneath, so the card does not repeat them (it was two stacked rows of the same
- * glyphs); the keyboard pastes into the text itself. Sending writes the text plus Enter to the
- * session; this is the quick-reply path for a blocked agent. The text is the caller's ([text]), so
- * a message that could not be sent stays where it was typed: [send] returns whether it went out,
- * and the caller clears the text itself once it did. [canSend] is false while the session is not
- * connected.
+ * the IME, in one row: an attach action when the terminal takes images ([attach]: the Photo Picker),
+ * the mono text (a placeholder while empty), a close action and a circular send button,
+ * `surfaceTrack` until there is text, then `accent`. Paste and the panes sheet are one tap away in
+ * the toolbar beneath, so the card does not repeat them (it was two stacked rows of the same glyphs);
+ * the keyboard pastes into the text itself. Sending writes the text plus Enter to the session; this
+ * is the quick-reply path for a blocked agent. The text is the caller's ([state]), so a message that
+ * could not be sent stays where it was typed: [send] returns whether it went out, and only then is
+ * the text cleared. [canSend] is false while the session is not connected. An image a keyboard
+ * commits into the text (a clipboard screenshot, a GIF keyboard) goes to [receiveImage] with its
+ * content Uri, which returns whether it took it; without one the field takes no images.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun Composer(
-    placeholder: String, text: String, onTextChange: (String) -> Unit, canSend: Boolean, send: (String) -> Boolean,
-    close: () -> Unit, modifier: Modifier = Modifier,
+    placeholder: String, state: TextFieldState, canSend: Boolean, send: (String) -> Boolean,
+    close: () -> Unit, modifier: Modifier = Modifier, attach: (() -> Unit)? = null, receiveImage: ((Uri) -> Boolean)? = null,
 ) {
     val focusRequester = remember { FocusRequester() }
     val haptics = LocalHapticFeedback.current
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
+    val receiver = receiveImage?.let { receive ->
+        Modifier.contentReceiver { content ->
+            if (!content.hasMediaType(MediaType.Image)) content
+            else content.consume { item -> item.uri?.let(receive) == true }
+        }
+    } ?: Modifier
+    val text = state.text
     // The actions stay at the bottom of a message that grows to several lines.
     Row(
         modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 6.dp).clip(Or2Shapes.Composer)
-            .background(Or2Colors.Crust).padding(start = 14.dp, end = 4.dp).testTag("composer"),
+            .background(Or2Colors.Crust).padding(start = if (attach != null) 0.dp else 14.dp, end = 4.dp).testTag("composer"),
         verticalAlignment = Alignment.Bottom,
     ) {
+        if (attach != null) ComposerAction(Or2Icons.Image, "Attach image", "composer-attach", attach, tint = Or2Colors.TextMuted)
         BasicTextField(
-            text, onTextChange,
-            Modifier.weight(1f).padding(vertical = (Or2Dimens.ComposerTouch - 18.dp) / 2).focusRequester(focusRequester).testTag("composer-input"),
+            state,
+            Modifier.weight(1f).padding(vertical = (Or2Dimens.ComposerTouch - 18.dp) / 2).focusRequester(focusRequester)
+                .then(receiver).testTag("composer-input"),
             textStyle = Or2Type.Composer.copy(color = Or2Colors.Text), cursorBrush = SolidColor(Or2Colors.Accent),
-            minLines = 1, maxLines = 5, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
-            decorationBox = { inner ->
+            lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 1, maxHeightInLines = 5),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
+            decorator = { inner ->
                 Box {
                     if (text.isEmpty()) Text(placeholder, style = Or2Type.Composer, color = Or2Colors.Placeholder, maxLines = 1)
                     inner()
@@ -356,7 +385,7 @@ fun Composer(
                 .clickable(enabled = ready, role = Role.Button) {
                     haptics.performHapticFeedback(HapticFeedbackType.Confirm)
                     // Only a message that went out is cleared: after a drop the text is still there to resend.
-                    if (send(text)) onTextChange("")
+                    if (send(state.text.toString())) state.clearText()
                 }
                 .semantics { contentDescription = "Send" }.testTag("composer-send"),
             contentAlignment = Alignment.Center,
@@ -367,12 +396,12 @@ fun Composer(
 }
 
 @Composable
-private fun ComposerAction(icon: ImageVector, description: String, tag: String, onClick: () -> Unit) {
+private fun ComposerAction(icon: ImageVector, description: String, tag: String, onClick: () -> Unit, tint: Color = Or2Colors.Text) {
     Box(
         Modifier.size(Or2Dimens.ComposerTouch).clip(Or2Shapes.Circle).clickable(role = Role.Button, onClick = onClick)
             .semantics { contentDescription = description }.testTag(tag),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Text)
+        Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = tint)
     }
 }

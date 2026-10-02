@@ -189,6 +189,15 @@ async fn serve_terminal(
                 screen.text_echo = format!("submit{typed} | 0d");
                 publish(&mut driver, screen.delta(2));
             }
+            Command::Paste(text) => {
+                // Echoed as a program with bracketed paste on would receive it (API 16).
+                let pasted: String = submit_text_bytes(&text, true)
+                    .iter()
+                    .map(|b| format!(" {b:02x}"))
+                    .collect();
+                screen.text_echo = format!("paste{pasted}");
+                publish(&mut driver, screen.delta(2));
+            }
             Command::Key(key) => {
                 let m = key.modifiers();
                 let modifiers: String = [
@@ -258,8 +267,10 @@ fn publish(driver: &mut SessionDriver, frame: Frame) {
 /// alone, or after the latest text echo as `text 61 | roams N`. SSH probe terminals never
 /// report health and ignore `roam()`. `watch_herdr` goes `Live`, updates once and closes on
 /// `stop()`. `navigate` (API 14) succeeds for every tmux and herdr move, except one from a
-/// `pane_id` the probe view does not have (`PaneNotFound`). Closing the host closes its
-/// terminals and watches first.
+/// `pane_id` the probe view does not have (`PaneNotFound`). `upload_image` (API 16) returns
+/// [`PROBE_IMAGE_DIR`]`/or2-19700101-000000-000000.<extension>` (after the handle's own checks),
+/// except for a `gif`, which is `SftpUnavailable`. Closing the host closes its terminals and
+/// watches first.
 #[uniffi::export]
 pub fn contract_probe_host(
     request: HostConnectRequest,
@@ -401,6 +412,18 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                     Ok(())
                 });
             }
+            HostCommand::UploadImage {
+                extension, reply, ..
+            } => {
+                // A failure the app can show, for tests of the notice strip.
+                let _ = reply.send(if extension == "gif" {
+                    Err(core_host::HostError::SftpUnavailable)
+                } else {
+                    Ok(format!(
+                        "{PROBE_IMAGE_DIR}/or2-19700101-000000-000000.{extension}"
+                    ))
+                });
+            }
             HostCommand::ScrollTarget { reply, .. } => {
                 let _ = reply.send(Ok(()));
             }
@@ -473,6 +496,8 @@ async fn run_herdr_watch(
 pub const PROBE_SERVER_PID: u32 = 4242;
 /// A pid whose `stop_mosh_server` fails on a probe host, whatever else is true.
 pub const PROBE_UNSTOPPABLE_PID: u32 = 13;
+/// Where a probe host says it put an uploaded image.
+pub const PROBE_IMAGE_DIR: &str = "/home/probe/.cache/or2/images";
 const PROBE_PANES: [&str; 3] = ["w1:p1", "w1:p2", "w2:p1"];
 
 /// One blocked, one working and one idle agent; `resolved` turns the blocked one into working;

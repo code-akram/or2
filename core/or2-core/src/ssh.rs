@@ -12,6 +12,7 @@ mod mosh_session;
 mod pair_client;
 mod pump;
 mod terminal_session;
+mod upload;
 
 use std::sync::{Arc, OnceLock};
 

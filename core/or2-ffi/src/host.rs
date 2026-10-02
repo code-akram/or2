@@ -164,6 +164,12 @@ pub enum HostError {
     /// would clash with `Throwable.message` in the generated Kotlin exception.)
     #[error("command failed: {reason}")]
     CommandFailed { reason: String },
+    /// `upload_image` (API 16): the host has no SFTP subsystem (or it would not start).
+    #[error("SFTP is not available on this host")]
+    SftpUnavailable,
+    /// `upload_image` (API 16): the image is larger than 20 MiB.
+    #[error("the image is too large")]
+    TooLarge,
 }
 
 impl From<core::HostError> for HostError {
@@ -177,6 +183,8 @@ impl From<core::HostError> for HostError {
             core::HostError::NotInstalled { program } => Self::NotInstalled { program },
             core::HostError::PaneNotFound => Self::PaneNotFound,
             core::HostError::CommandFailed { message } => Self::CommandFailed { reason: message },
+            core::HostError::SftpUnavailable => Self::SftpUnavailable,
+            core::HostError::TooLarge => Self::TooLarge,
         }
     }
 }
@@ -546,6 +554,25 @@ impl HostConnection {
             .await?)
     }
 
+    /// Uploads an image for an agent to read and returns its absolute path on the host (API 16;
+    /// contracts.md, "Image paste"). The bytes go over SFTP on this host's connection (no new
+    /// connection, no shell command) to `~/.cache/or2/images/or2-<UTC yyyyMMdd-HHmmss>-<6
+    /// hex>.<extension>`: the directory created `0700`, the file `0600`, written to a temporary
+    /// name and renamed. Each upload first removes that directory's `or2-*` files older than
+    /// seven days (best effort). `extension` is `png`, `jpg`, `jpeg`, `gif` or `webp` (any case),
+    /// else `InvalidName`, as is an empty image; more than 20 MiB is `TooLarge`; both are refused
+    /// before anything is sent. `SftpUnavailable` when the host has no SFTP subsystem,
+    /// `CommandFailed` for other failures (a reason without paths), `Closed` when the connection
+    /// ended. Bounded by the query timeout (30 s). Cancelling the coroutine stops the upload and
+    /// removes its temporary file, best effort.
+    pub async fn upload_image(
+        &self,
+        bytes: Vec<u8>,
+        extension: String,
+    ) -> Result<String, HostError> {
+        Ok(self.handle.upload_image(bytes, &extension).await?)
+    }
+
     /// Watches a herdr session (`None` is the default session); it ends with the connection.
     pub fn watch_herdr(
         &self,
@@ -680,6 +707,14 @@ mod tests {
         assert_eq!(
             HostError::from(core::HostError::PaneNotFound),
             HostError::PaneNotFound
+        );
+        assert_eq!(
+            HostError::from(core::HostError::SftpUnavailable),
+            HostError::SftpUnavailable
+        );
+        assert_eq!(
+            HostError::from(core::HostError::TooLarge),
+            HostError::TooLarge
         );
         assert_eq!(
             core::TerminalTarget::from(TerminalTarget::Herdr {

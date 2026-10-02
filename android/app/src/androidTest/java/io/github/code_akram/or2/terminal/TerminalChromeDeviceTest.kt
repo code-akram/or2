@@ -50,6 +50,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.github.code_akram.or2.ffi.TerminalTarget
+import io.github.code_akram.or2.paste.ImageFormat
+import io.github.code_akram.or2.paste.ImagePaste
+import io.github.code_akram.or2.paste.PreparedImage
+import io.github.code_akram.or2.paste.UploadState
+import io.github.code_akram.or2.paste.uploadNotice
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -82,6 +87,11 @@ class TerminalChromeDeviceTest {
             if (refuse) throw SessionException.NotConnected()
             submits += text
         }
+        val pastes = mutableListOf<String>()
+        override fun pasteText(text: String) {
+            if (refuse) throw SessionException.NotConnected()
+            pastes += text
+        }
         override fun sendKey(input: KeyInput) {
             if (refuse) throw SessionException.NotConnected()
             keys += input
@@ -110,14 +120,22 @@ class TerminalChromeDeviceTest {
         instrumentation.targetContext.getSharedPreferences(Or2TestRunner.SCRATCH_FILE, 0).edit().clear().commit()
     }
 
-    private fun show(pad: Boolean = false, composer: Boolean = false, state: SessionState = SessionState.Connected) = compose.runOnUiThread {
+    private fun show(
+        pad: Boolean = false, composer: Boolean = false, state: SessionState = SessionState.Connected,
+        chrome: TerminalChromeState = TerminalChromeState(padOpen = pad, composerOpen = composer), images: ImagePaste? = null,
+    ) = compose.runOnUiThread {
         compose.activity.setContent {
             Or2Theme {
                 TerminalScreen(session, MutableStateFlow(state), MutableSharedFlow(), Modifier.fillMaxSize(),
-                    composerHint = "Message agent…", openPanes = { panes++ }, chrome = TerminalChromeState(padOpen = pad, composerOpen = composer))
+                    composerHint = "Message agent…", openPanes = { panes++ }, chrome = chrome, imagePaste = images)
             }
         }
     }
+
+    /** An image paste whose uploads all land at [path] at once, without a host. */
+    private fun images(path: String) = ImagePaste(MainScope()) { _, _ -> path }
+
+    private val image = PreparedImage(byteArrayOf(1), ImageFormat.PNG)
 
     private fun armed() = SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Armed for next key")
     private fun off() = SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Off")
@@ -351,6 +369,55 @@ class TerminalChromeDeviceTest {
         compose.onNodeWithTag("composer-close").performClick()
         compose.onNodeWithTag("composer-input").assertDoesNotExist()
         compose.onNodeWithTag("key:Esc").assertIsDisplayed()
+    }
+
+    @Test
+    fun theAttachButtonShowsOnlyForATerminalThatTakesImages() {
+        show(composer = true)
+        compose.onNodeWithTag("composer").assertIsDisplayed()
+        compose.onNodeWithTag("composer-attach").assertDoesNotExist()
+        show(composer = true, images = images("/p.png"))
+        compose.onNodeWithTag("composer-attach").assertIsDisplayed().assertTouchTargetAtLeast(40)
+        compose.onNodeWithContentDescription("Attach image").assertIsDisplayed()
+        // Left of the text, on the same compact row.
+        val (attach, input) = settledBounds("composer-attach", "composer-input")
+        assertTrue(attach.right <= input.left + 1)
+    }
+
+    @Test
+    fun anUploadedPathGoesIntoTheOpenComposerElseIntoTheTerminalAsAPasteWithoutEnter() {
+        val chrome = TerminalChromeState(composerOpen = true, composerText = "look at")
+        val paste = images("/home/u/my images/or2-1.png")
+        show(chrome = chrome, images = paste)
+        compose.runOnIdle { paste.start { image } }
+        compose.waitUntil(5_000) { chrome.composerText == "look at '/home/u/my images/or2-1.png'" }
+        compose.onNodeWithTag("composer-input").assertTextContains("look at '/home/u/my images/or2-1.png'")
+        compose.runOnIdle { assertTrue("nothing typed into the terminal", session.pastes.isEmpty() && session.submits.isEmpty()) }
+        // Closed composer: one paste into the terminal, a space first and no Enter after.
+        compose.onNodeWithTag("composer-close").performClick()
+        compose.runOnIdle { paste.start { image } }
+        compose.waitUntil(5_000) { session.pastes.isNotEmpty() }
+        compose.runOnIdle {
+            assertEquals(listOf(" '/home/u/my images/or2-1.png'"), session.pastes)
+            assertTrue(session.texts.isEmpty() && session.keys.isEmpty() && session.submits.isEmpty())
+        }
+    }
+
+    @Test
+    fun anUploadingImageCanBeCancelledFromTheNoticeStrip() {
+        var cancelled = false
+        compose.runOnUiThread {
+            compose.activity.setContent {
+                Or2Theme {
+                    io.github.code_akram.or2.session.TerminalCard("workstation", "shell", Transport.SSH, SessionState.Connected,
+                        minimise = {}, openSwitcher = {}, endSession = {}, upload = uploadNotice(UploadState.Uploading),
+                        uploadAction = { cancelled = true }) {}
+                }
+            }
+        }
+        compose.onNodeWithTag("upload-status").assertTextContains("Uploading image\u2026")
+        compose.onNodeWithTag("upload-action").assertTextContains("Cancel").performClick()
+        compose.runOnIdle { assertTrue(cancelled) }
     }
 
     @Test

@@ -54,6 +54,8 @@ fun hostErrorMessage(error: HostException): String = when (error) {
     is HostException.NotInstalled -> "${error.program} is not installed on the host."
     is HostException.PaneNotFound -> "That agent's pane no longer exists in herdr. Refresh the inbox."
     is HostException.CommandFailed -> "A command on the host failed. Retry, or reconnect."
+    is HostException.SftpUnavailable -> "SFTP is not available on this host."
+    is HostException.TooLarge -> "The image is larger than 20 MiB."
 }
 
 /** A closed connection explains itself with the same words as a closed session. */

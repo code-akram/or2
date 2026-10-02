@@ -10,6 +10,9 @@ use russh::server;
 use tokio::net::TcpListener;
 
 use super::*;
+
+#[path = "sftp_test_server.rs"]
+mod sftp_server;
 use crate::herdr::{HerdrObserver, HerdrState, HerdrUnavailable};
 use crate::host::{TerminalTarget, TerminalTransport, TmuxSession};
 use crate::keys::ClientKey;
@@ -316,6 +319,17 @@ struct Shared {
     /// timeout tests need a server that stays silent).
     shell_answers: AtomicBool,
     withheld_stage: Mutex<Option<&'static str>>,
+    /// Where the `sftp` subsystem serves files from (its start directory); `None` refuses the
+    /// subsystem like a server without SFTP.
+    sftp: Mutex<Option<std::path::PathBuf>>,
+    /// The SFTP requests served, by name.
+    sftp_log: Arc<Mutex<Vec<String>>>,
+    /// Session channels kept for a subsystem while SFTP is served.
+    sessions: Mutex<std::collections::HashMap<russh::ChannelId, russh::Channel<server::Msg>>>,
+    /// Exec requests of any kind.
+    execs: AtomicUsize,
+    /// See `FsSftp`'s own.
+    sftp_first_write_delay: Mutex<Option<Duration>>,
 }
 
 struct Server {
@@ -348,7 +362,17 @@ impl server::Handler for Server {
         _: &mut server::Session,
     ) -> Result<(), Self::Error> {
         let channel_id = channel.id();
-        drop(channel);
+        // Kept for an `sftp` subsystem request while SFTP is served; dropped otherwise (the
+        // handler callbacks serve everything else).
+        if self.shared.sftp.lock().unwrap().is_some() {
+            self.shared
+                .sessions
+                .lock()
+                .unwrap()
+                .insert(channel_id, channel);
+        } else {
+            drop(channel);
+        }
         let gate = self.shared.open_gate.lock().unwrap().take();
         if let Some(gate) = gate {
             let shared = self.shared.clone();
@@ -467,6 +491,7 @@ impl server::Handler for Server {
         _: &[(russh::Pty, u32)],
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        self.shared.sessions.lock().unwrap().remove(&channel);
         if let Some(tx) = self.shared.channel_events.lock().unwrap().as_ref() {
             let _ = tx.send(("pty", channel));
         }
@@ -497,12 +522,38 @@ impl server::Handler for Server {
         Ok(())
     }
 
+    /// `sftp`: served from `Shared::sftp` over the kept channel, or refused.
+    async fn subsystem_request(
+        &mut self,
+        channel: russh::ChannelId,
+        name: &str,
+        session: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        if let Some(tx) = self.shared.channel_events.lock().unwrap().as_ref() {
+            let _ = tx.send(("subsystem", channel));
+        }
+        let root = self.shared.sftp.lock().unwrap().clone();
+        let kept = self.shared.sessions.lock().unwrap().remove(&channel);
+        match (name, root, kept) {
+            ("sftp", Some(root), Some(kept)) => {
+                session.channel_success(channel)?;
+                let delay = self.shared.sftp_first_write_delay.lock().unwrap().take();
+                let handler = sftp_server::FsSftp::new(root, self.shared.sftp_log.clone(), delay);
+                russh_sftp::server::run(kept.into_stream(), handler).await;
+            }
+            _ => session.channel_failure(channel)?,
+        }
+        Ok(())
+    }
+
     async fn exec_request(
         &mut self,
         channel: russh::ChannelId,
         command: &[u8],
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        self.shared.sessions.lock().unwrap().remove(&channel);
+        self.shared.execs.fetch_add(1, Ordering::SeqCst);
         let command = String::from_utf8_lossy(command).into_owned();
         if command.contains("'session' 'list' '--json'") {
             session.channel_success(channel)?;
@@ -713,6 +764,11 @@ impl Fixture {
             unix_gate: Mutex::new(None),
             shell_answers: AtomicBool::new(false),
             withheld_stage: Mutex::new(None),
+            sftp: Mutex::new(None),
+            sftp_log: Arc::new(Mutex::new(Vec::new())),
+            sessions: Mutex::new(std::collections::HashMap::new()),
+            execs: AtomicUsize::new(0),
+            sftp_first_write_delay: Mutex::new(None),
         });
         let (listener, port) = runtime().block_on(async {
             let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -2711,4 +2767,247 @@ fn a_pump_whose_local_input_ended_closes_its_channel_on_the_healthy_connection()
     fixture.handle.disconnect();
     assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
     assert_eq!(closes, 1, "local input EOF must not abandon a live channel");
+}
+
+// ---------------------------------------------------------------------------------------
+// Image upload over SFTP (contracts.md, "Image paste").
+
+use std::os::unix::fs::PermissionsExt;
+
+use crate::host::{HostError, MAX_IMAGE_BYTES};
+
+/// A connected fixture whose `sftp` subsystem serves a fresh directory (its "home"), which is
+/// returned canonical.
+fn sftp_fixture() -> (Fixture, tempfile::TempDir, std::path::PathBuf) {
+    let fixture = Fixture::connected(Duration::from_secs(5));
+    let home = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    *fixture.shared.sftp.lock().unwrap() = Some(root.clone());
+    (fixture, home, root)
+}
+
+fn mode_of(path: &std::path::Path) -> u32 {
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
+/// `length` bytes, not one repeated chunk: a misplaced write would show.
+fn image_bytes(length: usize) -> Vec<u8> {
+    (0..length).map(|index| (index * 31 % 251) as u8).collect()
+}
+
+fn listing(directory: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn an_upload_makes_a_private_directory_and_a_private_file_through_a_rename() {
+    let (fixture, _home, root) = sftp_fixture();
+    let bytes = image_bytes(200_000);
+    let execs = fixture.shared.execs.load(Ordering::SeqCst);
+    let path = runtime()
+        .block_on(fixture.handle.upload_image(bytes.clone(), "PNG"))
+        .unwrap();
+
+    let directory = root.join(".cache/or2/images");
+    let name = path
+        .strip_prefix(&format!("{}/", directory.display()))
+        .unwrap_or_else(|| panic!("an absolute path in the image directory: {path}"));
+    // or2-<yyyyMMdd>-<HHmmss>-<6 hex>.png
+    assert!(name.ends_with(".png"), "{name}");
+    let parts: Vec<&str> = name.trim_end_matches(".png").split('-').collect();
+    assert_eq!(parts.len(), 4, "{name}");
+    assert_eq!(parts[0], "or2");
+    assert!(
+        parts[1].len() == 8 && parts[1].bytes().all(|b| b.is_ascii_digit()),
+        "{name}"
+    );
+    assert!(
+        parts[2].len() == 6 && parts[2].bytes().all(|b| b.is_ascii_digit()),
+        "{name}"
+    );
+    assert!(
+        parts[3].len() == 6 && parts[3].bytes().all(|b| b.is_ascii_hexdigit()),
+        "{name}"
+    );
+
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(mode_of(std::path::Path::new(&path)), 0o600);
+    assert_eq!(mode_of(&directory), 0o700);
+    assert_eq!(mode_of(&root.join(".cache")), 0o700);
+    assert_eq!(mode_of(&root.join(".cache/or2")), 0o700);
+    assert_eq!(
+        listing(&directory),
+        [name.to_owned()],
+        "no temporary file left"
+    );
+
+    let log = fixture.shared.sftp_log.lock().unwrap().clone();
+    let open = log.iter().position(|request| request == "open").unwrap();
+    let rename = log.iter().position(|request| request == "rename").unwrap();
+    assert!(
+        open < rename,
+        "written under a temporary name, then renamed: {log:?}"
+    );
+    assert_eq!(
+        fixture.shared.execs.load(Ordering::SeqCst),
+        execs,
+        "no shell command"
+    );
+    // The SFTP channel is closed once the upload is done.
+    wait_for(|| fixture.shared.closes.load(Ordering::SeqCst) >= 1);
+
+    // A second upload reuses the directory and gets a name of its own.
+    let second = runtime()
+        .block_on(fixture.handle.upload_image(b"GIF89a".to_vec(), "gif"))
+        .unwrap();
+    assert_ne!(second, path);
+    assert!(second.ends_with(".gif"));
+    assert_eq!(listing(&directory).len(), 2);
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+}
+
+#[test]
+fn an_upload_first_sweeps_old_or2_files_and_makes_an_existing_directory_private() {
+    let (fixture, _home, root) = sftp_fixture();
+    let directory = root.join(".cache/or2/images");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let now = std::time::SystemTime::now();
+    let day = Duration::from_secs(24 * 60 * 60);
+    for (name, age) in [
+        ("or2-old.png", 8 * day),
+        ("or2-old.png.part", 8 * day),
+        ("or2-recent.png", day),
+        ("notes-old.txt", 8 * day),
+    ] {
+        let file = std::fs::File::create(directory.join(name)).unwrap();
+        file.set_modified(now - age).unwrap();
+    }
+    std::fs::create_dir(directory.join("or2-old-directory")).unwrap();
+    std::fs::File::open(directory.join("or2-old-directory"))
+        .unwrap()
+        .set_modified(now - 8 * day)
+        .unwrap();
+
+    let path = runtime()
+        .block_on(fixture.handle.upload_image(image_bytes(10), "jpg"))
+        .unwrap();
+    let name = path.rsplit('/').next().unwrap().to_owned();
+    assert_eq!(
+        listing(&directory),
+        [
+            "notes-old.txt".to_owned(),
+            name,
+            "or2-old-directory".to_owned(),
+            "or2-recent.png".to_owned()
+        ],
+        "only old or2-* files go"
+    );
+    assert_eq!(mode_of(&directory), 0o700);
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+}
+
+#[test]
+fn a_server_without_sftp_is_sftp_unavailable_and_its_channel_is_closed() {
+    let fixture = Fixture::connected(Duration::from_secs(5));
+    assert_eq!(
+        runtime().block_on(fixture.handle.upload_image(image_bytes(10), "png")),
+        Err(HostError::SftpUnavailable)
+    );
+    wait_for(|| fixture.shared.closes.load(Ordering::SeqCst) == 1);
+    // The connection is fine.
+    assert!(
+        runtime()
+            .block_on(fixture.handle.list_tmux_sessions())
+            .is_ok()
+    );
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+}
+
+#[test]
+fn too_large_empty_and_unknown_images_are_refused_before_anything_is_sent() {
+    let (fixture, _home, root) = sftp_fixture();
+    let (events, received) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(events);
+    assert_eq!(
+        runtime().block_on(
+            fixture
+                .handle
+                .upload_image(vec![0; MAX_IMAGE_BYTES + 1], "png")
+        ),
+        Err(HostError::TooLarge)
+    );
+    assert_eq!(
+        runtime().block_on(fixture.handle.upload_image(Vec::new(), "png")),
+        Err(HostError::InvalidName)
+    );
+    for extension in ["exe", "", "png/..", "svg"] {
+        assert_eq!(
+            runtime().block_on(fixture.handle.upload_image(image_bytes(10), extension)),
+            Err(HostError::InvalidName),
+            "{extension}"
+        );
+    }
+    assert!(received.try_recv().is_err(), "no channel was opened");
+    assert!(fixture.shared.sftp_log.lock().unwrap().is_empty());
+    assert!(!root.join(".cache").exists());
+    // Exactly the limit is taken.
+    assert!(
+        runtime()
+            .block_on(
+                fixture
+                    .handle
+                    .upload_image(vec![7; MAX_IMAGE_BYTES], "webp")
+            )
+            .is_ok()
+    );
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+}
+
+#[test]
+fn a_cancelled_upload_removes_its_temporary_file() {
+    let (fixture, _home, root) = sftp_fixture();
+    *fixture.shared.sftp_first_write_delay.lock().unwrap() = Some(Duration::from_millis(500));
+    // The caller gives up while the host is still taking the first write.
+    let upload = runtime().block_on(async {
+        timeout(
+            Duration::from_millis(250),
+            fixture.handle.upload_image(image_bytes(200_000), "png"),
+        )
+        .await
+    });
+    assert!(upload.is_err(), "still running when cancelled");
+    let directory = root.join(".cache/or2/images");
+    assert!(directory.is_dir());
+    wait_for(|| {
+        fixture
+            .shared
+            .sftp_log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request == "remove")
+    });
+    wait_for(|| listing(&directory).is_empty());
+    assert!(
+        !fixture
+            .shared
+            .sftp_log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request == "rename"),
+        "never renamed into place"
+    );
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
 }

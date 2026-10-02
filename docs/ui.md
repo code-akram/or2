@@ -203,7 +203,13 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   `attention` for a warning, the icon too), and an optional trailing text action (`Chip` 12 sp in `accent`,
   drawn 28 dp tall). It has no fill of its own (it sits on its container's) and takes layout space: it pushes
   what is below it down and never overlays it. The terminal card uses it for Connecting / Authenticating /
-  Waiting for host-key approval (muted, spinner) and for a closed session (warning, with **Close**).
+  Waiting for host-key approval (muted, spinner) and for a closed session (warning, with **Close**); while the
+  session is connected, for an image upload: `Uploading image…` (muted, spinner, **Cancel**) or why it failed
+  (warning, **Dismiss**).
+- **Share picker:** an image shared to or2 from another app opens a sheet titled **Send image to**: one grouped
+  card of the open terminals (terminal icon, the host, the target in mono), the last used first. A tap shows
+  that terminal and uploads the image to it. With no open terminal there is no sheet, only the one-line
+  message `No open terminal to send the image to`.
 - **Segmented control:** 32 dp `surfaceTrack` pill, selected segment `surface` with `text`, others
   `textMuted`.
 - **Toggle:** `accent` track with a `text` knob when on (a `background` knob read as a hole); `surfaceTrack` with a muted knob when off.
@@ -395,8 +401,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   keys, label-wide navigation keys, `accent` labels; a latched `Alt` on `accentMuted`) one tap away, with an
   edge fade on each side that has more keys behind it.
 - **Composer (chat input):** a rounded 20 dp `crust` card docked above the IME and above the key
-  toolbar (which stays, so `Esc`, `Ctrl` and `Tab` remain reachable), in one row (about 40 dp for a single line, growing to five): a 13 sp mono
-  placeholder (`Message <host>...`) or the text, a close action (40 dp box) and a
+  toolbar (which stays, so `Esc`, `Ctrl` and `Tab` remain reachable), in one row (about 40 dp for a single line, growing to five): for a
+  terminal that takes images an attach action at the left (an outline image glyph in `textMuted`, 40 dp box, opening the Photo
+  Picker), a 13 sp mono placeholder (`Message <host>...`) or the text, a close action (40 dp box) and a
   36 dp circular send button at the right. Paste and the panes sheet are not repeated in the card: the toolbar
   directly below has both, and the keyboard pastes into the text. The send button (`surfaceTrack` until there is text and the session is connected, then
   `accent`). Sending calls the session's `submit_text`: Rust writes the text (one bracketed paste
@@ -405,7 +412,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   path for blocked agents. The text is cleared only when it was sent: after a dropped session it
   stays to
   resend. Several lines are confirmed ("Send N lines? They will run as typed") like a multi-line
-  paste. Attach, snippets and dictation are not implemented.
+  paste. An uploaded image's path joins the text after a space (contracts.md, "Image paste"); a
+  keyboard's image (a clipboard screenshot, a GIF keyboard) committed into the text is uploaded the
+  same way. Snippets and dictation are not implemented.
 
 ## Terminal defaults
 

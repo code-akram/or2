@@ -209,6 +209,9 @@ pub enum Command {
     Text(String),
     /// Text, then Enter as a separate, delayed write (see [`crate::submit`]).
     Submit(String),
+    /// Pasted text: one bracketed paste while the terminal has that mode on, else typed
+    /// (newlines become carriage returns). No Enter.
+    Paste(String),
     Key(KeyInput),
     Scroll(ViewportScroll),
     /// A tap while the program tracks the mouse: a left-button press and release at the
@@ -378,6 +381,17 @@ impl SessionHandle {
     pub fn submit_text(&self, text: String) -> Result<(), SessionError> {
         self.require_connected()?;
         self.send(Command::Submit(text))
+    }
+
+    /// Pastes `text` (an image path, the clipboard): one bracketed paste when the terminal has
+    /// that mode on (any paste end marker in `text` removed), else typed with newlines as
+    /// carriage returns. No Enter. Empty text sends nothing. Requires `Connected`.
+    pub fn paste_text(&self, text: String) -> Result<(), SessionError> {
+        self.require_connected()?;
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.send(Command::Paste(text))
     }
 
     pub fn send_key(&self, key: KeyInput) -> Result<(), SessionError> {
@@ -730,6 +744,10 @@ mod tests {
         );
         assert_eq!(handle.request_full_frame(), Err(SessionError::NotConnected));
         assert_eq!(
+            handle.paste_text(" /p".into()),
+            Err(SessionError::NotConnected)
+        );
+        assert_eq!(
             handle.submit_text("ls".into()),
             Err(SessionError::NotConnected)
         );
@@ -744,6 +762,8 @@ mod tests {
         handle.send_key(key.clone()).unwrap();
         handle.submit_text("go".into()).unwrap();
         handle.submit_text(String::new()).unwrap();
+        handle.paste_text(String::new()).unwrap();
+        handle.paste_text(" /p".into()).unwrap();
         assert_eq!(driver.blocking_next_command(), Command::Text("ls\n".into()));
         assert_eq!(driver.blocking_next_command(), Command::Key(key));
         assert_eq!(driver.blocking_next_command(), Command::Submit("go".into()));
@@ -751,6 +771,8 @@ mod tests {
             driver.blocking_next_command(),
             Command::Submit(String::new())
         );
+        // An empty paste sends nothing.
+        assert_eq!(driver.blocking_next_command(), Command::Paste(" /p".into()));
     }
 
     #[test]

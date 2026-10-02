@@ -250,6 +250,13 @@ impl TerminalPump {
                 }
                 self.submits.arm();
             }
+            // A submit's text without its Enter.
+            Command::Paste(text) => {
+                let bytes = self.terminal.submit_text_bytes(&text).map_err(internal)?;
+                if !bytes.is_empty() {
+                    let _ = self.writes.send(Write::Bytes(bytes));
+                }
+            }
             Command::Key(key) => {
                 let bytes = self.terminal.encode_key(&key).map_err(internal)?;
                 let _ = self.writes.send(Write::Bytes(bytes));
@@ -480,6 +487,36 @@ mod tests {
         pump.terminal.write(b"\x1b[?2004l");
         pump.command(&mut driver, submit()).unwrap();
         assert_eq!(bytes(writes.try_recv().ok()), b"hi\rthere");
+    }
+
+    #[test]
+    fn a_paste_is_bracketed_only_while_the_terminal_has_the_mode_on_and_never_presses_enter() {
+        let (mut pump, mut driver, mut writes) = pump();
+        let paste = || Command::Paste(" /home/u/.cache/or2/images/or2-1.png".into());
+        pump.command(&mut driver, paste()).unwrap();
+        assert_eq!(
+            drain(&mut writes),
+            [b" /home/u/.cache/or2/images/or2-1.png".to_vec()]
+        );
+        assert!(!pump.submits.is_armed(), "no Enter is owed");
+        pump.terminal.write(b"\x1b[?2004h");
+        pump.command(&mut driver, Command::Paste("a\x1b[201~b".into()))
+            .unwrap();
+        assert_eq!(drain(&mut writes), [b"\x1b[200~ab\x1b[201~".to_vec()]);
+        assert!(!pump.submits.is_armed());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_paste_after_a_submit_waits_for_its_enter() {
+        let (mut pump, mut driver, mut writes) = pump();
+        pump.command(&mut driver, Command::Submit("one".into()))
+            .unwrap();
+        pump.command(&mut driver, Command::Paste(" p".into()))
+            .unwrap();
+        assert_eq!(drain(&mut writes), [b"one".to_vec()]);
+        pump.enter_pending().await;
+        pump.enter_due(&mut driver).unwrap();
+        assert_eq!(drain(&mut writes), [b"\r".to_vec(), b" p".to_vec()]);
     }
 
     #[test]
