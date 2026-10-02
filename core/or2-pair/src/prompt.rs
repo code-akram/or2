@@ -47,7 +47,7 @@ mod echo {
     use std::cell::UnsafeCell;
     use std::mem::MaybeUninit;
     use std::os::fd::RawFd;
-    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
     /// The settings to put back from a signal handler (which can only use what is already in
     /// memory): written before [`SAVED_FD`] names a descriptor, read only while it does.
@@ -60,36 +60,104 @@ mod echo {
     static SAVED: Saved = Saved(UnsafeCell::new(MaybeUninit::uninit()));
     static SAVED_FD: AtomicI32 = AtomicI32::new(-1);
 
-    /// The signals that end (or stop) the process while the code is typed.
-    const SIGNALS: [libc::c_int; 5] = [
-        libc::SIGINT,
-        libc::SIGTERM,
-        libc::SIGHUP,
-        libc::SIGQUIT,
-        libc::SIGTSTP,
-    ];
+    /// Whether this guard's [`stop`] handles SIGTSTP (it was not ignored), so that [`resume`]
+    /// installs it again after the stop.
+    static STOP_HANDLED: AtomicBool = AtomicBool::new(false);
 
-    /// Puts the terminal back and lets the signal do what it would have done.
-    extern "C" fn restore_and_reraise(signal: libc::c_int) {
-        let fd = SAVED_FD.swap(-1, Ordering::SeqCst);
-        // SAFETY: `tcsetattr`, `sigaction`, `sigemptyset` and `raise` are async-signal-safe;
-        // `SAVED` holds valid settings whenever `SAVED_FD` named a descriptor.
+    /// The signals that end the process while the code is typed.
+    const ENDING: [libc::c_int; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
+
+    /// Installs `handler` for `signal` (no flags: a blocked read returns early); the previous
+    /// action goes into `old` when asked for.
+    ///
+    /// # Safety
+    ///
+    /// `handler` must be async-signal-safe.
+    unsafe fn install(
+        signal: libc::c_int,
+        handler: extern "C" fn(libc::c_int),
+        old: *mut libc::sigaction,
+    ) -> bool {
+        // SAFETY: `action` is fully initialised; `sigaction` and `sigemptyset` are
+        // async-signal-safe, so this may run in a handler too.
         unsafe {
-            if fd >= 0 {
-                libc::tcsetattr(fd, libc::TCSANOW, (*SAVED.0.get()).as_ptr());
-            }
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = handler as *const () as usize;
+            libc::sigemptyset(&mut action.sa_mask);
+            action.sa_flags = 0;
+            libc::sigaction(signal, &action, old) == 0
+        }
+    }
+
+    /// Gives `signal` its default action and raises it: delivered when the handler returns.
+    ///
+    /// # Safety
+    ///
+    /// Only from a handler for `signal` (which is blocked while it runs).
+    unsafe fn reraise_by_default(signal: libc::c_int) {
+        // SAFETY: `sigaction`, `sigemptyset` and `raise` are async-signal-safe.
+        unsafe {
             let mut action: libc::sigaction = std::mem::zeroed();
             action.sa_sigaction = libc::SIG_DFL;
             libc::sigemptyset(&mut action.sa_mask);
             libc::sigaction(signal, &action, std::ptr::null_mut());
-            // Delivered when this handler returns, with the default action.
             libc::raise(signal);
+        }
+    }
+
+    /// A signal that ends the process: puts the terminal back and lets the signal do what it
+    /// would have done.
+    extern "C" fn restore_and_reraise(signal: libc::c_int) {
+        let fd = SAVED_FD.swap(-1, Ordering::SeqCst);
+        // SAFETY: `tcsetattr` is async-signal-safe; `SAVED` holds valid settings whenever
+        // `SAVED_FD` named a descriptor.
+        unsafe {
+            if fd >= 0 {
+                libc::tcsetattr(fd, libc::TCSANOW, (*SAVED.0.get()).as_ptr());
+            }
+            reraise_by_default(signal);
+        }
+    }
+
+    /// SIGTSTP (Ctrl-Z): puts the terminal back for whatever runs while this process is stopped,
+    /// and stops. The prompt is still waiting: [`resume`] switches echo off again.
+    extern "C" fn stop(signal: libc::c_int) {
+        let fd = SAVED_FD.load(Ordering::SeqCst);
+        // SAFETY: as in `restore_and_reraise`.
+        unsafe {
+            if fd >= 0 {
+                libc::tcsetattr(fd, libc::TCSANOW, (*SAVED.0.get()).as_ptr());
+            }
+            reraise_by_default(signal);
+        }
+    }
+
+    /// SIGCONT: the process goes on with the prompt, so echo goes off again (what the terminal
+    /// has now, without `ECHO` and `ECHONL`), and SIGTSTP is handled again (the stop gave it its
+    /// default action). Nothing once the guard is gone.
+    extern "C" fn resume(_: libc::c_int) {
+        let fd = SAVED_FD.load(Ordering::SeqCst);
+        if fd < 0 {
+            return;
+        }
+        // SAFETY: `tcgetattr`, `tcsetattr` and `sigaction` are async-signal-safe; `stop` is
+        // async-signal-safe.
+        unsafe {
+            let mut settings: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut settings) == 0 {
+                settings.c_lflag &= !(libc::ECHO | libc::ECHONL);
+                libc::tcsetattr(fd, libc::TCSANOW, &settings);
+            }
+            if STOP_HANDLED.load(Ordering::SeqCst) {
+                install(libc::SIGTSTP, stop, std::ptr::null_mut());
+            }
         }
     }
 
     /// While this lives, the terminal on `fd` does not echo what is typed (neither the
     /// characters nor the newline). Dropping it (on success, an error or a panic) puts the
-    /// settings back; a signal that ends or stops the process puts them back first. Nothing
+    /// settings back; a signal that ends or stops the process puts them back first, and when a
+    /// stopped process goes on (SIGCONT) echo goes off again for the rest of the line. Nothing
     /// happens when `fd` is not a terminal.
     pub struct EchoOff {
         fd: RawFd,
@@ -112,23 +180,32 @@ mod echo {
             // SAFETY: see `Saved`; no handler reads it before `SAVED_FD` is set below.
             unsafe { (*SAVED.0.get()).write(original) };
             SAVED_FD.store(fd, Ordering::SeqCst);
-            for signal in SIGNALS {
-                // SAFETY: both structures are fully initialised; the handler is
-                // async-signal-safe (see `restore_and_reraise`).
+            let handled = ENDING
+                .iter()
+                .map(|signal| (*signal, restore_and_reraise as extern "C" fn(libc::c_int)))
+                .chain([
+                    (libc::SIGTSTP, stop as extern "C" fn(libc::c_int)),
+                    (libc::SIGCONT, resume as extern "C" fn(libc::c_int)),
+                ]);
+            for (signal, handler) in handled {
+                // SAFETY: `old` is filled by `sigaction`; every handler here is
+                // async-signal-safe.
                 unsafe {
                     let mut old: libc::sigaction = std::mem::zeroed();
                     if libc::sigaction(signal, std::ptr::null(), &mut old) != 0
-                        || old.sa_sigaction == libc::SIG_IGN
+                        || (old.sa_sigaction == libc::SIG_IGN && signal != libc::SIGCONT)
                     {
-                        // An ignored signal stays ignored.
+                        // An ignored signal stays ignored (an ignored SIGCONT still resumes
+                        // the process, so echo must go off again then too).
                         continue;
                     }
-                    let mut action: libc::sigaction = std::mem::zeroed();
-                    action.sa_sigaction = restore_and_reraise as *const () as usize;
-                    libc::sigemptyset(&mut action.sa_mask);
-                    action.sa_flags = 0;
-                    if libc::sigaction(signal, &action, std::ptr::null_mut()) == 0 {
+                    if signal == libc::SIGTSTP {
+                        STOP_HANDLED.store(true, Ordering::SeqCst);
+                    }
+                    if install(signal, handler, std::ptr::null_mut()) {
                         guard.handlers.push((signal, old));
+                    } else if signal == libc::SIGTSTP {
+                        STOP_HANDLED.store(false, Ordering::SeqCst);
                     }
                 }
             }
@@ -148,11 +225,13 @@ mod echo {
 
     impl Drop for EchoOff {
         fn drop(&mut self) {
+            // First, so that a SIGCONT arriving now does not switch echo off again.
+            SAVED_FD.store(-1, Ordering::SeqCst);
+            STOP_HANDLED.store(false, Ordering::SeqCst);
             if let Some(original) = &self.original {
                 // SAFETY: `original` came from `tcgetattr` on this descriptor.
                 unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, original) };
             }
-            SAVED_FD.store(-1, Ordering::SeqCst);
             for (signal, old) in self.handlers.drain(..) {
                 // SAFETY: `old` is what `sigaction` reported before.
                 unsafe { libc::sigaction(signal, &old, std::ptr::null_mut()) };
