@@ -31,7 +31,7 @@ import org.junit.Test
 
 /**
  * The host screen and its session picker sheet with fabricated state: no connection, Keystore or
- * database is touched. The sheet opens by itself when the host is connected.
+ * database is touched. The sheet never opens by itself: "Open a session" opens it on a connected host.
  */
 class HostScreenUiDeviceTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
@@ -69,8 +69,8 @@ class HostScreenUiDeviceTest {
 
     private fun pickerTab(index: Int) = compose.onNodeWithTag("picker-tab:$index").performClick()
 
-    /** Choosing a session closes the sheet; "Open a session" brings it back. */
-    private fun reopenPicker() {
+    /** "Open a session" opens the sheet (choosing a session closes it again). */
+    private fun openPicker() {
         compose.onNodeWithTag("host-open-picker").performScrollTo().performClick()
         compose.onNodeWithTag("session-picker").assertIsDisplayed()
     }
@@ -128,24 +128,35 @@ class HostScreenUiDeviceTest {
     }
 
     @Test
+    fun aConnectedHostScreenDoesNotCoverItselfWithThePicker() {
+        show(HostState.Connected(0u))
+        compose.onNodeWithTag("host-detail").assertIsDisplayed()
+        compose.onNodeWithTag("session-picker").assertDoesNotExist()
+        compose.onNodeWithTag("host-open-picker").assertIsDisplayed()
+        // A host that connects while the screen is up does not open it either.
+        show(HostState.Connecting)
+        compose.onNodeWithTag("session-picker").assertDoesNotExist()
+    }
+
+    @Test
     fun aConnectedHostOpensThePickerWithHerdrTmuxAndAPlainShell() {
         val calls = Calls()
         show(HostState.Connected(1u), calls = calls)
-        compose.onNodeWithTag("session-picker").assertIsDisplayed()
         compose.onNodeWithText("Using address 2: b.invalid:2222").assertExists()
+        openPicker()
         // herdr is the first segment: the default session opens without a name, a named one by
         // name, and a stopped one not at all.
         compose.onNodeWithTag("herdr-open:old").assertIsNotEnabled()
         compose.onNodeWithTag("herdr-open:default").performClick()
-        reopenPicker()
+        openPicker()
         compose.onNodeWithTag("herdr-open:work").performClick()
-        reopenPicker()
+        openPicker()
         pickerTab(1)
         compose.onNodeWithText("3 windows · 1 attached").assertIsDisplayed()
         compose.onNodeWithTag("tmux-attach:build").performClick()
-        reopenPicker()
+        openPicker()
         compose.onNodeWithTag("host-shell").assertTextEquals("Shell").performClick() // A plain shell.
-        reopenPicker()
+        openPicker()
         pickerTab(1)
         compose.onNodeWithTag("host-refresh").performScrollTo().performClick()
         compose.runOnIdle { assertEquals(listOf("herdr:null", "herdr:work", "tmux:build", "shell", "refresh"), calls.log) }
@@ -156,11 +167,13 @@ class HostScreenUiDeviceTest {
     fun theRecentTabResumesOpenTerminalsOfThisHost() {
         val calls = Calls()
         show(HostState.Connected(0u), calls = calls, terminals = listOf(HostTerminalItem(7, "tmux main", false), HostTerminalItem(8, "shell", true)))
+        openPicker()
         pickerTab(2)
         compose.onNodeWithTag("recent-open:7").performClick()
         compose.runOnIdle { assertEquals(listOf("resume:7"), calls.log) }
         compose.onNodeWithTag("open-terminal:8").performScrollTo().assertIsDisplayed() // Also listed on the host screen.
         show(HostState.Connected(0u))
+        openPicker()
         pickerTab(2)
         compose.onNodeWithTag("recent-empty").assertIsDisplayed()
     }
@@ -169,7 +182,7 @@ class HostScreenUiDeviceTest {
     fun theSheetCanBeDismissedAndTheHostCanBeDisconnectedAfterwards() {
         val calls = Calls()
         show(HostState.Connected(0u), calls = calls)
-        compose.onNodeWithTag("session-picker").assertIsDisplayed()
+        openPicker()
         compose.onNodeWithTag("host-shell").performClick()
         compose.onNodeWithTag("host-disconnect").performScrollTo().assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals(listOf("shell", "disconnect"), calls.log) }
@@ -179,6 +192,7 @@ class HostScreenUiDeviceTest {
     fun newTmuxSessionNamesAreValidatedBeforeCreating() {
         val calls = Calls()
         show(HostState.Connected(0u), calls = calls)
+        openPicker()
         pickerTab(1)
         compose.onNodeWithTag("tmux-new").performScrollTo().assertIsNotEnabled()
         compose.onNodeWithTag("tmux-new-name").performScrollTo().performTextInput("a:b")
@@ -187,6 +201,7 @@ class HostScreenUiDeviceTest {
         compose.onNodeWithTag("tmux-new-name").performTextInput("x") // "a:bx" is still invalid.
         compose.onNodeWithTag("tmux-new").assertIsNotEnabled()
         show(HostState.Connected(0u), calls = calls)
+        openPicker()
         pickerTab(1)
         compose.onNodeWithTag("tmux-new-name").performScrollTo().performTextInput("my work")
         compose.onNodeWithTag("tmux-new").performScrollTo().assertIsEnabled().performClick()
@@ -196,21 +211,59 @@ class HostScreenUiDeviceTest {
     @Test
     fun missingTmuxHerdrAndFailedListingsAreExplainedNotHidden() {
         show(HostState.Connected(0u), caps = caps.copy(tmux = null, herdr = null))
+        openPicker()
         compose.onNodeWithTag("herdr-missing").assertIsDisplayed()
         pickerTab(1)
         compose.onNodeWithTag("tmux-missing").assertIsDisplayed()
         show(HostState.Connected(0u), tmux = TmuxList.Failed("The connection has closed. Reconnect to continue."))
+        openPicker()
         pickerTab(1)
         compose.onNodeWithText("The connection has closed. Reconnect to continue.").assertIsDisplayed()
         show(HostState.Connected(0u), caps = null, tmux = TmuxList.Loading)
+        openPicker()
         compose.onNodeWithText("Checking the host…", substring = true).assertIsDisplayed()
         show(HostState.Connected(0u), capsError = "probe failed")
+        openPicker()
         compose.onNodeWithText("Could not query the host. Try Refresh.").assertIsDisplayed()
+    }
+
+    /** The picker as Home's session button shows it, before its host has connected ([gate]). */
+    private fun showGate(gate: PickerGate?, actions: MutableList<GateAction>) = compose.runOnUiThread {
+        val generation = ++generations
+        compose.activity.setContent {
+            key(generation) { Or2Theme {
+                SessionPickerSheet(caps, null, tmux, emptyList(), {}, {}, {}, {}, {}, {}, gate = gate, gateAction = { actions += it })
+            } }
+        }
+    }
+
+    @Test
+    fun beforeItsHostConnectsThePickerShowsProgressThenWhyNotWithOneAction() {
+        val actions = mutableListOf<GateAction>()
+        showGate(PickerGate.Connecting("Build box", "Checking server…", spinning = true), actions)
+        compose.onNodeWithTag("session-picker").assertIsDisplayed()
+        compose.onNodeWithTag("picker-progress").assertTextEquals("Checking server…")
+        compose.onNodeWithTag("picker-spinner").assertIsDisplayed()
+        compose.onNodeWithTag("picker-tab:0").assertDoesNotExist() // No lists until the host is connected.
+        compose.onNodeWithTag("host-shell").assertDoesNotExist()
+        showGate(PickerGate.Stopped("Build box", "Authentication rejected.", failed = true, detail = "a.invalid:22 · refused",
+            action = GateAction.RETRY, enabled = true), actions)
+        compose.onNodeWithTag("picker-reason").assertTextEquals("Authentication rejected.")
+        compose.onNodeWithTag("picker-detail").assertIsDisplayed()
+        compose.onNodeWithTag("picker-retry").assertTextEquals("Retry").performClick()
+        showGate(PickerGate.Stopped("Build box", "Not connected", false, null, GateAction.CONNECT, enabled = false), actions)
+        compose.onNodeWithTag("picker-retry").assertIsNotEnabled()
+        compose.runOnIdle { assertEquals(listOf(GateAction.RETRY), actions) }
+        // Connected: the gate is gone and the lists show in the same sheet.
+        showGate(null, actions)
+        compose.onNodeWithTag("picker-gate").assertDoesNotExist()
+        compose.onNodeWithTag("herdr-open:work").assertIsDisplayed()
     }
 
     @Test
     fun aHostWithoutHerdrOpensOnTheTmuxSegment() {
         show(HostState.Connected(0u), caps = caps.copy(herdr = null, herdrSessions = emptyList()))
+        openPicker()
         compose.onNodeWithTag("tmux-attach:main").assertIsDisplayed()
     }
 }

@@ -79,7 +79,8 @@ class HomeResume(val title: String, val detail: String)
 
 /**
  * The start screen: only trailing icon buttons on top (agents inbox, keys, about), then SESSIONS (live
- * thumbnails of open terminals; tap resumes), CONNECTIONS (host cards; long press for options)
+ * thumbnails of open terminals; tap resumes), CONNECTIONS (host cards: a tap opens the host screen ([openHost]),
+ * the `>_` button the session picker over Home ([openSessions]); long press for options)
  * and status chips, and a FAB that adds a host ([addHost] opens the add-host sheet). Without hosts, CONNECTIONS
  * holds the same add-host chooser inline: [easyPair] and [manualHost] are its two cards. Stateless: the caller
  * supplies everything.
@@ -95,6 +96,7 @@ fun HomeScreen(
     busy: Boolean,
     openSession: (HomeSession) -> Unit,
     openHost: (Host) -> Unit,
+    openSessions: (Host) -> Unit,
     addHost: () -> Unit,
     easyPair: () -> Unit,
     manualHost: () -> Unit,
@@ -164,7 +166,8 @@ fun HomeScreen(
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         hosts.forEach { card ->
-                            HostCardView(card, onClick = { openHost(card.host) }, onLongClick = { options = card })
+                            HostCardView(card, onClick = { openHost(card.host) }, onLongClick = { options = card },
+                                openSessions = { openSessions(card.host) })
                         }
                         if (keyCount == 0) {
                             AttentionCard("Add an SSH key", "Hosts need a key before they can connect.", onClick = openKeys,
@@ -256,9 +259,13 @@ private fun EmptyConnections(easyPair: () -> Unit, manualHost: () -> Unit) {
     }
 }
 
-/** A server icon with its status dot, name, mono `user@host:port` (or progress, or the failure), chevron. */
+/**
+ * A server icon with its status dot, name, mono `user@host:port` (or progress, or the failure), and the session
+ * button at the end. The card body ([onClick]) opens the host screen; the button ([openSessions]) opens the
+ * session picker over Home.
+ */
 @Composable
-fun HostCardView(card: HostCard, onClick: () -> Unit, onLongClick: () -> Unit, modifier: Modifier = Modifier) {
+fun HostCardView(card: HostCard, onClick: () -> Unit, onLongClick: () -> Unit, openSessions: () -> Unit, modifier: Modifier = Modifier) {
     val host = card.host
     val status = card.status
     // The dot's meaning is said as well as coloured: the merged card reads "Connected" after the name.
@@ -266,7 +273,8 @@ fun HostCardView(card: HostCard, onClick: () -> Unit, onLongClick: () -> Unit, m
         modifier.testTag("host:${host.id}").semantics { stateDescription = hostStateDescription(status) },
         onClick = onClick, onLongClick = onLongClick,
     ) {
-        Row(Modifier.padding(start = 14.dp, end = Or2Dimens.Gutter, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        // No vertical padding on the row: the text column carries it, so the 48 dp button fits the card's own height.
+        Row(Modifier.padding(start = 14.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(Or2Dimens.Spinner), contentAlignment = Alignment.Center) {
                 if (status.spinning) {
                     // The same 24 dp slot as the server icon, so the glyph does not jump between states.
@@ -279,7 +287,7 @@ fun HostCardView(card: HostCard, onClick: () -> Unit, onLongClick: () -> Unit, m
                 }
             }
             Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Column(Modifier.weight(1f).padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(host.label, style = Or2Type.CardTitle, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 when {
                     status.progress != null ->
@@ -295,8 +303,25 @@ fun HostCardView(card: HostCard, onClick: () -> Unit, onLongClick: () -> Unit, m
                     Text(it, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, maxLines = 4, modifier = Modifier.testTag("host-detail-lines:${host.id}"))
                 }
             }
-            Spacer(Modifier.width(6.dp))
-            Icon(Or2Icons.ChevronRight, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.TextMuted)
+            Spacer(Modifier.width(2.dp))
+            SessionButton(host, openSessions)
+        }
+    }
+}
+
+/**
+ * The card's session button: the `>_` prompt glyph in `accent` on a 32 dp `accentMuted` disc, centred in a 48 dp
+ * touch box. Its own click target inside the card, so a tap on it never opens the host screen.
+ */
+@Composable
+private fun SessionButton(host: Host, onClick: () -> Unit) {
+    Box(
+        Modifier.size(48.dp).clip(Or2Shapes.Circle).clickable(role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Open a session on ${host.label}" }.testTag("host-session:${host.id}"),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.size(32.dp).clip(Or2Shapes.Circle).background(Or2Colors.AccentMuted), contentAlignment = Alignment.Center) {
+            Icon(Or2Icons.Terminal, null, Modifier.size(18.dp), tint = Or2Colors.Accent)
         }
     }
 }

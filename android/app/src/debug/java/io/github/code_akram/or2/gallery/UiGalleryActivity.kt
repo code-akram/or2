@@ -67,7 +67,9 @@ import io.github.code_akram.or2.home.HomeScreen
 import io.github.code_akram.or2.home.HomeSession
 import io.github.code_akram.or2.home.HostCard
 import io.github.code_akram.or2.home.hostCardStatus
+import io.github.code_akram.or2.host.GateAction
 import io.github.code_akram.or2.host.HostScreen
+import io.github.code_akram.or2.host.PickerGate
 import io.github.code_akram.or2.host.HostTerminalItem
 import io.github.code_akram.or2.host.PickerTab
 import io.github.code_akram.or2.host.SessionPickerSheet
@@ -143,6 +145,11 @@ class UiGalleryActivity : ComponentActivity() {
             "home-empty" -> Home(HomeVariant.Empty)
             "home-notices" -> Home(HomeVariant.Notices)
             "host-cards" -> Home(HomeVariant.CardStates)
+            "home-picker" -> HomePicker(HomeVariant.Sessions, gate = null)
+            "home-picker-connecting" -> HomePicker(HomeVariant.Connecting, PickerGate.Connecting("nas", "Checking server…", spinning = true))
+            "home-picker-failed" -> HomePicker(HomeVariant.Failed, PickerGate.Stopped("nas",
+                "Authentication rejected. Check the username and public-key authorization.", failed = true, detail = null,
+                action = GateAction.RETRY, enabled = true))
             "inbox" -> Inbox(empty = false)
             "inbox-empty" -> Inbox(empty = true)
             "picker-herdr" -> Picker(PickerTab.HERDR)
@@ -226,7 +233,7 @@ class UiGalleryActivity : ComponentActivity() {
 
     // --- screens -------------------------------------------------------------------------
 
-    private enum class HomeVariant { Sessions, Empty, CardStates, Notices }
+    private enum class HomeVariant { Sessions, Empty, CardStates, Notices, Connecting, Failed }
 
     @Composable
     private fun Home(variant: HomeVariant) {
@@ -237,10 +244,15 @@ class UiGalleryActivity : ComponentActivity() {
         )
         val hosts = when (variant) {
             HomeVariant.Empty -> emptyList()
-            HomeVariant.Sessions, HomeVariant.Notices -> listOf(
+            HomeVariant.Sessions, HomeVariant.Notices, HomeVariant.Connecting, HomeVariant.Failed -> listOf(
                 card(host(1, "workstation"), HostState.Connected(0u), blocked = 1),
                 card(host(2, "build-box", address = "198.51.100.7"), HostState.Connected(0u)),
-                card(host(3, "nas"), null),
+                // The host the connecting and failed pickers are for: its card says the same as the sheet.
+                card(host(3, "nas"), when (variant) {
+                    HomeVariant.Connecting -> HostState.Connecting
+                    HomeVariant.Failed -> HostState.Closed(CloseReason.Failed(SessionFailure.AuthenticationRejected))
+                    else -> null
+                }),
             )
             HomeVariant.CardStates -> listOf(
                 card(host(1, "workstation"), HostState.Connected(0u), blocked = 1),
@@ -256,7 +268,7 @@ class UiGalleryActivity : ComponentActivity() {
             sessions, hosts, keyCount = if (variant == HomeVariant.Empty) 0 else 2,
             blocked = if (variant == HomeVariant.Empty) 0 else 1, working = if (variant == HomeVariant.Empty) 0 else 2,
             canConnectAll = false, busy = false,
-            openSession = {}, openHost = {}, addHost = {}, easyPair = {}, manualHost = {}, editHost = {}, connectHost = {}, disconnectHost = {}, deleteHost = {},
+            openSession = {}, openHost = {}, openSessions = {}, addHost = {}, easyPair = {}, manualHost = {}, editHost = {}, connectHost = {}, disconnectHost = {}, deleteHost = {},
             openInbox = {}, openKeys = {}, connectAll = {},
             // Both one-line offers: the battery exemption was declined, and the connection notification is not allowed.
             batteryCard = variant == HomeVariant.Notices, notificationCard = variant == HomeVariant.Notices,
@@ -291,11 +303,26 @@ class UiGalleryActivity : ComponentActivity() {
         InboxScreen(state, busy = false, connectAll = {}, connect = {}, openHost = {}, openAgent = {})
     }
 
+    /**
+     * The session picker over Home, from a card's `>_` button: the lists for a connected host ([gate] null), or the
+     * sheet before its host has connected.
+     */
+    @Composable
+    private fun HomePicker(variant: HomeVariant, gate: PickerGate?) {
+        Box(Modifier.fillMaxSize()) {
+            Home(variant)
+            SessionPickerSheet(
+                caps, null, tmux,
+                recent = listOf(HostTerminalItem(1, "tmux main", false), HostTerminalItem(3, "shell", true)),
+                openShell = {}, openTmux = {}, openHerdr = {}, resume = {}, refresh = {}, dismiss = {}, gate = gate,
+            )
+        }
+    }
+
     @Composable
     private fun Picker(tab: PickerTab) {
         Box(Modifier.fillMaxSize()) {
-            HostScreen(host(1, "workstation"), HostState.Connected(0u), caps, null, tmux, false, {}, {}, {}, {}, {}, {}, {}, {},
-                pickerOffered = true)
+            HostScreen(host(1, "workstation"), HostState.Connected(0u), caps, null, tmux, false, {}, {}, {}, {}, {}, {}, {}, {})
             SessionPickerSheet(
                 caps, null, tmux,
                 recent = listOf(HostTerminalItem(1, "tmux main", false), HostTerminalItem(2, "herdr personal", false), HostTerminalItem(3, "shell", true)),
@@ -390,7 +417,7 @@ class UiGalleryActivity : ComponentActivity() {
 
     companion object {
         val screens = listOf(
-            "home", "home-empty", "home-notices", "host-cards", "inbox", "inbox-empty", "picker-herdr", "picker-tmux", "picker-recent",
+            "home", "home-empty", "home-notices", "host-cards", "home-picker", "home-picker-connecting", "home-picker-failed", "inbox", "inbox-empty", "picker-herdr", "picker-tmux", "picker-recent",
             "host-form", "host-form-new-key", "host-form-edit", "keys", "keys-empty", "about", "licenses", "hostkey-first", "hostkey-changed",
             "add-host", "pair-scan", "pair-scan-denied", "pair-review", "pair-review-new", "pair-progress", "pair-install", "keepalive", "keepalive-waiting",
             "terminal", "terminal-tmux", "terminal-long", "terminal-stale", "terminal-connecting", "terminal-closed",

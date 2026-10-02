@@ -415,8 +415,11 @@ class HostConnections(
     fun terminal(id: Long): ActiveTerminal? = mutableTerminals.value.find { it.id == id }
 
     /** A terminal on [hostId] for exactly [target] that has not closed or been told to, if any. */
-    fun findOpenTerminal(hostId: Long, target: TerminalTarget): ActiveTerminal? = mutableTerminals.value.find {
-        it.host.id == hostId && it.target == target && !it.retired && !it.disconnectRequested &&
+    fun findOpenTerminal(hostId: Long, target: TerminalTarget): ActiveTerminal? = openTerminals(hostId) { it == target }.firstOrNull()
+
+    /** The terminals on [hostId] whose target [matches] and that have not closed or been told to, in creation order. */
+    fun openTerminals(hostId: Long, matches: (TerminalTarget) -> Boolean): List<ActiveTerminal> = mutableTerminals.value.filter {
+        it.host.id == hostId && matches(it.target) && !it.retired && !it.disconnectRequested &&
             it.state.value !is SessionState.Closed
     }
 

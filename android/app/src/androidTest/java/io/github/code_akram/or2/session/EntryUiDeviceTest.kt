@@ -196,9 +196,8 @@ class EntryUiDeviceTest {
         }
         compose.runOnUiThread { screen = "terminal" }
         view = awaitTerminal()
-        // Disconnect from the panes sheet: the final frame stays until the session is closed.
-        compose.onNodeWithTag("terminal-panes").performClick()
-        compose.onNodeWithTag("terminal-disconnect").performClick()
+        // A session that closes by itself (here the server's end): the final frame stays until the user closes it.
+        compose.runOnUiThread { session.listener!!.onStateChanged(SessionState.Closed(CloseReason.Disconnected)) }
         compose.onNodeWithTag("terminal-close").assertIsDisplayed()
         compose.onNodeWithText("Disconnected", substring = true).assertIsDisplayed()
         compose.runOnIdle {
@@ -218,5 +217,37 @@ class EntryUiDeviceTest {
             assertTrue(holder.terminals.value.isEmpty())
         }
         assertNotNull(view)
+    }
+
+    @Test
+    fun closeSessionInThePanesSheetEndsAnOpenTerminalInOneTapAndReturnsHome() {
+        val session = UiSession()
+        val holder = terminalHolder(UiPort { session })
+        var screen by mutableStateOf("terminal")
+        compose.runOnUiThread {
+            holder.openTerminal(holder.host(1)!!, TerminalTarget.Shell)
+            compose.activity.setContent {
+                val terminals by holder.terminals.collectAsState()
+                AppScaffold(fullScreen = screen == "terminal") {
+                    if (screen == "terminal") SessionScreen(holder, terminals.firstOrNull(), terminals, minimise = { screen = "home" }, select = {})
+                    else Text("Home fixture")
+                }
+            }
+        }
+        compose.onNodeWithTag("terminal-panes").performClick()
+        // One action, whatever the state: no "Disconnect" step and no closed strip to dismiss afterwards.
+        compose.onNodeWithText("Disconnect session").assertDoesNotExist()
+        compose.onNodeWithTag("terminal-close-session").assertIsDisplayed().performClick()
+        compose.onNodeWithText("Home fixture").assertIsDisplayed()
+        compose.onNodeWithTag("terminal-close").assertDoesNotExist()
+        compose.waitUntil(5_000) {
+            var closed = false
+            compose.runOnUiThread { closed = session.destroyed }
+            closed
+        }
+        compose.runOnIdle {
+            assertTrue(holder.terminals.value.isEmpty()) // Dismissed, not left behind as a closed thumbnail.
+            assertEquals(1, session.closes)
+        }
     }
 }

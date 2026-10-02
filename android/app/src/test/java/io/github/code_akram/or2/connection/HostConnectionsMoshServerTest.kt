@@ -100,6 +100,25 @@ class HostConnectionsMoshServerTest {
     }
 
     @Test
+    fun closingAnOpenTerminalInOneTapStillStopsAndForgetsItsServer() = runTest {
+        val process = Proc(this, MemoryPrefStore())
+        process.connect()
+        val terminal = process.open()
+        process.sessionState(0, 0, SessionState.Connected)
+        assertEquals(listOf(4242u), process.recorded)
+        // "Close session" on an open terminal: disconnected and dismissed together (SessionScreen's endSession).
+        process.holder.disconnectTerminal(terminal)
+        process.holder.dismissTerminal(terminal)
+        assertTrue(process.holder.terminals.value.isEmpty())
+        val session = process.ports[0].terminals[0].third
+        assertTrue("disconnect" in session.events) // Rust is told to end it (and to stop its server).
+        assertTrue(session.destroyed) // Released: nothing shows it.
+        // Its Closed still arrives on the listener after the dismissal, and the record goes with it.
+        process.sessionState(0, 0, SessionState.Closed(CloseReason.Disconnected))
+        assertEquals(emptyList<UInt>(), process.recorded)
+    }
+
+    @Test
     fun aServerThatEndedItselfIsForgottenToo() = runTest {
         val process = Proc(this, MemoryPrefStore())
         process.connect()
