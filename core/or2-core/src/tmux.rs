@@ -1,11 +1,14 @@
-//! tmux on a host: listing sessions and the command that attaches to one.
+//! tmux on a host: listing sessions, the command that attaches to one, and the navigation moves.
 //!
 //! Everything goes through a [`RemoteHost`] and the absolute tmux path from the capability
 //! probe. tmux uses its default socket; tests isolate it with `TMUX_TMPDIR` in the
 //! environment the commands run in, not with a production option.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
 use crate::host::{NavDirection, TargetNav, TmuxSession};
-use crate::remote::{RemoteCommand, RemoteError, RemoteHost};
+use crate::remote::{ExecOutput, RemoteCommand, RemoteError, RemoteHost};
 
 /// Fields joined by `:`, with the name last. tmux turns `:` and `.` in session names into
 /// `_`, so a name never contains the delimiter, and the name being last means even a
@@ -176,7 +179,7 @@ fn nothing_to_do(stderr: &str) -> bool {
         || stderr.contains("can't find previous session")
 }
 
-fn failure(output: &crate::remote::ExecOutput) -> TmuxError {
+fn failure(output: &ExecOutput) -> TmuxError {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let first = stderr.lines().next().unwrap_or("").trim();
     TmuxError::Failed(if first.is_empty() {
@@ -196,17 +199,15 @@ fn failure(output: &crate::remote::ExecOutput) -> TmuxError {
 /// name in `list-clients`. A client that is no longer listed (the terminal reattached, with a
 /// new client on the target session) is forgotten.
 #[derive(Debug, Default)]
-pub struct NavClients(std::sync::Mutex<std::collections::HashMap<String, String>>);
+pub struct NavClients(Mutex<HashMap<String, String>>);
 
 impl NavClients {
     pub fn new() -> Self {
         Self::default()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, String>> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, String>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The client remembered for `target`, if any.
@@ -471,20 +472,17 @@ mod tests {
     /// Answers each exec with the next scripted output and records the command lines.
     #[derive(Default)]
     struct Scripted {
-        replies: std::sync::Mutex<std::collections::VecDeque<crate::remote::ExecOutput>>,
-        log: std::sync::Mutex<Vec<String>>,
+        replies: Mutex<std::collections::VecDeque<ExecOutput>>,
+        log: Mutex<Vec<String>>,
     }
 
     impl Scripted {
         fn reply(&self, status: u32, stdout: &str, stderr: &str) {
-            self.replies
-                .lock()
-                .unwrap()
-                .push_back(crate::remote::ExecOutput {
-                    status: Some(status),
-                    stdout: stdout.as_bytes().into(),
-                    stderr: stderr.as_bytes().into(),
-                });
+            self.replies.lock().unwrap().push_back(ExecOutput {
+                status: Some(status),
+                stdout: stdout.as_bytes().into(),
+                stderr: stderr.as_bytes().into(),
+            });
         }
 
         fn take_log(&self) -> Vec<String> {
@@ -495,10 +493,7 @@ mod tests {
     impl RemoteHost for Scripted {
         type Stream = tokio::io::DuplexStream;
 
-        async fn exec_rendered(
-            &self,
-            line: &str,
-        ) -> Result<crate::remote::ExecOutput, RemoteError> {
+        async fn exec_rendered(&self, line: &str) -> Result<ExecOutput, RemoteError> {
             self.log.lock().unwrap().push(line.to_owned());
             Ok(self
                 .replies

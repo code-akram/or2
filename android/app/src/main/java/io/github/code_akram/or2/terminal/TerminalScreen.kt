@@ -69,8 +69,8 @@ fun TerminalScreen(
     chrome: TerminalChromeState = remember { TerminalChromeState() },
     /** A frame was drawn (reported to the timing markers, which ignore it unless a path is waiting for one). */
     onFrameDrawn: () -> Unit = {},
-    /** A navigation swipe on the terminal ([SwipeClassifier]). */
-    onSwipe: (Swipe) -> Unit = {},
+    /** A navigation swipe on the terminal ([SwipeClassifier]); null (a shell) recognises none. */
+    onSwipe: ((Swipe) -> Unit)? = null,
     /** Ctrl+Shift+1..9: the open terminal at this index (0-based, Home's order). */
     switchTo: (Int) -> Unit = {},
     /** Ctrl+Shift+W. */
@@ -146,12 +146,13 @@ fun TerminalScreen(
             }
         }
         val swiped by rememberUpdatedState(onSwipe)
-        DisposableEffect(view) {
+        val swipes = onSwipe != null
+        DisposableEffect(view, swipes) {
             view.onShortcut = { shortcut(it) }
-            view.onSwipe = { swiped(it) }
+            view.onSwipe = if (swipes) ({ swipe -> swiped?.invoke(swipe) }) else null
             onDispose {
                 view.onShortcut = {}
-                view.onSwipe = {}
+                view.onSwipe = null
             }
         }
         val pad = PadActions(

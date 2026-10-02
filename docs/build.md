@@ -184,6 +184,14 @@ is. The in-process russh server tests in `ssh/connection_tests.rs` (no sshd need
 refused channels, terminal setup timeout, cancelled execs, the connect timer around the
 host-key prompt and a dying connection task.
 
+`core/or2-core/tests/host_nav.rs` runs `HostHandle::navigate` (the swipe gestures' moves) for a
+tmux target end to end: the disposable sshd, tmux on its private `TMUX_TMPDIR`, a real tmux client
+attached by an SSH terminal, and window, pane and session moves checked with `tmux display` and
+`list-clients` (an `or2-a2` session next to `or2-a` proves the targets are exact). It needs `sshd`
+and `tmux`, with the same skips and `OR2_REQUIRE_*` switches as `host.rs`. The herdr moves run
+against a real isolated herdr in `herdr_live.rs` (below) and a scripted one in `herdr::navigate`'s
+unit tests.
+
 `core/or2-core/tests/host_mosh.rs` runs mosh terminals through a host connection to the
 disposable sshd with a real `mosh-server` (bootstrap, roam, link health, host loss and disconnect,
 blocked UDP, cleanup of unreached servers, and AUTO's absolute start budget: a blocked start and a
@@ -423,7 +431,9 @@ own `herdr --session or2-test-<pid>-<n> server` (every `HERDR_*` variable remove
 reaches the session it may be run from), talks only to that socket, and stops and deletes that
 session. It looks for `herdr` in `OR2_HERDR`, `PATH`, then `~/.local/bin`; without one it skips
 with a message, or fails if `OR2_REQUIRE_HERDR` is set. The restart test waits for two 10 s
-retry intervals (about 20 s in all).
+retry intervals (about 20 s in all). The navigation test builds two workspaces (one with two
+panes side by side and two tabs) and checks every tab, pane and workspace move, wrapping and a
+vanished pane against the session's own snapshot.
 
 ## UI gallery (debug builds)
 

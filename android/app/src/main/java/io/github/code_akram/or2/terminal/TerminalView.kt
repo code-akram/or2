@@ -89,8 +89,11 @@ class TerminalView(context: Context) : View(context) {
     var onInputChanged: () -> Unit = {}
     var onSelectionChanged: () -> Unit = {}
 
-    /** A navigation swipe was recognised ([SwipeClassifier]); the screen decides what it moves. */
-    var onSwipe: (Swipe) -> Unit = {}
+    /**
+     * A navigation swipe was recognised ([SwipeClassifier]); the screen decides what it moves. Null (a
+     * shell, which has nothing to move) leaves every touch to the terminal, as before swipes existed.
+     */
+    var onSwipe: ((Swipe) -> Unit)? = null
 
     /** A hardware-keyboard shortcut was pressed ([terminalShortcut]); the key never reaches the terminal. */
     var onShortcut: (TerminalShortcut) -> Unit = {}
@@ -386,34 +389,43 @@ class TerminalView(context: Context) : View(context) {
     /**
      * Feeds the swipe classifier. True once the touch is a navigation swipe: the gesture detector was
      * cancelled, so the touch never also scrolls, taps or selects, and the rest of it is consumed here.
-     * Not during a selection (its drag moves the selection end).
+     * Not during a selection (its drag moves the selection end), and not without [onSwipe].
      */
     private fun swipeTouch(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                if (selection == null) swipes.down(event.x, event.y) else swipes.cancel()
+                if (selection == null && onSwipe != null) swipes.down(event.x, event.y) else swipes.cancel()
                 return false
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> return swipes.up()
         }
         if (selection != null) swipes.cancel()
-        // The fingers still down: a finger going up is in this event, but no longer counts.
+        // The fingers still down (a finger going up is in this event but no longer counts): their
+        // centre, and the span between the first two.
         val lifted = if (event.actionMasked == MotionEvent.ACTION_POINTER_UP) event.actionIndex else -1
-        val down = (0 until event.pointerCount).filter { it != lifted }
-        if (down.isEmpty()) return swipes.claimed
-        val x = down.map { event.getX(it) }.average().toFloat()
-        val y = down.map { event.getY(it) }.average().toFloat()
-        val span = if (down.size < 2) 0f else
-            hypot(event.getX(down[0]) - event.getX(down[1]), event.getY(down[0]) - event.getY(down[1]))
+        var count = 0
+        var sumX = 0f
+        var sumY = 0f
+        var first = -1
+        var second = -1
+        for (index in 0 until event.pointerCount) {
+            if (index == lifted) continue
+            count++
+            sumX += event.getX(index)
+            sumY += event.getY(index)
+            if (first < 0) first = index else if (second < 0) second = index
+        }
+        if (count == 0) return swipes.claimed
+        val span = if (second < 0) 0f else hypot(event.getX(first) - event.getX(second), event.getY(first) - event.getY(second))
         val wasClaimed = swipes.claimed
-        val swipe = swipes.move(down.size, x, y, span)
+        val swipe = swipes.move(count, sumX / count, sumY / count, span)
         if (swipes.claimed && !wasClaimed) {
             val cancel = MotionEvent.obtain(0, 0, MotionEvent.ACTION_CANCEL, 0f, 0f, 0)
             gestures.onTouchEvent(cancel)
             cancel.recycle()
             scroller.forceFinished(true)
         }
-        swipe?.let(onSwipe)
+        if (swipe != null) onSwipe?.invoke(swipe)
         return swipes.claimed
     }
 

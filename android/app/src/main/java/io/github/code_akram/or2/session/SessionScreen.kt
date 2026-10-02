@@ -124,12 +124,10 @@ fun SessionScreen(
                 handle?.let { TerminalScreen(it, terminal.state, terminal.frameReady, Modifier.weight(1f),
                     composerHint = "Message " + terminal.host.label + "…", openPanes = { switcher = true },
                     onBackground = { background = it }, onFrameDrawn = { holder.timing.terminalFrame(terminal.id) },
-                    // Swipes move tmux or herdr; a shell has nothing to move, so no feedback either.
-                    onSwipe = { swipe ->
-                        if (terminal.target !is TerminalTarget.Shell) {
-                            haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
-                            scope.launch { holder.navigate(terminal, swipeNav(swipe)) }
-                        }
+                    // Swipes move tmux or herdr; a shell has nothing to move and keeps every touch.
+                    onSwipe = if (terminal.target is TerminalTarget.Shell) null else { swipe ->
+                        haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+                        scope.launch { holder.navigate(terminal, swipeNav(swipe)) }
                     },
                     switchTo = { index -> open.getOrNull(index)?.let { if (it !== terminal) select(it) } },
                     closeTerminal = { holder.dismissTerminal(terminal); minimise() }) }
