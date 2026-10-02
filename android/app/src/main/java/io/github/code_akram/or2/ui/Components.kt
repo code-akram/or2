@@ -4,6 +4,18 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -108,30 +120,63 @@ fun BottomInsetSpacer(modifier: Modifier = Modifier) {
 }
 
 /**
- * No app-bar fill: an optional back arrow, a light 16 sp title on the background and trailing
- * icon buttons. Top-level screens pass no title and only [actions].
+ * Every screen's top bar, the one pattern (docs/ui.md, "Top bar"): exactly [Or2Dimens.TopBar] tall,
+ * no fill, an optional back icon, a light 16 sp title and trailing icon buttons. Top-level screens
+ * (Home, Inbox) pass no title and only [actions]. The icon buttons sit on the screen edges, so their
+ * 20 dp glyphs land on the 12 dp gutter like the content below. It is placed above the screen's
+ * scrolling content, never inside it, so it stays put; [scrolled] (see [scrolledUnder]) fades in a
+ * hairline at its bottom edge once that content has scrolled under it.
  */
 @Composable
 fun TopBar(
     modifier: Modifier = Modifier, title: String? = null, back: (() -> Unit)? = null,
-    backIcon: ImageVector = Or2Icons.Back, backDescription: String = "Back", endPadding: Dp = 2.dp, actions: @Composable RowScope.() -> Unit = {},
+    backIcon: ImageVector = Or2Icons.Back, backDescription: String = "Back", scrolled: Boolean = false,
+    actions: @Composable RowScope.() -> Unit = {},
 ) {
-    Row(
-        modifier.fillMaxWidth().padding(start = 2.dp, end = endPadding).heightIn(min = 48.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (back != null) IconAction(backIcon, backDescription, back, Modifier.testTag("top-back"))
-        if (title != null) {
-            Text(
-                title, style = Or2Type.TopBarTitle, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f).padding(start = if (back != null) 12.dp else Or2Dimens.Gutter - 2.dp)
-                    .semantics { heading() },
-            )
-        } else {
-            Spacer(Modifier.weight(1f))
+    val edge by animateFloatAsState(if (scrolled) 1f else 0f, tween(150), label = "top-bar-edge")
+    Box(modifier.fillMaxWidth().height(Or2Dimens.TopBar).testTag("top-bar")) {
+        Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+            if (back != null) IconAction(backIcon, backDescription, back, Modifier.testTag("top-back"))
+            if (title != null) {
+                Text(
+                    title, style = Or2Type.TopBarTitle, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(start = if (back != null) 12.dp else Or2Dimens.Gutter, end = 8.dp)
+                        .semantics { heading() },
+                )
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
+            actions()
         }
-        actions()
+        // The scroll edge: a full-width hairline, only while content sits under the bar.
+        if (edge > 0f) {
+            Box(
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(1.dp).alpha(edge).background(Or2Colors.Divider)
+                    .then(if (scrolled) Modifier.testTag("top-bar-edge") else Modifier),
+            )
+        }
     }
+}
+
+/** Whether a scrolling column's content sits under the top bar: anything but its very top ([ScrollState.value] > 0). */
+fun isScrolledUnder(scrollOffset: Int): Boolean = scrollOffset > 0
+
+/** Whether a lazy list's content sits under the top bar: its first item is gone or partly scrolled away. */
+fun isScrolledUnder(firstVisibleItemIndex: Int, firstVisibleItemScrollOffset: Int): Boolean =
+    firstVisibleItemIndex > 0 || firstVisibleItemScrollOffset > 0
+
+/** [TopBar]'s `scrolled` for a screen whose content is a `verticalScroll` column on this state. */
+@Composable
+fun ScrollState.scrolledUnder(): Boolean {
+    val state = this
+    return remember(state) { derivedStateOf { isScrolledUnder(state.value) } }.value
+}
+
+/** [TopBar]'s `scrolled` for a screen whose content is a lazy list on this state. */
+@Composable
+fun LazyListState.scrolledUnder(): Boolean {
+    val state = this
+    return remember(state) { derivedStateOf { isScrolledUnder(state.firstVisibleItemIndex, state.firstVisibleItemScrollOffset) } }.value
 }
 
 // --- sections and cards --------------------------------------------------------------------
@@ -506,34 +551,65 @@ fun SheetHandle(modifier: Modifier = Modifier) {
 }
 
 /**
+ * How far a sheet may rise: never over the status bar or a top cutout, and [Or2Dimens.SheetTopGap]
+ * below them, so a full-height sheet still reads as a sheet (its rounded top edge shows on the scrim).
+ */
+val Or2SheetTopInsets: WindowInsets @Composable get() = WindowInsets.safeDrawing.only(WindowInsetsSides.Top)
+
+/**
+ * The insets a sheet's content keeps inside the sheet: the gesture bar (and the keyboard) at the
+ * bottom and the side cutouts. The top is left out: [Or2SheetTopInsets] keeps the whole sheet below it.
+ */
+val Or2SheetContentInsets: WindowInsets
+    @Composable get() = WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)
+
+/**
  * A modal bottom sheet in `surfaceRaised`: 24 dp top radius, drag handle, optional title on the
  * left and a "Done" action on the right. Always opens fully.
+ *
+ * The sheet rule (docs/ui.md): Material's sheet window is edge to edge and lets a tall sheet's
+ * surface rise to the very top of the screen, under the status bar, padding only its content. Here
+ * the whole sheet stops [Or2Dimens.SheetTopGap] below the status bar (the padding sits outside the
+ * surface), and the content keeps only the bottom and side insets. [scrollable] content scrolls
+ * inside the sheet when it is taller than that room (the title row stays put); a sheet that lays
+ * out its own scrolling list (the session picker) passes false. [modifier] applies to the sheet's body.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun Or2Sheet(
     onDismiss: () -> Unit, modifier: Modifier = Modifier, title: String? = null, done: String? = "Done",
-    content: @Composable ColumnScope.() -> Unit,
+    scrollable: Boolean = true, content: @Composable ColumnScope.() -> Unit,
 ) {
     ModalBottomSheet(
-        onDismissRequest = onDismiss, modifier = modifier,
+        onDismissRequest = onDismiss,
+        // Outermost on the sheet's surface: the anchors are measured inside it, so "expanded" is its top.
+        modifier = Modifier.windowInsetsPadding(Or2SheetTopInsets).padding(top = Or2Dimens.SheetTopGap),
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         shape = Or2Shapes.Sheet, containerColor = Or2Colors.SurfaceRaised, contentColor = Or2Colors.Text,
-        scrimColor = Or2Colors.Scrim, dragHandle = { SheetHandle() },
+        scrimColor = Or2Colors.Scrim, dragHandle = { SheetHandle(Modifier.testTag("sheet-handle")) },
+        contentWindowInsets = { Or2SheetContentInsets },
     ) {
-        if (title != null || done != null) {
-            Row(
-                Modifier.fillMaxWidth().padding(start = Or2Dimens.Gutter + 4.dp, end = Or2Dimens.Gutter - 4.dp, bottom = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    title.orEmpty(), style = Or2Type.ScreenTitle, color = Or2Colors.Text, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).semantics { heading() },
-                )
-                if (done != null) TextAction(done, onDismiss, color = Or2Colors.Text, modifier = Modifier.testTag("sheet-done"))
+        // The caller's modifier (its test tag) goes on the body, where the sheet is drawn: on the surface it would sit
+        // outside the sheet's drag offset and report the bounds of where the sheet would be fully open.
+        Column(modifier) {
+            if (title != null || done != null) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = Or2Dimens.Gutter + 4.dp, end = Or2Dimens.Gutter - 4.dp, bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        title.orEmpty(), style = Or2Type.ScreenTitle, color = Or2Colors.Text, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).semantics { heading() },
+                    )
+                    if (done != null) TextAction(done, onDismiss, color = Or2Colors.Text, modifier = Modifier.testTag("sheet-done"))
+                }
+            }
+            if (scrollable) {
+                Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).testTag("sheet-content"), content = content)
+            } else {
+                content()
             }
         }
-        content()
     }
 }
 
@@ -553,7 +629,10 @@ fun Or2Dialog(
 ) {
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
-            modifier.padding(horizontal = Or2Dimens.Gutter).widthIn(max = 480.dp).fillMaxWidth()
+            // A tall dialog (a changed host key with many old fingerprints) keeps clear of the status bar and
+            // the cutouts whatever the dialog window does with the insets, and a section gap from the edges.
+            modifier.windowInsetsPadding(WindowInsets.safeDrawing).padding(horizontal = Or2Dimens.Gutter, vertical = Or2Dimens.SectionGap)
+                .widthIn(max = 480.dp).fillMaxWidth()
                 .clip(Or2Shapes.Card).background(Or2Colors.SurfaceRaised).padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp),
         ) {
             Text(title, style = titleStyle, color = titleColor, modifier = Modifier.semantics { heading() })

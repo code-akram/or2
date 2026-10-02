@@ -3,6 +3,8 @@ package io.github.code_akram.or2.gallery
 import android.graphics.Color as AndroidColor
 import android.os.Bundle
 import android.view.View
+import android.view.MotionEvent
+import android.os.SystemClock
 import android.view.ViewGroup
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -95,6 +97,16 @@ import io.github.code_akram.or2.terminal.TerminalView
 import io.github.code_akram.or2.terminal.Transport
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Type
+import androidx.compose.ui.platform.LocalContext
+import io.github.code_akram.or2.about.APP_LICENSE
+import io.github.code_akram.or2.about.LicenseData
+import io.github.code_akram.or2.about.LicenseText
+import io.github.code_akram.or2.about.LicenseTextPage
+import io.github.code_akram.or2.about.readAsset
+import io.github.code_akram.or2.app.SettingsScreen
+import io.github.code_akram.or2.home.HostOptionsSheet
+import io.github.code_akram.or2.keys.PublicKeySheet
+import io.github.code_akram.or2.terminal.ShortcutsSheet
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -104,9 +116,10 @@ import kotlinx.coroutines.flow.receiveAsFlow
 private const val GALLERY_PAIR_CODE = "7KQ4-M2XD-9PTM"
 
 /**
- * Debug-only UI gallery: every screen and key state rendered with fake data, no network, no
+ * Debug-only UI gallery: every screen, sheet and key state rendered with fake data, no network, no
  * biometrics, no database. `am start -n io.github.code_akram.or2/.gallery.UiGalleryActivity
- * --es screen <name>` opens one directly (see [screens]); without an extra it lists them.
+ * --es screen <name>` opens one directly (see [screens]); without an extra it lists them. Any name
+ * with the [SCROLLED] suffix shows that screen with its content dragged up under the top bar.
  */
 class UiGalleryActivity : ComponentActivity() {
     private var probe: Session? = null
@@ -143,6 +156,15 @@ class UiGalleryActivity : ComponentActivity() {
 
     @Composable
     private fun Screen(name: String) {
+        if (name.endsWith(SCROLLED)) {
+            // Any screen, its content scrolled up under the fixed top bar by a real drag (the scroll edge shows).
+            Screen(name.removeSuffix(SCROLLED))
+            LaunchedEffect(name) {
+                delay(1_000)
+                dragUp(window.decorView)
+            }
+            return
+        }
         when (name) {
             "home" -> Home(HomeVariant.Sessions)
             "home-empty" -> Home(HomeVariant.Empty)
@@ -158,6 +180,16 @@ class UiGalleryActivity : ComponentActivity() {
             "picker-herdr" -> Picker(PickerTab.HERDR)
             "picker-tmux" -> Picker(PickerTab.TMUX)
             "picker-recent" -> Picker(PickerTab.RECENT)
+            "picker-many" -> Picker(PickerTab.HERDR, many = true)
+            "home-picker-many" -> HomePicker(HomeVariant.Sessions, gate = null, many = true)
+            "home-options" -> Box(Modifier.fillMaxSize()) {
+                Home(HomeVariant.Sessions)
+                HostOptionsSheet(card(host(1, "workstation"), HostState.Connected(0u)), busy = false, {}, {}, {}, {}, {})
+            }
+            "host" -> HostScreen(host(1, "workstation"), HostState.Connected(0u), caps, null, tmux, false, {}, {}, {}, {}, {}, {}, {}, {},
+                terminals = listOf(HostTerminalItem(1, "tmux main", false), HostTerminalItem(2, "herdr personal", false)))
+            "settings" -> SettingsScreen(agentAlerts = true, setAgentAlerts = {}, copyFromHost = true, setCopyFromHost = {}, back = {})
+            "shortcuts" -> ShortcutsSheet(dismiss = {})
             "host-form" -> HostFormScreen(null, listOf(key1, key2), false, {}, {}, createKey = { _, _ -> key1 }, deviceLabel = "Pixel")
             "host-form-new-key" -> HostFormScreen(null, emptyList(), false, {}, {}, createKey = { _, _ -> key1 }, deviceLabel = "Pixel")
             "host-form-edit" -> HostFormScreen(multiHost, listOf(key1, key2), false, {}, {}, createKey = { _, _ -> key1 }, deviceLabel = "Pixel")
@@ -173,10 +205,20 @@ class UiGalleryActivity : ComponentActivity() {
             "keepalive-waiting" -> KeepAliveScreen(waiting = true, allow = {}, notNow = {})
             "keys" -> KeysScreen(listOf(key1, key2), false, { _, _ -> }, { _, _, _ -> }, {})
             "keys-empty" -> KeysScreen(emptyList(), false, { _, _ -> }, { _, _, _ -> }, {})
+            "key-sheet" -> Box(Modifier.fillMaxSize()) {
+                KeysScreen(listOf(key1, key2), false, { _, _ -> }, { _, _, _ -> }, {})
+                PublicKeySheet(key1, busy = false, delete = {}, dismiss = {})
+            }
             "about" -> AboutRoute(back = {}, openLicenses = {})
             "licenses" -> LicensesRoute(back = {})
+            "license-text" -> {
+                val context = LocalContext.current
+                val gpl = remember { readAsset(context, LicenseData.COPYING) }
+                LicenseTextPage(APP_LICENSE, "The licence of or2 itself", null, null, listOf(LicenseText("COPYING", gpl)), back = {})
+            }
             "hostkey-first" -> HostKey(changed = false)
             "hostkey-changed" -> HostKey(changed = true)
+            "hostkey-changed-many" -> HostKey(changed = true, many = true)
             "terminal" -> Terminal()
             "terminal-tmux" -> Terminal(target = "tmux main", transport = Transport.MOSH)
             "terminal-long" -> Terminal(host = "build-box-staging-eu-west", target = "herdr personal w1:p2", transport = Transport.MOSH)
@@ -231,6 +273,8 @@ class UiGalleryActivity : ComponentActivity() {
 
     private val caps = HostCapabilities("/usr/bin/tmux", "/home/dev/.local/bin/herdr", null, "C.UTF-8", listOf(
         HerdrSessionInfo("personal", true, true), HerdrSessionInfo("work", true, false), HerdrSessionInfo("archive", false, false)))
+    /** A host with more herdr sessions than fit: the picker at full height, its list scrolling inside the sheet. */
+    private val manyCaps = caps.copy(herdrSessions = (1..30).map { HerdrSessionInfo("session-$it", it % 3 != 0, it == 1) })
     private val tmux = TmuxList.Loaded(listOf(
         TmuxSession("main", 3u, 1u, 0L, 30L), TmuxSession("build", 1u, 0u, 0L, 20L), TmuxSession("scratch", 2u, 0u, 0L, 10L)))
 
@@ -313,11 +357,11 @@ class UiGalleryActivity : ComponentActivity() {
      * sheet before its host has connected.
      */
     @Composable
-    private fun HomePicker(variant: HomeVariant, gate: PickerGate?) {
+    private fun HomePicker(variant: HomeVariant, gate: PickerGate?, many: Boolean = false) {
         Box(Modifier.fillMaxSize()) {
             Home(variant)
             SessionPickerSheet(
-                caps, null, tmux,
+                if (many) manyCaps else caps, null, tmux,
                 recent = listOf(HostTerminalItem(1, "tmux main", false), HostTerminalItem(3, "shell", true)),
                 openShell = {}, openTmux = {}, openHerdr = {}, resume = {}, refresh = {}, dismiss = {}, gate = gate, title = "build-box",
             )
@@ -325,11 +369,11 @@ class UiGalleryActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun Picker(tab: PickerTab) {
+    private fun Picker(tab: PickerTab, many: Boolean = false) {
         Box(Modifier.fillMaxSize()) {
             HostScreen(host(1, "workstation"), HostState.Connected(0u), caps, null, tmux, false, {}, {}, {}, {}, {}, {}, {}, {})
             SessionPickerSheet(
-                caps, null, tmux,
+                if (many) manyCaps else caps, null, tmux,
                 recent = listOf(HostTerminalItem(1, "tmux main", false), HostTerminalItem(2, "herdr personal", false), HostTerminalItem(3, "shell", true)),
                 openShell = {}, openTmux = {}, openHerdr = {}, resume = {}, refresh = {}, dismiss = {}, initialTab = tab,
             )
@@ -337,10 +381,12 @@ class UiGalleryActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun HostKey(changed: Boolean) {
+    private fun HostKey(changed: Boolean, many: Boolean = false) {
         val presented = PublicKeyInfo("ssh-ed25519", "k", "SHA256:3Fq8vXk0mT2yLdN7pRzA1sWbHcE9uJgOiVnY5tB4QeM", "")
-        val old = listOf(PublicKeyInfo("ssh-ed25519", "o", "SHA256:Zc9bN1xQ4mWuT7yLdKp2sRfHaE8vJgOiVnY3tB0QeMA", ""),
+        val two = listOf(PublicKeyInfo("ssh-ed25519", "o", "SHA256:Zc9bN1xQ4mWuT7yLdKp2sRfHaE8vJgOiVnY3tB0QeMA", ""),
             PublicKeyInfo("ssh-rsa", "r", "SHA256:Ab3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5bC7dE9f", ""))
+        // Many previously trusted keys: the tallest dialog, which must still keep clear of the status bar.
+        val old = if (many) (1..6).flatMap { two } else two
         HostScreen(host(1, "workstation"), HostState.AwaitingHostKeyDecision(presented, if (changed) old else emptyList()), null, null,
             TmuxList.Loading, false, {}, {}, {}, {}, {}, {}, {}, {})
     }
@@ -415,6 +461,26 @@ class UiGalleryActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * A slow drag up the middle of the screen, ending still (so nothing flings): content scrolls up under the top bar
+     * exactly as a finger would move it.
+     */
+    private fun dragUp(root: View) {
+        val x = root.width / 2f
+        val from = root.height * 0.75f
+        val to = root.height * 0.35f
+        val start = SystemClock.uptimeMillis()
+        fun event(action: Int, y: Float, at: Long) = MotionEvent.obtain(start, start + at, action, x, y, 0).also {
+            root.dispatchTouchEvent(it)
+            it.recycle()
+        }
+        event(MotionEvent.ACTION_DOWN, from, 0)
+        val steps = 20
+        for (step in 1..steps) event(MotionEvent.ACTION_MOVE, from + (to - from) * step / steps, step * 16L)
+        event(MotionEvent.ACTION_MOVE, to, steps * 16L + 200)
+        event(MotionEvent.ACTION_UP, to, steps * 16L + 216)
+    }
+
     private fun findTerminal(view: View): TerminalView? {
         if (view is TerminalView) return view
         if (view is ViewGroup) for (index in 0 until view.childCount) findTerminal(view.getChildAt(index))?.let { return it }
@@ -431,10 +497,18 @@ class UiGalleryActivity : ComponentActivity() {
     }
 
     companion object {
+        /** A name with this suffix is that screen with its content dragged up under the top bar (e.g. `licenses-scrolled`). */
+        const val SCROLLED = "-scrolled"
+
         val screens = listOf(
-            "home", "home-empty", "home-notices", "host-cards", "home-picker", "home-picker-connecting", "home-picker-failed", "inbox", "inbox-empty", "picker-herdr", "picker-tmux", "picker-recent",
-            "host-form", "host-form-new-key", "host-form-edit", "keys", "keys-empty", "about", "licenses", "hostkey-first", "hostkey-changed",
-            "add-host", "pair-scan", "pair-scan-denied", "pair-review", "pair-review-new", "pair-progress", "pair-install", "keepalive", "keepalive-waiting",
+            "home", "home-scrolled", "home-empty", "home-notices", "host-cards", "host-cards-scrolled", "home-options",
+            "home-picker", "home-picker-many", "home-picker-connecting", "home-picker-failed",
+            "inbox", "inbox-scrolled", "inbox-empty", "host", "picker-herdr", "picker-many", "picker-tmux", "picker-recent",
+            "host-form", "host-form-scrolled", "host-form-new-key", "host-form-edit", "keys", "keys-scrolled", "keys-empty", "key-sheet",
+            "settings", "about", "about-scrolled", "licenses", "licenses-scrolled", "license-text", "license-text-scrolled",
+            "hostkey-first", "hostkey-changed", "hostkey-changed-many", "shortcuts",
+            "add-host", "pair-scan", "pair-scan-scrolled", "pair-scan-denied", "pair-review", "pair-review-scrolled", "pair-review-new",
+            "pair-progress", "pair-install", "keepalive", "keepalive-waiting",
             "terminal", "terminal-tmux", "terminal-long", "terminal-stale", "terminal-connecting", "terminal-closed",
             "terminal-arrowpad", "terminal-arrowpad-text", "terminal-herdr-wheel", "terminal-composer",
         )

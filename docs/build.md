@@ -466,10 +466,14 @@ state with fake data: no network, no biometrics, no database. Without an extra i
 screens; `am start -n io.github.code_akram.or2/.gallery.UiGalleryActivity --es screen <name>`
 opens one directly. Names: `home`, `home-empty`, `home-notices` (the battery and notification cards), `host-cards` (unlocking, checking,
 authenticating, connected with a blocked agent, failed, idle; each card with its `>_` session button), `home-picker` (the
-session picker over Home for a connected host), `home-picker-connecting` (over Home while its host connects:
-spinner and progress line), `home-picker-failed` (the failure and **Retry**), `inbox`, `inbox-empty`,
-`picker-herdr`, `picker-tmux`, `picker-recent`, `host-form`, `host-form-new-key` (no stored key: **New key** chosen), `host-form-edit`, `keys`,
-`keys-empty`, `about`, `licenses`, `hostkey-first`, `hostkey-changed`, `add-host` (the add-host chooser in its sheet; `home-empty` shows it inline), `pair-scan`,
+session picker over Home for a connected host), `home-picker-many` (the picker at full height: thirty herdr sessions),
+`home-options` (a host card's long-press options sheet), `home-picker-connecting` (over Home while its host connects:
+spinner and progress line), `home-picker-failed` (the failure and **Retry**), `inbox`, `inbox-empty`, `host` (a
+connected host's screen), `picker-herdr`, `picker-many` (the host screen's picker at full height), `picker-tmux`,
+`picker-recent`, `host-form`, `host-form-new-key` (no stored key: **New key** chosen), `host-form-edit`, `keys`,
+`keys-empty`, `key-sheet` (a key's own sheet), `settings`, `about`, `licenses`, `license-text` (the GPL text page),
+`hostkey-first`, `hostkey-changed`, `hostkey-changed-many` (the tallest trust dialog), `shortcuts` (the keyboard
+shortcuts sheet), `add-host` (the add-host chooser in its sheet; `home-empty` shows it inline), `pair-scan`,
 `pair-scan-denied`, `pair-review`, `pair-review-new` (with a failure), `pair-progress`, `pair-install`
 (Easy pair; the camera preview itself is not in the gallery), `keepalive` (the battery step that ends adding a
 host), `keepalive-waiting` (Android's dialog up), `terminal` (a shell over SSH), `terminal-tmux` (a tmux
@@ -478,7 +482,9 @@ target over Mosh), `terminal-long` (a title long enough to ellipsize), `terminal
 **Close**), `terminal-arrowpad`, `terminal-arrowpad-text` (the pad open over a terminal full of text, to
 judge its blue keys against it), `terminal-herdr-wheel` (a herdr target tracking the mouse after a swipe up
 went to herdr as wheel events: the scroll-to-bottom button shows), `terminal-composer` (opens with a message typed and the keyboard up, to show
-the caret and the lit send button). The terminal screens run the native contract probe and replace its first
+the caret and the lit send button). Any name with the suffix `-scrolled` (`licenses-scrolled`, `about-scrolled`,
+`home-scrolled`, `inbox-scrolled`, ...) is that screen a second after opening, its content dragged up under the
+fixed top bar, so the scroll edge shows. The terminal screens run the native contract probe and replace its first
 frame with a Catppuccin demo session (`gallery/DemoFrames.kt`). Use it to screenshot the phone
 without touching real hosts or the biometric prompt.
 

@@ -60,6 +60,7 @@ import io.github.code_akram.or2.ui.PrimaryButton
 import io.github.code_akram.or2.ui.SectionHeader
 import io.github.code_akram.or2.ui.Spinner
 import io.github.code_akram.or2.ui.TopBar
+import io.github.code_akram.or2.ui.scrolledUnder
 
 /** The pairing screens in turn, driven by the flow's state; [PairFlow] holds all the logic. */
 @Composable
@@ -109,10 +110,11 @@ fun PairScanScreen(code: String, error: String?, access: CameraAccess, onCode: (
         }
     }
     val context = LocalContext.current
+    val scroll = rememberScrollState()
     Column(Modifier.fillMaxSize()) {
-        TopBar(title = "Easy pair", back = back)
+        TopBar(title = "Easy pair", back = back, scrolled = scroll.scrolledUnder())
         Column(
-            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).testTag("pair-scan"),
+            Modifier.weight(1f).verticalScroll(scroll).padding(horizontal = Or2Dimens.Gutter).testTag("pair-scan"),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -219,10 +221,11 @@ fun PairReviewScreen(
     submit: () -> Unit, back: () -> Unit,
 ) {
     val offer = review.offer
+    val scroll = rememberScrollState()
     Column(Modifier.fillMaxSize()) {
-        TopBar(title = "Review", back = back)
+        TopBar(title = "Review", back = back, scrolled = scroll.scrolledUnder())
         Column(
-            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).testTag("pair-review"),
+            Modifier.weight(1f).verticalScroll(scroll).padding(horizontal = Or2Dimens.Gutter).testTag("pair-review"),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Or2Field(review.name, { edit(it, null, null) }, label = "Name", placeholder = "My server", mono = false,
@@ -301,10 +304,11 @@ fun PairReviewScreen(
 /** The phone is logged in to the host and sending its key: one to a few seconds. */
 @Composable
 fun PairProgressScreen(name: String, cancel: () -> Unit) {
+    val scroll = rememberScrollState()
     Column(Modifier.fillMaxSize()) {
-        TopBar(title = "Easy pair")
+        TopBar(title = "Easy pair", scrolled = scroll.scrolledUnder())
         Column(
-            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter * 2).testTag("pair-progress"),
+            Modifier.weight(1f).verticalScroll(scroll).padding(horizontal = Or2Dimens.Gutter * 2).testTag("pair-progress"),
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Spacer(Modifier.height(48.dp))
@@ -323,10 +327,11 @@ fun PairProgressScreen(name: String, cancel: () -> Unit) {
 @Composable
 fun PairInstallKeyScreen(hostLabel: String, keyLine: String, fingerprint: String, done: () -> Unit, trusted: Boolean = true) {
     val context = LocalContext.current
+    val scroll = rememberScrollState()
     Column(Modifier.fillMaxSize()) {
-        TopBar(title = "Add the key to the host")
+        TopBar(title = "Add the key to the host", scrolled = scroll.scrolledUnder())
         Column(
-            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).testTag("pair-install"),
+            Modifier.weight(1f).verticalScroll(scroll).padding(horizontal = Or2Dimens.Gutter).testTag("pair-install"),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(

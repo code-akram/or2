@@ -49,6 +49,7 @@ import io.github.code_akram.or2.ui.PrimaryButton
 import io.github.code_akram.or2.ui.SectionHeader
 import io.github.code_akram.or2.ui.TextAction
 import io.github.code_akram.or2.ui.TopBar
+import io.github.code_akram.or2.ui.scrolledUnder
 
 /** Keys as grouped list cards with mono fingerprints; generate and import are the primary actions. */
 @Composable
@@ -59,7 +60,6 @@ fun KeysScreen(
     delete: (String) -> Unit,
     back: () -> Unit = {},
 ) {
-    val context = LocalContext.current
     var label by rememberSaveable { mutableStateOf("") }
     var comment by rememberSaveable { mutableStateOf("") }
     // Do not save URI/passphrase to SavedState. Retry re-reads the source; file bytes are wiped per attempt.
@@ -71,9 +71,10 @@ fun KeysScreen(
         uri = it
         passphrase = ""
     }
+    val scroll = rememberScrollState()
     Column(Modifier.fillMaxSize()) {
-        TopBar(title = "SSH keys", back = back)
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).testTag("keys-list")) {
+        TopBar(title = "SSH keys", back = back, scrolled = scroll.scrolledUnder())
+        Column(Modifier.weight(1f).verticalScroll(scroll).padding(horizontal = Or2Dimens.Gutter).testTag("keys-list")) {
             Text(
                 "Private keys stay encrypted with hardware-backed AES-GCM. Every save and connect requires a strong biometric.",
                 style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.padding(top = 4.dp),
@@ -131,35 +132,7 @@ fun KeysScreen(
         }
     }
     publicKey?.let { key ->
-        Or2Sheet({ publicKey = null }, title = key.label) {
-            Column(
-                Modifier.verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).padding(bottom = Or2Dimens.Gutter),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Text("${key.algorithm} · Add this line to authorized_keys yourself. or2 never installs keys automatically.",
-                    style = Or2Type.Secondary, color = Or2Colors.TextMuted)
-                SelectionContainer {
-                    Text(key.fingerprint, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.testTag("key-fingerprint"))
-                }
-                SelectionContainer { MonoBlock(key.openssh, Modifier.testTag("key-openssh")) }
-                GroupCard(color = Or2Colors.SurfaceRaisedRow) {
-                    ListRow("Copy public key", icon = Or2Icons.Copy, modifier = Modifier.testTag("key-copy"), onClick = {
-                        (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                            .setPrimaryClip(ClipData.newPlainText("SSH public key", key.openssh))
-                    })
-                    GroupDivider(inset = 44.dp)
-                    ListRow("Share public key", icon = Or2Icons.Share, modifier = Modifier.testTag("key-share"), onClick = {
-                        context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_TEXT, key.openssh)
-                        }, "Share public key"))
-                    })
-                    GroupDivider(inset = 44.dp)
-                    ListRow("Delete key", icon = Or2Icons.Trash, titleColor = Or2Colors.Danger, enabled = !busy,
-                        modifier = Modifier.testTag("key-delete"), onClick = { deleting = key; publicKey = null })
-                }
-            }
-        }
+        PublicKeySheet(key, busy, delete = { deleting = key; publicKey = null }, dismiss = { publicKey = null })
     }
     deleting?.let { key ->
         Or2Dialog(
@@ -167,5 +140,40 @@ fun KeysScreen(
             confirm = { TextAction("Delete", { delete(key.id); deleting = null }, color = Or2Colors.Danger, modifier = Modifier.testTag("key-delete-confirm")) },
             dismiss = { TextAction("Cancel", { deleting = null }, color = Or2Colors.Text) },
         ) { Text("Delete ${key.label} and its encrypted private key? Hosts using it will need a new key selection. This cannot be undone.") }
+    }
+}
+
+/** A key's own sheet: its fingerprint and full public line (selectable), Copy, Share and Delete. */
+@Composable
+fun PublicKeySheet(key: KeyRecord, busy: Boolean, delete: () -> Unit, dismiss: () -> Unit) {
+    val context = LocalContext.current
+    Or2Sheet(dismiss, title = key.label, modifier = Modifier.testTag("key-sheet")) {
+        Column(
+            Modifier.padding(horizontal = Or2Dimens.Gutter).padding(bottom = Or2Dimens.Gutter),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("${key.algorithm} · Add this line to authorized_keys yourself. or2 never installs keys automatically.",
+                style = Or2Type.Secondary, color = Or2Colors.TextMuted)
+            SelectionContainer {
+                Text(key.fingerprint, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.testTag("key-fingerprint"))
+            }
+            SelectionContainer { MonoBlock(key.openssh, Modifier.testTag("key-openssh")) }
+            GroupCard(color = Or2Colors.SurfaceRaisedRow) {
+                ListRow("Copy public key", icon = Or2Icons.Copy, modifier = Modifier.testTag("key-copy"), onClick = {
+                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                        .setPrimaryClip(ClipData.newPlainText("SSH public key", key.openssh))
+                })
+                GroupDivider(inset = 44.dp)
+                ListRow("Share public key", icon = Or2Icons.Share, modifier = Modifier.testTag("key-share"), onClick = {
+                    context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, key.openssh)
+                    }, "Share public key"))
+                })
+                GroupDivider(inset = 44.dp)
+                ListRow("Delete key", icon = Or2Icons.Trash, titleColor = Or2Colors.Danger, enabled = !busy,
+                    modifier = Modifier.testTag("key-delete"), onClick = delete)
+            }
+        }
     }
 }

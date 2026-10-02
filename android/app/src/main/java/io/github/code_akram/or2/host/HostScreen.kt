@@ -65,6 +65,7 @@ import io.github.code_akram.or2.ui.Segmented
 import io.github.code_akram.or2.ui.Spinner
 import io.github.code_akram.or2.ui.StatusDot
 import io.github.code_akram.or2.ui.TopBar
+import io.github.code_akram.or2.ui.scrolledUnder
 
 /** The tmux session list of a connected host as the screen last learned it. */
 sealed interface TmuxList {
@@ -117,12 +118,13 @@ fun HostScreen(
 ) {
     val link = linkStatus(hostState, host.sleeps)
     var pickerOpen by rememberSaveable { mutableStateOf(false) }
+    val scroll = rememberScrollState()
     Column(modifier.fillMaxSize()) {
-        TopBar(title = host.label, back = back, actions = {
+        TopBar(title = host.label, back = back, scrolled = scroll.scrolledUnder(), actions = {
             IconAction(Or2Icons.Pencil, "Edit host", edit, Modifier.testTag("host-edit"), enabled = !busy)
         })
         Column(
-            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).testTag("host-detail"),
+            Modifier.weight(1f).verticalScroll(scroll).padding(horizontal = Or2Dimens.Gutter).testTag("host-detail"),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             StatusCard(host, hostState, link)
@@ -253,7 +255,7 @@ fun SessionPickerSheet(
     val tab = chosen ?: if (caps != null && caps.herdr == null && caps.tmux != null) PickerTab.TMUX else PickerTab.HERDR
     // A fixed minimum height keeps the segmented control where the thumb left it when the tab changes.
     val minHeight = (LocalConfiguration.current.screenHeightDp * 0.4f).dp
-    Or2Sheet(dismiss, title = null, done = null) {
+    Or2Sheet(dismiss, title = null, done = null, scrollable = false) {
         Column(Modifier.imePadding().heightIn(min = minHeight).testTag("session-picker")) {
             if (gate != null) {
                 GatePane(gate, gateAction)

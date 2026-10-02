@@ -85,9 +85,26 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   status dots 8 dp.
 - Controls: fields and the primary button 44 dp; segmented control 32 dp; chips 28 dp; pill
   buttons 36 dp.
-- Top bar: no app-bar fill. Back arrow + light 20 sp title on the background; top-level screens
-  (Home, Inbox) show only trailing icon buttons (inbox/home switch, keys), 44 dp round buttons
-  (touch target 48 dp) with 12 dp end padding; the form's close and check sit 2 dp from the edge.
+- Top bar: one component (`TopBar`) on every screen but the terminal (whose header is its own),
+  the same everywhere. No app-bar fill: exactly 48 dp tall (`Or2Dimens.TopBar`) right under the
+  status bar (the root applies the top inset once; nothing else does), an optional back icon, a light
+  16 sp title (`TopBarTitle`, sentence case: "SSH keys", "New connection") and trailing actions as
+  quiet 44 dp round icon buttons (touch target 48 dp), never pills or text buttons. Top-level screens
+  (Home, Inbox) have no title, only their row of icons. The icon buttons sit on the screen edges, so
+  the 20 dp glyphs (back on the left, the last action on the right) land on the 12 dp gutter like
+  the content below; the title starts on the gutter too, or 12 dp after the back button.
+- The bar never scrolls: it is laid out above the screen's scrolling content (a `verticalScroll`
+  column or a lazy list filling the rest of the screen), which is clipped at the bar's bottom edge,
+  so nothing ever scrolls over the bar or into the status bar. **Scroll edge:** while content sits
+  under the bar (scrolled away from its very top, `ScrollState.scrolledUnder()` /
+  `LazyListState.scrolledUnder()`), a full-width 1 dp `divider` hairline fades in (150 ms) at the
+  bar's bottom edge; at the top it fades out. It is the only edge: no shadow, no fill.
+- Nothing draws over the status bar or a top cutout: not a screen, a sheet, a dialog or the camera
+  preview (Easy pair's preview is a `TextureView`, `COMPATIBLE` mode, so it is clipped like any other
+  content; a `SurfaceView` would sit in its own layer that Compose's clips do not reach). Only a
+  sheet's or dialog's scrim dims it. The navigation is instant (no slide or cross-fade), so no
+  transition frame draws a screen elsewhere either. `TopEdgeDeviceTest` checks every gallery screen,
+  sheet and dialog.
 - Glow: a wide, flat ellipse behind the top bar (gone before lists start, so sticky headers on a
   plain `background` have no visible edge) and a modest radial in the bottom-right corner.
 - Primary action: full-width pill button (`accent`, 44 dp tall; the disabled label is
@@ -112,7 +129,15 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 - Empty states: centred 72 dp `surface` circle with a 32 dp outline icon, a 20 sp title and a
   muted two-line explanation, then an optional call-to-action card.
 - Bottom sheets: `surfaceRaised`, 24 dp top radius, drag handle; option and detail sheets have a title
-  left and "Done" right. The session picker has neither, like Moshi's, and a minimum height of 40 % of
+  left and "Done" right. **Sheet inset rule** (`Or2Sheet`, the only sheet): a sheet never rises over
+  the status bar. Material's sheet window is edge to edge and lets a tall sheet's surface reach the
+  very top of the screen, padding only its content; `Or2Sheet` instead pads the whole sheet by the top
+  safe-drawing inset plus `Or2Dimens.SheetTopGap` (12 dp), outside the surface, so a full-height sheet
+  stops 12 dp below the status bar with its rounded top showing on the scrim. The content keeps only
+  the bottom (gesture bar, keyboard) and side insets, and it scrolls inside the sheet when it is
+  taller than that room, the title row staying put (the session picker scrolls its own list).
+- Dialogs (`Or2Dialog`) keep the safe-drawing insets and a 24 dp margin above and below, so a tall one
+  (a changed host key with many old fingerprints) stays clear of the status bar and scrolls inside. The session picker has neither, like Moshi's, and a minimum height of 40 % of
   the screen (a sheet for three rows is not mostly empty) so the segmented control stays put when the tab (and so the list) changes
   unless a list grows past it.
 

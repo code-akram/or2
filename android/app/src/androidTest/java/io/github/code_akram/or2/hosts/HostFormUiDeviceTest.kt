@@ -115,7 +115,7 @@ class HostFormUiDeviceTest {
         var saved: Host? = null
         val existing = uiHost(3, "Existing", addresses = listOf(HostEndpoint("a.invalid", 22), HostEndpoint("b.invalid", 2222)))
         show(existing, save = { saved = it })
-        compose.onNodeWithText("Edit Connection").assertIsDisplayed()
+        compose.onNodeWithText("Edit connection").assertIsDisplayed()
         compose.onNodeWithText("Changing any address or port clears previous host-key trust.").performScrollTo().assertIsDisplayed()
         compose.onNodeWithTag("address-down:0").performScrollTo().performClick()
         compose.onNodeWithTag("host-inbox").performScrollTo().performClick()
@@ -233,7 +233,7 @@ class HostFormUiDeviceTest {
         var closed = 0
         var saved = 0
         show(null, save = { saved++ }, close = { closed++ })
-        compose.onNodeWithText("New Connection").assertIsDisplayed()
+        compose.onNodeWithText("New connection").assertIsDisplayed()
         compose.onNodeWithTag("host-form-save").assertIsNotEnabled()
         compose.onNodeWithContentDescription("Close").performClick() // The leading icon is a close (X) here.
         compose.runOnIdle {

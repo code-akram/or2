@@ -54,6 +54,7 @@ import io.github.code_akram.or2.ui.Segmented
 import io.github.code_akram.or2.ui.TopBar
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import io.github.code_akram.or2.ui.scrolledUnder
 
 /**
  * Add or edit a host: filled fields with labels above and mono placeholders, an ordered address
@@ -133,13 +134,15 @@ fun HostFormScreen(
             installKeyId = key.id
         }
     }
+    val scroll = rememberScrollState()
     Column(Modifier.fillMaxSize()) {
         TopBar(
-            title = if (previous == null) "New Connection" else "Edit Connection", back = close, backIcon = Or2Icons.Close, backDescription = "Close",
+            title = if (previous == null) "New connection" else "Edit connection", back = close, backIcon = Or2Icons.Close, backDescription = "Close",
+            scrolled = scroll.scrolledUnder(),
             actions = { IconAction(Or2Icons.Check, "Save", ::submit, Modifier.testTag("host-form-save"), tint = Or2Colors.Accent, enabled = valid && !busy && !working) },
         )
         Column(
-            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).testTag("host-form"),
+            Modifier.weight(1f).verticalScroll(scroll).padding(horizontal = Or2Dimens.Gutter).testTag("host-form"),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Spacer(Modifier.height(0.dp))

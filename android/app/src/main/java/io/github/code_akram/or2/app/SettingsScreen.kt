@@ -22,6 +22,7 @@ import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Toggle
 import io.github.code_akram.or2.ui.SectionHeader
 import io.github.code_akram.or2.ui.TopBar
+import io.github.code_akram.or2.ui.scrolledUnder
 
 /** The muted sentence under the `Agent notifications` switch. */
 const val AGENT_ALERTS_EXPLANATION =
@@ -52,9 +53,10 @@ fun SettingsScreen(
     back: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val scroll = rememberScrollState()
     Column(modifier.fillMaxSize()) {
-        TopBar(title = "Settings", back = back)
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).testTag("settings-list")) {
+        TopBar(title = "Settings", back = back, scrolled = scroll.scrolledUnder())
+        Column(Modifier.weight(1f).verticalScroll(scroll).padding(horizontal = Or2Dimens.Gutter).testTag("settings-list")) {
             SectionHeader("Notifications", topGap = 8.dp)
             GroupCard {
                 ListRow(

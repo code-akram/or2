@@ -122,6 +122,12 @@ object Or2Dimens {
     val SheetHandleWidth = 32.dp
     val SheetHandleHeight = 4.dp
 
+    /** Every screen's top bar is exactly this tall, title or not (docs/ui.md, "Top bar"). */
+    val TopBar = 48.dp
+
+    /** The least room between the status bar (or a cutout) and a full-height sheet's top edge. */
+    val SheetTopGap = 12.dp
+
     /** The terminal header's drag handle: thin (28 x 3 dp), 4 dp from the card's top edge, inside the 36 dp header. */
     val TerminalHandleWidth = 28.dp
     val TerminalHandleHeight = 3.dp

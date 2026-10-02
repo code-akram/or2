@@ -45,6 +45,8 @@ import io.github.code_akram.or2.ui.PillButton
 import io.github.code_akram.or2.ui.SectionHeader
 import io.github.code_akram.or2.ui.StatusDot
 import io.github.code_akram.or2.ui.TopBar
+import androidx.compose.foundation.lazy.rememberLazyListState
+import io.github.code_akram.or2.ui.scrolledUnder
 
 /** The dot column of agent rows and host rows: both start their text at the same x. */
 private val LeadingSlot = 20.dp
@@ -92,8 +94,9 @@ fun InboxScreen(
         it.host.keyId != null && it.link.canConnect
     }
     val anyConnected = state.hosts.any { it.link == LinkStatus.CONNECTED }
+    val list = rememberLazyListState()
     Column(modifier.fillMaxSize()) {
-        TopBar(endPadding = Or2Dimens.Gutter, actions = {
+        TopBar(scrolled = list.scrolledUnder(), actions = {
             IconAction(Or2Icons.Home, "Home", openHome, Modifier.testTag("nav-home"))
             IconAction(Or2Icons.Key, "SSH keys", openKeys, Modifier.testTag("nav-keys"))
         })
@@ -103,7 +106,7 @@ fun InboxScreen(
                 // `background` plus the corner glow (the top glow ends above it).
                 drawRect(Or2Colors.Background)
                 drawCornerGlow()
-            }, contentPadding = PaddingValues(horizontal = Or2Dimens.Gutter),
+            }, state = list, contentPadding = PaddingValues(horizontal = Or2Dimens.Gutter),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             if (state.hosts.isEmpty()) {

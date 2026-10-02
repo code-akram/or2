@@ -67,6 +67,7 @@ import io.github.code_akram.or2.ui.StatusChip
 import io.github.code_akram.or2.ui.StatusDot
 import io.github.code_akram.or2.ui.TextAction
 import io.github.code_akram.or2.ui.TopBar
+import io.github.code_akram.or2.ui.scrolledUnder
 
 /** An open terminal as the SESSIONS section shows it; [preview] draws its live thumbnail. */
 class HomeSession(
@@ -126,9 +127,10 @@ fun HomeScreen(
 ) {
     var options by remember { mutableStateOf<HostCard?>(null) }
     var deleting by remember { mutableStateOf<Host?>(null) }
+    val scroll = rememberScrollState()
     Box(modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).testTag("home-list")) {
-            TopBar(endPadding = Or2Dimens.Gutter, actions = {
+        Column(Modifier.fillMaxSize()) {
+            TopBar(scrolled = scroll.scrolledUnder(), actions = {
                 Box {
                     IconAction(
                         Or2Icons.Inbox,
@@ -143,7 +145,7 @@ fun HomeScreen(
                 IconAction(Or2Icons.Settings, "Settings", openSettings, Modifier.testTag("nav-settings"))
                 IconAction(Or2Icons.Info, "About or2", openAbout, Modifier.testTag("nav-about"))
             })
-            Column(Modifier.padding(horizontal = Or2Dimens.Gutter)) {
+            Column(Modifier.weight(1f).verticalScroll(scroll).padding(horizontal = Or2Dimens.Gutter).testTag("home-list")) {
                 if (resume != null) {
                     ActionCard("Resume", resume.title, "Unlocks if needed, then returns to this terminal.", meta = resume.detail,
                         icon = Or2Icons.Terminal, onClick = onResume, modifier = Modifier.padding(top = Or2Dimens.Gutter).testTag("home-resume"))
@@ -180,9 +182,9 @@ fun HomeScreen(
                         if (canConnectAll && !busy) StatusChip("Connect all", Or2Colors.Accent, Modifier.testTag("home-connect-all"), onClick = connectAll)
                     }
                 }
+                Spacer(Modifier.height(Or2Dimens.Fab + 32.dp))
+                BottomInsetSpacer()
             }
-            Spacer(Modifier.height(Or2Dimens.Fab + 32.dp))
-            BottomInsetSpacer()
         }
         Box(
             Modifier.align(Alignment.BottomEnd).windowInsetsPadding(Or2BottomInsets).padding(end = 16.dp, bottom = 8.dp).size(Or2Dimens.Fab).clip(Or2Shapes.Circle)
@@ -194,29 +196,11 @@ fun HomeScreen(
         }
     }
     options?.let { card ->
-        val host = card.host
-        Or2Sheet({ options = null }, title = host.label, done = "Done") {
-            Column(Modifier.padding(horizontal = Or2Dimens.Gutter).padding(bottom = Or2Dimens.Gutter)) {
-                GroupCard(color = Or2Colors.SurfaceRaisedRow) {
-                    val live = !card.link.canConnect
-                    if (!live) {
-                        ListRow("Connect", icon = Or2Icons.Power, enabled = !busy && host.keyId != null,
-                            subtitle = if (host.keyId == null) "Select a key first" else null,
-                            modifier = Modifier.testTag("option-connect"), onClick = { options = null; connectHost(host) })
-                        GroupDivider(inset = 44.dp)
-                    }
-                    ListRow("Edit", icon = Or2Icons.Pencil, modifier = Modifier.testTag("option-edit"), onClick = { options = null; editHost(host) })
-                    if (live) {
-                        GroupDivider(inset = 44.dp)
-                        ListRow("Disconnect", icon = Or2Icons.Power, modifier = Modifier.testTag("option-disconnect"),
-                            onClick = { options = null; disconnectHost(host) })
-                    }
-                    GroupDivider(inset = 44.dp)
-                    ListRow("Delete", icon = Or2Icons.Trash, titleColor = Or2Colors.Danger, enabled = !busy,
-                        modifier = Modifier.testTag("option-delete"), onClick = { options = null; deleting = host })
-                }
-            }
-        }
+        HostOptionsSheet(
+            card, busy, connect = { options = null; connectHost(card.host) }, edit = { options = null; editHost(card.host) },
+            disconnect = { options = null; disconnectHost(card.host) }, delete = { options = null; deleting = card.host },
+            dismiss = { options = null },
+        )
     }
     deleting?.let { host ->
         Or2Dialog(
@@ -224,6 +208,35 @@ fun HomeScreen(
             confirm = { TextAction("Delete", { deleteHost(host); deleting = null }, color = Or2Colors.Danger, modifier = Modifier.testTag("delete-confirm")) },
             dismiss = { TextAction("Cancel", { deleting = null }, color = Or2Colors.Text) },
         ) { Text("Delete ${host.label} and its trusted host keys? This does not delete your SSH key.") }
+    }
+}
+
+/** A host card's long-press options: Connect or Disconnect, Edit and Delete, under the host's name. */
+@Composable
+fun HostOptionsSheet(
+    card: HostCard, busy: Boolean, connect: () -> Unit, edit: () -> Unit, disconnect: () -> Unit, delete: () -> Unit, dismiss: () -> Unit,
+) {
+    val host = card.host
+    Or2Sheet(dismiss, title = host.label, done = "Done", modifier = Modifier.testTag("host-options-sheet")) {
+        Column(Modifier.padding(horizontal = Or2Dimens.Gutter).padding(bottom = Or2Dimens.Gutter)) {
+            GroupCard(color = Or2Colors.SurfaceRaisedRow) {
+                val live = !card.link.canConnect
+                if (!live) {
+                    ListRow("Connect", icon = Or2Icons.Power, enabled = !busy && host.keyId != null,
+                        subtitle = if (host.keyId == null) "Select a key first" else null,
+                        modifier = Modifier.testTag("option-connect"), onClick = connect)
+                    GroupDivider(inset = 44.dp)
+                }
+                ListRow("Edit", icon = Or2Icons.Pencil, modifier = Modifier.testTag("option-edit"), onClick = edit)
+                if (live) {
+                    GroupDivider(inset = 44.dp)
+                    ListRow("Disconnect", icon = Or2Icons.Power, modifier = Modifier.testTag("option-disconnect"), onClick = disconnect)
+                }
+                GroupDivider(inset = 44.dp)
+                ListRow("Delete", icon = Or2Icons.Trash, titleColor = Or2Colors.Danger, enabled = !busy,
+                    modifier = Modifier.testTag("option-delete"), onClick = delete)
+            }
+        }
     }
 }
 

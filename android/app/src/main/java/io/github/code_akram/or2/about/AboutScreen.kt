@@ -34,6 +34,7 @@ import io.github.code_akram.or2.ui.Or2Icons
 import io.github.code_akram.or2.ui.Or2Type
 import io.github.code_akram.or2.ui.SectionHeader
 import io.github.code_akram.or2.ui.TopBar
+import io.github.code_akram.or2.ui.scrolledUnder
 
 /** Where or2's source lives. */
 const val SOURCE_URL = "https://github.com/code-akram/or2"
@@ -100,9 +101,10 @@ fun AboutScreen(
         )
         return
     }
+    val scroll = rememberScrollState()
     Column(modifier.fillMaxSize()) {
-        TopBar(title = "About or2", back = back)
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).testTag("about-list")) {
+        TopBar(title = "About or2", back = back, scrolled = scroll.scrolledUnder())
+        Column(Modifier.weight(1f).verticalScroll(scroll).padding(horizontal = Or2Dimens.Gutter).testTag("about-list")) {
             Text("or2", style = Or2Type.ScreenTitle, color = Or2Colors.Text, modifier = Modifier.padding(top = 8.dp))
             Text(
                 "A free, open-source Android client for SSH and mosh, built for driving coding agents on your own machines.",
@@ -160,9 +162,10 @@ fun LicenseTextPage(
     modifier: Modifier = Modifier,
     note: String? = null,
 ) {
+    val scroll = rememberScrollState()
     Column(modifier.fillMaxSize()) {
-        TopBar(title = title, back = back)
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter).testTag("license-text")) {
+        TopBar(title = title, back = back, scrolled = scroll.scrolledUnder())
+        Column(Modifier.weight(1f).verticalScroll(scroll).padding(horizontal = Or2Dimens.Gutter).testTag("license-text")) {
             if (summary != null) Text(summary, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.padding(top = 4.dp))
             if (!repository.isNullOrBlank()) {
                 SelectionContainer { Text(repository, style = Or2Type.MonoSmall, color = Or2Colors.Accent, modifier = Modifier.padding(top = 2.dp)) }

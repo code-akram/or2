@@ -25,6 +25,7 @@ import io.github.code_akram.or2.ui.Or2Type
 import io.github.code_akram.or2.ui.PrimaryButton
 import io.github.code_akram.or2.ui.TextAction
 import io.github.code_akram.or2.ui.TopBar
+import io.github.code_akram.or2.ui.scrolledUnder
 
 /** The battery step's title and its one line on why. */
 const val KEEP_ALIVE_TITLE = "Keep sessions alive in the background?"
@@ -39,10 +40,11 @@ const val KEEP_ALIVE_WHY = "Android may stop the connection while or2 is in the 
 fun KeepAliveScreen(waiting: Boolean, allow: () -> Unit, notNow: () -> Unit) {
     // Back is "Not now"; while Android's dialog is up there is nothing to answer.
     BackHandler { if (!waiting) notNow() }
+    val scroll = rememberScrollState()
     Column(Modifier.fillMaxSize()) {
-        TopBar()
+        TopBar(scrolled = scroll.scrolledUnder())
         Column(
-            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Or2Dimens.Gutter * 2).testTag("keepalive"),
+            Modifier.weight(1f).verticalScroll(scroll).padding(horizontal = Or2Dimens.Gutter * 2).testTag("keepalive"),
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Spacer(Modifier.height(48.dp))

@@ -73,7 +73,16 @@ fun QrScanner(onCode: (String) -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val latest by rememberUpdatedState(onCode)
-    val view = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
+    // COMPATIBLE draws the preview in a TextureView, inside the view hierarchy: it is clipped like any other
+    // content (the card's rounded corners, the scrolling column under the top bar). The default SurfaceView sits
+    // in its own layer that Compose's clips do not reach, so a scrolled-away preview could show over the top bar and
+    // the status bar.
+    val view = remember {
+        PreviewView(context).apply {
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        }
+    }
     DisposableEffect(lifecycleOwner, view) {
         val executor = Executors.newSingleThreadExecutor()
         val main = ContextCompat.getMainExecutor(context)

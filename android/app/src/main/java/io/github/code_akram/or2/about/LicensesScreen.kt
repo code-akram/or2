@@ -34,10 +34,13 @@ import io.github.code_akram.or2.ui.Spinner
 import io.github.code_akram.or2.ui.TopBar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
+import io.github.code_akram.or2.ui.scrolledUnder
 
 /** The Open source licenses destination: loads the assets off the main thread, then shows the list. */
 @Composable
-fun LicensesRoute(back: () -> Unit) {
+fun LicensesRoute(back: () -> Unit, listState: LazyListState = rememberLazyListState()) {
     val context = LocalContext.current
     val loaded by produceState<Result<LicenseData>?>(null) {
         value = withContext(Dispatchers.IO) { runCatching { LicenseData.load { readAsset(context, it) } } }
@@ -50,7 +53,7 @@ fun LicensesRoute(back: () -> Unit) {
         }
     } else {
         result.fold(
-            onSuccess = { LicensesScreen(it, back) },
+            onSuccess = { LicensesScreen(it, back, listState = listState) },
             onFailure = {
                 Column(Modifier.fillMaxSize()) {
                     TopBar(title = "Open source licenses", back = back)
@@ -70,7 +73,7 @@ fun LicensesRoute(back: () -> Unit) {
  * returns to the list. Stateless: [data] comes from the assets.
  */
 @Composable
-fun LicensesScreen(data: LicenseData, back: () -> Unit, modifier: Modifier = Modifier) {
+fun LicensesScreen(data: LicenseData, back: () -> Unit, modifier: Modifier = Modifier, listState: LazyListState = rememberLazyListState()) {
     var selectedKey by rememberSaveable { mutableStateOf<String?>(null) }
     val selected = selectedKey?.let(data::find)
     if (selected != null) {
@@ -84,8 +87,8 @@ fun LicensesScreen(data: LicenseData, back: () -> Unit, modifier: Modifier = Mod
         return
     }
     Column(modifier.fillMaxSize()) {
-        TopBar(title = "Open source licenses", back = back)
-        LazyColumn(Modifier.weight(1f).padding(horizontal = Or2Dimens.Gutter).testTag("licenses-list")) {
+        TopBar(title = "Open source licenses", back = back, scrolled = listState.scrolledUnder())
+        LazyColumn(Modifier.weight(1f).padding(horizontal = Or2Dimens.Gutter).testTag("licenses-list"), state = listState) {
             item(key = "intro") {
                 Text(
                     "or2 is GPL-3.0-or-later. These projects ship inside it under their own licences; tap one for its full text.",
