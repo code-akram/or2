@@ -1288,11 +1288,13 @@ async fn hold(
         ..
     } = request;
     let (ended_sender, mut ended) = oneshot::channel();
+    // The trusted keys' algorithms first, so a host with several keys presents a trusted one.
+    let config = config(&trusted_host_keys);
     let mut client = Client::new(trusted_host_keys, events.clone());
     client.ended = Some(ended_sender);
     #[cfg(test)]
     let reader_gate = Arc::clone(&client.reader_gate);
-    let mut handle = russh_client::connect_stream(config(), stream, client)
+    let mut handle = russh_client::connect_stream(config, stream, client)
         .await
         .map_err(handshake_failure)?;
     let _ = events.send(HostEvent::Authenticating).await;

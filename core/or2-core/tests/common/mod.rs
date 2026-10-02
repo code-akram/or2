@@ -1,4 +1,5 @@
-//! Shared by the disposable OpenSSH integration tests (`host.rs`, `host_mosh.rs`). Only
+//! Shared by the disposable OpenSSH integration tests (`host.rs`, `host_mosh.rs`,
+//! `host_keys.rs`). Only
 //! temporary keys/configuration and an ephemeral loopback listener are used; no home keys,
 //! system sshd or existing authorization are touched.
 #![allow(dead_code)]
@@ -92,8 +93,11 @@ pub struct Sshd {
     pub directory: tempfile::TempDir,
     child: Child,
     pub port: u16,
-    /// The host's public key, as an `authorized_keys`-style line.
+    /// The host's ED25519 public key, as an `authorized_keys`-style line.
     pub host: String,
+    /// The other host keys of [`Sshd::with_every_host_key`] (ECDSA, then RSA), as lines like
+    /// [`Sshd::host`]'s; empty otherwise.
+    pub other_host_keys: Vec<String>,
     /// `TMUX_TMPDIR` of every session this sshd starts: tmux in these tests never touches the
     /// user's default socket.
     pub tmux_dir: PathBuf,
@@ -114,6 +118,23 @@ impl Sshd {
     /// session of this sshd runs with. Only the first `SetEnv` line of a config counts, hence
     /// a parameter rather than another line in `extra`.
     pub fn with_environment(certificate_only: bool, extra: &str, environment: &str) -> Self {
+        Self::start(certificate_only, extra, environment, &[])
+    }
+
+    /// A host like most real ones: ED25519 ([`Sshd::host`]), ECDSA P-256 and RSA 3072 host keys
+    /// ([`Sshd::other_host_keys`]), configured in the order of a stock `sshd_config` (RSA, ECDSA,
+    /// ED25519).
+    pub fn with_every_host_key() -> Self {
+        Self::start(false, "", "", &[("rsa", "3072"), ("ecdsa", "256")])
+    }
+
+    /// `others` are the `ssh-keygen` type and size of host keys configured before the ED25519 one.
+    fn start(
+        certificate_only: bool,
+        extra: &str,
+        environment: &str,
+        others: &[(&str, &str)],
+    ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path();
         let host = ClientKey::generate_ed25519("");
@@ -122,8 +143,33 @@ impl Sshd {
         fs::write(path.join("authorized"), "").unwrap();
         let tmux_dir = path.join("tmux");
         fs::create_dir(&tmux_dir).unwrap();
+        let mut host_key_lines = String::new();
+        let mut other_host_keys = Vec::new();
+        for (kind, bits) in others {
+            let file = path.join(format!("host_{kind}"));
+            assert!(
+                Command::new("ssh-keygen")
+                    .args(["-q", "-t", kind, "-b", bits, "-N", "", "-C", "", "-f"])
+                    .arg(&file)
+                    .stdin(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            host_key_lines.push_str(&format!("HostKey {}\n", file.display()));
+            let public = fs::read_to_string(file.with_extension("pub")).unwrap();
+            other_host_keys.push(
+                public
+                    .split_whitespace()
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        // Configured RSA first, as stock; listed ECDSA first (the field's documented order).
+        other_host_keys.reverse();
         let mut config = format!(
-            "ListenAddress {}\nHostKey {}\nAuthorizedKeysFile {}\nPidFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPrintMotd no\nPrintLastLog no\nSetEnv HOME={} HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR={} TMUX_TMPDIR={} {environment}\nLogLevel VERBOSE\n",
+            "ListenAddress {}\n{host_key_lines}HostKey {}\nAuthorizedKeysFile {}\nPidFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPrintMotd no\nPrintLastLog no\nSetEnv HOME={} HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR={} TMUX_TMPDIR={} {environment}\nLogLevel VERBOSE\n",
             Ipv4Addr::LOCALHOST,
             path.join("host").display(),
             path.join("authorized").display(),
@@ -177,6 +223,7 @@ impl Sshd {
                         child,
                         port,
                         host: host.public_key().openssh,
+                        other_host_keys: other_host_keys.clone(),
                         tmux_dir,
                     };
                 }

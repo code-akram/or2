@@ -106,6 +106,19 @@ opens sockets.
   with `HostKeyMismatch`, binding the decision to the key the user saw. `reject_host_key()`
   closes with `HostKeyRejected`.
 - The server's login grace time bounds the wait; expiry arrives as `ConnectionLost`.
+- **The host presents a trusted key if it has one.** sshd presents its key of the first host-key
+  algorithm in the client's list that it has a key for, and most hosts have ED25519, ECDSA and
+  RSA keys. The client therefore lists the algorithms of the trusted keys first (an RSA key
+  counts for `rsa-sha2-512`, `rsa-sha2-256` and `ssh-rsa`), in russh's default order among
+  themselves, then every other default algorithm (`ssh::client::config`). A host trusted by its
+  RSA or ECDSA key is never asked for its ED25519 key first (which would be a false "changed"
+  prompt); a host whose trusted key is ED25519, or with nothing trusted, sees russh's default
+  order (ED25519 first). The other algorithms stay on offer, so a host that has none of the
+  trusted keys any more still handshakes and gets the changed-key prompt, about its key of the
+  trusted kind when it has one. The negotiation is one round: with trusted keys of several kinds
+  the host presents its key of the first kind it has, trusted or not (trust holds one key per
+  host in practice: approving replaces it). Tests: `ssh::client` unit tests (the order),
+  `or2-core/tests/host_keys.rs` (a disposable sshd with all three kinds of host key).
 - Agent forwarding stays off.
 
 ## Session
@@ -487,7 +500,10 @@ Connecting ──▶ AwaitingHostKey ──▶ Authenticating ──▶ Connecte
   on a paused clock (`transport_dial_tests.rs`, `transport_race_tests.rs`).
 - Host-key relay, connect timeout (20 s, paused while awaiting the user), keepalive (15 s, 3
   misses) and failure mapping are M1's. `CloseReason` is reused; `RemoteExited` never occurs
-  for a host.
+  for a host. The host-key algorithms are offered trusted kinds first (M1 "Host-key trust"), so
+  a host with several keys presents the trusted one. Everything after `Connected` (the orphan
+  reap, the capability probe, tmux, herdr watches, SSH terminals, mosh bootstraps) runs on this
+  one connection: nothing else handshakes, so nothing else can prompt.
 - Closing a host (user `disconnect`, release of the last handle, or loss) closes every terminal
   session on it (`Disconnected` when the user disconnected the host, else the host's failure),
   stops every herdr watch, and fails pending queries with `Closed`.
@@ -2326,7 +2342,8 @@ version 2.
 5. **Host (the forced command):** replaces the bootstrap line with the phone's key in one locked, crash-safe write
    and answers. The waiting `or2-pair` sees the result and prints it.
 6. **Phone:** saves the host with its trusted host key and connects with its own key (no first-use
-   prompt).
+   prompt, whatever other host keys the host has: the connection asks for the trusted key's algorithm
+   first, M1 "Host-key trust").
 
 **Why the secret goes from the phone to the host.** The QR is the part most likely to leak (a screen
 share, a recording, a screenshot, terminal scrollback, someone behind you). In version 2 the QR is
@@ -2874,7 +2891,12 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
   host key's fingerprint, the key to authorize (an existing key or **New key**, saved first so a retry
   reuses it). The button is **Pair**; then **Pairing with <name>…** (1 to 3 s).
 - **After `ok`**: the host, its addresses (the offer's port on each), user, key and the trusted `hk` are
-  saved in one Room transaction (`AppDao.saveHostWithTrust`), then the usual connect runs. If saving
+  saved in one Room transaction (`AppDao.saveHostWithTrust`), then the usual connect runs. The usual
+  connect includes, on a fresh install, the one-time prompts that come **before the first unlock**: the
+  system's notification permission (Allow / Don't allow) and the battery explanation ("Keep sessions
+  connected", Allow / Not now, then possibly the system's own request), M3 polish "Battery exemption up
+  front". They are not host-key prompts: a host-key prompt can only follow the unlock (the connection
+  needs the decrypted key), and its buttons are **Trust and connect** / **Reject**. If saving
   fails after the host installed the key, the retry is **bound to that key** (its stored key id and
   fingerprint): key selection and **New key** are disabled on the review, and the retry repeats only
   the atomic host and trust save, never `pair_enroll` (the host's run is spent).
@@ -2990,6 +3012,8 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
 - **Kotlin**: `PairFlowTest` (fakes; among them that changing the key after a save failure starts no
   second enrolment, `afterASaveFailureTheKeyCannotBeChangedAndOnlyTheSaveIsRepeated`), `PairMessagesTest`,
   `PairEndToEndTest` (`or2-pair-testhost` behind a disposable sshd with `K` from the flow written to its
-  stdin, then a real `connect_host` with the paired key and pinned host key), and `PairUiDeviceTest`
+  stdin, then a real `connect_host` with the paired key and pinned host key, on an sshd with ED25519,
+  ECDSA and RSA host keys, through the capability probe that follows `Connected` with no host-key
+  prompt at any point), and `PairUiDeviceTest`
   with the new screen (screenshots of the Easy pair, review and pairing screens; the locked key choice
   of a save retry).
