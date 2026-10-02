@@ -23,6 +23,7 @@ use std::time::Duration;
 use crate::herdr::{self, Directory, DiscoveryError, SessionEntry};
 use crate::host::{HerdrSessionInfo, HostCapabilities};
 use crate::remote::{RemoteError, RemoteHost};
+use crate::tmux;
 
 /// How long herdr's session listing may take before it counts as failed.
 pub const HERDR_LIST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -44,6 +45,7 @@ or2_find() {
 }
 or2_find tmux
 echo "or2:tmux:$or2_path"
+if [ -n "$or2_path" ]; then echo "or2:tmux-version:$("$or2_path" -V 2>/dev/null </dev/null)"; fi
 or2_find herdr
 echo "or2:herdr:$or2_path"
 or2_find mosh-server
@@ -245,13 +247,15 @@ impl SessionsCache {
 }
 
 /// Parses the probe's output. Lenient by design: lines that are not the probe's are ignored,
-/// an unusable path counts as not installed, and a missing or odd locale falls back to
-/// `en_US.UTF-8`. `herdr_sessions` stays empty: [`herdr_sessions`] fills it.
+/// an unusable path counts as not installed, a missing or unreadable `tmux -V` means tmux
+/// cannot record a terminal's client (`tmux_records_clients`), and a missing or odd locale
+/// falls back to `en_US.UTF-8`. `herdr_sessions` stays empty: [`herdr_sessions`] fills it.
 pub fn parse(output: &str) -> HostCapabilities {
     let mut caps = HostCapabilities {
         tmux: None,
         herdr: None,
         mosh_server: None,
+        tmux_records_clients: false,
         utf8_locale: FALLBACK_LOCALE.into(),
         herdr_sessions: Vec::new(),
     };
@@ -261,12 +265,17 @@ pub fn parse(output: &str) -> HostCapabilities {
         };
         match rest.split_once(':') {
             Some(("tmux", path)) => caps.tmux = program_path(path),
+            Some(("tmux-version", version)) => {
+                caps.tmux_records_clients = tmux::records_clients(version);
+            }
             Some(("herdr", path)) => caps.herdr = program_path(path),
             Some(("mosh-server", path)) => caps.mosh_server = program_path(path),
             Some(("locale", locale)) if is_locale(locale) => caps.utf8_locale = locale.into(),
             _ => {}
         }
     }
+    // A version says nothing without the tmux it belongs to.
+    caps.tmux_records_clients &= caps.tmux.is_some();
     caps
 }
 
@@ -318,6 +327,25 @@ mod tests {
             caps.herdr_sessions.is_empty(),
             "the session list is separate"
         );
+        assert!(!caps.tmux_records_clients, "no version line");
+    }
+
+    #[test]
+    fn tmux_records_clients_only_from_a_version_that_can() {
+        let records = |version: &str| {
+            parse(&format!(
+                "or2:tmux:/usr/bin/tmux\nor2:tmux-version:{version}\nor2:end\n"
+            ))
+            .tmux_records_clients
+        };
+        assert!(records("tmux 3.4"));
+        assert!(records("tmux 2.6"));
+        // Too old for `set-option -F`, or `-V` said nothing readable: a plain attach.
+        assert!(!records("tmux 2.5"));
+        assert!(!records(""));
+        assert!(!parse("or2:tmux:/usr/bin/tmux\nor2:end\n").tmux_records_clients);
+        // A version line without a usable tmux path counts for nothing.
+        assert!(!parse("or2:tmux:tmux\nor2:tmux-version:tmux 3.4\n").tmux_records_clients);
     }
 
     #[test]

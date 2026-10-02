@@ -254,6 +254,11 @@ pub struct HostCapabilities {
     pub tmux: Option<String>,
     pub herdr: Option<String>,
     pub mosh_server: Option<String>,
+    /// The host's tmux can record which client a terminal's attach made (`set-option -F`,
+    /// tmux 2.6 and later, from `tmux -V` in the program probe: [`crate::tmux::records_clients`]).
+    /// Without it a tmux attach is plain and a terminal's session moves do nothing
+    /// ([`HostHandle::navigate`]). Not exported over the FFI.
+    pub tmux_records_clients: bool,
     pub utf8_locale: String,
     /// Empty when herdr is missing, has no sessions or could not list them. Read afresh on
     /// every `capabilities()` query (a failed read reports the last list that succeeded); live
@@ -696,9 +701,11 @@ impl HostHandle {
     /// workspace wraps around; with only one there is nothing to do, which is `Ok(())`.
     ///
     /// `client_id` is the moving terminal's [`SessionHandle::client_id`] (the session it shows
-    /// now): a tmux move then acts on exactly that terminal's tmux client, whatever other
-    /// terminals show the same tmux session. `None` finds the client by the target alone (the
-    /// most recently active one showing it), and herdr ignores it. A malformed id is
+    /// now): a tmux session move then acts on exactly that terminal's tmux client, whatever
+    /// other terminals show the same tmux session. When that client cannot be identified
+    /// (`None`, a tmux too old to record it, nothing recorded) a session move is nothing to do,
+    /// `Ok(())` with nothing switched: it never guesses. Window and pane moves act on the
+    /// session, not a client, and run either way. herdr ignores the id. A malformed id is
     /// `InvalidName`.
     pub async fn navigate(
         &self,
@@ -1277,6 +1284,7 @@ mod tests {
             tmux: Some("/usr/bin/tmux".into()),
             herdr: None,
             mosh_server: None,
+            tmux_records_clients: true,
             utf8_locale: "C.UTF-8".into(),
             herdr_sessions: vec![HerdrSessionInfo {
                 name: "default".into(),

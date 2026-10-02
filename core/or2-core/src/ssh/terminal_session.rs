@@ -154,13 +154,15 @@ pub(super) async fn plan(
     let (command, focus) = match target {
         TerminalTarget::Shell => (None, None),
         TerminalTarget::Tmux { session_name } => {
-            let path = host
-                .programs()
-                .await
-                .map_err(remote_failure)?
+            let programs = host.programs().await.map_err(remote_failure)?;
+            let path = programs
                 .tmux
                 .as_deref()
                 .ok_or_else(|| not_installed("tmux"))?;
+            // The client-recording step only for a tmux that takes it (2.6 and later, from the
+            // program probe's `tmux -V`): an older tmux would reject the whole command list,
+            // attach included. Without it the terminal's session moves do nothing.
+            let client_id = client_id.filter(|_| programs.tmux_records_clients);
             (
                 Some(tmux::attach_command(path, session_name, client_id)),
                 None,

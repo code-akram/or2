@@ -273,6 +273,7 @@ fn probe_capabilities() -> HostCapabilities {
         tmux: Some("/usr/bin/tmux".into()),
         herdr: Some("/home/probe/.local/bin/herdr".into()),
         mosh_server: Some("/usr/bin/mosh-server".into()),
+        tmux_records_clients: true,
         utf8_locale: "C.UTF-8".into(),
         herdr_sessions: vec![
             HerdrSessionInfo {

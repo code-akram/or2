@@ -38,7 +38,9 @@ pub fn list_command(tmux: &str) -> RemoteCommand {
 /// With a terminal's `client` id ([`new_client_id`]) the same tmux command list then records
 /// the attaching client's name under that id, `; set-option -s -F @or2-client-<id>
 /// '#{client_name}'` (run by the client that just attached, so `#{client_name}` is its own),
-/// which is how navigation later finds exactly this terminal's client ([`navigate`]).
+/// which is how navigation later finds exactly this terminal's client ([`navigate`]). Pass
+/// `client` only for a tmux that [`records_clients`]: an older one would reject the whole
+/// command list, attach included.
 pub fn attach_command(tmux: &str, name: &str, client: Option<&str>) -> RemoteCommand {
     let command = RemoteCommand::new(tmux).args(["-u", "new-session", "-A", "-s", name]);
     match client {
@@ -180,6 +182,39 @@ pub fn is_valid_client_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// The first tmux release whose `set-option` takes `-F` (formats expanded in the value: tmux
+/// CHANGES, "2.5 to 2.6"), which recording a terminal's client needs ([`attach_command`]).
+/// `#{client_name}` (2.4), user options (1.8) and server options (1.2) are older.
+pub const RECORDS_CLIENTS_SINCE: (u32, u32) = (2, 6);
+
+/// Whether the tmux whose `tmux -V` printed `version` can record a terminal's client at its
+/// attach (`set-option -F`, [`RECORDS_CLIENTS_SINCE`]). Read strictly, since appending the
+/// step to the attach of a tmux that cannot parse it would break the attach itself (an older
+/// tmux client rejects the whole command list): `tmux X.Y` with any suffix (`3.3a`,
+/// `3.0-rc5`), `tmux next-X.Y` (a development build after X.Y), `tmux master`, and OpenBSD's
+/// base tmux (`tmux openbsd-X.Y`, from OpenBSD 6.3, which ships a tmux newer than 2.6).
+/// Anything else, including no answer, is `false`: the attach stays plain.
+pub fn records_clients(version: &str) -> bool {
+    fn major_minor(text: &str) -> Option<(u32, u32)> {
+        let (major, rest) = text.split_once('.')?;
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        Some((major.parse().ok()?, rest[..digits].parse().ok()?))
+    }
+    let Some(release) = version.trim().strip_prefix("tmux ") else {
+        return false;
+    };
+    if release == "master" {
+        return true;
+    }
+    if let Some(openbsd) = release.strip_prefix("openbsd-") {
+        return major_minor(openbsd).is_some_and(|release| release >= (6, 3));
+    }
+    let release = release.strip_prefix("next-").unwrap_or(release);
+    major_minor(release).is_some_and(|release| release >= RECORDS_CLIENTS_SINCE)
+}
+
 /// The tmux server option a terminal's attach records its client's name in.
 fn client_option(id: &str) -> String {
     format!("@or2-client-{id}")
@@ -189,8 +224,8 @@ fn client_option(id: &str) -> String {
 /// contain `:`; a client's name is its tty for a terminal client, `client-<pid>` otherwise).
 /// The second field is the client name the asking terminal's attach recorded under its client
 /// id ([`attach_command`]), the same on every line; empty without an id, or when nothing was
-/// recorded (a tmux that could not run the `set-option`). The client whose name it is, is that
-/// terminal's.
+/// recorded. The client whose name it is, is that terminal's; with nothing recorded no client
+/// is.
 pub fn client_format(client: Option<&str>) -> String {
     let recorded = client
         .map(|id| format!("#{{{}}}", client_option(id)))
@@ -299,79 +334,51 @@ fn failure(output: &ExecOutput) -> TmuxError {
     })
 }
 
-/// Whose client a [`NavClients`] entry is: a terminal's, by its client id, or (a caller that
-/// has no id) whichever terminal is on a target, by the target's name.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum NavKey {
-    Client(String),
-    Target(String),
-}
-
-impl NavKey {
-    fn of(target: &str, client: Option<&str>) -> Self {
-        match client {
-            Some(id) => Self::Client(id.to_owned()),
-            None => Self::Target(target.to_owned()),
-        }
-    }
-}
-
-/// The tmux clients that session moves have switched, per terminal, for one host connection.
+/// The tmux clients that session moves have switched, per terminal (by client id), for one
+/// host connection.
 ///
 /// A terminal attaches to its target session (`new-session -A -s <target>`), so until it
 /// switches, its client shows that session and window and pane moves act on the target
 /// session. After `switch-client` its client shows another session, which window and pane
-/// moves must act on instead: so the client a switch moved is remembered under the terminal's
-/// client id (two terminals on one target are two entries), and found again in `list-clients`
-/// (by what its attach recorded, else by its name). A client that is no longer listed (the
-/// terminal reattached) is forgotten, and a closed terminal's entry is released.
+/// moves must act on instead: so a terminal whose client a switch moved is remembered under
+/// its client id (two terminals on one target are two entries), and its client is found again
+/// in `list-clients` by what its attach recorded. A record that is no longer listed (the
+/// terminal reattached, the server restarted) is forgotten, and a closed terminal's entry is
+/// released.
 #[derive(Debug, Default)]
-pub struct NavClients(Mutex<HashMap<NavKey, String>>);
+pub struct NavClients(Mutex<HashMap<String, String>>);
 
 impl NavClients {
     pub fn new() -> Self {
         Self::default()
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<NavKey, String>> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, String>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The client remembered for the terminal with client id `client` on `target` (by
-    /// `target` alone without an id), if any.
-    pub fn get(&self, target: &str, client: Option<&str>) -> Option<String> {
-        self.lock().get(&NavKey::of(target, client)).cloned()
+    /// The client name remembered for the terminal with client id `client`, if any.
+    pub fn get(&self, client: &str) -> Option<String> {
+        self.lock().get(client).cloned()
     }
 
-    /// Forgets the client of the terminal with client id `client`, which has closed.
+    /// Forgets the client of the terminal with client id `client` (it has closed, or its
+    /// record is gone).
     pub fn release(&self, client: &str) {
-        self.lock().remove(&NavKey::Client(client.to_owned()));
+        self.lock().remove(client);
     }
 
-    fn remember(&self, key: NavKey, client: &str) {
-        self.lock().insert(key, client.to_owned());
-    }
-
-    fn forget(&self, key: &NavKey) {
-        self.lock().remove(key);
-    }
-
-    /// The clients remembered for every other terminal than `key`'s.
-    fn others(&self, key: &NavKey) -> Vec<String> {
-        self.lock()
-            .iter()
-            .filter(|(other, _)| *other != key)
-            .map(|(_, client)| client.clone())
-            .collect()
+    fn remember(&self, client: &str, name: &str) {
+        self.lock().insert(client.to_owned(), name.to_owned());
     }
 }
 
 async fn list_clients<H: RemoteHost>(
     host: &H,
     tmux: &str,
-    client: Option<&str>,
+    client: &str,
 ) -> Result<Vec<TmuxClient>, TmuxError> {
-    let output = host.exec(&list_clients_command(tmux, client)).await?;
+    let output = host.exec(&list_clients_command(tmux, Some(client))).await?;
     if output.success() {
         return Ok(parse_clients(&String::from_utf8_lossy(&output.stdout)));
     }
@@ -381,41 +388,32 @@ async fn list_clients<H: RemoteHost>(
     Err(failure(&output))
 }
 
-/// The client of the terminal on `target` among `clients`: the one its attach recorded; else
-/// (a tmux that recorded nothing) the one a switch moved, while it is listed; else the most
-/// recently active one showing `target` that is not remembered as another terminal's
-/// (`others`).
-fn terminal_client<'a>(
-    clients: &'a [TmuxClient],
-    remembered: Option<&str>,
-    others: &[String],
-    target: &str,
-) -> Option<&'a TmuxClient> {
-    clients
-        .iter()
-        .find(|client| client.recorded)
-        .or_else(|| remembered.and_then(|name| clients.iter().find(|client| client.name == name)))
-        .or_else(|| {
-            clients
-                .iter()
-                .filter(|client| client.session == target && !others.contains(&client.name))
-                .max_by_key(|client| client.activity_unix)
-        })
+/// What a [`navigate`] call did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavOutcome {
+    /// The move ran (or tmux said it had nowhere to go: one window, one session).
+    Ran,
+    /// A session move whose terminal's client cannot be identified (no client id, a tmux that
+    /// cannot record it, or nothing recorded under it): nothing was switched. The caller
+    /// treats it as nothing to do, never as an error.
+    ClientUnknown,
 }
 
 /// Moves what a terminal attached to tmux session `target` shows (see [`TargetNav`]).
-/// `client` is the terminal's client id ([`new_client_id`], given to its [`attach_command`]):
-/// the move acts on exactly that terminal's tmux client, whatever other terminals (of this
-/// app or not) show the same session. `None` (a caller without one) finds the client by
-/// `target` alone, the most recently active one showing it.
+/// `client` is the terminal's client id ([`new_client_id`]) when its attach recorded its
+/// client ([`attach_command`]); `None` when it could not (a tmux older than 2.6, see
+/// [`records_clients`]).
 ///
 /// - A window or pane move acts on the session the terminal shows: `target`, or after a session
-///   move the session its client was switched to ([`NavClients`]; one `list-clients` more).
-/// - A session move switches the terminal's client ([`terminal_client`]) with
-///   `switch-client -c <client> -n|-p` and remembers it. With no client found (nothing attached
-///   to `target`) it fails: there is no terminal to switch.
+///   move the session its recorded client was switched to ([`NavClients`]; one `list-clients`
+///   more).
+/// - A session move switches exactly the terminal's own client, the one its attach recorded,
+///   with `switch-client -c <client> -n|-p`, and remembers it. When that client cannot be
+///   identified it is [`NavOutcome::ClientUnknown`] and nothing is switched: it never guesses
+///   among the clients on `target` (the most recently active one need not be the one under
+///   the user's fingers: a gesture is not tmux input and leaves no activity).
 ///
-/// A move with nowhere to go (one window, one session) is `Ok(())`.
+/// A move with nowhere to go (one window, one session) is [`NavOutcome::Ran`].
 pub async fn navigate<H: RemoteHost>(
     host: &H,
     tmux: &str,
@@ -423,39 +421,34 @@ pub async fn navigate<H: RemoteHost>(
     target: &str,
     client: Option<&str>,
     nav: TargetNav,
-) -> Result<(), TmuxError> {
-    let key = NavKey::of(target, client);
-    let remembered = clients.get(target, client);
+) -> Result<NavOutcome, TmuxError> {
     let command = match nav {
         TargetNav::NextSession | TargetNav::PreviousSession => {
-            let listed = list_clients(host, tmux, client).await?;
-            let others = clients.others(&key);
-            let Some(found) = terminal_client(&listed, remembered.as_deref(), &others, target)
-            else {
-                clients.forget(&key);
-                return Err(TmuxError::Failed(format!(
-                    "no tmux client is attached to {target}"
-                )));
+            let Some(id) = client else {
+                return Ok(NavOutcome::ClientUnknown);
             };
-            clients.remember(key, &found.name);
+            let listed = list_clients(host, tmux, id).await?;
+            let Some(found) = listed.iter().find(|listed| listed.recorded) else {
+                clients.release(id);
+                return Ok(NavOutcome::ClientUnknown);
+            };
+            clients.remember(id, &found.name);
             switch_command(tmux, &found.name, nav == TargetNav::NextSession)
         }
         _ => {
             let mut session = target.to_owned();
-            if let Some(name) = remembered {
-                let listed = list_clients(host, tmux, client).await?;
-                let found = listed
-                    .iter()
-                    .find(|listed| listed.recorded)
-                    .or_else(|| listed.iter().find(|listed| listed.name == name));
-                match found {
+            if let Some(id) = client
+                && let Some(name) = clients.get(id)
+            {
+                let listed = list_clients(host, tmux, id).await?;
+                match listed.iter().find(|listed| listed.recorded) {
                     Some(found) => {
                         if found.name != name {
-                            clients.remember(key, &found.name);
+                            clients.remember(id, &found.name);
                         }
                         session = found.session.clone();
                     }
-                    None => clients.forget(&key),
+                    None => clients.release(id),
                 }
             }
             nav_command(tmux, &session, nav).expect("a window or pane move")
@@ -463,7 +456,7 @@ pub async fn navigate<H: RemoteHost>(
     };
     let output = host.exec(&command).await?;
     if output.success() || nothing_to_do(&String::from_utf8_lossy(&output.stderr)) {
-        Ok(())
+        Ok(NavOutcome::Ran)
     } else {
         Err(failure(&output))
     }
@@ -644,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn clients_parse_and_the_terminal_client_is_the_recorded_remembered_or_most_active_one() {
+    fn clients_parse_and_only_the_recorded_one_is_the_terminals() {
         assert_eq!(
             client_format(None),
             "#{client_activity}::#{client_session}:#{client_name}"
@@ -674,48 +667,45 @@ mod tests {
                 recorded: false,
             }
         );
-        // Not remembered: the most recently active client on the target...
-        assert_eq!(
-            terminal_client(&clients, None, &[], "main").unwrap().name,
-            "/dev/pts/2"
-        );
-        // ... that is not another terminal's.
-        assert_eq!(
-            terminal_client(&clients, None, &["/dev/pts/2".into()], "main")
-                .unwrap()
-                .name,
-            "/dev/pts/1"
-        );
-        // Remembered and still listed: that one, whatever it shows now.
-        assert_eq!(
-            terminal_client(&clients, Some("client-77"), &[], "main")
-                .unwrap()
-                .name,
-            "client-77"
-        );
-        // Remembered but gone: back to the target's clients.
-        assert_eq!(
-            terminal_client(&clients, Some("/dev/pts/8"), &[], "main")
-                .unwrap()
-                .name,
-            "/dev/pts/2"
-        );
-        assert!(terminal_client(&clients, None, &[], "nobody").is_none());
-
-        // What the terminal's attach recorded wins over everything else: activity, the target,
-        // and a remembered client.
+        // Nothing recorded: no client is the terminal's, however active.
+        assert!(clients.iter().all(|client| !client.recorded));
+        // What the attach recorded names exactly one client, whatever it shows now.
         let clients = parse_clients(
             "100:/dev/pts/1:other:/dev/pts/1\n\
              300:/dev/pts/1:main:/dev/pts/2\n",
         );
         assert!(clients[0].recorded && !clients[1].recorded);
-        for remembered in [None, Some("/dev/pts/2")] {
-            assert_eq!(
-                terminal_client(&clients, remembered, &[], "main")
-                    .unwrap()
-                    .name,
-                "/dev/pts/1"
-            );
+    }
+
+    #[test]
+    fn only_a_tmux_that_takes_set_option_f_records_clients() {
+        for version in [
+            "tmux 2.6",
+            "tmux 2.9a",
+            "tmux 3.0-rc5",
+            "tmux 3.3a",
+            "tmux 3.7c\n",
+            "tmux 10.0",
+            "tmux next-3.6",
+            "tmux master",
+            "tmux openbsd-7.5",
+        ] {
+            assert!(records_clients(version), "{version:?}");
+        }
+        for version in [
+            "",
+            "tmux",
+            "tmux 1.8",
+            "tmux 2.5",
+            "tmux 2.",
+            "tmux next-2.5",
+            "tmux openbsd-6.2",
+            "tmux openbsd-",
+            "tmux unknown",
+            "usage: tmux [-2CluvV] [-c shell-command]",
+            "3.4",
+        ] {
+            assert!(!records_clients(version), "{version:?}");
         }
     }
 
@@ -772,25 +762,46 @@ mod tests {
         }
     }
 
+    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
     #[tokio::test]
-    async fn a_session_move_switches_the_terminal_client_and_later_moves_follow_it() {
+    async fn a_session_move_switches_the_recorded_client_and_later_moves_follow_it() {
         let host = Scripted::default();
         let clients = NavClients::new();
-        let list = format!("'/t' '-u' 'list-clients' '-F' '{}'", client_format(None));
+        let list = format!("'/t' '-u' 'list-clients' '-F' '{}'", client_format(Some(A)));
 
         // Before any session move a window move is one command on the target.
         host.reply(0, "", "");
-        navigate(&host, "/t", &clients, "main", None, TargetNav::NextWindow)
-            .await
-            .unwrap();
+        let moved = navigate(
+            &host,
+            "/t",
+            &clients,
+            "main",
+            Some(A),
+            TargetNav::NextWindow,
+        )
+        .await;
+        assert_eq!(moved, Ok(NavOutcome::Ran));
         assert_eq!(host.take_log(), ["'/t' '-u' 'next-window' '-t' '=main'"]);
 
-        // A session move finds the client on the target and switches it.
-        host.reply(0, "10::main:/dev/pts/1\n20::other:/dev/pts/2\n", "");
+        // A session move switches the client A's attach recorded, although another client on
+        // the target is more recently active.
+        host.reply(
+            0,
+            "10:/dev/pts/1:main:/dev/pts/1\n20:/dev/pts/1:main:/dev/pts/2\n",
+            "",
+        );
         host.reply(0, "", "");
-        navigate(&host, "/t", &clients, "main", None, TargetNav::NextSession)
-            .await
-            .unwrap();
+        let moved = navigate(
+            &host,
+            "/t",
+            &clients,
+            "main",
+            Some(A),
+            TargetNav::NextSession,
+        )
+        .await;
+        assert_eq!(moved, Ok(NavOutcome::Ran));
         assert_eq!(
             host.take_log(),
             [
@@ -798,17 +809,21 @@ mod tests {
                 "'/t' '-u' 'switch-client' '-c' '/dev/pts/1' '-n'".into()
             ]
         );
-        assert_eq!(clients.get("main", None).as_deref(), Some("/dev/pts/1"));
+        assert_eq!(clients.get(A).as_deref(), Some("/dev/pts/1"));
 
         // Window and pane moves now act on the session that client shows.
-        host.reply(0, "30::third:/dev/pts/1\n20::other:/dev/pts/2\n", "");
+        host.reply(
+            0,
+            "30:/dev/pts/1:third:/dev/pts/1\n20:/dev/pts/1:other:/dev/pts/2\n",
+            "",
+        );
         host.reply(0, "", "");
         navigate(
             &host,
             "/t",
             &clients,
             "main",
-            None,
+            Some(A),
             TargetNav::Pane {
                 direction: NavDirection::Up,
             },
@@ -824,14 +839,18 @@ mod tests {
         );
 
         // The next session move switches the same client back, although none shows `main`.
-        host.reply(0, "30::third:/dev/pts/1\n40::other:/dev/pts/2\n", "");
+        host.reply(
+            0,
+            "30:/dev/pts/1:third:/dev/pts/1\n40:/dev/pts/1:other:/dev/pts/2\n",
+            "",
+        );
         host.reply(0, "", "");
         navigate(
             &host,
             "/t",
             &clients,
             "main",
-            None,
+            Some(A),
             TargetNav::PreviousSession,
         )
         .await
@@ -841,7 +860,7 @@ mod tests {
             "'/t' '-u' 'switch-client' '-c' '/dev/pts/1' '-p'"
         );
 
-        // A remembered client that has gone is forgotten: the move acts on the target again.
+        // A record that is no longer listed is forgotten: the move acts on the target again.
         host.reply(0, "50::main:/dev/pts/4\n", "");
         host.reply(0, "", "");
         navigate(
@@ -849,7 +868,7 @@ mod tests {
             "/t",
             &clients,
             "main",
-            None,
+            Some(A),
             TargetNav::PreviousWindow,
         )
         .await
@@ -858,7 +877,7 @@ mod tests {
             host.take_log()[1],
             "'/t' '-u' 'previous-window' '-t' '=main'"
         );
-        assert_eq!(clients.get("main", None), None);
+        assert_eq!(clients.get(A), None);
     }
 
     #[tokio::test]
@@ -867,28 +886,120 @@ mod tests {
         let clients = NavClients::new();
         host.reply(1, "", "no next window\n");
         assert_eq!(
-            navigate(&host, "/t", &clients, "main", None, TargetNav::NextWindow).await,
-            Ok(())
+            navigate(
+                &host,
+                "/t",
+                &clients,
+                "main",
+                Some(A),
+                TargetNav::NextWindow
+            )
+            .await,
+            Ok(NavOutcome::Ran)
         );
         host.reply(1, "", "can't find session: main\n");
         assert_eq!(
-            navigate(&host, "/t", &clients, "main", None, TargetNav::NextWindow).await,
+            navigate(
+                &host,
+                "/t",
+                &clients,
+                "main",
+                Some(A),
+                TargetNav::NextWindow
+            )
+            .await,
             Err(TmuxError::Failed("can't find session: main".into()))
         );
-        // No server, or no client on the target: a session move has no terminal to switch.
+        host.reply(0, "1:/dev/pts/1:main:/dev/pts/1\n", "");
+        host.reply(1, "", "can't find next session\n");
+        assert_eq!(
+            navigate(
+                &host,
+                "/t",
+                &clients,
+                "main",
+                Some(A),
+                TargetNav::NextSession
+            )
+            .await,
+            Ok(NavOutcome::Ran)
+        );
+        // No server: nothing recorded, so no client to switch, and that is no error.
         host.reply(1, "", "no server running on /tmp/tmux-1000/default\n");
         assert_eq!(
-            navigate(&host, "/t", &clients, "main", None, TargetNav::NextSession).await,
-            Err(TmuxError::Failed(
-                "no tmux client is attached to main".into()
-            ))
+            navigate(
+                &host,
+                "/t",
+                &clients,
+                "main",
+                Some(A),
+                TargetNav::NextSession
+            )
+            .await,
+            Ok(NavOutcome::ClientUnknown)
         );
-        host.reply(0, "5::other:/dev/pts/2\n", "");
-        assert!(matches!(
-            navigate(&host, "/t", &clients, "main", None, TargetNav::NextSession).await,
-            Err(TmuxError::Failed(_))
-        ));
-        assert_eq!(host.take_log().len(), 4, "no switch was attempted");
+        host.reply(1, "", "server says no\n");
+        assert_eq!(
+            navigate(
+                &host,
+                "/t",
+                &clients,
+                "main",
+                Some(A),
+                TargetNav::NextSession
+            )
+            .await,
+            Err(TmuxError::Failed("server says no".into()))
+        );
+        assert_eq!(host.take_log().len(), 6);
+    }
+
+    /// No record of the terminal's client (a tmux older than 2.6 attached without the step, so
+    /// the caller passes no id; or the record is gone): a session move switches nothing and
+    /// never guesses, while window and pane moves still act on the target.
+    #[tokio::test]
+    async fn without_a_record_a_session_move_switches_nothing() {
+        let host = Scripted::default();
+        let clients = NavClients::new();
+        for nav in [TargetNav::NextSession, TargetNav::PreviousSession] {
+            // No id: nothing runs at all.
+            assert_eq!(
+                navigate(&host, "/t", &clients, "work", None, nav).await,
+                Ok(NavOutcome::ClientUnknown)
+            );
+            assert!(host.take_log().is_empty());
+            // An id with nothing recorded under it: the clients on the target are listed, the
+            // most recently active is not taken.
+            host.reply(0, "10::work:/dev/pts/1\n20::work:/dev/pts/2\n", "");
+            assert_eq!(
+                navigate(&host, "/t", &clients, "work", Some(A), nav).await,
+                Ok(NavOutcome::ClientUnknown)
+            );
+            assert_eq!(host.take_log().len(), 1, "no switch-client");
+            assert_eq!(clients.get(A), None);
+        }
+        for (client, nav, command) in [
+            (None, TargetNav::NextWindow, "'next-window' '-t' '=work'"),
+            (
+                Some(A),
+                TargetNav::PreviousWindow,
+                "'previous-window' '-t' '=work'",
+            ),
+            (
+                None,
+                TargetNav::Pane {
+                    direction: NavDirection::Left,
+                },
+                "'select-pane' '-L' '-t' '=work:'",
+            ),
+        ] {
+            host.reply(0, "", "");
+            assert_eq!(
+                navigate(&host, "/t", &clients, "work", client, nav).await,
+                Ok(NavOutcome::Ran)
+            );
+            assert_eq!(host.take_log(), [format!("'/t' '-u' {command}")]);
+        }
     }
 
     /// Two terminals on one target session: each move acts on the client the asking terminal's
@@ -956,9 +1067,8 @@ mod tests {
                 "'/t' '-u' 'switch-client' '-c' '/dev/pts/2' '-p'".into()
             ]
         );
-        assert_eq!(clients.get("work", Some(a)).as_deref(), Some("/dev/pts/1"));
-        assert_eq!(clients.get("work", Some(b)).as_deref(), Some("/dev/pts/2"));
-        assert_eq!(clients.get("work", None), None);
+        assert_eq!(clients.get(a).as_deref(), Some("/dev/pts/1"));
+        assert_eq!(clients.get(b).as_deref(), Some("/dev/pts/2"));
 
         // Window moves act on the session each terminal's own client shows.
         host.reply(0, &listing(a, "other", "third"), "");
@@ -1025,7 +1135,7 @@ mod tests {
             host.take_log()[1],
             "'/t' '-u' 'previous-window' '-t' '=work'"
         );
-        assert_eq!(clients.get("work", Some(a)).as_deref(), Some("/dev/pts/7"));
+        assert_eq!(clients.get(a).as_deref(), Some("/dev/pts/7"));
 
         // A closed terminal is released: its entry and what its attach recorded.
         host.reply(0, "", "");
@@ -1036,52 +1146,7 @@ mod tests {
                 "'/t' '-u' 'set-option' '-s' '-q' '-u' '@or2-client-{a}'"
             )]
         );
-        assert_eq!(clients.get("work", Some(a)), None);
-        assert_eq!(clients.get("work", Some(b)).as_deref(), Some("/dev/pts/2"));
-    }
-
-    /// A tmux that recorded nothing (too old for `set-option -F`): a terminal falls back to the
-    /// target's most recently active client, but never to one another terminal has claimed.
-    #[tokio::test]
-    async fn without_a_record_a_terminal_never_takes_another_terminals_client() {
-        let host = Scripted::default();
-        let clients = NavClients::new();
-        let (a, b) = (
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        );
-        host.reply(0, "10::work:/dev/pts/1\n20::work:/dev/pts/2\n", "");
-        host.reply(0, "", "");
-        navigate(
-            &host,
-            "/t",
-            &clients,
-            "work",
-            Some(a),
-            TargetNav::NextSession,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            host.take_log()[1],
-            "'/t' '-u' 'switch-client' '-c' '/dev/pts/2' '-n'"
-        );
-        // /dev/pts/2 now shows another session; B's guess must not take it back.
-        host.reply(0, "10::work:/dev/pts/1\n30::other:/dev/pts/2\n", "");
-        host.reply(0, "", "");
-        navigate(
-            &host,
-            "/t",
-            &clients,
-            "work",
-            Some(b),
-            TargetNav::NextSession,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            host.take_log()[1],
-            "'/t' '-u' 'switch-client' '-c' '/dev/pts/1' '-n'"
-        );
+        assert_eq!(clients.get(a), None);
+        assert_eq!(clients.get(b).as_deref(), Some("/dev/pts/2"));
     }
 }

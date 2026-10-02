@@ -301,7 +301,12 @@ impl SshHost {
                 let Ok(programs) = host.programs().await else {
                     return;
                 };
-                if let Some(path) = &programs.tmux {
+                // Nothing was recorded by a tmux that cannot (`plan` attached without the step).
+                if let Some(path) = programs
+                    .tmux
+                    .as_ref()
+                    .filter(|_| programs.tmux_records_clients)
+                {
                     let _ =
                         tmux::release_client(&*host, path, &host.tmux_clients, &client_id).await;
                 }
@@ -1366,6 +1371,11 @@ async fn navigate(
                 .tmux
                 .as_ref()
                 .ok_or_else(|| not_installed("tmux"))?;
+            // A tmux that cannot record clients attached without the step (`plan`): nothing
+            // is recorded under the id, so the terminal's client is unknown.
+            let client_id = client_id.filter(|_| capabilities.tmux_records_clients);
+            // `ClientUnknown` (a session move that cannot know the terminal's client) is
+            // nothing to do, like a move with nowhere to go: `Ok`, never a guess or an error.
             tmux::navigate(
                 &**host,
                 path,
@@ -1375,6 +1385,7 @@ async fn navigate(
                 nav,
             )
             .await
+            .map(|_: tmux::NavOutcome| ())
             .map_err(|error| match error {
                 TmuxError::Remote(error) => host_error(error),
                 TmuxError::Failed(message) => HostError::CommandFailed { message },

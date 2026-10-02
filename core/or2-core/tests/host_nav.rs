@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use common::{Sshd, sshd_ready, tmux_ready};
 use or2_core::host::{
-    HostConnectRequest, HostError, HostObserver, HostState, NavDirection, TargetNav, TerminalTarget,
+    HostConnectRequest, HostObserver, HostState, NavDirection, TargetNav, TerminalTarget,
 };
 use or2_core::keys::ClientKey;
 use or2_core::session::{SessionObserver, SessionState};
@@ -150,13 +150,11 @@ fn tmux_moves_windows_panes_and_the_terminal_client_between_sessions() {
     let target = TerminalTarget::Tmux {
         session_name: "or2-a".into(),
     };
-    let navigate = |nav: TargetNav| block_on(host.navigate(target.clone(), None, nav, None));
-
-    // Before a terminal is attached a session move has no client to switch.
-    assert!(matches!(
-        navigate(TargetNav::NextSession),
-        Err(HostError::CommandFailed { .. })
-    ));
+    // Before a terminal is attached a session move has no client to switch: nothing to do.
+    assert_eq!(
+        block_on(host.navigate(target.clone(), None, TargetNav::NextSession, None)),
+        Ok(())
+    );
 
     // The terminal: an SSH tmux client attached to or2-a.
     let (tx, session_states) = mpsc::channel();
@@ -173,6 +171,17 @@ fn tmux_moves_windows_panes_and_the_terminal_client_between_sessions() {
     );
     let client_session = || tmux(&sshd, &["list-clients", "-F", "#{client_session}"]);
     eventually("the terminal's client", "or2-a", client_session);
+    let id = terminal.client_id().expect("a tmux terminal").to_owned();
+    let navigate =
+        |nav: TargetNav| block_on(host.navigate(target.clone(), None, nav, Some(id.clone())));
+
+    // Without the terminal's id its client is unknown: a session move switches nothing (the
+    // only client on the target is not taken on a guess).
+    assert_eq!(
+        block_on(host.navigate(target.clone(), None, TargetNav::NextSession, None)),
+        Ok(())
+    );
+    assert_eq!(client_session(), "or2-a");
 
     // Panes: left from pane 1, then right again.
     navigate(TargetNav::Pane {
@@ -399,5 +408,171 @@ fn two_terminals_on_one_tmux_session_each_move_only_their_own_client() {
     eventually("B after its next session", "or2-b", || shows(&tty_b));
 
     second.disconnect();
+    host.disconnect();
+}
+
+/// A `tmux` in front of the real one on the sshd sessions' `PATH` that behaves like a tmux
+/// older than 2.6 where the identity step is concerned: `-V` says `tmux 2.5`, and any command
+/// list with `set-option -F` is refused whole, as an old tmux client refuses a command it
+/// cannot parse (the attach with it included). Every invocation is logged.
+struct OldTmux {
+    directory: tempfile::TempDir,
+}
+
+impl OldTmux {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let bin = directory.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .chain([std::path::PathBuf::from("/usr/bin")])
+            .map(|dir| dir.join("tmux"))
+            .find(|path| path.is_file())
+            .expect("a real tmux");
+        let script = bin.join("tmux");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 printf '%s\\n' \"$*\" >> '{log}'\n\
+                 if [ \"$1\" = -V ]; then echo 'tmux 2.5'; exit 0; fi\n\
+                 or2_set=0\n\
+                 for or2_arg in \"$@\"; do\n\
+                   case \"$or2_arg\" in\n\
+                     set-option) or2_set=1 ;;\n\
+                     ';') or2_set=0 ;;\n\
+                     -F) if [ $or2_set = 1 ]; then echo 'usage: set-option [-agoqsuw] option [value]' >&2; exit 1; fi ;;\n\
+                   esac\n\
+                 done\n\
+                 exec '{real}' \"$@\"\n",
+                log = directory.path().join("log").display(),
+                real = real.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Self { directory }
+    }
+
+    /// The session environment that puts the old tmux first on `PATH`.
+    fn environment(&self) -> String {
+        format!(
+            "PATH={}:{}",
+            self.directory.path().join("bin").display(),
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
+        )
+    }
+
+    /// Every command line it was run with.
+    fn log(&self) -> String {
+        std::fs::read_to_string(self.directory.path().join("log")).unwrap_or_default()
+    }
+}
+
+/// A tmux too old to record a terminal's client (`set-option -F`): the attach is plain and
+/// works, a session move switches nothing (the terminal's client cannot be known, and it is
+/// never guessed), and window and pane moves still act on the target.
+#[test]
+fn an_old_tmux_attaches_plainly_and_its_session_moves_do_nothing() {
+    if !sshd_ready() || !tmux_ready() {
+        return;
+    }
+    let old = OldTmux::new();
+    let sshd = Sshd::with_environment(false, "", &old.environment());
+    let key = ClientKey::generate_ed25519("");
+    sshd.authorize(&key);
+    let (tx, states) = mpsc::channel();
+    let host = connect_host(
+        HostConnectRequest::new(
+            &[("127.0.0.1", sshd.port)],
+            &Sshd::username(),
+            &key.to_stored(),
+            std::slice::from_ref(&sshd.host),
+        )
+        .unwrap(),
+        Arc::new(HostObs(tx)),
+    );
+    let mut state = states.recv_timeout(WAIT).unwrap();
+    while state != (HostState::Connected { address_index: 0 }) {
+        assert!(!matches!(state, HostState::Closed(_)), "{state:?}");
+        state = states.recv_timeout(WAIT).unwrap();
+    }
+    for name in ["or2-a", "or2-b"] {
+        tmux(
+            &sshd,
+            &[
+                "new-session",
+                "-d",
+                "-s",
+                name,
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "sh",
+            ],
+        );
+    }
+    tmux(&sshd, &["split-window", "-h", "-t", "=or2-a:0", "sh"]);
+    tmux(&sshd, &["new-window", "-d", "-t", "=or2-a:", "sh"]);
+    tmux(&sshd, &["select-pane", "-t", "=or2-a:0.1"]);
+    let display = |format: &str| tmux(&sshd, &["display", "-p", "-t", "=or2-a:", format]);
+
+    let target = TerminalTarget::Tmux {
+        session_name: "or2-a".into(),
+    };
+    let (tx, session_states) = mpsc::channel();
+    let terminal = host
+        .open_terminal(
+            target.clone(),
+            TerminalSize::new(80, 24).unwrap(),
+            Arc::new(SessionObs(tx)),
+        )
+        .unwrap();
+    assert_eq!(
+        session_states.recv_timeout(WAIT).unwrap(),
+        SessionState::Connected
+    );
+    // The attach worked: its client shows the target.
+    let client_session = || tmux(&sshd, &["list-clients", "-F", "#{client_session}"]);
+    eventually("the terminal's client", "or2-a", client_session);
+    let id = terminal.client_id().expect("a tmux terminal").to_owned();
+    let navigate =
+        |nav: TargetNav| block_on(host.navigate(target.clone(), None, nav, Some(id.clone())));
+
+    // Session moves: nothing to do, nothing switched.
+    assert_eq!(navigate(TargetNav::NextSession), Ok(()));
+    assert_eq!(navigate(TargetNav::PreviousSession), Ok(()));
+    assert_eq!(client_session(), "or2-a");
+
+    // Window and pane moves act on the target.
+    navigate(TargetNav::Pane {
+        direction: NavDirection::Left,
+    })
+    .unwrap();
+    assert_eq!(display("#{window_index}.#{pane_index}"), "0.0");
+    navigate(TargetNav::NextWindow).unwrap();
+    assert_eq!(display("#{window_index}"), "1");
+
+    terminal.disconnect();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let state = session_states.recv_timeout(WAIT).unwrap();
+        if matches!(state, SessionState::Closed(_)) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the terminal never closed");
+    }
+    // A release would run in the background: give it the time it would take.
+    std::thread::sleep(Duration::from_millis(500));
+    let log = old.log();
+    assert!(log.lines().any(|line| line == "-V"), "{log}");
+    assert!(
+        log.lines().any(|line| line == "-u new-session -A -s or2-a"),
+        "the attach is plain: {log}"
+    );
+    assert!(!log.contains("set-option"), "no identity step: {log}");
+    assert!(!log.contains("switch-client"), "no session switched: {log}");
     host.disconnect();
 }

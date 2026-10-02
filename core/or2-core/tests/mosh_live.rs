@@ -311,6 +311,7 @@ async fn bootstrap_local() -> Option<(MoshParams, ServerGuard)> {
         tmux: None,
         herdr: None,
         mosh_server: Some(server),
+        tmux_records_clients: false,
         utf8_locale: "C.UTF-8".into(),
         herdr_sessions: Vec::new(),
     };

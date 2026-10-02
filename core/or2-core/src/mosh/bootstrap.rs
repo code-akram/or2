@@ -351,6 +351,7 @@ mod tests {
             tmux: None,
             herdr: None,
             mosh_server: mosh_server.map(str::to_owned),
+            tmux_records_clients: false,
             utf8_locale: "C.UTF-8".into(),
             herdr_sessions: Vec::new(),
         }
