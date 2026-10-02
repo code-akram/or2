@@ -8,10 +8,35 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+### Added
+
+- Agent notifications: one notification when a herdr agent needs input or finishes, none for the pane on
+  screen; a tap opens the pane. On by default for every host shown in the inbox, with a switch in Settings.
+- Wheel-aware scrolling: a swipe scrolls the program's view (wheel events when it tracks the mouse, tmux copy
+  mode or herdr's own scroll otherwise) instead of shell history, and a scroll-to-bottom button.
+- Tap a link to open it (http and https, OSC 8 hyperlinks and URLs wrapped across lines).
+- Copy from the host: OSC 52 clipboard writes reach the phone's clipboard (on by default, a switch in
+  Settings; the host can never read the phone's clipboard).
+- Gestures: swipe for the next or previous tmux window or herdr tab, two fingers for panes and sessions.
+- Hardware keyboard shortcuts: Ctrl+Shift+1..9, W, V, C, Enter and / (a shortcuts sheet).
+- A Settings screen on Home.
+- `or2-pair` on macOS detects the application firewall blocking `mosh-server` and prints the commands that
+  allow it.
+
 ### Changed
 
+- Terminals open instantly on every host: under Auto, tmux and herdr terminals open over SSH at once and
+  switch to mosh in the background when UDP gets through, so a firewall that drops mosh no longer costs
+  seconds. The capability probe no longer waits for herdr's session listing. Whether UDP works is decided
+  per connection (the 24-hour memory is gone), and a host whose UDP is blocked says so once on its screen.
 - The Android native library build now always remaps the repository and cargo home paths, and fails if a
   build-machine path is left in `libor2_ffi.so` (v0.1.0 applied the remap by hand).
+- FFI API 14.
+
+### Fixed
+
+- Status lines under the terminal header (the mosh fallback note, "last heard") no longer cover the terminal's
+  top rows: the note is gone and "last heard" sits in the header row.
 
 ## [0.1.0] - 2026-10-02
 
