@@ -35,11 +35,27 @@ class ImageShares {
     fun take(): Uri? = mutableRequest.value.also { mutableRequest.value = null }
 }
 
-/** The image an `ACTION_SEND` of an image type carries, else null. */
+/**
+ * The image an `ACTION_SEND` of an image type carries, else null. Only a `content:` stream is taken
+ * ([readableImageScheme]): another app must not have or2 open a `file:` path with or2's own rights.
+ */
 fun sharedImage(intent: Intent?): Uri? {
     if (intent?.action != Intent.ACTION_SEND || intent.type?.startsWith("image/") != true) return null
-    return intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+    return intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)?.takeIf { readableImageScheme(it.scheme) }
 }
+
+/** This process, as a pending share's saved state names it ([savedShare]). */
+val THIS_PROCESS: String = java.util.UUID.randomUUID().toString()
+
+/** A pending share ([uri]) as saved state: the [process] that took it, and the URI. */
+fun savedShare(uri: String, process: String = THIS_PROCESS): Array<String> = arrayOf(process, uri)
+
+/**
+ * A pending share's URI from saved state, only in the [process] that saved it (a rotation). After the
+ * process died the terminals it was for are gone and its read grant need not hold: it is dropped.
+ */
+fun restoredShare(saved: Array<String>, process: String = THIS_PROCESS): String? =
+    saved.takeIf { it.size == 2 && it[0] == process }?.get(1)
 
 /** What a shared image says when no terminal is open to take it. */
 const val NO_TERMINAL_FOR_IMAGE = "No open terminal to send the image to"

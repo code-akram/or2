@@ -60,6 +60,7 @@ import io.github.code_akram.or2.paste.ImagePaste
 import io.github.code_akram.or2.paste.InsertTarget
 import io.github.code_akram.or2.paste.composerWithPath
 import io.github.code_akram.or2.paste.imageFromUri
+import io.github.code_akram.or2.paste.insertablePath
 import io.github.code_akram.or2.paste.insertTarget
 import io.github.code_akram.or2.paste.pathInsertion
 import io.github.code_akram.or2.ui.Or2Colors
@@ -146,6 +147,8 @@ fun TerminalScreen(
         // composer is open, else pasted into the terminal (bracketed when the program asked for that).
         LaunchedEffect(view, imagePaste) {
             imagePaste?.paths?.collect { path ->
+                // ImagePaste delivers only insertable paths; never type anything else.
+                if (!insertablePath(path)) return@collect
                 when (insertTarget(chrome.composerOpen)) {
                     InsertTarget.COMPOSER -> chrome.composerText = composerWithPath(chrome.composerText, path)
                     InsertTarget.TERMINAL -> view.pasteText(pathInsertion(path))
@@ -296,8 +299,9 @@ fun TerminalScreen(
                     TextAction("Send", {
                         haptics.performHapticFeedback(HapticFeedbackType.Confirm)
                         pendingSend = null
-                        // Cleared only when it went out; after a drop the message stays in the composer.
-                        if (view.sendLine(text)) chrome.composerText = ""
+                        // Cleared only when it went out; after a drop the message stays in the composer. Only what
+                        // was sent is cleared: an image's path that arrived under the dialog stays.
+                        if (view.sendLine(text)) chrome.composerSent(text)
                     }, modifier = Modifier.testTag("composer-send-confirm"))
                 },
                 dismiss = { TextAction("Cancel", { pendingSend = null }, color = Or2Colors.Text) },

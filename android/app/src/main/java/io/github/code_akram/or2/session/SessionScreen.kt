@@ -47,8 +47,8 @@ import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.paste.NO_UPLOAD
 import io.github.code_akram.or2.paste.UploadNotice
-import io.github.code_akram.or2.paste.UploadState
 import io.github.code_akram.or2.paste.uploadNotice
+import io.github.code_akram.or2.paste.uploading
 import io.github.code_akram.or2.terminal.TerminalScreen
 import io.github.code_akram.or2.terminal.Transport
 import io.github.code_akram.or2.terminal.display
@@ -125,7 +125,7 @@ fun SessionScreen(
         if (hasConnected) {
             TerminalCard(terminal.host.label, terminal.title, transport.display(), state, minimise, openSwitcher = { switcher = true }, endSession,
                 background = background, linkHealth = linkHealth, upload = uploadNotice(upload),
-                uploadAction = { if (upload is UploadState.Uploading) paste?.cancel() else paste?.dismiss() }) {
+                uploadAction = { if (upload.uploading) paste?.cancel() else paste?.dismiss() }) {
                 // Keep the borrowed handle composed through Closed so its final frame stays visible.
                 handle?.let { TerminalScreen(it, terminal.state, terminal.frameReady, Modifier.weight(1f),
                     composerHint = "Message " + terminal.host.label + "…", openPanes = { switcher = true },
