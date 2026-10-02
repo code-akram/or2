@@ -18,6 +18,7 @@
 //! - [`pairing`], [`exchange`], [`signals`]: the live run and the forced command `or2-pair enroll`
 //!   (Unix),
 //! - [`net`]: the one socket, behind a small trait,
+//! - [`rail`]: how all of it is drawn: one clack-style rail, colour and glyphs as the terminal allows,
 //! - [`run`]: the whole flow, with its environment injected.
 
 pub mod account;
@@ -39,6 +40,7 @@ pub mod pairing;
 pub mod payload;
 pub mod prompt;
 pub mod qr;
+pub mod rail;
 pub mod run;
 #[cfg(unix)]
 pub mod safefs;
@@ -57,6 +59,7 @@ use crate::date::DateTime;
 use crate::hostkey::SystemKeyscan;
 use crate::net::StdNet;
 use crate::prompt::Stdin;
+use crate::rail::{Rail, Stream, Style};
 use crate::run::{Env, Exit, OsSignals, RunError};
 
 /// The operating system's interface addresses (IPv4 and IPv6; the classification is in
@@ -123,12 +126,23 @@ fn resolve_account(options: &args::Options) -> Result<Account, AccountError> {
 /// `code_from_stdin` (the `test-support` host only) takes the code from a pipe instead of
 /// insisting on a terminal.
 pub fn run_main(options: &args::Options, code_from_stdin: bool) -> Result<Exit, RunError> {
-    let account = resolve_account(options)?;
+    let style = Style::detect(Stream::Stdout);
+    let account = match resolve_account(options) {
+        Ok(account) => account,
+        Err(error) => {
+            // The rail opens before the error that ends it.
+            let rail = Rail::new(style.with_flags(options.no_color, options.ascii));
+            run::open(
+                &rail,
+                &mut std::io::stdout().lock(),
+                env!("CARGO_PKG_VERSION"),
+                options,
+            )?;
+            return Err(error.into());
+        }
+    };
     let path: Option<OsString> = std::env::var_os("PATH");
     let hostname = gethostname::gethostname().to_string_lossy().into_owned();
-    let color = std::io::IsTerminal::is_terminal(&std::io::stdout())
-        && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
-        && std::env::var("TERM").map_or(true, |term| term != "dumb");
     let random = |buf: &mut [u8]| {
         use rand::Rng;
         rand::rng().fill_bytes(buf);
@@ -175,7 +189,7 @@ pub fn run_main(options: &args::Options, code_from_stdin: bool) -> Result<Exit, 
         exe,
         prompt: &Stdin,
         can_ask: code_from_stdin || Stdin::available(),
-        color,
+        style,
         random: &random,
         now: &now,
         signals: &OsSignals,
@@ -244,7 +258,12 @@ pub fn cli(args: impl IntoIterator<Item = String>, code_from_stdin: bool) -> Exi
     match run_main(&options, code_from_stdin) {
         Ok(exit) => ExitCode::from(u8::try_from(exit.code()).unwrap_or(1)),
         Err(error) => {
-            eprintln!("\nor2-pair: {error}");
+            // The rail went to standard output: all of it first, then the error that ends it.
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            let rail = Rail::new(
+                Style::detect(Stream::Stderr).with_flags(options.no_color, options.ascii),
+            );
+            let _ = run::report_error(&rail, &mut std::io::stderr().lock(), &error);
             ExitCode::FAILURE
         }
     }

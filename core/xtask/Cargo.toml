@@ -14,3 +14,7 @@ sha2.workspace = true
 
 [dev-dependencies]
 tempfile = "=3.27.0"
+
+# A pseudo-terminal for the installer test (colour only on a terminal).
+[target.'cfg(unix)'.dev-dependencies]
+libc = "=0.2.189"

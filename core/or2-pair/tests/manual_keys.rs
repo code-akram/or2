@@ -38,7 +38,7 @@ fn manual(
         exe: Ok(EXE.into()),
         prompt: &script,
         can_ask: true,
-        color: false,
+        style: or2_pair::rail::Style::plain(),
         random: &random,
         now: &|| or2_pair::date::DateTime::from_unix(1_782_867_661),
         signals: &signals,

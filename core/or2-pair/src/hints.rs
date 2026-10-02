@@ -519,12 +519,12 @@ fn linux_firewall(root: &Path) -> Option<Firewall> {
 }
 
 /// The end of every sshd hint: the answer may simply be on another port.
-const OTHER_PORT: &str = "; if sshd listens on another port, pass --ssh-port";
+const OTHER_PORT: &str = "\nif sshd listens on another port, pass --ssh-port";
 
 /// What to do when sshd does not answer: the end of "sshd is not answering on port N: …".
 pub fn sshd(platform: Platform, facts: &HostFacts) -> String {
     let hint = match platform {
-        Platform::MacOs => "turn on Remote Login (System Settings > General > Sharing > Remote Login), or run `sudo systemsetup -setremotelogin on` (that needs Full Disk Access for this terminal app, in System Settings > Privacy & Security)".to_owned(),
+        Platform::MacOs => "turn on Remote Login (System Settings > General > Sharing > Remote Login)\nor run `sudo systemsetup -setremotelogin on` (that needs Full Disk Access for this terminal app, in System Settings > Privacy & Security)".to_owned(),
         Platform::Linux => linux_sshd(facts),
         Platform::Windows => {
             "install and start OpenSSH Server (Settings > Optional features, then Start-Service sshd)".to_owned()
@@ -579,11 +579,11 @@ fn linux_sshd(facts: &HostFacts) -> String {
     match (facts.sshd_installed, facts.sshd_packaged) {
         // Not found, and the package database agrees.
         (Some(false), Some(false)) => {
-            format!("the OpenSSH server is not installed; install it with {install}, then {start}")
+            format!("the OpenSSH server is not installed; install it with {install}\nthen {start}")
         }
         // Not found where it usually is, and nothing to confirm it.
         (Some(false), _) => format!(
-            "the OpenSSH server does not seem to be installed (no sshd in the usual directories); if it is not, install it with {install}, then {start}"
+            "the OpenSSH server does not seem to be installed (no sshd in the usual directories); if it is not, install it with {install}\nthen {start}"
         ),
         _ => start,
     }
@@ -597,7 +597,7 @@ pub enum Program {
     MoshServer,
 }
 
-/// How to install a program that was not found: what follows "install it: ".
+/// How to install a program that was not found: the line under "<program> not found".
 pub fn install(program: Program, platform: Platform, facts: &HostFacts) -> String {
     let package = match program {
         // herdr's own instructions say how to install it; no package name is guessed.
@@ -609,9 +609,12 @@ pub fn install(program: Program, platform: Platform, facts: &HostFacts) -> Strin
         Program::MoshServer => "mosh",
     };
     match (facts.package_manager, platform) {
-        (Some(manager), _) => format!("`{}`", manager.install(package, facts.superuser)),
+        (Some(manager), _) => format!(
+            "install it: `{}`",
+            manager.install(package, facts.superuser)
+        ),
         (None, Platform::MacOs) => {
-            format!("with Homebrew (https://brew.sh): `brew install {package}`")
+            format!("install it with Homebrew (https://brew.sh): `brew install {package}`")
         }
         (None, _) => format!("install the {package} package with your package manager"),
     }
@@ -626,26 +629,28 @@ pub fn firewall(platform: Platform, facts: &HostFacts, mosh: bool) -> Option<Str
     let sudo = facts.sudo();
     Some(match platform {
         Platform::MacOs => format!(
-            "{ports} if the firewall is on (allow mosh-server in System Settings > Network > Firewall)"
+            "{ports} if the firewall is on\nallow mosh-server in System Settings > Network > Firewall"
         ),
         Platform::Linux => match facts.firewall {
-            Some(Firewall::Ufw) => format!("{ports}; ufw is on: `{sudo}ufw allow 60000:61000/udp`"),
+            Some(Firewall::Ufw) => {
+                format!("{ports}\nufw is on; open them with:\n`{sudo}ufw allow 60000:61000/udp`")
+            }
             Some(Firewall::Firewalld) => format!(
-                "{ports}; firewalld is enabled: `{sudo}firewall-cmd --permanent --add-port=60000-61000/udp && {sudo}firewall-cmd --reload`"
+                "{ports}\nfirewalld is enabled; open them with:\n`{sudo}firewall-cmd --permanent --add-port=60000-61000/udp && {sudo}firewall-cmd --reload`"
             ),
             Some(Firewall::Nftables) => format!(
-                "{ports}; the nftables service is enabled: add a rule such as `{sudo}nft add rule inet filter input udp dport 60000-61000 accept` (with your ruleset's table and chain), and the same to /etc/nftables.conf to keep it"
+                "{ports}\nthe nftables service is enabled; add a rule such as this one (with your ruleset's table and chain), and the same to /etc/nftables.conf to keep it:\n`{sudo}nft add rule inet filter input udp dport 60000-61000 accept`"
             ),
             None => format!(
-                "{ports}; no enabled ufw, firewalld or nftables was found here, so if a firewall blocks them it is another one (on this host, a router's or a cloud provider's): open them there"
+                "{ports}\nno enabled ufw, firewalld or nftables was found here, so if a firewall blocks them it is another one (on this host, a router's or a cloud provider's): open them there"
             ),
         },
         Platform::Windows | Platform::Other => return None,
     })
 }
 
-/// Starts each further line of a check, under its text (after `  warn  `).
-const CONTINUED: &str = "\n        ";
+/// Starts each further line of a check: drawn on the rail under its first line.
+const CONTINUED: &str = "\n";
 
 /// `path` for a POSIX shell: in double quotes, or in single quotes when it has a character
 /// double quotes do not keep.
@@ -689,7 +694,7 @@ pub fn mac_firewall_checks(
         out.push((
             Level::Warn,
             format!(
-                "the macOS firewall blocks all incoming connections, which overrides any rule, so mosh cannot reach this host and terminals use SSH (it also blocks sharing services such as Remote Login from other machines); turn off \"Block all incoming connections\" in System Settings > Network > Firewall > Options, or run:{CONTINUED}{sudo}{SOCKETFILTERFW} --setblockall off"
+                "the macOS firewall blocks all incoming connections, which overrides any rule, so mosh cannot reach this host and terminals use SSH (it also blocks sharing services such as Remote Login from other machines){CONTINUED}turn off \"Block all incoming connections\" in System Settings > Network > Firewall > Options, or run:{CONTINUED}`{sudo}{SOCKETFILTERFW} --setblockall off`"
             ),
         ));
     }
@@ -712,7 +717,7 @@ pub fn mac_firewall_checks(
         out.push((
             Level::Warn,
             format!(
-                "{what}, so mosh cannot reach this host and terminals use SSH; allow it:{CONTINUED}{sudo}{SOCKETFILTERFW} --add {quoted}{CONTINUED}{sudo}{SOCKETFILTERFW} --unblockapp {quoted}{CONTINUED}{upgrade}"
+                "{what}, so mosh cannot reach this host and terminals use SSH{CONTINUED}allow it:{CONTINUED}`{sudo}{SOCKETFILTERFW} --add {quoted}`{CONTINUED}`{sudo}{SOCKETFILTERFW} --unblockapp {quoted}`{CONTINUED}{upgrade}"
             ),
         ));
     }
@@ -1121,7 +1126,7 @@ mod tests {
             assert_eq!(
                 *text,
                 format!(
-                    "{opening}, so mosh cannot reach this host and terminals use SSH; allow it:\n        sudo {tool} --add \"{CELLAR}\"\n        sudo {tool} --unblockapp \"{CELLAR}\"\n        `brew upgrade mosh` installs a new mosh-server at another path, so add the rule again after an upgrade (or2-pair --check shows it)"
+                    "{opening}, so mosh cannot reach this host and terminals use SSH\nallow it:\n`sudo {tool} --add \"{CELLAR}\"`\n`sudo {tool} --unblockapp \"{CELLAR}\"`\n`brew upgrade mosh` installs a new mosh-server at another path, so add the rule again after an upgrade (or2-pair --check shows it)"
                 )
             );
         }
@@ -1133,9 +1138,7 @@ mod tests {
         };
         let (_, text) = &mac_firewall_checks(Platform::MacOs, &facts, true)[0];
         assert!(
-            text.contains(&format!(
-                "\n        {tool} --add \"/opt/local/bin/mosh-server\""
-            )),
+            text.contains(&format!("\n`{tool} --add \"/opt/local/bin/mosh-server\"`")),
             "{text}"
         );
         assert!(!text.contains("sudo") && !text.contains("brew"), "{text}");
@@ -1164,7 +1167,7 @@ mod tests {
                 "the macOS firewall blocks all incoming connections, which overrides any rule"
             ) && checks[0]
                 .1
-                .ends_with(&format!("\n        sudo {tool} --setblockall off")),
+                .ends_with(&format!("\n`sudo {tool} --setblockall off`")),
             "{}",
             checks[0].1
         );
@@ -1604,7 +1607,7 @@ mod tests {
         };
         assert!(
             sshd(Platform::Linux, &alpine)
-                .contains("`sudo apk add openssh`, then start it with `sudo rc-update add sshd")
+                .contains("`sudo apk add openssh`\nthen start it with `sudo rc-update add sshd")
         );
         let unknown = HostFacts {
             sshd_installed: Some(false),
@@ -1655,7 +1658,7 @@ mod tests {
         ];
         for hint in everything {
             assert!(
-                hint.ends_with("; if sshd listens on another port, pass --ssh-port"),
+                hint.ends_with("\nif sshd listens on another port, pass --ssh-port"),
                 "{hint}"
             );
         }
@@ -1702,8 +1705,14 @@ mod tests {
             ),
         ] {
             let facts = linux(Some(manager));
-            assert_eq!(install(Program::Tmux, Platform::Linux, &facts), tmux);
-            assert_eq!(install(Program::MoshServer, Platform::Linux, &facts), mosh);
+            assert_eq!(
+                install(Program::Tmux, Platform::Linux, &facts),
+                format!("install it: {tmux}")
+            );
+            assert_eq!(
+                install(Program::MoshServer, Platform::Linux, &facts),
+                format!("install it: {mosh}")
+            );
         }
         // Root: no sudo; Homebrew never has it.
         let root = HostFacts {
@@ -1712,7 +1721,7 @@ mod tests {
         };
         assert_eq!(
             install(Program::Tmux, Platform::Linux, &root),
-            "`dnf install tmux`"
+            "install it: `dnf install tmux`"
         );
         // No package manager found.
         assert!(
@@ -1740,7 +1749,7 @@ mod tests {
         for (active, expected) in [
             (
                 Some(Firewall::Ufw),
-                "ufw is on: `sudo ufw allow 60000:61000/udp`",
+                "ufw is on; open them with:\n`sudo ufw allow 60000:61000/udp`",
             ),
             (
                 Some(Firewall::Firewalld),

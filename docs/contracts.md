@@ -2343,7 +2343,8 @@ version 2.
 
 1. **Phone:** Add host → **Easy pair**. The screen shows a **pairing code** `K` such as
    `7KQ4-M2XD-9PTM`, with the camera below it.
-2. **Host:** `or2-pair` runs its checks, then asks `Code shown on your phone:`. The person types `K`.
+2. **Host:** `or2-pair` runs its checks, then asks **Code shown on your phone** (see "Host CLI", "Output"). The
+   person types `K`.
 3. **Host:** derives a throwaway Ed25519 **bootstrap key** from `K` and a fresh pairing id, adds it to
    `~/.ssh/authorized_keys` restricted to one forced command (`or2-pair enroll <id>`) with an expiry
    (OpenSSH 9.1 or newer),
@@ -2759,7 +2760,7 @@ run ends with nothing changed), and an empty line, the end of input or Ctrl-C en
 changed. It is asked **after** every check that can refuse (so nobody types a code for a run that cannot
 start) and **before** anything is written. `K` is not echoed, written to a file or logged: while it is
 typed the terminal's echo is off (`termios`: `ECHO` and `ECHONL` cleared on descriptor 0, like a
-password prompt), and `or2-pair` prints the newline itself after the line is read. The terminal's
+password prompt), and `or2-pair` draws the answer itself after the line is read (the code masked: see "Output"). The terminal's
 settings are put back on every way out: after the line, on an error or a panic (a drop guard), and on
 SIGINT, SIGTERM, SIGHUP, SIGQUIT and SIGTSTP during the prompt (handlers installed only for the prompt,
 not for signals that were ignored, restore the settings with `tcsetattr`, then re-raise the signal with
@@ -2789,13 +2790,13 @@ IPv4-mapped addresses are skipped; an IPv6 address on an overlay-named interface
 **Checks** add: the sshd version from the banner; a best-effort read of `/etc/ssh/sshd_config` and the
 files it `Include`s when readable (below); the login shell (it must start this program: see "The
 bootstrap key"); the executable path's characters; leftover bootstrap entries (reported by `--check`,
-removed by a run). Each line is `ok`, `info`, `warn` or `fail`. A **`fail`** is something that makes
+removed by a run). Each line is `ok` (✔), `info` (●), `warn` (▲) or `fail` (■). A **`fail`** is something that makes
 automatic pairing impossible here (sshd not answering or not OpenSSH, `authorized_keys` unwritable or
 refused by StrictModes, `~/.ssh` not writable (the replacement is a new file there), a login shell that
 cannot run commands or does not start this program, a program path sshd's shell would mangle, and what
 `sshd_config` certainly does for this account, below): the run prints the checks and ends with
-"automatic pairing is not possible here (the lines marked fail above say why); fix them, or run or2-pair
---manual", before asking for the code and before changing anything. With `--manual` (or where no keys
+"automatic pairing is not possible here: the failed checks above say why" and "fix them, or run or2-pair
+--manual and add the phone's key by hand", before asking for the code and before changing anything. With `--manual` (or where no keys
 are installed) the same findings are `warn`. `--check` prints them either way and exits 0. An sshd
 older than OpenSSH 9.1 is a `warn` that says the key is written without an expiry.
 
@@ -2907,6 +2908,34 @@ then warns when the directory's path has characters `or2-pair` refuses, prints t
 not on `PATH`, and tells the person to run `or2-pair`. It never runs `sudo` and writes nothing else. The
 checksum proves integrity, not authenticity: the binary and `SHA256SUMS` come from the same release (signing
 is a future item).
+The installer draws the same rail as `or2-pair` (see "Output" below; `printf` only, colour only when `[ -t 1 ]`
+(`[ -t 2 ]` for an error), `NO_COLOR` unset or empty and `TERM` not `dumb`, the Unicode glyphs only when
+`${LC_ALL:-${LC_CTYPE:-${LANG}}}` names UTF-8, else the ASCII rail), once its arguments are understood:
+
+```text
+┌  install or2-pair
+│
+▲  running as root: or2-pair is installed for root, and pairing from root's shell pairs the root account
+│  run this as the user the phone should log in as                  (as root only)
+●  Downloading the latest release for x86_64-unknown-linux-musl     (or: Downloading v0.1.1 for …)
+●  Downloaded or2-pair-x86_64-unknown-linux-musl
+│  from https://github.com/code-akram/or2/releases/latest/download
+✔  Checksum verified
+│  SHA-256 <the asset's hash>
+✔  Installed or2-pair 0.1.1 at /home/dev/.local/bin/or2-pair
+▲  /home/dev/.local/bin is not on your PATH                         (only then)
+│  add it in your shell's startup file, for example:
+│  export PATH="/home/dev/.local/bin:$PATH"
+│
+●  Next: open or2 on your phone (Add host > Easy pair) and run:
+│  /home/dev/.local/bin/or2-pair                                    (or2-pair when on PATH)
+│
+└  Done
+```
+
+A refusal goes to standard error as `│`, `■  <what>` and its fix on the next lines, `│`, `└  Failed`; a usage
+error (before the rail) is the usage and one plain `install-or2-pair: <message>` line. A directory whose path has
+characters `or2-pair` refuses is a `▲` with the fix (`--dir` to a plain path).
 
 **Kept from version 1 unchanged:** the account (`getpwuid_r(geteuid())`, `$HOME`/`$USER` ignored,
 `--user` only repeating it); the phone's `authorized_keys` line, rebuilt from the validated key, with the
@@ -2929,34 +2958,111 @@ Its human output is the normal output on standard output; the line that starts `
 pairing code, and `Waiting for the phone` marks the moment the temporary key is in place. The installed
 `or2-pair` reads none of these variables; a `test-support` build of it reads them too.
 
-Output, for a host reached over its public address:
+**Output** (v0.1.1, `rail.rs`; the look of `@clack/prompts`). Everything `or2-pair` prints for a person is one
+continuous **rail** in a dim left gutter, text two columns after the rail's glyph:
+
+- `┌  or2-pair <version> · <what>` opens it (`pair a phone with this host`, `check this host for pairing`,
+  `pairing code only` for `--manual`); `└  <word>` closes it with one plain word: `Paired`, `Cancelled` (an empty
+  answer, the end of input, too many typos, Ctrl-C, SIGTERM or SIGHUP), `Timed out`, `Not paired` (a phone's result
+  without its key in the file), `Failed` (an error, or a temporary key that could not be removed), `Done`
+  (`--check`, `--manual`). A blank rail line (`│`) separates the steps.
+- Each message swaps the rail glyph for a symbol: `●` info (blue), `✔` ok (green), `▲` a warning or a calm notice
+  (yellow), `■` an error or a failed check (red), `◆` a question being asked (cyan), `◇` an answered one (green).
+  A message's further lines (each `\n` in its text) continue the rail (`│  `): a check's **fix** is on its own
+  lines under the check, a command on a line of its own between backticks (cyan with colour).
+- Lines **wrap** to the terminal's width (the `TIOCGWINSZ` of the stream, else `COLUMNS`, else 80) with the rail
+  continued, at spaces only: a word longer than the line (a path) and a command on a line of its own are never
+  split, so they stay copyable. Off a terminal nothing is wrapped. Under 16 columns of text nothing is wrapped
+  either.
+- **This host** is labelled rows (labels dimmed, one per line: name, user, ssh port, host key, addresses, one
+  address per line); values wrap under their first line.
+- **The QR** is drawn on the rail (`│  ` before each row, nothing else changed: its 2-module quiet zone, `--ascii`
+  and `--invert` as before) between blank rail lines; the rail glyph is three columns from the code, outside its
+  quiet zone, and the tests decode the drawing with the rail in it (`rqrr`). **The pairing code** is printed
+  **bare** on a line of its own, off the rail and never wrapped, so that selecting the line copies exactly it (the
+  phone's parser takes nothing before `or2-pair:`), and a line starting `or2-pair:2?` is still the code for the
+  tests.
+- **The code question:** `◆  Code shown on your phone`, then the answer's line `│  ` where the cursor waits. The
+  code is not echoed; once it is read the answer's line shows it masked (each character `•`, separators kept:
+  `••••-••••-••••`). On a terminal that takes cursor movement (standard output a terminal, `TERM` not `dumb`,
+  Unix) the answer's line first shows a dim hint (`hidden as you type; Enter when done`) with the cursor at its
+  start, and the answered question is redrawn in place (`\r`, cursor up one line, erase line) as `◇` (accepted),
+  `▲` (a typo: the reason follows under it, then a new `◆`) or `■` (no code: `No code was typed. Nothing was
+  changed.`). The redraw is skipped (only the answer's line is drawn) when the process was stopped and continued
+  during the question (Ctrl-Z and `fg`: the shell wrote meanwhile; the prompt's SIGCONT handler counts it) or the
+  question does not fit one line. Off a terminal the answer simply ends the line the cursor is on. An ending
+  signal during the question (Ctrl-C; SIGTERM, SIGHUP, SIGQUIT) still ends the rail: the handler that puts the
+  terminal back also writes the end prepared before the question (`write(2)` of bytes already in memory: the
+  answer's line `Cancelled. Nothing was changed.`, `│`, `└  Cancelled`), then the signal ends the process as
+  before.
+- **The wait** is one static line, `●  Waiting for the phone (until 12:35). Ctrl-C removes the temporary key.`: no
+  spinner. A spinner redraws its line in place, and the keys a person types while waiting (Enter, while scanning)
+  are echoed by the terminal and move the cursor, so the redraw would leave stale copies behind; turning echo off
+  for the wait would need a second termios guard beside the signal counting. Not worth the risk for a calm wait.
+- **Errors** (`RunError`) go to standard error after the rail on standard output: `│`, `■  <error>` (its fix on
+  the next lines), `│`, `└  Failed`. An error before the run starts (the account cannot be found) opens the rail
+  first. Usage errors (exit 2, before any rail) stay one plain `or2-pair: <message>` line, and `--help` and
+  `--version` are plain (`--version` prints exactly `or2-pair X.Y.Z`; the installer reads it). A cleanup that
+  fails in a panic or early return (the `Live` drop guard) reports on standard error with the same rail lines.
+  `or2-pair enroll` speaks JSON to the phone and is not drawn.
+- **Colour** only when the stream is a terminal, `NO_COLOR` is unset or empty, `TERM` is not `dumb` and
+  `--no-color` is not given; only the 16-colour palette (SGR 2 dim for the rail and quiet text, 31 red, 32 green,
+  33 yellow, 34 blue, 36 cyan, 0 reset), so it fits any theme. Standard error decides for itself.
+- **Glyphs**: Unicode only when the locale is UTF-8 (the first of `LC_ALL`, `LC_CTYPE`, `LANG` that is set and
+  not empty names `UTF-8` or `utf8`, in any case), and not with `--ascii`; otherwise the ASCII rail: `+` open,
+  `|` rail, `` ` `` close, `*` info, `+` ok, `!` warning, `x` error, `>` question (asked and answered), `*` mask,
+  `-` instead of `·` in the title. The QR keeps its own choice (half blocks unless `--ascii`): a terminal that
+  draws UTF-8 under a C locale (a common SSH session) still gets the narrow code.
+
+Output, for a host reached over its public address (no colour; `[QR]` stands for the rows of the code):
 
 ```text
-or2-pair 0.2.0 - pair a phone with this host
-
-Checks
-  ok    sshd is answering on port 22 (OpenSSH_9.8)
-  ok    ~/.ssh/authorized_keys can be written and sshd will honour it
-  ok    tmux, herdr, mosh-server found
-
-Open or2 on your phone: Add host > Easy pair.
-Code shown on your phone: 7KQ4-M2XD-9PTM
-
-This host
-  name       workstation      user  dev      ssh port  22
-  host key   ssh-ed25519 SHA256:…
-  addresses  10.147.17.5 (overlay), 203.0.113.9 (public), 2001:db8::9 (public)
-
-A temporary pairing key was added for dev until 12:35. Scan this with the same phone:
-  [QR]
-
-Or paste this code into the app (Easy pair > Paste pairing code):
+┌  or2-pair 0.1.1 · pair a phone with this host
+│
+✔  sshd is answering on port 22 (OpenSSH_9.8)
+✔  /home/dev/.ssh/authorized_keys can be written and sshd will honour it
+✔  login shell /bin/bash runs /home/dev/.local/bin/or2-pair
+✔  sshd will run /home/dev/.local/bin/or2-pair for the pairing
+✔  tmux, herdr, mosh-server found
+●  mosh needs UDP ports 60000-61000 open on this host
+│  ufw is on; open them with:
+│  `sudo ufw allow 60000:61000/udp`
+│
+●  Open or2 on your phone: Add host > Easy pair
+│
+◇  Code shown on your phone
+│  ••••-••••-••••
+│
+●  This host
+│  name       workstation
+│  user       dev
+│  ssh port   22
+│  host key   ssh-ed25519 SHA256:…  (/etc/ssh/ssh_host_ed25519_key.pub)
+│  addresses  10.147.17.5 (overlay)
+│             203.0.113.9 (public)
+│             2001:db8::9 (public)
+│             workstation.local (mDNS name, same network only)
+│
+●  A temporary pairing key was added for dev until 12:35
+│  Scan this with the same phone:
+│
+│  [QR]
+│
+│  Or paste this code into the app (Easy pair > Paste pairing code):
 or2-pair:2?…
-
-Waiting for the phone (until 12:35). Ctrl-C removes the temporary key.
-Paired "OnePlus" (SHA256:7xKc…) as dev. The temporary key was replaced by the phone's key.
-To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys.
+│
+●  Waiting for the phone (until 12:35). Ctrl-C removes the temporary key.
+│
+✔  "OnePlus" can now log in as dev (SHA256:7xKc…)
+│  Its key replaced the temporary key. To undo, delete the line ending or2-OnePlus-2026-10-02 in
+│  /home/dev/.ssh/authorized_keys.
+│  The previous file is saved as /home/dev/.ssh/authorized_keys.or2-backup-20261002-123012.
+│
+└  Paired
 ```
+
+`--check` ends with `✔  No warnings. Nothing was changed.` (or `▲  2 warnings. Nothing was changed.`, warnings
+and failed checks together) and `└  Done`.
 
 ## FFI (API 13)
 

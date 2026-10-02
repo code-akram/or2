@@ -154,6 +154,8 @@ impl World {
             .env("FAKE_UNAME_S", os)
             .env("FAKE_UNAME_M", arch)
             .env("FAKE_UID", self.uid.to_string())
+            // The rail's glyphs follow the locale: UTF-8 unless a test says otherwise.
+            .env("LC_ALL", "C.UTF-8")
             .env(
                 "OR2_PAIR_RELEASES_BASE",
                 format!("file://{}", self.releases().display()),
@@ -249,8 +251,11 @@ fn a_matching_checksum_installs_the_binary_for_this_host() {
             "x86_64-unknown-linux-musl".to_owned()
         )
     );
-    assert!(said.contains("(the latest release)"), "{said}");
-    assert!(said.contains("Checksum OK"), "{said}");
+    assert!(
+        said.contains("Downloading the latest release for x86_64-unknown-linux-musl"),
+        "{said}"
+    );
+    assert!(said.contains("Checksum verified"), "{said}");
     assert!(
         said.contains(&format!("Installed or2-pair {LATEST}")),
         "{said}"
@@ -312,7 +317,7 @@ fn a_matching_checksum_installs_the_binary_for_this_host() {
     assert_eq!(installed(&env_dir).1, "x86_64-unknown-linux-musl");
     // On PATH: no hint, and the plain name.
     assert!(!said.contains("is not on your PATH"), "{said}");
-    assert!(said.ends_with("  or2-pair\n"), "{said}");
+    assert!(said.ends_with("\n│  or2-pair\n│\n└  Done\n"), "{said}");
 }
 
 #[test]
@@ -330,7 +335,7 @@ fn version_picks_that_release_and_a_missing_one_is_named() {
         let output = world.install("Linux", "x86_64", &args, &[]);
         let said = text(&output);
         assert!(output.status.success(), "{spelling}: {said}");
-        assert!(said.contains("(v9.9.8)"), "{said}");
+        assert!(said.contains("Downloading v9.9.8 for"), "{said}");
         assert_eq!(installed(&world.default_dir()).0, "or2-pair 9.9.8");
     }
     // An upgrade to the latest replaces it.
@@ -567,14 +572,201 @@ fn a_binary_that_does_not_run_leaves_the_old_one() {
         let output = world.install("Linux", "x86_64", &[], &[]);
         let said = text(&output);
         assert!(!output.status.success(), "{said}");
-        assert!(said.contains("Checksum OK"), "{said}");
+        assert!(said.contains("Checksum verified"), "{said}");
         assert!(
-            said.contains("does not run on this host; nothing was replaced"),
+            said.contains("does not run on this host\n│  nothing was replaced"),
             "{said}"
         );
         assert_eq!(std::fs::read_to_string(dir.join("or2-pair")).unwrap(), old);
         assert_eq!(world.leftovers(&dir), Vec::<String>::new());
     }
+}
+
+/// The whole output is one rail on standard output; an error, and the rail's end, go to
+/// standard error.
+#[test]
+fn the_output_is_one_rail_and_an_error_ends_it_on_standard_error() {
+    if !have_curl() {
+        return;
+    }
+    let world = World::new();
+    let output = world.install("Linux", "x86_64", &[], &[]);
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(output.stderr.is_empty(), "{}", text(&output));
+    let dir = world.default_dir().canonicalize().unwrap();
+    let dir = dir.display();
+    let releases = world.releases();
+    let sum = hex(&std::fs::read(
+        world
+            .latest_dir()
+            .join("or2-pair-x86_64-unknown-linux-musl"),
+    )
+    .unwrap());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "┌  install or2-pair\n\
+             │\n\
+             ●  Downloading the latest release for x86_64-unknown-linux-musl\n\
+             ●  Downloaded or2-pair-x86_64-unknown-linux-musl\n\
+             │  from file://{releases}/latest/download\n\
+             ✔  Checksum verified\n\
+             │  SHA-256 {sum}\n\
+             ✔  Installed or2-pair {LATEST} at {dir}/or2-pair\n\
+             ▲  {dir} is not on your PATH\n\
+             │  add it in your shell's startup file, for example:\n\
+             │  export PATH=\"{dir}:$PATH\"\n\
+             │\n\
+             ●  Next: open or2 on your phone (Add host > Easy pair) and run:\n\
+             │  {dir}/or2-pair\n\
+             │\n\
+             └  Done\n",
+            releases = releases.display()
+        )
+    );
+
+    // A refusal: the rail so far on standard output, the error and the end on standard error.
+    let output = world.install("Linux", "x86_64", &["--version", "v1.2.3"], &[]);
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "┌  install or2-pair\n│\n●  Downloading v1.2.3 for x86_64-unknown-linux-musl\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "│\n■  version v1.2.3 does not exist (nothing at file://{}/download/v1.2.3)\n│  the releases are listed at https://github.com/code-akram/or2/releases\n│\n└  Failed\n",
+            releases.display()
+        )
+    );
+
+    // A usage error comes before the rail: one plain line after the usage.
+    let output = world.install("Linux", "x86_64", &["--version"], &[]);
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "install-or2-pair: --version needs a value\n"
+    );
+}
+
+/// Outside a UTF-8 locale the same rail is drawn in ASCII.
+#[test]
+fn outside_a_utf8_locale_the_rail_is_ascii() {
+    if !have_curl() {
+        return;
+    }
+    let world = World::new();
+    for locale in [("LC_ALL", "C"), ("LC_ALL", "POSIX"), ("LC_ALL", "")] {
+        let output = world.install("Linux", "x86_64", &[], &[locale]);
+        let said = text(&output);
+        assert!(output.status.success(), "{said}");
+        assert!(said.is_ascii(), "{locale:?}: {said}");
+        assert!(
+            said.starts_with("+  install or2-pair\n|\n*  Downloading the latest release")
+                && said.contains("\n+  Checksum verified\n|  SHA-256 ")
+                && said.contains(" is not on your PATH\n")
+                && said.contains("\n!  ")
+                && said.ends_with("\n|\n`  Done\n"),
+            "{locale:?}: {said}"
+        );
+    }
+    let output = world.install(
+        "Linux",
+        "x86_64",
+        &["--version", "v1.2.3"],
+        &[("LC_ALL", "C")],
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).starts_with("|\nx  version v1.2.3 does not exist")
+            && String::from_utf8_lossy(&output.stderr).ends_with("|\n`  Failed\n"),
+        "{}",
+        text(&output)
+    );
+    // LANG counts when LC_ALL and LC_CTYPE are not set.
+    let output = world.install(
+        "Linux",
+        "x86_64",
+        &[],
+        &[("LC_ALL", ""), ("LANG", "en_US.UTF-8")],
+    );
+    assert!(
+        text(&output).starts_with("┌  install or2-pair\n"),
+        "{}",
+        text(&output)
+    );
+}
+
+/// What the installer printed with its standard output on a pseudo-terminal, `\r\n` back to
+/// `\n`.
+#[cfg(target_os = "linux")]
+fn on_a_terminal(world: &World, env: &[(&str, &str)]) -> String {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    // SAFETY: plain calls on descriptors this function owns; `ptsname_r` writes at most
+    // `name.len()` bytes.
+    let (mut master, terminal) = unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+        assert!(master >= 0);
+        let master = OwnedFd::from_raw_fd(master);
+        assert_eq!(libc::grantpt(master.as_raw_fd()), 0);
+        assert_eq!(libc::unlockpt(master.as_raw_fd()), 0);
+        let mut name = [0 as libc::c_char; 128];
+        assert_eq!(
+            libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()),
+            0
+        );
+        let terminal = libc::open(
+            name.as_ptr(),
+            libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+        );
+        assert!(terminal >= 0);
+        (
+            std::fs::File::from(master),
+            std::fs::File::from_raw_fd(terminal),
+        )
+    };
+    let mut command = world.command("Linux", "x86_64", &[("TERM", "xterm")]);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command.arg(script()).stdout(terminal).stderr(Stdio::null());
+    let mut child = command.spawn().unwrap();
+    // Only the child holds the terminal now: the master reads to its end once it exits.
+    drop(command);
+    let mut seen = Vec::new();
+    // Linux ends a hung-up pseudo-terminal with EIO; what came before it is kept.
+    let _ = master.read_to_end(&mut seen);
+    assert!(child.wait().unwrap().success());
+    String::from_utf8_lossy(&seen).replace("\r\n", "\n")
+}
+
+/// Colour only on a terminal, and not with NO_COLOR or TERM=dumb.
+#[cfg(target_os = "linux")]
+#[test]
+fn on_a_terminal_the_rail_has_colour_unless_told_otherwise() {
+    if !have_curl() {
+        return;
+    }
+    let world = World::new();
+    let coloured = on_a_terminal(&world, &[]);
+    for drawn in [
+        "\x1b[2m┌\x1b[0m  install or2-pair\n\x1b[2m│\x1b[0m\n",
+        "\n\x1b[34m●\x1b[0m  Downloading the latest release",
+        "\n\x1b[32m✔\x1b[0m  Checksum verified\n",
+        "\n\x1b[33m▲\x1b[0m  ",
+        "\n\x1b[2m│\x1b[0m  \x1b[36mexport PATH=",
+        "\n\x1b[2m└\x1b[0m  Done\n",
+    ] {
+        assert!(coloured.contains(drawn), "{drawn:?} in {coloured:?}");
+    }
+    for env in [[("NO_COLOR", "1")], [("TERM", "dumb")]] {
+        let plain = on_a_terminal(&world, &env);
+        assert!(!plain.contains('\x1b'), "{env:?}: {plain:?}");
+        assert!(plain.starts_with("┌  install or2-pair\n"), "{plain}");
+    }
+    // Off a terminal (every other test): never.
+    let piped = world.install("Linux", "x86_64", &[], &[]);
+    assert!(!text(&piped).contains('\x1b'));
 }
 
 /// Destinations that are refused before anything is downloaded.

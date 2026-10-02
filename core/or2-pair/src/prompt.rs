@@ -17,6 +17,16 @@ pub const MAX_LINE: usize = 256;
 pub trait CodePrompt {
     /// One line without its terminator; `None` at the end of input (Ctrl-D, a closed pipe).
     fn read_line(&self) -> Option<Zeroizing<String>>;
+
+    /// Whether the process was stopped (Ctrl-Z) and continued while the last line was read:
+    /// the shell wrote to the terminal meanwhile, so the question is not redrawn in place.
+    fn was_stopped(&self) -> bool {
+        false
+    }
+
+    /// What to write to standard output if a signal ends the process while a line is typed
+    /// (Ctrl-C): the end of the rail. Only a terminal prompt is ended that way.
+    fn on_ending_signal(&self, _note: &[u8]) {}
 }
 
 /// Standard input.
@@ -30,11 +40,37 @@ impl Stdin {
     }
 }
 
+/// Whether the last [`Stdin::read_line`] saw the process continued after a stop.
+static STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl CodePrompt for Stdin {
     fn read_line(&self) -> Option<Zeroizing<String>> {
         #[cfg(unix)]
-        let _quiet = EchoOff::new(0);
+        {
+            let before = echo::resumes();
+            let line = {
+                let _quiet = EchoOff::new(0);
+                read_line_from_stdin()
+            };
+            STOPPED.store(
+                echo::resumes() != before,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            line
+        }
+        #[cfg(not(unix))]
         read_line_from_stdin()
+    }
+
+    fn was_stopped(&self) -> bool {
+        STOPPED.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn on_ending_signal(&self, note: &[u8]) {
+        #[cfg(unix)]
+        echo::set_note(note);
+        #[cfg(not(unix))]
+        let _ = note;
     }
 }
 
@@ -47,7 +83,7 @@ mod echo {
     use std::cell::UnsafeCell;
     use std::mem::MaybeUninit;
     use std::os::fd::RawFd;
-    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicUsize, Ordering};
 
     /// The settings to put back from a signal handler (which can only use what is already in
     /// memory): written before [`SAVED_FD`] names a descriptor, read only while it does.
@@ -66,6 +102,14 @@ mod echo {
 
     /// Set while the guard puts the terminal back: [`resume`] then leaves echo alone.
     static CLOSING: AtomicBool = AtomicBool::new(false);
+
+    /// How many times [`resume`] ran: the process was stopped and continued during a prompt.
+    static RESUMED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    /// How many times the process was continued after a stop during a prompt, so far.
+    pub fn resumes() -> u32 {
+        RESUMED.load(Ordering::SeqCst)
+    }
 
     /// The signals that end the process while the code is typed.
     const ENDING: [libc::c_int; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
@@ -122,14 +166,39 @@ mod echo {
     /// would have done.
     extern "C" fn restore_and_reraise(signal: libc::c_int) {
         let fd = SAVED_FD.swap(-1, Ordering::SeqCst);
-        // SAFETY: `tcsetattr` is async-signal-safe; `SAVED` holds valid settings whenever
-        // `SAVED_FD` named a descriptor.
+        // SAFETY: `tcsetattr` and `write` are async-signal-safe; `SAVED` holds valid settings
+        // whenever `SAVED_FD` named a descriptor; `NOTE` names `NOTE_LEN` bytes that are never
+        // freed once set.
         unsafe {
             if fd >= 0 {
                 libc::tcsetattr(fd, libc::TCSANOW, (*SAVED.0.get()).as_ptr());
+                let note = NOTE.load(Ordering::SeqCst);
+                if !note.is_null() {
+                    libc::write(
+                        libc::STDOUT_FILENO,
+                        note as *const libc::c_void,
+                        NOTE_LEN.load(Ordering::SeqCst),
+                    );
+                }
             }
             reraise_by_default(signal);
         }
+    }
+
+    /// What [`restore_and_reraise`] writes to standard output before the process ends: the end
+    /// of the rail, prepared ahead (a handler can only write bytes already in memory).
+    static NOTE: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
+    static NOTE_LEN: AtomicUsize = AtomicUsize::new(0);
+
+    /// Sets that note, once per process (later calls change nothing: the handler may be reading
+    /// it). Its bytes live as long as the process.
+    pub fn set_note(note: &[u8]) {
+        if !NOTE.load(Ordering::SeqCst).is_null() || note.is_empty() {
+            return;
+        }
+        let kept: &'static mut [u8] = Box::leak(note.to_vec().into_boxed_slice());
+        NOTE_LEN.store(kept.len(), Ordering::SeqCst);
+        NOTE.store(kept.as_mut_ptr(), Ordering::SeqCst);
     }
 
     /// SIGTSTP (Ctrl-Z): puts the terminal back for whatever runs while this process is stopped,
@@ -149,6 +218,8 @@ mod echo {
     /// has now, without `ECHO` and `ECHONL`), and SIGTSTP is handled again (the stop gave it its
     /// default action). Nothing once the guard is putting things back, or gone.
     extern "C" fn resume(_: libc::c_int) {
+        // A lock-free atomic: async-signal-safe.
+        RESUMED.fetch_add(1, Ordering::SeqCst);
         let fd = SAVED_FD.load(Ordering::SeqCst);
         if fd < 0 || CLOSING.load(Ordering::SeqCst) {
             return;

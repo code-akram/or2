@@ -54,7 +54,8 @@ private fun plain(line: String) = line.split(' ').take(2).joinToString(" ")
  *   to the forced command (`enroll`), which sshd starts with the sessions' environment (the fixture's `SetEnv`);
  * - `K` is read from standard input, one line, with no terminal;
  * - standard output carries the QR's text on a line of its own (it starts with `or2-pair:2?`) and, once the
- *   phone is enrolled, the line `Paired "<device>" (SHA256:…) as <user>.` of the contract's sample output.
+ *   phone is enrolled, the line `✔  "<device>" can now log in as <user> (SHA256:…)` of the contract's sample
+ *   output (`+` for `✔` outside a UTF-8 locale).
  * Like the other sshd suites it skips without `/usr/bin/sshd`, and fails instead when `OR2_REQUIRE_SSHD` is set.
  */
 class PairEndToEndTest {
@@ -87,20 +88,20 @@ class PairEndToEndTest {
             }
         }
 
-        private fun line(prefix: String): String {
+        private fun line(what: String, matches: (String) -> Boolean): String {
             val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
             while (true) {
                 val next = lines.poll(100, TimeUnit.MILLISECONDS)
-                if (next != null && next.startsWith(prefix)) return next.trim()
-                check(System.nanoTime() < end) { "no '$prefix' line from or2-pair-testhost" }
+                if (next != null && matches(next)) return next.trim()
+                check(System.nanoTime() < end) { "no $what line from or2-pair-testhost" }
             }
         }
 
-        /** The QR's text, once the CLI has accepted the code and added the bootstrap key. */
-        fun payload() = line("or2-pair:2?")
+        /** The QR's text, once the CLI has accepted the code and added the bootstrap key: a line of its own. */
+        fun payload() = line("pairing code") { it.startsWith("or2-pair:2?") }
 
-        /** The CLI's last line, once the phone is enrolled. */
-        fun result() = line("Paired \"")
+        /** The CLI's line that the phone is paired (`✔  "<device>" can now log in as <user> (SHA256:…)`). */
+        fun result() = line("paired") { it.contains("\" can now log in as ") }
 
         override fun close() {
             process.destroyForcibly()

@@ -32,20 +32,11 @@ pub enum Level {
     Info,
 }
 
-impl Level {
-    pub fn tag(self) -> &'static str {
-        match self {
-            Self::Ok => "ok  ",
-            Self::Warn => "warn",
-            Self::Fail => "fail",
-            Self::Info => "info",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Check {
     pub level: Level,
+    /// The finding on its first line; its fix, when it has one, on the next lines (`\n`), which
+    /// the rail draws under it.
     pub text: String,
 }
 
@@ -248,7 +239,7 @@ pub fn run(input: &CheckInput<'_>) -> Vec<Check> {
     if input.manual_keys {
         out.push(check(
             Level::Info,
-            "authorized_keys is not checked: or2-pair does not write it on this platform, so you add the phone's key by hand (the instructions follow the pairing code)",
+            "authorized_keys is not checked\nor2-pair does not write it on this platform, so you add the phone's key by hand (the instructions follow the pairing code)",
         ));
     } else {
         out.extend(authorized_keys(input.account, blocking));
@@ -294,7 +285,7 @@ pub fn run(input: &CheckInput<'_>) -> Vec<Check> {
             None => out.push(check(
                 Level::Info,
                 format!(
-                    "{name}: not found ({note}); install it: {}",
+                    "{name} not found ({note})\n{}",
                     hints::install(program, input.platform, input.facts)
                 ),
             )),
@@ -336,12 +327,12 @@ fn sshd(input: &CheckInput<'_>, blocking: Level) -> Check {
                 Err(DialectError::NotOpenSsh(_)) => check(
                     blocking,
                     format!(
-                        "the SSH server on port {port} is {what}, not OpenSSH: pairing needs OpenSSH's authorized_keys options; use --manual"
+                        "the SSH server on port {port} is {what}, not OpenSSH\npairing needs OpenSSH's authorized_keys options; use --manual"
                     ),
                 ),
                 Err(DialectError::NoBanner) => check(
                     blocking,
-                    format!("sshd on port {port} showed no version banner; use --manual"),
+                    format!("sshd on port {port} showed no version banner\nuse --manual"),
                 ),
                 Ok(Dialect::ExpiryUtc) => check(
                     Level::Ok,
@@ -350,7 +341,7 @@ fn sshd(input: &CheckInput<'_>, blocking: Level) -> Check {
                 Ok(_) => check(
                     Level::Warn,
                     format!(
-                        "sshd is answering on port {port} ({what}); {}",
+                        "sshd is answering on port {port} ({what})\n{}",
                         bootstrap::OLD_SSHD_NOTE
                     ),
                 ),
@@ -359,14 +350,14 @@ fn sshd(input: &CheckInput<'_>, blocking: Level) -> Check {
         Ok(_) => check(
             blocking,
             format!(
-                "something answers on port {} but it does not look like sshd; pass --ssh-port if sshd listens elsewhere",
+                "something answers on port {} but it does not look like sshd\npass --ssh-port if sshd listens elsewhere",
                 input.ssh_port
             ),
         ),
         Err(_) => check(
             blocking,
             format!(
-                "sshd is not answering on port {}: {}",
+                "sshd is not answering on port {}\n{}",
                 input.ssh_port,
                 hints::sshd(input.platform, input.facts)
             ),
@@ -416,7 +407,7 @@ fn shell(input: &CheckInput<'_>, blocking: Level) -> Vec<Check> {
     vec![check(
         blocking,
         format!(
-            "the login shell {shell} could not run `{command}` ({why}); sshd runs the pairing command through it, so pairing would fail. Fix the shell or its startup files, or use --manual"
+            "the login shell {shell} could not run `{command}` ({why})\nsshd runs the pairing command through it, so pairing would fail; fix the shell or its startup files, or use --manual"
         ),
     )]
 }
@@ -433,7 +424,7 @@ fn exe(input: &CheckInput<'_>, blocking: Level) -> Vec<Check> {
         Err(why) => vec![check(
             blocking,
             format!(
-                "cannot tell where this program is installed ({why}); sshd must be given its absolute path"
+                "cannot tell where this program is installed ({why})\nsshd must be given its absolute path"
             ),
         )],
     }
@@ -806,7 +797,7 @@ fn config(input: &CheckInput<'_>, blocking: Level) -> Vec<Check> {
         out.push(check(
             level(pubkey),
             format!(
-                "sshd_config has `PubkeyAuthentication no`{}: sshd would not accept the phone's key at all; use --manual after enabling it",
+                "sshd_config has `PubkeyAuthentication no`{}\nsshd would not accept the phone's key at all; use --manual after enabling it",
                 maybe(pubkey)
             ),
         ));
@@ -837,7 +828,7 @@ fn config(input: &CheckInput<'_>, blocking: Level) -> Vec<Check> {
         out.push(check(
             level(verdict),
             format!(
-                "sshd_config's AuthorizedKeysFile ({words}) does not include .ssh/authorized_keys{why}: sshd would not read the temporary key there; use --manual"
+                "sshd_config's AuthorizedKeysFile ({words}) does not include .ssh/authorized_keys{why}\nsshd would not read the temporary key there; use --manual"
             ),
         ));
     }
@@ -848,7 +839,7 @@ fn config(input: &CheckInput<'_>, blocking: Level) -> Vec<Check> {
     if command_verdict != Verdict::Fine && excluded != Verdict::Fine {
         out.push(check(
             Level::Warn,
-            "sshd_config sets an AuthorizedKeysCommand and its AuthorizedKeysFile may leave out .ssh/authorized_keys; pairing would likely fail here, use --manual",
+            "sshd_config sets an AuthorizedKeysCommand and its AuthorizedKeysFile may leave out .ssh/authorized_keys\npairing would likely fail here; use --manual",
         ));
     }
 
@@ -857,7 +848,7 @@ fn config(input: &CheckInput<'_>, blocking: Level) -> Vec<Check> {
         out.push(check(
             level(force),
             format!(
-                "sshd_config sets a ForceCommand{}, which would run instead of the pairing command; use --manual",
+                "sshd_config sets a ForceCommand{}, which would run instead of the pairing command\nuse --manual",
                 maybe(force)
             ),
         ));
@@ -875,7 +866,7 @@ fn config(input: &CheckInput<'_>, blocking: Level) -> Vec<Check> {
         out.push(check(
             Level::Warn,
             format!(
-                "sshd_config's AuthenticationMethods ({shown}) needs more than a key; pairing would likely fail here, use --manual"
+                "sshd_config's AuthenticationMethods ({shown}) needs more than a key\npairing would likely fail here; use --manual"
             ),
         ));
     }
@@ -1040,7 +1031,7 @@ mod tests {
         assert!(
             checks
                 .iter()
-                .any(|c| c.text.starts_with("herdr: not found") && c.level == Level::Info)
+                .any(|c| c.text.starts_with("herdr not found") && c.level == Level::Info)
         );
         assert!(checks.iter().any(|c| {
             c.text
@@ -1100,25 +1091,25 @@ mod tests {
         let checks = setup.run();
         assert_eq!(
             checks[0].text,
-            "sshd is not answering on port 22: start it with `sudo systemctl enable --now ssh`; if sshd listens on another port, pass --ssh-port"
+            "sshd is not answering on port 22\nstart it with `sudo systemctl enable --now ssh`\nif sshd listens on another port, pass --ssh-port"
         );
         let infos = texts(&checks, Level::Info);
         assert!(
             infos.contains(
-                &"tmux: not found (optional: or2 can attach to its sessions); install it: `sudo apt install tmux`"
+                &"tmux not found (optional: or2 can attach to its sessions)\ninstall it: `sudo apt install tmux`"
             ),
             "{infos:?}"
         );
         assert!(
             infos
                 .iter()
-                .any(|t| t.starts_with("herdr: not found") && t.contains("herdr's install docs")),
+                .any(|t| t.starts_with("herdr not found") && t.contains("herdr's install docs")),
             "{infos:?}"
         );
         assert!(
             infos
                 .iter()
-                .any(|t| t.contains("ufw is on: `sudo ufw allow 60000:61000/udp`")),
+                .any(|t| t.contains("ufw is on; open them with:\n`sudo ufw allow 60000:61000/udp`")),
             "{infos:?}"
         );
         // On a Mac with Homebrew.
@@ -1132,7 +1123,7 @@ mod tests {
         assert!(
             texts(&checks, Level::Info)
                 .iter()
-                .any(|t| t.starts_with("tmux: not found") && t.ends_with("`brew install tmux`")),
+                .any(|t| t.starts_with("tmux not found") && t.ends_with("`brew install tmux`")),
             "{checks:?}"
         );
     }

@@ -98,7 +98,10 @@ FIFO where `authorized_keys` should be (reports and exits, nothing changed). `te
 a thread, in a temporary home and a temporary `/etc/ssh` with made-up interfaces, a scripted terminal and a
 pretend sshd banner (nothing of the user's `~/.ssh`, sshd, tmux or herdr is read), the phone played by a
 direct call of the forced command's code. `tests/cli.rs`: the built binary (usage, the removed `--bind` and
-`--pair-port`, `enroll`, and the cleanup on SIGINT, SIGTERM, SIGHUP and the timeout). `tests/manual_keys.rs`:
+`--pair-port`, `enroll`, the cleanup on SIGINT, SIGTERM, SIGHUP and the timeout, and the output rail: the error that
+ends it on standard error, the ASCII rail outside a UTF-8 locale and with `--ascii`, and, on a pseudo-terminal,
+colour (none with `NO_COLOR`, `--no-color` or `TERM=dumb`) and the answered code question redrawn with the code
+masked). `tests/manual_keys.rs`:
 the no-key-installation (Windows) behaviour. `tests/process.rs`: what needs a process of its own, its other half
 run in a child (this test binary again): the code prompt on a pseudo-terminal through Ctrl-Z and `fg`, an ending
 signal in the prompt's teardown (a `test-support` hook), Ctrl-C during a slow login-shell check (no process of the
@@ -115,7 +118,10 @@ that ended). Like the other sshd tests it skips (printing `SKIP`) without
 `/usr/bin/sshd` and `ssh-keygen`, unless `OR2_REQUIRE_SSHD` is set, which fails instead; set it in the full
 gate (`cargo test -p or2-pair --all-features`). The code is typed through a `CodePrompt` the tests
 script; the shipped binary reads a terminal only. An independent QR decoder (`rqrr`, dev-only) reads the
-drawn code back. `cargo build -p or2-pair --release` builds the tool for the host
+drawn code back, with the rail around it (`tests/flow.rs`) and in every style (`--ascii`, `--invert`, colour;
+`qr.rs`). The rail itself (`rail.rs`) is unit-tested: both glyph sets, colour on and off (16-colour SGR only),
+wrapping with the rail continued and commands never split, the locale and `NO_COLOR` rules, and the redraw of an
+answered question. `cargo build -p or2-pair --release` builds the tool for the host
 (`target/release/or2-pair`); `cargo install --path core/or2-pair --locked` installs it, and
 `packaging/homebrew/or2-pair.rb` builds it from source for Homebrew. The `or2-pair-testhost` binary (feature
 `test-support`, so never part of an install) reads the code from standard input, for the tests above and the
@@ -163,7 +169,10 @@ or OS and a non-HTTPS base (refused before any download), the script cut after e
 into `sh` (nothing installed, no staging file, nothing left in `TMPDIR`), links planted at staging-like names and
 at `or2-pair` (never followed; the victim file unchanged), a checked binary that fails `--version` (the old
 binary stays), a directory at the destination, a directory anyone can write, and a fake root with a directory
-that is not root's (the notice, then refused). It needs `curl` (`wget` cannot read `file://`) and skips,
+that is not root's (the notice, then refused); and the output: the whole rail of an install, a refusal on standard
+error ending it, a usage error before it as one plain line, the ASCII rail outside a UTF-8 locale, and colour only
+on a pseudo-terminal (none with `NO_COLOR` or `TERM=dumb`; Linux, through `libc`, a Unix dev-dependency of
+`xtask`). It needs `curl` (`wget` cannot read `file://`) and skips,
 printing `SKIP`, without it.
 
 Rust integration tests (`core/or2-core/tests/`): `host.rs` runs host connections against a

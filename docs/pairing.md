@@ -88,9 +88,10 @@ or2-pair
 ```
 
 It runs its checks (sshd and its version, `authorized_keys`, your `sshd_config`, your login shell), then asks
-`Code shown on your phone:`. Type the code (capitals or not, with or without the hyphens; codes never contain
+**Code shown on your phone**. Type the code (capitals or not, with or without the hyphens; codes never contain
 `Z`, `U`, `I`, `L` or `O`, and an `I` or `L` is read as `1`, an `O` as `0`); the terminal does not show it as
-you type, like a password. A typo is caught and asked again; an empty line or Ctrl-C cancels with nothing
+you type, like a password (once you press Enter it shows the code masked, `••••-••••-••••`). A typo is caught
+and asked again; an empty line or Ctrl-C cancels with nothing
 changed. It then prints this host's name, user, host key and
 addresses (overlay networks such as ZeroTier or Tailscale first, then LAN, then public IPv4 and IPv6, then
 `<hostname>.local`), a **QR code** and the same pairing code as text, and waits for up to 5 minutes.
@@ -99,7 +100,8 @@ On the phone, scan the QR (allow the camera when it asks; it is used only to rea
 **Paste pairing code**. Check that the host key's fingerprint matches what `or2-pair` printed, pick an
 existing key or **New key**, and tap **Pair**. A second or two later the host is saved with its key already
 trusted and or2 connects: there is no first-use host-key prompt. `or2-pair` prints
-`Paired "<phone>" (…) as <user>`, which line it added to `authorized_keys` if you want to undo it, and exits. In the
+`"<phone>" can now log in as <user> (…)`, which line it added to `authorized_keys` if you want to undo it, and
+ends with `Paired`. In the
 rare case that the host took the key but the phone could not save the host, the review says so and keeps that key
 (the key choice is locked): **Pair** then only saves the host, without pairing again.
 

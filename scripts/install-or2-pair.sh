@@ -23,9 +23,88 @@
 
 set -eu
 
-say() { printf '%s\n' "$*"; }
+# --- the look: one rail, as or2-pair draws it ----------------------------------------------
+#
+#   ┌  install or2-pair
+#   │
+#   ✔  Installed or2-pair 0.1.1 at /home/dev/.local/bin/or2-pair
+#   │
+#   └  Done
+#
+# Unicode glyphs only in a UTF-8 locale (else + | ` * + ! x); colour only on a terminal, never
+# with NO_COLOR or TERM=dumb, and only the 16-colour palette. Errors go to standard error.
+
+# glyphs: the rail's characters for this locale (the first of LC_ALL, LC_CTYPE, LANG set).
+glyphs() {
+	case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+	*[Uu][Tt][Ff]-8* | *[Uu][Tt][Ff]8*)
+		g_open='┌' g_bar='│' g_close='└' g_info='●' g_ok='✔' g_warn='▲' g_error='■'
+		;;
+	*)
+		g_open='+' g_bar='|' g_close='`' g_info='*' g_ok='+' g_warn='!' g_error='x'
+		;;
+	esac
+}
+
+# colours FD: the escapes for descriptor FD, or none.
+colours() {
+	if [ -t "$1" ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; then
+		esc="$(printf '\033')"
+		c_dim="${esc}[2m" c_red="${esc}[31m" c_green="${esc}[32m" c_yellow="${esc}[33m"
+		c_blue="${esc}[34m" c_cyan="${esc}[36m" c_reset="${esc}[0m"
+	else
+		c_dim="" c_red="" c_green="" c_yellow="" c_blue="" c_cyan="" c_reset=""
+	fi
+}
+
+# line GLYPH COLOUR TEXT: one line of the rail.
+line() { printf '%s%s%s  %s\n' "$2" "$1" "$c_reset" "$3"; }
+# gap: a blank line of the rail, between steps.
+gap() { printf '%s%s%s\n' "$c_dim" "$g_bar" "$c_reset"; }
+# more TEXT...: further lines of the step above, on the rail.
+more() {
+	for text in "$@"; do
+		line "$g_bar" "$c_dim" "$text"
+	done
+}
+# command_line TEXT: a command to type, on the rail, in cyan.
+command_line() { printf '%s%s%s  %s%s%s\n' "$c_dim" "$g_bar" "$c_reset" "$c_cyan" "$1" "$c_reset"; }
+# info, ok, warn TEXT [MORE...]: a step: its first line after the symbol, the rest on the rail.
+info() {
+	line "$g_info" "$c_blue" "$1"
+	shift
+	more "$@"
+}
+ok() {
+	line "$g_ok" "$c_green" "$1"
+	shift
+	more "$@"
+}
+warn() {
+	line "$g_warn" "$c_yellow" "$1"
+	shift
+	more "$@"
+}
+# close WORD: the end of the rail.
+close() { line "$g_close" "$c_dim" "$1"; }
+
+
+# die TEXT [MORE...]: the error, on standard error, and the end of the rail; before the rail
+# is open (the arguments), one plain line.
 die() {
-	printf 'install-or2-pair: %s\n' "$*" >&2
+	if [ -z "$opened" ]; then
+		printf 'install-or2-pair: %s\n' "$*" >&2
+		exit 1
+	fi
+	colours 2
+	{
+		gap
+		line "$g_error" "$c_red" "$1"
+		shift
+		more "$@"
+		gap
+		close Failed
+	} >&2
 	exit 1
 }
 
@@ -71,6 +150,10 @@ unsafe_dir() {
 }
 
 main() {
+	opened=""
+	glyphs
+	colours 1
+
 	repo="code-akram/or2"
 	base="${OR2_PAIR_RELEASES_BASE:-https://github.com/$repo/releases}"
 
@@ -107,28 +190,33 @@ main() {
 		esac
 	done
 
+	# The arguments are understood: from here on everything is on the rail.
+	line "$g_open" "$c_dim" "install or2-pair"
+	opened=1
+	gap
+
 	case "$version" in
 	"") tag="" ;;
-	*[!A-Za-z0-9.+-]*) die "not a version: $version (use the form v0.1.0)" ;;
+	*[!A-Za-z0-9.+-]*) die "not a version: $version" "use the form v0.1.0" ;;
 	v[0-9]*) tag="$version" ;;
 	[0-9]*) tag="v$version" ;;
-	*) die "not a version: $version (use the form v0.1.0)" ;;
+	*) die "not a version: $version" "use the form v0.1.0" ;;
 	esac
 
 	case "$base" in
 	https://* | file://*) ;;
-	*) die "refusing $base: releases are fetched over https:// only (file:// for a local copy)" ;;
+	*) die "refusing $base: releases are fetched over https:// only" "(file:// for a local copy)" ;;
 	esac
 
 	# --- this host -------------------------------------------------------------------------
 
 	os="$(uname -s)"
 	arch="$(uname -m)"
-	source_build="Build it from source instead: cargo install --git https://github.com/$repo or2-pair --locked"
+	source_build="cargo install --git https://github.com/$repo or2-pair --locked"
 	case "$arch" in
 	x86_64 | amd64) arch="x86_64" ;;
 	aarch64 | arm64) arch="aarch64" ;;
-	*) die "unsupported CPU architecture: $arch (released: x86_64 and aarch64). $source_build" ;;
+	*) die "unsupported CPU architecture: $arch (released: x86_64 and aarch64)" "build it from source instead:" "$source_build" ;;
 	esac
 	case "$os" in
 	Linux) target="$arch-unknown-linux-musl" ;;
@@ -140,7 +228,7 @@ main() {
 			target="$arch-apple-darwin"
 		fi
 		;;
-	*) die "unsupported operating system: $os (released: Linux and macOS). $source_build" ;;
+	*) die "unsupported operating system: $os (released: Linux and macOS)" "build it from source instead:" "$source_build" ;;
 	esac
 	asset="or2-pair-$target"
 
@@ -153,7 +241,7 @@ main() {
 		esac
 		downloader=wget
 	else
-		die "neither curl nor wget is installed; install one and run this again"
+		die "neither curl nor wget is installed" "install one and run this again"
 	fi
 
 	if command -v sha256sum >/dev/null 2>&1; then
@@ -161,35 +249,36 @@ main() {
 	elif command -v shasum >/dev/null 2>&1; then
 		sha256() { shasum -a 256 "$1" | cut -d ' ' -f 1; }
 	else
-		die "neither sha256sum nor shasum is installed, so the download cannot be checked; nothing was installed"
+		die "neither sha256sum nor shasum is installed, so the download cannot be checked" "nothing was installed"
 	fi
 
 	uid="$(id -u)"
 	if [ "$uid" = 0 ]; then
-		say "Note: running as root, so or2-pair is installed for root, and pairing with it from root's shell pairs the root account; run this as the user the phone should log in as."
+		warn "running as root: or2-pair is installed for root, and pairing from root's shell pairs the root account" \
+			"run this as the user the phone should log in as"
 	fi
 
 	# --- where it goes ---------------------------------------------------------------------
 
 	if [ -z "$dir" ]; then
-		[ -n "${HOME:-}" ] || die "HOME is not set; pass --dir"
+		[ -n "${HOME:-}" ] || die "HOME is not set" "pass --dir"
 		dir="$HOME/.local/bin"
 	fi
-	mkdir -p "$dir" || die "cannot create $dir; pass another --dir (this script never uses sudo)"
+	mkdir -p "$dir" || die "cannot create $dir" "pass another --dir (this script never uses sudo)"
 	named="$dir"
 	dir="$(cd "$dir" && pwd -P)" || die "cannot use $dir"
-	[ -w "$dir" ] || die "$dir is not writable; pass another --dir (this script never uses sudo)"
+	[ -w "$dir" ] || die "$dir is not writable" "pass another --dir (this script never uses sudo)"
 	if [ "$uid" = 0 ]; then
 		# root writes and later runs this file: nobody else may be able to change the directory.
 		if unsafe_dir "$dir" 0; then
-			die "refusing $dir: running as root, it must belong to root and not be writable by group or others; pass another --dir"
+			die "refusing $dir: running as root, it must belong to root and not be writable by group or others" "pass another --dir"
 		fi
 	else
 		case "$(ls -ldn -- "$dir" 2>/dev/null)" in
-		????????w*) die "refusing $dir: anyone can write it, so anyone could replace or2-pair there; pass another --dir" ;;
+		????????w*) die "refusing $dir: anyone can write it, so anyone could replace or2-pair there" "pass another --dir" ;;
 		esac
 	fi
-	[ ! -d "$dir/or2-pair" ] || die "$dir/or2-pair is a directory; move it away or pass another --dir"
+	[ ! -d "$dir/or2-pair" ] || die "$dir/or2-pair is a directory" "move it away or pass another --dir"
 
 	# --- download and check ----------------------------------------------------------------
 
@@ -207,7 +296,7 @@ main() {
 		from="$base/download/$tag"
 		what="$tag"
 	fi
-	say "Downloading $asset ($what)"
+	info "Downloading $what for $target"
 	for name in SHA256SUMS "$asset"; do
 		status=0
 		fetch "$from/$name" "$work/$name" || status=$?
@@ -215,24 +304,26 @@ main() {
 		0) ;;
 		2)
 			if [ -n "$tag" ] && [ "$name" = SHA256SUMS ]; then
-				die "version $tag does not exist (nothing at $from); the releases are listed at https://github.com/$repo/releases"
+				die "version $tag does not exist (nothing at $from)" "the releases are listed at https://github.com/$repo/releases"
 			elif [ -z "$tag" ] && [ "$name" = SHA256SUMS ]; then
-				die "no release found at $base/latest; the releases are listed at https://github.com/$repo/releases"
+				die "no release found at $base/latest" "the releases are listed at https://github.com/$repo/releases"
 			fi
 			die "$what has no $asset (nothing at $from/$name)"
 			;;
-		3) die "refused $from/$name: it redirected away from HTTPS; nothing was installed" ;;
-		*) die "could not download $from/$name; check the network and run this again" ;;
+		3) die "refused $from/$name: it redirected away from HTTPS" "nothing was installed" ;;
+		*) die "could not download $from/$name" "check the network and run this again" ;;
 		esac
 	done
+	info "Downloaded $asset" "from $from"
 
 	expected="$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1; exit }' "$work/SHA256SUMS" | tr 'A-F' 'a-f')"
-	[ -n "$expected" ] || die "SHA256SUMS of $what lists no $asset; nothing was installed"
+	[ -n "$expected" ] || die "SHA256SUMS of $what lists no $asset" "nothing was installed"
 	actual="$(sha256 "$work/$asset")"
 	if [ "$actual" != "$expected" ]; then
-		die "checksum mismatch for $asset: expected $expected, got $actual. The download is corrupt or was tampered with (or a release was published between the two downloads: run this again); nothing was installed"
+		die "checksum mismatch for $asset" "expected $expected" "got      $actual" \
+			"the download is corrupt or was tampered with (or a release was published between the two downloads: run this again); nothing was installed"
 	fi
-	say "Checksum OK ($actual)"
+	ok "Checksum verified" "SHA-256 $actual"
 
 	# --- install ---------------------------------------------------------------------------
 
@@ -245,33 +336,37 @@ main() {
 	installed="$("$stage" --version 2>/dev/null)" || installed=""
 	case "$installed" in
 	"or2-pair "*) ;;
-	*) die "the downloaded $asset does not run on this host; nothing was replaced" ;;
+	*) die "the downloaded $asset does not run on this host" "nothing was replaced" ;;
 	esac
 	if [ -n "$tag" ] && [ "$installed" != "or2-pair ${tag#v}" ]; then
-		die "the downloaded $asset says it is \"$installed\", not or2-pair ${tag#v}; nothing was replaced"
+		die "the downloaded $asset says it is \"$installed\", not or2-pair ${tag#v}" "nothing was replaced"
 	fi
 	mv -f "$stage" "$dir/or2-pair" || die "cannot install $dir/or2-pair"
 	stage=""
-	say "Installed $installed to $dir/or2-pair"
+	ok "Installed $installed at $dir/or2-pair"
 
 	# sshd runs or2-pair by this path through the login shell, which or2-pair checks; a path
 	# needing quotes would be refused when pairing.
 	case "$dir" in
-	*[!A-Za-z0-9/._+-]*) say "Warning: $dir contains characters that or2-pair refuses (sshd's shell could misread them); install with --dir to a plain path such as ~/.local/bin." ;;
+	*[!A-Za-z0-9/._+-]*)
+		warn "$dir contains characters that or2-pair refuses (sshd's shell could misread them)" \
+			"install with --dir to a plain path such as ~/.local/bin"
+		;;
 	esac
 
 	case ":${PATH:-}:" in
 	*":$dir:"* | *":$named:"*) run="or2-pair" ;;
 	*)
 		run="$dir/or2-pair"
-		say ""
-		say "$dir is not on your PATH. Add it to your shell's startup file, for example:"
-		say "  export PATH=\"$dir:\$PATH\""
+		warn "$dir is not on your PATH" "add it in your shell's startup file, for example:"
+		command_line "export PATH=\"$dir:\$PATH\""
 		;;
 	esac
-	say ""
-	say "Next: open or2 on your phone (Add host > Easy pair with QR) and run:"
-	say "  $run"
+	gap
+	info "Next: open or2 on your phone (Add host > Easy pair) and run:"
+	command_line "$run"
+	gap
+	close Done
 }
 
 main "$@"
