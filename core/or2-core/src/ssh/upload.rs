@@ -7,8 +7,8 @@
 //! 1. creates the missing parts of [`IMAGE_DIR`] (`0700`), makes the image directory `0700` if
 //!    something else made it, and checks each part with `lstat` before going below it
 //!    ([`directory_problem`]): a directory, not a symbolic link (except `~/.cache`, which may
-//!    link to a directory held to the same rules), not writable by group or others, and the
-//!    image directory exactly `0700`;
+//!    link to a directory held to the same rules), not writable by group or others (`~/.cache`:
+//!    by others), and the image directory exactly `0700`;
 //! 2. creates `<name>.part` (exclusive, `0600`, then `fsetstat 0600`) and checks with `fstat`
 //!    that it is a regular `0600` file. Its owner is the account the upload runs as: the
 //!    directories must belong to it (`~/.cache` may also belong to root), checked next;
@@ -62,6 +62,9 @@ const FILE_MODE: u32 = 0o600;
 const PERMISSION_BITS: u32 = 0o7777;
 /// Write permission for group or others.
 const SHARED_WRITE: u32 = 0o022;
+/// Write permission for others: `~/.cache` may be group-writable (a umask of `002` with a
+/// group of the user's own, as Debian and Ubuntu give users, leaves it `0775`).
+const OTHER_WRITE: u32 = 0o002;
 /// `or2-*` files older than this are removed by the next upload.
 pub(crate) const SWEEP_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// How long the sweep may take before the upload goes on without finishing it.
@@ -437,7 +440,7 @@ async fn check_part(
 }
 
 /// What makes `attributes` wrong for `part` of [`IMAGE_DIR`], if anything: not a directory, a
-/// symbolic link, writable by group or others, the image directory not exactly `0700`, or
+/// symbolic link, writable by group or others (`~/.cache`: by others), the image directory not exactly `0700`, or
 /// (with the `owner` known) another account's (`~/.cache` may also be root's). Attributes
 /// without a mode, or without an owner when one is checked, fail too.
 pub(crate) fn directory_problem(
@@ -454,7 +457,12 @@ pub(crate) fn directory_problem(
     if bits & MODE_TYPE_MASK != MODE_DIRECTORY {
         return Some(format!("~/{part} is not a directory"));
     }
-    if bits & SHARED_WRITE != 0 {
+    let shared = if part == CACHE_DIR {
+        OTHER_WRITE
+    } else {
+        SHARED_WRITE
+    };
+    if bits & shared != 0 {
         return Some(format!("~/{part} is writable by others"));
     }
     if part == IMAGE_DIR && bits & PERMISSION_BITS != DIRECTORY_MODE {
@@ -725,6 +733,16 @@ mod tests {
             problem(".cache", 0o040_755, Some(0), Some(5)),
             None,
             "root's"
+        );
+        assert_eq!(
+            problem(".cache", 0o040_775, Some(5), Some(5)),
+            None,
+            "a group of the user's own (umask 002)"
+        );
+        assert_eq!(
+            problem(".cache/or2", 0o040_775, Some(5), Some(5)).as_deref(),
+            Some("~/.cache/or2 is writable by others"),
+            "only ~/.cache"
         );
         assert_eq!(
             problem(".cache/or2", 0o040_755, None, None),

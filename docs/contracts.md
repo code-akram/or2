@@ -4728,7 +4728,10 @@ stays green.
   read), `aTakenImageIsAlwaysPreparedSoItsGrantIsGivenBackEvenWhenCancelledAtOnce`.
 - **Fix: the image directory is checked, not trusted (Codex P2 #7, Fable P3).** Each part of
   `.cache/or2/images` is checked with `lstat` before anything is made below it, and fails closed
-  (`upload::directory_problem`): a directory; not a symbolic link; not writable by group or others; the
+  (`upload::directory_problem`): a directory; not a symbolic link; not writable by group or others
+  (`~/.cache`: not by others; **narrowed** because a umask of `002` with a group of the user's own, as
+  Debian and Ubuntu give users, leaves it `0775`, and the file is `0600` and the directories below it the
+  user's `0700` ones whatever a group member renames); the
   image directory exactly `0700` after the `setstat` (a server that will not make it private fails the
   upload: `~/.cache/or2/images could not be made private`). The temporary file gets `fsetstat 0600` and
   is then checked with `fstat` to be a regular `0600` file, before any byte is written (`the image
