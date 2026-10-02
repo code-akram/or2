@@ -64,6 +64,9 @@ class DaoPairStore(private val dao: AppDao) : PairStore {
     }
 }
 
+/** A save retry whose accepted key is no longer stored as it was (deleted, or another key under its id). */
+const val ACCEPTED_KEY_GONE = "The key the host accepted is no longer on this phone. Run or2-pair again."
+
 /** Which of the phone's keys is authorized on the host. */
 sealed interface KeyChoice {
     data class Existing(val keyId: String) : KeyChoice
@@ -97,6 +100,9 @@ fun reachedHost(error: PairException): Boolean = when (error) {
     else -> true
 }
 
+/** The phone key a host installed: its stored id and its fingerprint, both of which a retry must still match. */
+data class AcceptedKey(val keyId: String, val fingerprint: String)
+
 /** What the review screen edits: the offer and the choices made about it. */
 data class PairReview(
     val offer: PairOffer,
@@ -105,13 +111,19 @@ data class PairReview(
     val choice: KeyChoice,
     /** Why the last attempt failed; shown above the button. */
     val error: String? = null,
-    /** The fingerprint of the key the host already took, when only saving the host failed: no second enrolment. */
-    val acceptedKey: String? = null,
+    /**
+     * The key the host already installed, when only saving the host failed. The retry is bound to it: the choice is
+     * locked and the retry repeats the save, never the enrolment (the host's run is spent).
+     */
+    val accepted: AcceptedKey? = null,
     /** An attempt is running (asking for the biometric); the button is off. */
     val working: Boolean = false,
 ) {
     /** Whether the host will install the key itself (the code has a pairing id); without one the user does it by hand. */
     val enrolls get() = offer.pairingId != null
+
+    /** The key cannot be changed: the host accepted one already, so neither another key nor a new one can be picked. */
+    val keyLocked get() = accepted != null
 
     /** The label, user and addresses make a host the app can save. */
     val valid get() = validHost(
@@ -148,7 +160,9 @@ sealed interface PairState {
  *   every pairing that reached the host ([reachedHost]), and it is never logged or stored;
  * - the host is saved, with the host key from the code trusted, only after the host installed the key (or at
  *   once for a code without a pairing id), and before anything connects;
- * - a key generated for the pairing is saved first, so a failed pairing leaves a key the retry reuses.
+ * - a key generated for the pairing is saved first, so a failed pairing leaves a key the retry reuses;
+ * - once the host installed a key, a failed save is retried with that key only ([PairReview.accepted]: the choice is
+ *   locked) and repeats the save alone, never the enrolment.
  */
 class PairFlow(
     private val backend: PairBackend,
@@ -202,6 +216,8 @@ class PairFlow(
         // With a pairing id the host authorizes the key for the one account that ran or2-pair, and the
         // code names it: a different login here would pair one account and connect as another.
         val username = if (current.enrolls) null else username
+        // Once the host accepted a key, the retry is bound to it: another key would need another enrolment.
+        val choice = if (current.keyLocked) null else choice
         mutableState.value = PairState.Review(
             current.copy(
                 name = name ?: current.name, username = username ?: current.username,
@@ -240,20 +256,32 @@ class PairFlow(
         fun fail(from: PairReview, message: String) {
             mutableState.value = PairState.Review(from.copy(error = message, working = false))
         }
-        val key = when (val choice = review.choice) {
-            is KeyChoice.Existing -> keys.find { it.id == choice.keyId } ?: return fail(review, "That key was deleted. Choose another.")
-            KeyChoice.New -> try {
-                generateKey("Key for ${review.name.trim()}", "or2@${device.trim()}")
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                return fail(review, describeKeyError(error))
+        val accepted = review.accepted
+        val key = if (accepted != null) {
+            // Only the save is left, with exactly the key the host installed (same id, same fingerprint). Without it
+            // nothing can be saved, and the host's run is spent: start over rather than enrol or save another key.
+            val same = keys.find { it.id == accepted.keyId && it.fingerprint == accepted.fingerprint }
+            if (same == null) {
+                mutableState.value = scanning(ACCEPTED_KEY_GONE)
+                return
+            }
+            same
+        } else {
+            when (val choice = review.choice) {
+                is KeyChoice.Existing -> keys.find { it.id == choice.keyId } ?: return fail(review, "That key was deleted. Choose another.")
+                KeyChoice.New -> try {
+                    generateKey("Key for ${review.name.trim()}", "or2@${device.trim()}")
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    return fail(review, describeKeyError(error))
+                }
             }
         }
         // A key made just now is stored: a retry after a failed pairing picks it up as an existing one.
         val kept = if (review.choice == KeyChoice.New) review.copy(choice = KeyChoice.Existing(key.id)) else review
         val enrolls = review.enrolls
-        if (enrolls && kept.acceptedKey != key.fingerprint) {
+        if (enrolls && accepted == null) {
             mutableState.value = PairState.Pairing(kept)
             try {
                 backend.enroll(review.offer, code, key.openssh, device)
@@ -279,9 +307,9 @@ class PairFlow(
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
-            // The host has the key already: a retry saves the host without pairing again.
+            // The host has the key already: a retry saves the host with that key, without pairing again.
             return fail(
-                kept.copy(acceptedKey = key.fingerprint.takeIf { enrolls }),
+                kept.copy(accepted = if (enrolls) AcceptedKey(key.id, key.fingerprint) else null),
                 "The host accepted the key, but this phone could not save the host. Try again.",
             )
         }

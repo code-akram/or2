@@ -105,9 +105,9 @@ class PairFlowTest {
     private suspend fun awaitState(predicate: (PairState) -> Boolean) = withTimeout(5_000) { flow.state.first(predicate) }
 
     @Test
-    fun theScreenShowsAPairingCodeInCrockfordGroupsOfFourAndEveryStartDrawsANewOne() {
+    fun theScreenShowsAPairingCodeInCrockfordWithoutZGroupsOfFourAndEveryStartDrawsANewOne() {
         val first = shown()
-        assertTrue(first, Regex("[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}").matches(first))
+        assertTrue(first, Regex("[0-9A-HJKMNP-TV-Y]{4}-[0-9A-HJKMNP-TV-Y]{4}-[0-9A-HJKMNP-TV-Y]{4}").matches(first))
         flow.start()
         val second = shown()
         assertNotEquals(first, second)
@@ -296,7 +296,7 @@ class PairFlowTest {
     @Test
     fun aFailureAfterTheHostSawTheCodeReturnsToScanningWithItsReasonAndANewCode() = runBlocking<Unit> {
         for ((failure, fragment) in listOf(
-            PairException.BootstrapRefused() to "didn't accept this phone's code",
+            PairException.BootstrapRefused() to "didn't accept the pairing key",
             PairException.NotOr2Pair() to "Something other than or2-pair answered",
             PairException.Expired() to "has stopped or timed out",
             PairException.Gone() to "Another device already used this pairing",
@@ -340,11 +340,76 @@ class PairFlowTest {
         flow.submit(keys, "Pixel", generate)
         val review = (awaitState { it is PairState.Review && !it.review.working } as PairState.Review).review
         assertTrue(review.error!!.contains("accepted the key"))
-        assertEquals("SHA256:a", review.acceptedKey)
+        assertEquals(AcceptedKey("a", "SHA256:a"), review.accepted)
         flow.submit(keys, "Pixel", generate)
         awaitState { it is PairState.Paired }
         assertEquals("the spent code is not used twice", 1, backend.enrolments.size)
         assertEquals(listOf("enroll", "save", "save"), backend.events)
+    }
+
+    @Test
+    fun changingTheKeyAfterASaveFailureAttemptsASecondEnrolment() = runBlocking<Unit> {
+        // The name records the review's finding; the flow now refuses it: once the host accepted key a, the
+        // retry is bound to a, the key cannot be changed, and only the save is repeated.
+        store.failures = 1
+        flow.onCode(code(), keys)
+        flow.submit(keys, "Pixel", generate)
+        awaitState { it is PairState.Review && !it.review.working && it.review.accepted != null }
+        assertTrue(review().keyLocked)
+        flow.edit(choice = KeyChoice.Existing("b"))
+        assertEquals(KeyChoice.Existing("a"), review().choice)
+        flow.edit(choice = KeyChoice.New)
+        assertEquals(KeyChoice.Existing("a"), review().choice)
+        // The name stays editable: it is only what the phone saves.
+        flow.edit(name = "Office")
+        assertEquals("Office", review().name)
+        flow.submit(keys, "Pixel", generate)
+        val paired = awaitState { it is PairState.Paired } as PairState.Paired
+        assertEquals("no second enrolment", 1, backend.enrolments.size)
+        assertEquals("ssh-ed25519 AAAA-a", backend.enrolments.single().keyLine)
+        assertEquals(listOf("enroll", "save", "save"), backend.events)
+        assertEquals("a", store.saved.single().first.keyId)
+        assertEquals("Office", paired.host.label)
+    }
+
+    @Test
+    fun aNewKeyTheHostAcceptedIsTheRetrysKeyAndIsNotGeneratedAgain() = runBlocking<Unit> {
+        store.failures = 1
+        flow.onCode(code(), emptyList())
+        flow.submit(emptyList(), "Pixel", generate)
+        val failed = (awaitState { it is PairState.Review && !it.review.working } as PairState.Review).review
+        assertEquals(AcceptedKey("new", "SHA256:new"), failed.accepted)
+        assertEquals(KeyChoice.Existing("new"), failed.choice)
+        flow.edit(choice = KeyChoice.New)
+        assertEquals(KeyChoice.Existing("new"), review().choice)
+        // The key list the screen passes now holds the generated key.
+        val stored = listOf(newKey) + keys
+        flow.submit(stored, "Pixel", generate)
+        awaitState { it is PairState.Paired }
+        assertEquals(listOf("generate", "enroll", "save", "save"), backend.events)
+        assertEquals(1, generated.size)
+        assertEquals("new", store.saved.single().first.keyId)
+    }
+
+    @Test
+    fun aRetryWhoseAcceptedKeyChangedOrWentAwayNeverEnrolsAgain() = runBlocking<Unit> {
+        for (changed in listOf(listOf(keyRecord("a", fingerprint = "SHA256:other"), keyRecord("b")), listOf(keyRecord("b")))) {
+            store.failures = 1
+            backend.enrolments.clear()
+            backend.events.clear()
+            flow.start()
+            flow.onCode(code(), keys)
+            flow.submit(keys, "Pixel", generate)
+            awaitState { it is PairState.Review && !it.review.working && it.review.accepted != null }
+            // Key a is no longer the key the host accepted (deleted, or another key under its id): the host's run is
+            // spent, so the screen starts over with a new code instead of enrolling or saving the wrong key.
+            flow.submit(changed, "Pixel", generate)
+            val state = awaitState { it is PairState.Scanning } as PairState.Scanning
+            assertTrue(state.error!!, state.error!!.contains("Run or2-pair again"))
+            assertEquals(1, backend.enrolments.size)
+            assertEquals(listOf("enroll", "save"), backend.events)
+            assertTrue(store.saved.isEmpty())
+        }
     }
 
     @Test

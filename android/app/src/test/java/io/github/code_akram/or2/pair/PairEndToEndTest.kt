@@ -249,7 +249,7 @@ class PairEndToEndTest {
                         flow.state.first { it is PairState.Paired || (it is PairState.Review && it.review.error != null) || (it is PairState.Scanning && it.error != null) }
                     }
                     val scanning = outcome as? PairState.Scanning ?: error("expected a refusal that reached the host, got $outcome")
-                    assertTrue(scanning.error!!, scanning.error!!.contains("didn't accept this phone's code"))
+                    assertTrue(scanning.error!!, scanning.error!!.contains("didn't accept the pairing key"))
                     // The host saw the code: it is spent, and the screen shows a new one.
                     assertTrue(onThePhone != scanning.code.text)
                     assertNull(store.saved)

@@ -126,6 +126,28 @@ class PairUiDeviceTest {
     }
 
     @Test
+    fun afterTheHostAcceptedAKeyTheRetryCannotChangeIt() {
+        val offer = parsePairPayload(code)
+        var edits = 0
+        show {
+            PairReviewScreen(
+                PairReview(
+                    offer, offer.name, offer.username, KeyChoice.Existing("k1"),
+                    error = "The host accepted the key, but this phone could not save the host. Try again.",
+                    accepted = AcceptedKey("k1", key.fingerprint),
+                ),
+                listOf(key), edit = { _, _, _ -> edits++ }, submit = {}, back = {},
+            )
+        }
+        // The host installed k1: neither another key nor a new one can be picked, and the retry only saves.
+        compose.onNodeWithTag("pair-key:k1").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithTag("pair-key-new").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithTag("pair-key-note").performScrollTo().assertTextContains("only saving the host is left", substring = true)
+        compose.onNodeWithTag("pair-submit").performScrollTo().assertIsEnabled()
+        assertEquals(0, edits)
+    }
+
+    @Test
     fun aManualCodeLetsYouNameTheUserAndAddsTheHostWithoutPairing() {
         val offer = parsePairPayload(manualCode)
         show {

@@ -15,8 +15,9 @@ use or2_core::trust::HostKey;
 use crate::host::HostAddress;
 use crate::keys::PublicKeyInfo;
 
-/// The pairing code `K` (`7KQ4-M2XD-9PTM`): 55 random bits and a check character, shown on the
-/// Easy pair screen and typed into `or2-pair` on the host. Opaque to Kotlin.
+/// The pairing code `K` (`7KQ4-M2XD-9PTM`): 11 random characters of Crockford base32 without `Z`
+/// (about 54.5 bits) and a check character, shown on the Easy pair screen and typed into
+/// `or2-pair` on the host. Opaque to Kotlin.
 #[derive(uniffi::Object)]
 pub struct PairCode {
     code: core::PairCode,
