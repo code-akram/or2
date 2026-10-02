@@ -29,6 +29,22 @@ class MoshServerLedgerTest {
     }
 
     @Test
+    fun aRecordIsOnTheDiskWhenRecordReturns() {
+        val store = DiskPrefStore()
+        val ledger = MoshServerLedger(store)
+        ledger.record(one, 100u)
+        // The process dies now: no queued write ever reaches the disk. The next process reads the pid.
+        assertEquals(listOf(100u), MoshServerLedger(store.disk).pids(one))
+        ledger.record(two, 200u)
+        assertEquals(listOf(200u), MoshServerLedger(store.disk).pids(two))
+
+        // A clear may land later (losing it costs one repeated, harmless stop), and a later record carries it.
+        ledger.clear(one, 100u)
+        ledger.record(one, 101u)
+        assertEquals(listOf(101u), MoshServerLedger(store.disk).pids(one))
+    }
+
+    @Test
     fun clearingOnePidLeavesTheOthersAndTheLastClearRemovesTheEntry() {
         val store = MemoryPrefStore()
         val ledger = MoshServerLedger(store)

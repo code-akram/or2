@@ -1,5 +1,7 @@
 package io.github.code_akram.or2.connection
 
+import io.github.code_akram.or2.app.MemoryPrefStore
+import io.github.code_akram.or2.app.PrefStore
 import io.github.code_akram.or2.data.AppDao
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostAddressRecord
@@ -47,6 +49,9 @@ class FakeSession(val events: MutableList<String> = mutableListOf(), val transpo
 
     /** What `serverPid()` answers: the `mosh-server` a mosh session started; null for SSH. */
     var pid: UInt? = null
+
+    /** Its listener was told [pid] (`FakePort.serverStarted`). */
+    var pidAnnounced = false
     val lastFrame = TerminalFrame(1uL, 2u, 1u, true,
         listOf(CellStyle(0xffffffu, 0u, null, Underline.NONE, false, false, false, false, false)),
         listOf(TerminalRow(0u, false, listOf(TerminalCell("L", CellWidth.NARROW, 0u), TerminalCell("R", CellWidth.NARROW, 0u)))),
@@ -148,12 +153,31 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     /** While set, `mosh_server()` is unanswered until it completes. */
     var moshServerGate: CompletableDeferred<Unit>? = null
     var moshServerFailure: Exception? = null
+
+    /** The next this many `mosh_server()` calls fail (a transient failure), then [moshServerFailure] decides. */
+    var moshServerFailuresLeft = 0
     var moshServerCalls = 0
     override suspend fun moshServer(): String? {
         moshServerCalls++
         moshServerGate?.await()
+        if (moshServerFailuresLeft > 0) {
+            moshServerFailuresLeft--
+            throw HostException.CommandFailed("no free channel")
+        }
         moshServerFailure?.let { throw it }
         return caps.moshServer
+    }
+
+    /**
+     * What Rust does once the mosh session [index] opened has started its server (if it names one):
+     * `on_server_pid`, on its own thread, before that session can report `Connected`. Once per session.
+     */
+    fun serverStarted(index: Int) {
+        val (_, listener, session) = terminals[index]
+        val pid = session.pid ?: return
+        if (session.pidAnnounced) return
+        session.pidAnnounced = true
+        listener.onServerPid(pid)
     }
     override suspend fun listTmuxSessions() = tmux
     override fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface {
@@ -241,4 +265,27 @@ class FakeDao : AppDao() {
     override suspend fun trustedKeys(hostId: Long) = trust.filter { it.hostId == hostId }.map { it.openssh }
     override suspend fun clearTrust(hostId: Long) { trust.removeAll { it.hostId == hostId } }
     override suspend fun insertTrust(key: TrustedHostKey) { trust += key }
+}
+
+/**
+ * A [PrefStore] with a disk: `putString` acts like `SharedPreferences.apply()` (read back at once, on [disk]
+ * only after [flush]), `putStringDurably` like `commit()` (on [disk], with every earlier write, before it
+ * returns). [disk] is what a new process would read after this one died.
+ */
+class DiskPrefStore : PrefStore {
+    private val memory = MemoryPrefStore()
+    val disk = MemoryPrefStore()
+    private val pending = mutableListOf<(PrefStore) -> Unit>()
+
+    override fun getBoolean(key: String) = memory.getBoolean(key)
+    override fun putBoolean(key: String, value: Boolean) { memory.putBoolean(key, value); pending += { it.putBoolean(key, value) } }
+    override fun getString(key: String) = memory.getString(key)
+    override fun putString(key: String, value: String?) { memory.putString(key, value); pending += { it.putString(key, value) } }
+    override fun putStringDurably(key: String, value: String?) { putString(key, value); flush() }
+
+    /** The queued writes reach the disk (what `apply()` does some time later). */
+    fun flush() {
+        pending.forEach { it(disk) }
+        pending.clear()
+    }
 }

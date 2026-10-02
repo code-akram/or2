@@ -2088,7 +2088,8 @@ The app records its pid and stops it over the next SSH connection to that host.
   of the old destination), and reverting the edit does not bring them back; a label, key, inbox or transport
   edit keeps both. Entries without an identity (written before it existed) are dropped on read: they cannot be
   tied to a destination. `HostConnections` records the pid when a mosh
-  session reaches `Connected` (the process can die at any moment after), and clears it when the session
+  session reaches `Connected` (the process can die at any moment after; since API 14 it is recorded
+  earlier and durably, at `on_server_pid`, see "v0.1.1 review fixes" under Instant opens), and clears it when the session
   closes `Disconnected` (Rust stopped the server before reporting the close, or the peer confirmed) or
   `RemoteExited` (the server announced its own end). A session that closes `Failed` stays recorded: its
   stop may not have reached the host (for example the connection was lost), and a repeat is harmless. A
@@ -2117,7 +2118,8 @@ The app records its pid and stops it over the next SSH connection to that host.
   and a destination or login edit purges the records and the remembered terminal) and the
   real FFI through the probe (`HostConnectionsProbeTest`).
 - **Limits, accepted.** The record is written only for a session that reached `Connected`: a start that failed
-  with a pid the stop could not reach (host lost during the bootstrap) is not recorded. A user disconnect
+  with a pid the stop could not reach (host lost during the bootstrap) is not recorded (API 14 lifts this: every
+  session whose pid is known is recorded, and one that fails before connecting keeps its record). A user disconnect
   whose goodbye was unconfirmed while the SSH connection was already lost is stranded in Rust
   (`ServerDebt::stranded`) and the app clears it as a normal close. Either leaves a server until someone stops
   it, as before. A pid is only a pid: stopping needs the host's `ps` to name it `mosh-server`, which is
@@ -3249,6 +3251,7 @@ only its own exports below.
 | Export | Lane |
 |---|---|
 | `HostConnection.mosh_server() async -> Result<Option<String>, HostError>`: the path of `mosh-server`, resolved by the program probe alone (never by the herdr listing) | Instant |
+| `SessionListener.on_server_pid(pid: u32)`: mosh only, at most once, before `Connected` and before the session sends its server anything; Rust waits for the return (the one callback that may block briefly: the app writes the pid durably there). Core: `SessionObserver::server_pid_known`, called by `SessionDriver::set_server_pid` | Instant (review fix) |
 | `TerminalFrame.modes: TerminalModes { mouse_tracking: bool, alternate_screen: bool }` | Scroll |
 | `ViewportScroll::Wheel { rows: i32, column: u16, row: u16 }` (negative rows = up; the touch's cell) | Scroll |
 | `HostConnection.scroll_target(target: TerminalTarget, pane_id: Option<String>, scroll: TargetScroll) async -> Result<(), HostError>`, `TargetScroll { Up { lines: u32 }, Down { lines: u32 }, Bottom }` | Scroll |
@@ -3393,6 +3396,68 @@ server's pid is recorded); `HostContractTest` (`moshServer()` over the FFI, `Not
 Device tests (compiled, not run here): `TransportChromeDeviceTest` (the link line sits in the header,
 never over the terminal, and never resizes it; no note), `HostScreenUiDeviceTest` (the blocked line
 only while connected).
+
+### v0.1.1 review fixes (branch `v011/fix-lifecycle`)
+
+Two findings of the external v0.1.1 review.
+
+**The mosh-server ledger had a process-death hole (P2).** The pid was written only when the main
+dispatcher handled `Connected`, through `SharedPreferences.apply()`. A process killed after Rust accepted
+the first authenticated datagram (from then on `mosh-server` has no idle timeout) but before that main
+turn ran, or right after `record` returned with the `apply()` still pending, left a server no later
+process knew to stop.
+- **Rust.** `SessionObserver::server_pid_known(pid)` (default: nothing), called by
+  `SessionDriver::set_server_pid` for a nonzero pid while the observer is held (not after `Closed`).
+  `mosh_session::drive` sets the pid before `run_session` sends the first datagram, so the call returns
+  before the server can see its client and before `Connected`. FFI: `SessionListener.on_server_pid(pid)`
+  (API 14; table above), the one listener callback allowed to block briefly. The probe's mosh terminals
+  call it with 4242 before `Connected`. SSH terminals never call it.
+- **Kotlin.** `HostConnections`' listener records the pid in `onServerPid`, on Rust's callback thread
+  (never on the main dispatcher's `Connected` path), and adds it to `ownServers` (host id, pid: this
+  process's live servers, guarded by itself). `MoshServerLedger.record` writes durably:
+  `PrefStore.putStringDurably` (new; `SharedPrefsStore` uses `commit()`, `MemoryPrefStore` just writes).
+  Clears and purges stay `apply()` (a lost clear costs one repeated, harmless stop). Each session's own
+  `Closed` (on main, whatever terminal it still speaks for: a background attempt, a fallback's first
+  try, a swapped-out session) removes its pid from `ownServers` and clears its record on `Disconnected`
+  or `RemoteExited`; `Failed` keeps it, as before. `reapOrphans` spares `ownServers` (no longer the open
+  terminals' `moshServerPid`), and checks again before each stop. `ActiveTerminal.moshServerPid` is now
+  only what the terminal shows (read from `Session.server_pid()` on `Connected` and on the swap).
+- **Decisions.** Every server whose pid is known is recorded, not only one that connected: a background
+  attempt is recorded while it is still connecting (and a reconnect meanwhile spares it), a cancelled
+  one is forgotten on its `Disconnected`, and a start that fails before connecting (AUTO's fallback, a
+  `BLOCKED` background attempt) keeps its record like any `Failed` session, so the next connection
+  sends one more idempotent stop. The blocking write runs on a Rust runtime thread: a `commit()` of one
+  small file, once per mosh start, before the UDP handshake.
+- **Tests.** Rust: `session::tests::the_observer_hears_a_server_pid_when_it_is_set_before_connected_and_never_after_the_close`,
+  FFI `session::tests::a_mosh_server_pid_reaches_the_listener_before_connected`, and the live
+  `host_mosh.rs` orphan test (the pid is heard before `Connected`). JVM: `MoshServerLedgerTest.aRecordIsOnTheDiskWhenRecordReturns`
+  (a `DiskPrefStore` fake: `putString` reaches its disk only on a later flush, like `apply()`);
+  `HostConnectionsMoshServerTest` `aProcessThatDiesBeforeMainHandlesConnectedStillLeavesThePidOnDiskToStop`
+  (pid and `Connected` delivered, the main dispatcher never run, the next process reads only the disk and
+  stops the server), `aBackgroundAttemptIsRecordedBeforeItConnectsSparedByAReconnectAndForgottenWhenCancelled`,
+  `aMoshStartThatFailsBeforeConnectingKeepsItsRecordLikeAnyFailure`; `HostContractTest` (the probe's
+  `on_server_pid` through the real FFI). Device (compiled, not run): `PrefsDeviceTest` (the
+  `shared_prefs` file holds a durable write and a ledger record when the call returns). The fakes report
+  `on_server_pid` before `Connected` (`FakePort.serverStarted`), as Rust does.
+
+**A transient first `mosh_server()` failure degraded AUTO shells for the whole connection (P3).**
+`askMoshServer` settled the answer as unknown for good, and a later successful capability probe never
+filled it in, so a shell kept opening over SSH until a reconnect.
+- **Fix.** A failed query is not the answer. `askMoshServer` asks again after each of
+  `MOSH_SERVER_RETRY_DELAYS_MS` (250 ms, 1 s, 2 s, 4 s) while the answer is unknown and the connection is
+  still this one and up (one round at a time, `ActiveHost.askingMoshServer`). After a failure the
+  capability probe answers it (it ran the same program probe): at once when its result is already in,
+  else when `probe` gets one (at connect or on `refresh`). Its call's time is not one round trip (herdr's
+  listing is in it, or nothing at all when cached), so the shell's budget uses
+  `max(that time, UNMEASURED_PROBE_ROUND_TRIP_MS = 500 ms)`, a 3 s budget at least. While no query has
+  failed, the capability probe does not pre-empt the query's measured round trip. `refresh` also starts a
+  new round while the answer is unknown and none is running. `moshServerSettled` now completes with the
+  answer or when a round's retries are spent (it describes that wait, not the answer), so a Resume that
+  connected the host (at most 3 s) can still catch a retry that succeeds.
+- **Tests.** `HostConnectionsTransportTest`: `aFailedMoshServerQueryIsAskedAgainAndAShellThenPlansMosh`,
+  `aMoshServerQueryThatKeepsFailingIsAnsweredByARefreshedCapabilityProbe` (bounded at five queries, SSH
+  meanwhile, then mosh with the 3 s budget after a refresh), `aMoshServerAnswerFromTheCapabilityProbeWhileTheQueryFailsAtConnect`;
+  the wait test now spends the bounded retries.
 
 ## or2-pair on macOS: the firewall (lane Instant, host side)
 

@@ -50,10 +50,12 @@ class HostConnectionsTransportTest {
     private suspend fun TestScope.rig(
         pref: TransportPref = TransportPref.AUTO, moshServer: String? = "/usr/bin/mosh-server", probed: Boolean = true,
         pending: Boolean = false, moshPending: Boolean = false, failedUntil: Long = 0, roundTripMs: Long = 0,
+        moshServerFailures: Int = 0,
     ): Rig {
         val host = testHost(transport = pref, moshFailedUntil = failedUntil)
         val port = FakePort()
         port.caps = port.caps.copy(moshServer = moshServer)
+        port.moshServerFailuresLeft = moshServerFailures
         if (!probed) port.capsFailure = IllegalStateException("probe not answered")
         if (pending) port.capsGate = CompletableDeferred()
         port.moshServerGate = if (moshPending) CompletableDeferred() else if (roundTripMs > 0) {
@@ -72,7 +74,9 @@ class HostConnectionsTransportTest {
 
     private fun TestScope.sessionListener(rig: Rig, index: Int): SessionListener = rig.port.terminals[index].second
 
+    /** As Rust reports it: a mosh session names its server (`on_server_pid`) before it can be `Connected`. */
     private fun TestScope.state(rig: Rig, index: Int, state: SessionState) {
+        if (state == SessionState.Connected) rig.port.serverStarted(index)
         sessionListener(rig, index).onStateChanged(state)
         advanceUntilIdle()
     }
@@ -110,8 +114,8 @@ class HostConnectionsTransportTest {
         none.holder.openTerminal(none.active, shell)
         assertEquals(listOf(TerminalTransport.SSH), none.port.transports)
 
-        // `mosh_server()` has not answered: the open does not wait for it.
-        val early = rig(moshPending = true)
+        // `mosh_server()` has not answered (nor the capability probe): the open does not wait for it.
+        val early = rig(moshPending = true, pending = true)
         assertNull(early.active.moshServer.value)
         val terminal = early.holder.openTerminal(early.active, shell)
         assertEquals(listOf(TerminalTransport.SSH), early.port.transports)
@@ -141,19 +145,68 @@ class HostConnectionsTransportTest {
         assertEquals(TerminalTransport.MOSH, opened.await().transport.value)
         assertNull(resumed.active.capabilities.value) // The full probe is still out: never waited for.
 
-        // A failed query ends the wait too, and a query that never answers is given up on.
-        val failing = rig(moshPending = true)
+        // A query that keeps failing (and no capability probe to answer instead) ends the wait once its
+        // bounded retries are spent, and a query that never answers is given up on.
+        val failing = rig(moshPending = true, probed = false)
         failing.port.moshServerFailure = HostException.CommandFailed("no channel")
         failing.port.moshServerGate!!.complete(Unit)
         advanceUntilIdle()
+        assertEquals(1 + MOSH_SERVER_RETRY_DELAYS_MS.size, failing.port.moshServerCalls)
         val start = testScheduler.currentTime
         failing.holder.awaitTransportChoice(failing.active, connectedInThisTap = true)
         assertEquals(start, testScheduler.currentTime)
         assertNull(failing.active.moshServer.value)
-        val never = rig(moshPending = true)
+        val never = rig(moshPending = true, pending = true)
         val waitFrom = testScheduler.currentTime
         never.holder.awaitTransportChoice(never.active, connectedInThisTap = true, timeoutMs = 3_000)
         assertEquals(3_000L, testScheduler.currentTime - waitFrom)
+    }
+
+    @Test
+    fun aFailedMoshServerQueryIsAskedAgainAndAShellThenPlansMosh() = runTest {
+        // The first query fails (no free channel at connect, say) and the capability probe fails too.
+        val rig = rig(probed = false, moshServerFailures = 1)
+        assertEquals(2, rig.port.moshServerCalls) // Asked again after the first pause.
+        assertEquals(MoshServerAnswer("/usr/bin/mosh-server", 0), rig.active.moshServer.value)
+        rig.holder.openTerminal(rig.active, shell)
+        assertEquals(listOf(TerminalTransport.MOSH), rig.port.transports)
+        assertEquals(listOf<UInt?>(700u), rig.port.budgets)
+    }
+
+    @Test
+    fun aMoshServerQueryThatKeepsFailingIsAnsweredByARefreshedCapabilityProbe() = runTest {
+        val rig = rig(probed = false, moshServerFailures = Int.MAX_VALUE)
+        assertEquals(1 + MOSH_SERVER_RETRY_DELAYS_MS.size, rig.port.moshServerCalls) // Bounded.
+        assertNull(rig.active.moshServer.value)
+        rig.holder.openTerminal(rig.active, shell)
+        assertEquals(listOf(TerminalTransport.SSH), rig.port.transports) // Unknown: no wait, SSH.
+
+        // The user refreshes the host and the capability probe answers now: it knows `mosh-server`.
+        rig.port.capsFailure = null
+        rig.holder.refresh(rig.active)
+        advanceUntilIdle()
+        assertEquals(MoshServerAnswer("/usr/bin/mosh-server", UNMEASURED_PROBE_ROUND_TRIP_MS), rig.active.moshServer.value)
+        val terminal = rig.holder.openTerminal(rig.active, shell)
+        assertEquals(listOf(TerminalTransport.SSH, TerminalTransport.MOSH), rig.port.transports)
+        assertEquals(listOf<UInt?>(null, 3_000u), rig.port.budgets) // 6 x the conservative 500 ms.
+        assertTrue(terminal.fallbackEligible)
+        // Known now: a refresh does not ask the query again.
+        val calls = rig.port.moshServerCalls
+        rig.holder.refresh(rig.active)
+        advanceUntilIdle()
+        assertEquals(calls, rig.port.moshServerCalls)
+    }
+
+    @Test
+    fun aMoshServerAnswerFromTheCapabilityProbeWhileTheQueryFailsAtConnect() = runTest {
+        // The capability probe beside it succeeded, then the cheap query fails: the probe's is the answer, at once.
+        val rig = rig(moshServerFailures = Int.MAX_VALUE)
+        assertEquals(MoshServerAnswer("/usr/bin/mosh-server", UNMEASURED_PROBE_ROUND_TRIP_MS), rig.active.moshServer.value)
+        assertEquals(1, rig.port.moshServerCalls) // Not asked again once answered.
+        val none = rig(moshServer = null, moshServerFailures = Int.MAX_VALUE)
+        assertEquals(MoshServerAnswer(null, UNMEASURED_PROBE_ROUND_TRIP_MS), none.active.moshServer.value)
+        none.holder.openTerminal(none.active, shell)
+        assertEquals(listOf(TerminalTransport.SSH), none.port.transports)
     }
 
     @Test

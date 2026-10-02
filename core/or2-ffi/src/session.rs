@@ -379,7 +379,8 @@ impl From<UnexpectedUniFFICallbackError> for ListenerError {
 }
 
 /// Implemented in Kotlin. Called on a Rust-owned thread, never concurrently for one session,
-/// in order. Return quickly (post to the main or render thread). Exceptions are ignored and
+/// in order. Return quickly (post to the main or render thread; only `on_server_pid` may block
+/// briefly, for a durable write). Exceptions are ignored and
 /// do not affect the session. Released by Rust right after `Closed` is delivered.
 #[uniffi::export(callback_interface)]
 pub trait SessionListener: Send + Sync {
@@ -395,6 +396,13 @@ pub trait SessionListener: Send + Sync {
     /// 1 MiB (UTF-8). Both transports; only between `Connected` and `Closed`. A read request is
     /// never answered, so the host never learns the phone's clipboard.
     fn on_clipboard_write(&self, text: String) -> Result<(), ListenerError>;
+    /// mosh only (API 14): the session's `mosh-server` runs on the host with this pid, at most
+    /// once, before `Connected` and before the session sends the server anything. Rust waits
+    /// for the return before it lets the server see its client: this is the one callback that
+    /// may block briefly, so the app writes the pid durably here (the orphan record) and a
+    /// process death at any moment afterwards still leaves the pid to stop. The same pid is
+    /// `Session.server_pid()`. Never called for SSH terminals.
+    fn on_server_pid(&self, pid: u32) -> Result<(), ListenerError>;
 }
 
 pub(crate) struct ListenerObserver(pub(crate) Box<dyn SessionListener>);
@@ -414,6 +422,10 @@ impl core::SessionObserver for ListenerObserver {
 
     fn clipboard_write(&self, text: String) {
         let _ = self.0.on_clipboard_write(text);
+    }
+
+    fn server_pid_known(&self, pid: u32) {
+        let _ = self.0.on_server_pid(pid);
     }
 }
 
@@ -630,6 +642,9 @@ mod tests {
                     reason: "ignored".into(),
                 })
             }
+            fn on_server_pid(&self, _: u32) -> Result<(), ListenerError> {
+                Ok(())
+            }
         }
         let copies = Arc::new(std::sync::Mutex::new(Vec::new()));
         let observer = ListenerObserver(Box::new(Copies(copies.clone())));
@@ -638,6 +653,41 @@ mod tests {
         driver.publish_clipboard("copied".into());
         driver.publish_clipboard("again".into());
         assert_eq!(*copies.lock().unwrap(), ["copied", "again"]);
+    }
+
+    #[test]
+    fn a_mosh_server_pid_reaches_the_listener_before_connected() {
+        struct Pids(Arc<std::sync::Mutex<Vec<String>>>);
+        impl SessionListener for Pids {
+            fn on_state_changed(&self, state: super::SessionState) -> Result<(), ListenerError> {
+                self.0.lock().unwrap().push(format!("{state:?}"));
+                Ok(())
+            }
+            fn on_frame_ready(&self) -> Result<(), ListenerError> {
+                Ok(())
+            }
+            fn on_link_health(&self, _: LinkHealth) -> Result<(), ListenerError> {
+                Ok(())
+            }
+            fn on_clipboard_write(&self, _: String) -> Result<(), ListenerError> {
+                Ok(())
+            }
+            fn on_server_pid(&self, pid: u32) -> Result<(), ListenerError> {
+                self.0.lock().unwrap().push(format!("pid {pid}"));
+                // A listener failure is ignored: the session goes on.
+                Err(ListenerError::Failed {
+                    reason: "ignored".into(),
+                })
+            }
+        }
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observer = ListenerObserver(Box::new(Pids(events.clone())));
+        let (handle, mut driver) = channel(Arc::new(observer));
+        let session = Session::new(handle, TerminalTransport::Ssh);
+        driver.set_server_pid(Some(4242));
+        driver.transition(SessionState::Connected).unwrap();
+        assert_eq!(session.server_pid(), Some(4242));
+        assert_eq!(*events.lock().unwrap(), ["pid 4242", "Connected"]);
     }
 
     #[test]

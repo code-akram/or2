@@ -76,6 +76,7 @@ class NativeDeviceTest {
         override fun onLinkHealth(health: LinkHealth) = Unit
 
         override fun onClipboardWrite(text: String) = Unit
+        override fun onServerPid(pid: UInt) = Unit
 
         fun next(): SessionState {
             val state = states.poll(5, TimeUnit.SECONDS)

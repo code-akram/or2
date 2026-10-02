@@ -96,6 +96,13 @@ impl SessionObserver for SessionObs {
     fn link_health(&self, health: LinkHealth) {
         self.health.lock().unwrap().push(health);
     }
+
+    fn server_pid_known(&self, pid: u32) {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("{}:pid {pid}", self.tag));
+    }
 }
 
 struct Term {
@@ -1297,6 +1304,16 @@ fn a_server_orphaned_by_a_dead_client_is_stopped_over_a_new_connection_by_its_pi
         .server_pid()
         .expect("the session knows its server");
     assert_eq!(live.servers(), [pid], "it is the fixture's mosh-server");
+    // The app heard the pid before the session connected (it records it durably right there).
+    let log = live.log.lock().unwrap().clone();
+    let heard = log
+        .iter()
+        .position(|entry| *entry == format!("m:pid {pid}"));
+    let connected = log.iter().position(|entry| entry == "m:Connected");
+    assert!(
+        heard.is_some() && heard < connected,
+        "the pid comes before Connected: {log:?}"
+    );
 
     // The old client is gone without a goodbye: no SSH, no UDP.
     live.udp.mute.store(true, Ordering::SeqCst);
