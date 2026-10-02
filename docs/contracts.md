@@ -3403,8 +3403,8 @@ wait for mosh, whatever the host's firewall does.
   only when the host connected in this tap; an inbox tap on a live host never waits.
 - **Explicit `SSH` / `MOSH`** preferences are unchanged.
 - **The note.** No note under terminals any more. A `BLOCKED` verdict shows one muted line on the host
-  screen: `Mosh can't reach this host over UDP, so terminals use SSH. On a Mac, run or2-pair --check
-  for the fix.` The terminal header's badge follows the live transport (it flips SSH → Mosh on a
+  screen: `Mosh can't reach this host over UDP, so terminals use SSH.` (Changed after the owner's Mac:
+  its firewall allowed mosh-server and UDP was still dropped, so the line names no fix.) The terminal header's badge follows the live transport (it flips SSH → Mosh on a
   swap). **Bug fixed with it:** the old note was drawn over the terminal's top rows; any line under
   the header must take layout space, never overlay the grid.
 - **Tests:** JVM tests for the choice table, the swap (frames of the old session dropped, one attempt,

@@ -247,8 +247,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   stays a `danger` failure.
 - **UDP blocked (host screen):** while a connected host's UDP verdict is `BLOCKED` (and its probe did not
   say mosh-server is missing), one muted `Secondary` line sits under the status card: `Mosh can't reach
-  this host over UDP, so terminals use SSH. On a Mac, run or2-pair --check for the fix.` Nothing else
-  explains it, and no terminal carries a note.
+  this host over UDP, so terminals use SSH.` It suggests no fix: a firewall is only one cause (on the owner's
+  Mac the firewall allowed mosh-server and UDP was still dropped). Nothing else explains it, and no terminal
+  carries a note.
 - **Reconnect chip:** when the app returns and an inbox host's SSH connection was lost, a status chip
   (`surface` pill, 28 dp, `attention` 8 dp dot, `Chip` 12 sp `text` label, a 16 dp `textMuted` close glyph
   at the right) reads `Reconnect Alpha · 1 fingerprint` (`Reconnect 3 hosts · 2 fingerprints`). It floats with

@@ -86,8 +86,8 @@ class TransportChoiceTest {
 
     @Test
     fun theBlockedLineSaysWhyAndWhereTheFixIs() {
-        assertTrue(UDP_BLOCKED_LINE.startsWith("Mosh can't reach this host over UDP, so terminals use SSH."))
-        assertTrue(UDP_BLOCKED_LINE.endsWith("On a Mac, run or2-pair --check for the fix."))
+        // Only what is known: a firewall is one cause among several, so no fix is suggested.
+        assertEquals("Mosh can't reach this host over UDP, so terminals use SSH.", UDP_BLOCKED_LINE)
     }
 
     @Test

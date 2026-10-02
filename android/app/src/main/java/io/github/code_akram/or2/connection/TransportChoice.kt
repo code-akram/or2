@@ -108,7 +108,7 @@ fun isMoshFallback(failure: SessionFailure): Boolean =
 
 /** The muted line on the host screen while the connection's verdict is `BLOCKED`. */
 const val UDP_BLOCKED_LINE =
-    "Mosh can't reach this host over UDP, so terminals use SSH. On a Mac, run or2-pair --check for the fix."
+    "Mosh can't reach this host over UDP, so terminals use SSH."
 
 /** Link health older than this greys the transport badge (contract: `since_heard_ms > 5000`). */
 const val STALE_HEARD_MS = 5_000uL
