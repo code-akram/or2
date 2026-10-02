@@ -8,6 +8,19 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+### Changed
+
+- The arrow pad's keys are blue (accent glyphs on a blue-tinted fill with a blue edge, Enter solid accent), so they
+  stand apart from the terminal behind them; the extras row has accent labels.
+- A tap on a program that tracks the mouse (herdr, tmux with mouse on) is a click at that cell, so the program's own
+  buttons work; a link still opens, and the keyboard key still opens the keyboard.
+- FFI API 15 (`Session.mouse_click`).
+
+### Fixed
+
+- After scrolling a herdr or tmux pane with a swipe that went to the program as wheel events, the scroll-to-bottom
+  button now shows and returns the pane to its live screen; typing first returns it too.
+
 ## [0.1.1] - 2026-10-02
 
 Instant opens on every host, agent notifications, scrolling that follows the program, tap links and copy from the
