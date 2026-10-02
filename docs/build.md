@@ -84,7 +84,10 @@ but is not linked into the app library, so it never appears in the licence data.
 with the rest of the workspace.
 
 `core/or2-pair` (the Easy pair host CLI, a workspace crate that does not depend on `or2-core` at run
-time) has unit tests next to the code and four integration suites. `tests/flow.rs`: the whole CLI flow in
+time) has unit tests next to the code and six integration suites. `tests/code_agreement.rs`: the host's
+reading of a typed code against the phone's (`or2_core::pair::PairCode`, a dev-dependency) on the same
+inputs, the contract's vectors and their bootstrap keys included. `tests/fifo.rs`: the built binary with a
+FIFO where `authorized_keys` should be (reports and exits, nothing changed). `tests/flow.rs`: the whole CLI flow in
 a thread, in a temporary home and a temporary `/etc/ssh` with made-up interfaces, a scripted terminal and a
 pretend sshd banner (nothing of the user's `~/.ssh`, sshd, tmux or herdr is read), the phone played by a
 direct call of the forced command's code. `tests/cli.rs`: the built binary (usage, the removed `--bind` and

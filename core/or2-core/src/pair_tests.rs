@@ -124,6 +124,8 @@ fn typed_input_is_read_leniently() {
         "7KQ4M2XD9PTM",
         " 7KQ4 M2XD 9PTM ",
         "7-K-Q-4-M-2-X-D-9-P-T-M",
+        // Any white space, as the host reads it (a tab, a line end).
+        "\t7KQ4\tM2XD-9PTM\r\n",
     ] {
         assert_eq!(
             PairCode::parse_typed(text).unwrap().display(),
@@ -146,6 +148,10 @@ fn typed_input_is_read_leniently() {
         ("7KQ4-M2XD-9PTU", PairCodeError::Character),
         ("7KQ4-M2XD-9PT!", PairCodeError::Character),
         ("7KQ4-M2XD-9PT\u{e9}", PairCodeError::Character),
+        // The length is checked first, as on the host: a short or long input is `Length` whatever
+        // its characters.
+        ("ZZZ", PairCodeError::Length),
+        ("7KQ4-M2XD-9PTM-Z", PairCodeError::Length),
     ] {
         assert_eq!(
             PairCode::parse_typed(text).unwrap_err(),

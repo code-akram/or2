@@ -40,7 +40,7 @@ qrcode = { version = "=0.14.1", default-features = false }
 libc = "=0.2.189"
 
 [dev-dependencies]
-or2-core.workspace = true
+or2-core = { workspace = true, features = ["test-support"] }
 russh.workspace = true
 rqrr = { version = "=0.11.0", default-features = false }
 tempfile = "=3.27.0"

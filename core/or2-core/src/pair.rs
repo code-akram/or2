@@ -89,7 +89,7 @@ const BOOTSTRAP_INFO: &[u8] = b"or2-pair/2 bootstrap ed25519";
 pub enum PairCodeError {
     #[error("a pairing code has 12 characters")]
     Length,
-    #[error("a pairing code has only digits and letters (no U or Z)")]
+    #[error("a pairing code has a character codes never use (they use 0-9 and A-Y, never U or Z)")]
     Character,
     #[error("that code has a typo")]
     Check,
@@ -140,14 +140,19 @@ impl PairCode {
         Self(values)
     }
 
-    /// Reads a code as a person types it: case-insensitive, hyphens and spaces ignored, `I` and
-    /// `L` read as `1`, `O` as `0`. A character codes never use (`U`, `Z`, anything not a digit or
-    /// letter) is [`PairCodeError::Character`]; a wrong check character is
-    /// [`PairCodeError::Check`].
+    /// Reads a code as a person types it, with exactly the host's rules (`or2-pair`'s
+    /// `code::PairCode::parse`; a test of the host crate compares the two): case-insensitive,
+    /// hyphens and white space ignored, `I` and `L` read as `1`, `O` as `0`. What is left must be
+    /// 12 characters ([`PairCodeError::Length`] otherwise, checked first); a character codes never
+    /// use (`U`, `Z`, anything not a digit or letter) is [`PairCodeError::Character`]; a wrong check
+    /// character is [`PairCodeError::Check`].
     pub fn parse_typed(text: &str) -> Result<Self, PairCodeError> {
+        let typed = || text.chars().filter(|c| !c.is_whitespace() && *c != '-');
+        if typed().count() != CODE_CHARS {
+            return Err(PairCodeError::Length);
+        }
         let mut values = Zeroizing::new([0u8; CODE_CHARS]);
-        let mut count = 0;
-        for character in text.chars().filter(|c| !matches!(c, '-' | ' ')) {
+        for (slot, character) in values.iter_mut().zip(typed()) {
             let mapped = match character.to_ascii_uppercase() {
                 'I' | 'L' => '1',
                 'O' => '0',
@@ -157,14 +162,7 @@ impl PairCode {
                 .ok()
                 .and_then(|byte| ALPHABET.iter().position(|a| *a == byte))
                 .ok_or(PairCodeError::Character)?;
-            if count == CODE_CHARS {
-                return Err(PairCodeError::Length);
-            }
-            values[count] = value as u8;
-            count += 1;
-        }
-        if count != CODE_CHARS {
-            return Err(PairCodeError::Length);
+            *slot = value as u8;
         }
         if values[DATA_CHARS] != check_value(&values[..DATA_CHARS]) {
             return Err(PairCodeError::Check);

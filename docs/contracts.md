@@ -2356,12 +2356,22 @@ gone.
   `byte mod 31`, so every symbol is equally likely; a byte of 248 or more is dropped and another byte is
   drawn (rejection sampling, never folding). The phone (`PairCode`) and the host's own generator (used by
   its tests) draw the same way.
-- Typed input is read leniently: case-insensitive, hyphens and spaces ignored, `I`/`L` read as `1`, `O`
-  as `0`. `Z` (like `U` or punctuation) is a character codes never use: refused as invalid (the host
-  re-prompts as for any typo; the phone's `PairCode::parse_typed` returns `Character`), never read as
-  another character. A failed check re-prompts on the host ("That code has a typo") without spending
-  anything. On the host the typed characters are normalized into a zeroizing buffer, wiped on every way
-  out (a refused character included).
+- Typed input is read leniently: case-insensitive, hyphens and white space ignored, `I`/`L` read as
+  `1`, `O` as `0`. What is left must be 12 characters (checked first: a wrong length is a length
+  error whatever the characters), then each must be a code character: `Z` (like `U` or punctuation) is
+  a character codes never use, refused as invalid (the host re-prompts as for any typo; the phone's
+  `PairCode::parse_typed` returns `Character`; both messages say codes use "0-9 and A-Y, never U or
+  Z"), never read as another character; then the check. A failed check re-prompts on the host ("That
+  code has a typo") without spending anything. On the host the typed characters are normalized into a
+  zeroizing buffer, wiped on every way out (a refused character included).
+- **One reading on both sides.** The host's `code::PairCode::parse` and the phone's
+  `PairCode::parse_typed` give the same answer (the same code, or the same one of length, character
+  and check) for every input; `or2-pair`'s `tests/code_agreement.rs` holds them to it (the five
+  vectors and their bootstrap keys, every character up to U+024F and a few others in every position of
+  every vector, a table of lenient and wrong inputs, every code the host's drawing makes from each
+  byte value, the refused-character message). (Integration of the v2 review fixes: the phone ignored
+  only spaces and hyphens, not other white space, and refused a character before it counted the
+  length.)
 - Generated in Rust (`PairCode`, zeroized on drop). A new `K` is drawn each time the Easy pair screen
   opens and after every pairing that reached the host, successful or not. It is never logged or saved.
 
@@ -2869,7 +2879,8 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
 ## Tests
 
 - **CLI**: payload round trip and `validate`/parser agreement; `K` parsing (check character, lenient
-  input, typos, `Z` refused, no substitution or swap exception), generation uniform over the 31 symbols;
+  input, typos, `Z` refused, no substitution or swap exception), generation uniform over the 31 symbols,
+  and the host's and the phone's readings compared on the same inputs (`tests/code_agreement.rs`);
   the derivation vector; options by sshd version and `TZ`, the UTC expiry; path character refusal; login
   shell refusal and the shell run (failing exit, time limit, wrong output); `sshd_config` `fail` and
   `warn` findings with `Match` evaluation and unreadable includes; `authorized_keys` append, remove (a
@@ -2899,7 +2910,7 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
   `HostKeyMismatch` and `BootstrapRefused`.
 - **`or2_core::pair`**: `PairCode` (the 31-symbol alphabet and `Z` refused as invalid, the check
   character with no exception and the five shared check vectors, rejection sampling and uniformity
-  bounds), the parser table, the derivation vector, the client against a scripted exchange and every
+  bounds, any white space ignored and the length checked first, as on the host), the parser table, the derivation vector, the client against a scripted exchange and every
   error mapping.
 - **Kotlin**: `PairFlowTest` (fakes; among them that changing the key after a save failure starts no
   second enrolment, `changingTheKeyAfterASaveFailureAttemptsASecondEnrolment`), `PairMessagesTest`,
