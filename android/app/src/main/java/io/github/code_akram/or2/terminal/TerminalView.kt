@@ -31,10 +31,13 @@ import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.Underline
 import io.github.code_akram.or2.ffi.KeyInput
+import io.github.code_akram.or2.ffi.TargetScroll
 import io.github.code_akram.or2.ffi.TerminalKey
+import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.ViewportScroll
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dimens
+import kotlinx.coroutines.CoroutineScope
 import kotlin.math.ceil
 import kotlin.math.roundToInt
 
@@ -95,8 +98,8 @@ class TerminalView(context: Context) : View(context) {
     val horizontalInset = Or2Dimens.TerminalInset.value * resources.displayMetrics.density
     private var inputConnection: TerminalInputConnection? = null
     val input = TerminalInput(
-        { text -> clearSelection(); sessionCall { sendText(text) } },
-        { key -> clearSelection(); sessionCall { sendKey(key) } },
+        { text -> clearSelection(); atBottom { sessionCall { sendText(text) } } },
+        { key -> clearSelection(); atBottom { sessionCall { sendKey(key) } } },
         { invalidate(); onInputChanged() },
     )
     var selection: TerminalSelection? = null
@@ -104,9 +107,25 @@ class TerminalView(context: Context) : View(context) {
     private val scroller = OverScroller(context)
     private var flingY = 0
     private var scrollRemainder = 0f
+
+    /** The cell a swipe (and the fling after it) started on: where its wheel events are reported. */
+    private var scrollCell = CellPosition(0, 0)
+
+    /** What this terminal shows: tmux and herdr targets scroll their own history ([scrollRoute]). */
+    var target: TerminalTarget = TerminalTarget.Shell
+        private set
+
+    /** Scrolls a tmux or herdr target through `scroll_target`; null until the screen provides one. */
+    var targetScroller: TargetScroller? = null
+        private set
+
+    /** Called with whether the scroll-to-bottom button should show, when that changes. */
+    var onScrolledAwayChanged: (Boolean) -> Unit = {}
+    private var reportedAway = false
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean {
             scroller.forceFinished(true)
+            scrollCell = position(e.x, e.y) ?: scrollCell
             return true
         }
         override fun onSingleTapUp(e: MotionEvent): Boolean {
@@ -205,6 +224,7 @@ class TerminalView(context: Context) : View(context) {
                     onBackgroundChanged(grid.background)
                 }
                 appliedFrames.applied()
+                updateScrolledAway()
                 invalidate()
             } else {
                 requestSnapshot()
@@ -258,7 +278,10 @@ class TerminalView(context: Context) : View(context) {
         if (text.isEmpty()) return false
         clearSelection()
         input.discardComposition()
-        return sessionCall { submitText(text) }
+        var taken: Boolean? = null
+        atBottom { taken = sessionCall { submitText(text) } }
+        // Held behind the target's Bottom: it goes out once tmux or herdr is back at the live screen.
+        return taken ?: (connected && !session.gone)
     }
 
     fun showKeyboard() {
@@ -390,24 +413,73 @@ class TerminalView(context: Context) : View(context) {
         scrollRemainder += delta
         val rows = (scrollRemainder / cellHeight).toInt()
         if (rows != 0) {
-            sessionCall { scroll(ViewportScroll.Delta(rows)) }
+            scrollRows(rows)
             scrollRemainder -= rows * cellHeight
         }
     }
 
-    /** One page up into the scrollback (the toolbar's history key). */
+    /**
+     * Scrolls what the user is looking at by [rows] (negative = up), never shell history
+     * ([scrollRoute]): wheel events while the program tracks the mouse, the tmux or herdr target's
+     * own history, else the local viewport (arrow keys on the alternate screen).
+     */
+    private fun scrollRows(rows: Int) {
+        val targets = targetScroller
+        when (scrollRoute(grid.modes, target)) {
+            ScrollRoute.WHEEL -> sessionCall {
+                scroll(ViewportScroll.Wheel(rows, scrollCell.column.toUShort(), scrollCell.row.toUShort()))
+            }
+            ScrollRoute.TMUX, ScrollRoute.HERDR ->
+                if (targets != null) targets.scroll(rows) else sessionCall { scroll(ViewportScroll.Delta(rows)) }
+            ScrollRoute.VIEWPORT -> sessionCall { scroll(ViewportScroll.Delta(rows)) }
+        }
+        updateScrolledAway()
+    }
+
+    /**
+     * Lets a tmux or herdr [target] scroll its own history through [send] (`scroll_target`), one
+     * call at a time in [scope].
+     */
+    fun useTargetScroll(target: TerminalTarget, scope: CoroutineScope, send: suspend (TargetScroll) -> Unit) {
+        this.target = target
+        targetScroller = TargetScroller(scope, send) { updateScrolledAway() }
+    }
+
+    /** Runs [send] at once, or after the target's `Bottom` while it is scrolled away (no typing into copy mode). */
+    private fun atBottom(send: () -> Unit) {
+        val targets = targetScroller
+        if (targets == null) send() else targets.input(send)
+    }
+
+    private fun updateScrolledAway() {
+        val away = scrollToBottomVisible(grid.scrollback, grid.modes, grid.rows.size, targetScroller?.away == true)
+        if (away != reportedAway) {
+            reportedAway = away
+            onScrolledAwayChanged(away)
+        }
+    }
+
+    /** One page up into the scrollback (the toolbar's history key), routed like a swipe. */
     fun pageUp() {
         clearSelection()
         scroller.forceFinished(true)
         val page = (grid.rows.size - 1).coerceAtLeast(1)
-        sessionCall { scroll(ViewportScroll.Delta(-page)) }
+        scrollRows(-page)
     }
 
+    /**
+     * Back to the bottom (the scroll-to-bottom button, and holding the history key): the target's
+     * live screen when it is scrolled away, the viewport's bottom when that is.
+     */
     fun jumpToBottom() {
         clearSelection()
         scroller.forceFinished(true)
         scrollRemainder = 0f
-        sessionCall { scroll(ViewportScroll.Bottom) }
+        val targets = targetScroller
+        val targetAway = targets?.away == true
+        if (targetAway) targets?.bottom()
+        if (!targetAway || viewportAway(grid.scrollback, grid.modes, grid.rows.size)) sessionCall { scroll(ViewportScroll.Bottom) }
+        updateScrolledAway()
     }
 
     override fun computeScroll() {

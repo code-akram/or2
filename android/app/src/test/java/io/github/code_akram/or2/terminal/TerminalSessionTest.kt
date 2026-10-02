@@ -4,6 +4,7 @@ import io.github.code_akram.or2.ffi.CellStyle
 import io.github.code_akram.or2.ffi.CellWidth
 import io.github.code_akram.or2.ffi.KeyInput
 import io.github.code_akram.or2.ffi.Scrollback
+import io.github.code_akram.or2.ffi.TerminalModes
 import io.github.code_akram.or2.ffi.SessionException
 import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionState
@@ -20,7 +21,7 @@ class TerminalSessionTest {
     private val frame = TerminalFrame(1u, 1u, 1u, true,
         listOf(CellStyle(0xff0000u, 0u, null, Underline.NONE, false, false, false, false, false)),
         listOf(TerminalRow(0u, false, listOf(TerminalCell("A", CellWidth.NARROW, 0u)))),
-        null, 0u, Scrollback(1u, 0u))
+        null, 0u, Scrollback(1u, 0u), TerminalModes(false, false))
 
     private class FakeSession(var frame: TerminalFrame?) : SessionInterface {
         var destroyed = false

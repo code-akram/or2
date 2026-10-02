@@ -6,6 +6,7 @@ import io.github.code_akram.or2.ffi.CellWidth
 import io.github.code_akram.or2.ffi.Scrollback
 import io.github.code_akram.or2.ffi.TerminalCursor
 import io.github.code_akram.or2.ffi.TerminalFrame
+import io.github.code_akram.or2.ffi.TerminalModes
 import io.github.code_akram.or2.ui.Or2Colors
 import kotlin.math.floor
 
@@ -39,6 +40,9 @@ class TerminalGrid {
         private set
     var scrollback = Scrollback(0u, 0u)
         private set
+    /** What a swipe scrolls ([scrollRoute]); updated by every frame. */
+    var modes = TerminalModes(false, false)
+        private set
     var sequence = 0uL
         private set
     val hasGrid get() = rows.isNotEmpty()
@@ -62,6 +66,7 @@ class TerminalGrid {
         cursor = frame.cursor
         background = frame.background
         scrollback = frame.scrollback
+        modes = frame.modes
         sequence = frame.sequence
         return true
     }

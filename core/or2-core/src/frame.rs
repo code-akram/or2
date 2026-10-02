@@ -126,6 +126,15 @@ pub struct Scrollback {
     pub offset: u64,
 }
 
+/// Terminal modes Kotlin routes a vertical swipe by (contracts.md, "Wheel-aware scrolling").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TerminalModes {
+    /// The program asked for mouse reports (DECSET 9, 1000, 1002 or 1003).
+    pub mouse_tracking: bool,
+    /// The alternate screen is the active one.
+    pub alternate_screen: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
     size: TerminalSize,
@@ -136,6 +145,7 @@ pub struct Frame {
     /// Default background for clearing and margins.
     background: Rgb,
     scrollback: Scrollback,
+    modes: TerminalModes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -280,7 +290,18 @@ impl Frame {
             cursor,
             background,
             scrollback,
+            modes: TerminalModes::default(),
         })
+    }
+
+    /// The same frame reporting `modes` (a new frame reports none set).
+    pub fn with_modes(mut self, modes: TerminalModes) -> Self {
+        self.modes = modes;
+        self
+    }
+
+    pub fn modes(&self) -> TerminalModes {
+        self.modes
     }
 
     pub fn size(&self) -> TerminalSize {
@@ -325,6 +346,7 @@ impl Frame {
         self.cursor = newer.cursor;
         self.background = newer.background;
         self.scrollback = newer.scrollback;
+        self.modes = newer.modes;
     }
 }
 
@@ -651,6 +673,36 @@ mod tests {
         assert_eq!(
             mailbox.publish(delta(4, 3, &[(0, "x")], 0)),
             Err(FrameError::SizeMismatch)
+        );
+    }
+
+    #[test]
+    fn merged_deltas_report_the_newest_modes() {
+        let mouse = TerminalModes {
+            mouse_tracking: true,
+            alternate_screen: true,
+        };
+        let mut mailbox = FrameMailbox::default();
+        mailbox.publish(full(4, 3, "a")).unwrap();
+        assert_eq!(
+            mailbox.take().unwrap().frame.modes(),
+            TerminalModes::default()
+        );
+        mailbox
+            .publish(delta(4, 3, &[(0, "b")], 0).with_modes(mouse))
+            .unwrap();
+        // A delta without rows still carries the modes (a mode change dirties nothing).
+        mailbox
+            .publish(delta(4, 3, &[], 0).with_modes(mouse))
+            .unwrap();
+        assert_eq!(mailbox.take().unwrap().frame.modes(), mouse);
+        mailbox
+            .publish(delta(4, 3, &[(1, "c")], 0).with_modes(mouse))
+            .unwrap();
+        mailbox.publish(delta(4, 3, &[], 0)).unwrap();
+        assert_eq!(
+            mailbox.take().unwrap().frame.modes(),
+            TerminalModes::default()
         );
     }
 

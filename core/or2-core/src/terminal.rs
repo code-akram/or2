@@ -2,6 +2,10 @@
 //! frames and encoded byte vectors cross thread boundaries.
 
 use libghostty_vt::key::{Action, Encoder, Event, Key as PhysicalKey, Mods};
+use libghostty_vt::mouse::{
+    Action as MouseAction, Button as MouseButton, Encoder as MouseEncoder, EncoderSize,
+    Event as MouseEvent, Position,
+};
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::screen::{CellWide, Screen};
 use libghostty_vt::snapshot::Decoder;
@@ -12,7 +16,8 @@ use libghostty_vt::terminal::{Mode, ScrollViewport};
 use libghostty_vt::{RenderState, Terminal};
 
 use crate::frame::{
-    Cell, CellStyle, CellWidth, Cursor, CursorShape, Frame, Rgb, Row, Scrollback, Underline,
+    Cell, CellStyle, CellWidth, Cursor, CursorShape, Frame, Rgb, Row, Scrollback, TerminalModes,
+    Underline,
 };
 use crate::input::{Key, KeyInput, Modifiers, ViewportScroll};
 use crate::term::TerminalSize;
@@ -82,6 +87,8 @@ pub struct TerminalEngine {
     cell_iter: CellIterator<'static>,
     encoder: Encoder<'static>,
     event: Event<'static>,
+    mouse: MouseEncoder<'static>,
+    mouse_event: MouseEvent<'static>,
     size: TerminalSize,
     full: bool,
     colors: Option<(RgbColor, RgbColor)>,
@@ -139,6 +146,8 @@ impl TerminalEngine {
             cell_iter: CellIterator::new()?,
             encoder: Encoder::new()?,
             event: Event::new()?,
+            mouse: MouseEncoder::new()?,
+            mouse_event: MouseEvent::new()?,
             size,
             full: true,
             colors: None,
@@ -303,14 +312,18 @@ impl TerminalEngine {
         snapshot.set_dirty(Dirty::Clean)?;
         self.full = false;
         self.colors = Some(resolved);
+        let modes = self.modes()?;
         let build = if full { Frame::full } else { Frame::delta };
-        Ok(build(
-            self.size,
-            rows,
-            cursor,
-            rgb(colors.background),
-            scrollback,
-        )?)
+        Ok(build(self.size, rows, cursor, rgb(colors.background), scrollback)?.with_modes(modes))
+    }
+
+    /// The modes a swipe is routed by: whether the program tracks the mouse and which screen
+    /// is active.
+    pub fn modes(&self) -> Result<TerminalModes, TerminalError> {
+        Ok(TerminalModes {
+            mouse_tracking: self.terminal.is_mouse_tracking()?,
+            alternate_screen: self.terminal.active_screen()? == Screen::Alternate,
+        })
     }
 
     /// Whether the program has bracketed paste (DECSET 2004) on.
@@ -430,26 +443,90 @@ impl TerminalEngine {
         Ok((probe == b"\x1b[91;5u").then_some(key))
     }
 
-    /// Primary: move the viewport. Alternate: navigation keys, respecting application mode.
+    /// Primary: move the viewport. Alternate: navigation keys, respecting application mode. A
+    /// [`ViewportScroll::Wheel`] while the program tracks the mouse is wheel events instead;
+    /// without tracking (or in a mode that reports no wheel) it is a `Delta` of its rows.
     pub fn scroll(&mut self, scroll: ViewportScroll) -> Result<Vec<u8>, TerminalError> {
+        let scroll = match scroll {
+            ViewportScroll::Wheel { rows, column, row } => {
+                let bytes = self.wheel(rows, column, row)?;
+                if !bytes.is_empty() || rows == 0 {
+                    return Ok(bytes);
+                }
+                ViewportScroll::Delta(rows)
+            }
+            other => other,
+        };
         if self.terminal.active_screen()? == Screen::Primary {
             self.terminal.scroll_viewport(match scroll {
                 ViewportScroll::Top => ScrollViewport::Top,
                 ViewportScroll::Bottom => ScrollViewport::Bottom,
-                ViewportScroll::Delta(rows) => ScrollViewport::Delta(rows as isize),
+                ViewportScroll::Delta(rows) | ViewportScroll::Wheel { rows, .. } => {
+                    ScrollViewport::Delta(rows as isize)
+                }
             });
             return Ok(Vec::new());
         }
         let (key, count) = match scroll {
             ViewportScroll::Top => (Key::Home, 1),
             ViewportScroll::Bottom => (Key::End, 1),
-            ViewportScroll::Delta(rows) if rows < 0 => (Key::ArrowUp, rows.unsigned_abs()),
-            ViewportScroll::Delta(rows) => (Key::ArrowDown, rows as u32),
+            ViewportScroll::Delta(rows) | ViewportScroll::Wheel { rows, .. } if rows < 0 => {
+                (Key::ArrowUp, rows.unsigned_abs())
+            }
+            ViewportScroll::Delta(rows) | ViewportScroll::Wheel { rows, .. } => {
+                (Key::ArrowDown, rows as u32)
+            }
         };
         let bytes =
             self.encode_key(&KeyInput::new(key, Modifiers::default()).expect("navigation key"))?;
         // A single gesture cannot sensibly navigate more than one viewport at a time.
         Ok(bytes.repeat(count.min(u32::from(self.size.rows())) as usize))
+    }
+
+    /// `rows` wheel presses (button 4 up, 5 down) at the cell (`column`, `row`, clamped to the
+    /// grid), in the terminal's mouse tracking mode and format; empty when it tracks nothing or
+    /// its mode does not report the wheel (X10, DECSET 9). At most one viewport of events.
+    fn wheel(&mut self, rows: i32, column: u16, row: u16) -> Result<Vec<u8>, TerminalError> {
+        if rows == 0 || !self.terminal.is_mouse_tracking()? {
+            return Ok(Vec::new());
+        }
+        // The encoder maps surface pixels to cells; a nominal cell size places the event at
+        // the centre of the touched cell whatever the phone's real metrics are.
+        const CELL: u32 = 10;
+        let columns = self.size.columns();
+        let grid_rows = self.size.rows();
+        self.mouse
+            .set_options_from_terminal(&self.terminal)
+            .set_size(EncoderSize {
+                screen_width: u32::from(columns) * CELL,
+                screen_height: u32::from(grid_rows) * CELL,
+                cell_width: CELL,
+                cell_height: CELL,
+                padding_top: 0,
+                padding_bottom: 0,
+                padding_right: 0,
+                padding_left: 0,
+            })
+            .set_any_button_pressed(false)
+            .set_track_last_cell(false);
+        let centre =
+            |cell: u16, cells: u16| (u32::from(cell.min(cells - 1)) * CELL + CELL / 2) as f32;
+        self.mouse_event
+            .set_action(MouseAction::Press)
+            .set_button(Some(if rows < 0 {
+                MouseButton::Four
+            } else {
+                MouseButton::Five
+            }))
+            .set_mods(Mods::empty())
+            .set_position(Position {
+                x: centre(column, columns),
+                y: centre(row, grid_rows),
+            });
+        let mut one = Vec::new();
+        self.mouse.encode_to_vec(&self.mouse_event, &mut one)?;
+        let count = rows.unsigned_abs().min(u32::from(grid_rows));
+        Ok(one.repeat(count as usize))
     }
 }
 

@@ -706,4 +706,32 @@ class HostConnectionsTest {
         assertEquals(listOf("main"), holder.listTmuxSessions(holder.host(host.id)!!).map { it.name })
         holder.dismissHost(host.id)
     }
+
+    @Test
+    fun scrollTargetGoesThroughTheConnectionWithTheFocusedHerdrPane() = runTest {
+        val port = FakePort()
+        lateinit var listener: HostListener
+        val holder = holder(connector = { _, l -> listener = l; port })
+        holder.connect(host, byteArrayOf(1))
+        val active = holder.host(host.id)!!
+        listener.onHostStateChanged(HostState.Connected(0u))
+        connected(port)
+        runCurrent()
+        val tmux = holder.openTerminal(active, TerminalTarget.Tmux("work"))
+        val herdr = holder.openTerminal(active, TerminalTarget.Herdr(null, "w1:p1"))
+        holder.scrollTarget(tmux, TargetScroll.Up(3u))
+        // No live view of the session yet: herdr is asked for its focused pane.
+        holder.scrollTarget(herdr, TargetScroll.Down(2u))
+        val view = HerdrView(1uL, 22u, "w2:p4", emptyList(), emptyList(), emptyList(), emptyList())
+        port.watches.first { it.first == null }.second.onHerdrStateChanged(HerdrState.Live(view))
+        runCurrent()
+        holder.scrollTarget(herdr, TargetScroll.Bottom)
+        assertEquals(listOf(
+            Triple(TerminalTarget.Tmux("work"), null, TargetScroll.Up(3u)),
+            Triple(TerminalTarget.Herdr(null, "w1:p1"), null, TargetScroll.Down(2u)),
+            Triple(TerminalTarget.Herdr(null, "w1:p1"), "w2:p4", TargetScroll.Bottom),
+        ), port.scrolls)
+        holder.dismissHost(host.id)
+        assertThrows(HostException.Closed::class.java) { runBlocking { holder.scrollTarget(tmux, TargetScroll.Bottom) } }
+    }
 }

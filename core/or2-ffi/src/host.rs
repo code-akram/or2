@@ -207,6 +207,29 @@ impl From<TerminalTarget> for core::TerminalTarget {
     }
 }
 
+/// What `scroll_target` does to the history a tmux or herdr target shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TargetScroll {
+    Up {
+        lines: u32,
+    },
+    Down {
+        lines: u32,
+    },
+    /// Back to the live screen: tmux leaves copy mode, herdr's offset returns to 0.
+    Bottom,
+}
+
+impl From<TargetScroll> for core::TargetScroll {
+    fn from(scroll: TargetScroll) -> Self {
+        match scroll {
+            TargetScroll::Up { lines } => Self::Up { lines },
+            TargetScroll::Down { lines } => Self::Down { lines },
+            TargetScroll::Bottom => Self::Bottom,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct HerdrSessionInfo {
     pub name: String,
@@ -422,6 +445,27 @@ impl HostConnection {
         Ok(self.handle.stop_mosh_server(pid).await?)
     }
 
+    /// Scrolls the history `target` shows, for a swipe when the program does not track the
+    /// mouse (API 14; contracts.md, "Wheel-aware scrolling"). tmux: `copy-mode -e` then
+    /// `send-keys -X -N <lines> scroll-up`/`scroll-down` over exec (`Bottom` is `-X cancel`).
+    /// herdr: `pane.scroll` of `pane_id` (`None`: the session's focused pane), Rust keeping each
+    /// pane's `offset_from_bottom` (`Bottom` is 0). A `Shell` target, or zero lines, does
+    /// nothing and is `Ok`. `InvalidName` for a malformed name or pane id, `NotInstalled`
+    /// without the program, `PaneNotFound` for a vanished herdr pane, `CommandFailed`
+    /// otherwise. Call it at most once at a time per terminal (sum the deltas meanwhile).
+    /// Cancelling the coroutine drops the reply only.
+    pub async fn scroll_target(
+        &self,
+        target: TerminalTarget,
+        pane_id: Option<String>,
+        scroll: TargetScroll,
+    ) -> Result<(), HostError> {
+        Ok(self
+            .handle
+            .scroll_target(target.into(), pane_id, scroll.into())
+            .await?)
+    }
+
     /// Watches a herdr session (`None` is the default session); it ends with the connection.
     pub fn watch_herdr(
         &self,
@@ -596,6 +640,18 @@ mod tests {
         });
         assert_eq!((tmux.windows, tmux.created_unix), (3, -1));
         assert_eq!(tmux.activity_unix, i64::MAX);
+        assert_eq!(
+            core::TargetScroll::from(TargetScroll::Up { lines: 3 }),
+            core::TargetScroll::Up { lines: 3 }
+        );
+        assert_eq!(
+            core::TargetScroll::from(TargetScroll::Down { lines: 4 }),
+            core::TargetScroll::Down { lines: 4 }
+        );
+        assert_eq!(
+            core::TargetScroll::from(TargetScroll::Bottom),
+            core::TargetScroll::Bottom
+        );
     }
 
     #[test]

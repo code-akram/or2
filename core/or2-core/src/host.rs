@@ -193,6 +193,19 @@ pub enum TerminalTarget {
     },
 }
 
+/// What [`HostHandle::scroll_target`] does to the history a tmux or herdr target shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetScroll {
+    Up {
+        lines: u32,
+    },
+    Down {
+        lines: u32,
+    },
+    /// Back to the live screen: tmux leaves copy mode, herdr's offset returns to 0.
+    Bottom,
+}
+
 /// Nonempty, at most 128 bytes, no control characters, `\`, `:` or `.`.
 pub fn is_valid_tmux_session_name(name: &str) -> bool {
     !name.is_empty()
@@ -339,6 +352,18 @@ pub enum HostCommand {
     /// host), `Closed` when the connection ended.
     StopMoshServer {
         pid: u32,
+        reply: oneshot::Sender<Result<(), HostError>>,
+    },
+    /// Scroll the history `target` shows ([`HostHandle::scroll_target`]): tmux through exec
+    /// ([`crate::tmux::scroll`]), herdr through `pane.scroll` with the offset this connection
+    /// keeps per pane ([`herdr::ScrollOffsets`]). `target` is a validated tmux or herdr target;
+    /// `pane_id` (validated) is the herdr pane, `None` for the focused one. Reply
+    /// `NotInstalled` without the program, `PaneNotFound` for a vanished herdr pane,
+    /// `CommandFailed` for other failures.
+    ScrollTarget {
+        target: TerminalTarget,
+        pane_id: Option<String>,
+        scroll: TargetScroll,
         reply: oneshot::Sender<Result<(), HostError>>,
     },
     /// Run [`herdr::run`] (or an equivalent) on `driver`, with the herdr path from the probe.
@@ -580,6 +605,41 @@ impl HostHandle {
             return Err(HostError::InvalidName);
         }
         self.send(HostCommand::StopMoshServer { pid, reply })?;
+        await_reply(response, QUERY_TIMEOUT).await
+    }
+
+    /// Scrolls the history of what `target` shows, without the mouse (contracts.md,
+    /// "Wheel-aware scrolling"): a tmux target enters copy mode and scrolls by lines (`Bottom`
+    /// leaves copy mode); a herdr target sets `pane_id`'s `offset_from_bottom` (`None`: the
+    /// session's focused pane), this connection keeping each pane's offset. A `Shell` target, or
+    /// zero lines, does nothing and is `Ok`. Names are validated like [`TerminalTarget`]'s
+    /// (`InvalidName`); a vanished herdr pane is [`HostError::PaneNotFound`].
+    pub async fn scroll_target(
+        &self,
+        target: TerminalTarget,
+        pane_id: Option<String>,
+        scroll: TargetScroll,
+    ) -> Result<(), HostError> {
+        target.validate()?;
+        if !pane_id.as_deref().is_none_or(is_valid_herdr_pane_id) {
+            return Err(HostError::InvalidName);
+        }
+        if target == TerminalTarget::Shell
+            || matches!(
+                scroll,
+                TargetScroll::Up { lines: 0 } | TargetScroll::Down { lines: 0 }
+            )
+        {
+            return Ok(());
+        }
+        let (reply, response) = oneshot::channel();
+        self.require_connected()?;
+        self.send(HostCommand::ScrollTarget {
+            target,
+            pane_id,
+            scroll,
+            reply,
+        })?;
         await_reply(response, QUERY_TIMEOUT).await
     }
 

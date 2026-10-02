@@ -214,6 +214,118 @@ fn alternate_screen_and_scrollback_golden() {
 }
 
 #[test]
+fn frames_report_mouse_tracking_and_the_alternate_screen() {
+    let mut terminal = engine(8, 3);
+    assert_eq!(terminal.frame().unwrap().modes(), TerminalModes::default());
+    // A mode change dirties no row; the next (delta) frame still reports it.
+    terminal.write(b"\x1b[?1000h");
+    let frame = terminal.frame().unwrap();
+    assert!(frame.rows().is_empty());
+    assert_eq!(
+        frame.modes(),
+        TerminalModes {
+            mouse_tracking: true,
+            alternate_screen: false
+        }
+    );
+    terminal.write(b"\x1b[?1049h");
+    assert_eq!(
+        terminal.frame().unwrap().modes(),
+        TerminalModes {
+            mouse_tracking: true,
+            alternate_screen: true
+        }
+    );
+    terminal.write(b"\x1b[?1000l");
+    assert_eq!(
+        terminal.frame().unwrap().modes(),
+        TerminalModes {
+            mouse_tracking: false,
+            alternate_screen: true
+        }
+    );
+    terminal.write(b"\x1b[?1002h\x1b[?1049l");
+    assert!(terminal.frame().unwrap().modes().mouse_tracking);
+    terminal.write(b"\x1b[?1002l\x1b[?1003h");
+    assert!(terminal.frame().unwrap().modes().mouse_tracking);
+    terminal.write(b"\x1b[?1003l");
+    assert_eq!(terminal.frame().unwrap().modes(), TerminalModes::default());
+}
+
+#[test]
+fn wheel_scrolls_are_sgr_wheel_events_at_the_touched_cell() {
+    let mut terminal = engine(20, 6);
+    terminal.write(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h");
+    let wheel = |rows, column, row| ViewportScroll::Wheel { rows, column, row };
+    // Up is button 64, down 65; coordinates are 1-based.
+    assert_eq!(terminal.scroll(wheel(-1, 0, 0)).unwrap(), b"\x1b[<64;1;1M");
+    assert_eq!(
+        terminal.scroll(wheel(2, 7, 3)).unwrap(),
+        b"\x1b[<65;8;4M\x1b[<65;8;4M"
+    );
+    // A cell past the grid is its last cell; a gesture is at most one viewport of events.
+    assert_eq!(
+        terminal.scroll(wheel(-50, 99, 99)).unwrap(),
+        b"\x1b[<64;20;6M".repeat(6)
+    );
+    assert!(terminal.scroll(wheel(0, 1, 1)).unwrap().is_empty());
+    // Any-event tracking reports the wheel the same way.
+    terminal.write(b"\x1b[?1000l\x1b[?1003h");
+    assert_eq!(terminal.scroll(wheel(-1, 2, 1)).unwrap(), b"\x1b[<64;3;2M");
+}
+
+#[test]
+fn wheel_scrolls_use_the_x10_format_when_no_extended_format_is_on() {
+    let mut terminal = engine(20, 6);
+    terminal.write(b"\x1b[?1000h");
+    // ESC [ M, then 32 + button, 32 + column, 32 + row (1-based).
+    assert_eq!(
+        terminal
+            .scroll(ViewportScroll::Wheel {
+                rows: -1,
+                column: 4,
+                row: 2
+            })
+            .unwrap(),
+        [0x1b, b'[', b'M', 32 + 64, 32 + 5, 32 + 3]
+    );
+    assert_eq!(
+        terminal
+            .scroll(ViewportScroll::Wheel {
+                rows: 1,
+                column: 0,
+                row: 5
+            })
+            .unwrap(),
+        [0x1b, b'[', b'M', 32 + 65, 32 + 1, 32 + 6]
+    );
+    // The primary viewport did not move: the program got the wheel.
+    assert_eq!(terminal.viewport_offset().unwrap(), None);
+}
+
+#[test]
+fn a_wheel_scroll_without_mouse_tracking_is_a_delta() {
+    let mut terminal = engine(8, 3);
+    terminal.write(b"L0\r\nL1\r\nL2\r\nL3\r\nL4");
+    let wheel = ViewportScroll::Wheel {
+        rows: -2,
+        column: 1,
+        row: 1,
+    };
+    // Primary: the viewport moves.
+    assert!(terminal.scroll(wheel).unwrap().is_empty());
+    assert_eq!(terminal.frame().unwrap().scrollback().offset, 0);
+    terminal.scroll(ViewportScroll::Bottom).unwrap();
+    // Alternate in application cursor mode: arrow keys.
+    terminal.write(b"\x1b[?1049h\x1b[?1h");
+    assert_eq!(terminal.scroll(wheel).unwrap(), b"\x1bOA\x1bOA");
+    // X10 tracking (DECSET 9) reports no wheel: the swipe still does something.
+    terminal.write(b"\x1b[?9h");
+    assert!(terminal.frame().unwrap().modes().mouse_tracking);
+    assert_eq!(terminal.scroll(wheel).unwrap(), b"\x1bOA\x1bOA");
+}
+
+#[test]
 fn key_encoding_golden_uses_current_modes_and_shifted_us_physical_keys() {
     let mut terminal = engine(80, 24);
     let none = Modifiers::default();

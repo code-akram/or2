@@ -303,3 +303,107 @@ async fn a_failing_tmux_is_a_typed_error_not_an_empty_list() {
         .unwrap_err();
     assert!(matches!(error, tmux::TmuxError::Failed(_)), "{error:?}");
 }
+
+#[tokio::test]
+async fn tmux_scroll_enters_copy_mode_scrolls_by_lines_and_returns_to_the_bottom() {
+    let Some(real) = tmux_binary() else {
+        assert!(
+            std::env::var_os("OR2_REQUIRE_TMUX").is_none(),
+            "OR2_REQUIRE_TMUX is set but tmux is absent"
+        );
+        eprintln!("SKIP: tmux is absent");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (wrapper, _sockets) = private_tmux(dir.path(), &real);
+    let tmux_path = wrapper.to_str().unwrap();
+    let host = LocalHost::new();
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = Command::new(&self.0)
+                .arg("kill-server")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+    let _cleanup = Cleanup(wrapper.clone());
+    // Two sessions whose names share a prefix: the scroll reaches only the exact one.
+    for name in ["it's work", "it's work too"] {
+        let status = Command::new(&wrapper)
+            .args([
+                "-u",
+                "new-session",
+                "-d",
+                "-x",
+                "40",
+                "-y",
+                "10",
+                "-s",
+                name,
+            ])
+            .args(["sh", "-c", "seq 1 200; sleep 300"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "{name}");
+    }
+    let mode = |name: &str| {
+        let output = Command::new(&wrapper)
+            .args(["display-message", "-p", "-t", &format!("={name}:")])
+            .arg("#{pane_in_mode} #{scroll_position}")
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    // Let the output reach the history.
+    for _ in 0..100 {
+        let output = Command::new(&wrapper)
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                "=it's work:",
+                "#{history_size}",
+            ])
+            .output()
+            .unwrap();
+        if String::from_utf8_lossy(&output.stdout).trim() != "0" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let scroll = |scroll| tmux::scroll(&host, tmux_path, "it's work", scroll);
+    use or2_core::host::TargetScroll::{Bottom, Down, Up};
+
+    // Down and Bottom outside copy mode have nothing to do, and succeed.
+    scroll(Down { lines: 3 }).await.unwrap();
+    scroll(Bottom).await.unwrap();
+    assert_eq!(mode("it's work"), "0");
+    scroll(Up { lines: 5 }).await.unwrap();
+    assert_eq!(mode("it's work"), "1 5");
+    assert_eq!(mode("it's work too"), "0", "never a prefix match");
+    // A pane already in copy mode keeps its position and scrolls on.
+    scroll(Up { lines: 3 }).await.unwrap();
+    assert_eq!(mode("it's work"), "1 8");
+    scroll(Down { lines: 2 }).await.unwrap();
+    assert_eq!(mode("it's work"), "1 6");
+    // Zero lines runs nothing.
+    scroll(Up { lines: 0 }).await.unwrap();
+    assert_eq!(mode("it's work"), "1 6");
+    scroll(Bottom).await.unwrap();
+    assert_eq!(mode("it's work"), "0");
+    // Scrolling down past the bottom leaves copy mode (`copy-mode -e`).
+    scroll(Up { lines: 2 }).await.unwrap();
+    scroll(Down { lines: 10 }).await.unwrap();
+    assert_eq!(mode("it's work"), "0");
+
+    // A session that does not exist is a failure with tmux's message.
+    let error = tmux::scroll(&host, tmux_path, "gone", Up { lines: 1 })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, tmux::TmuxError::Failed(message) if message.contains("gone")),
+        "{error:?}"
+    );
+}

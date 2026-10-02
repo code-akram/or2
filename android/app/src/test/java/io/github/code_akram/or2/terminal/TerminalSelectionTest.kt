@@ -3,6 +3,7 @@ package io.github.code_akram.or2.terminal
 import io.github.code_akram.or2.ffi.CellStyle
 import io.github.code_akram.or2.ffi.CellWidth
 import io.github.code_akram.or2.ffi.Scrollback
+import io.github.code_akram.or2.ffi.TerminalModes
 import io.github.code_akram.or2.ffi.TerminalCell
 import io.github.code_akram.or2.ffi.TerminalFrame
 import io.github.code_akram.or2.ffi.TerminalRow
@@ -63,7 +64,7 @@ class TerminalSelectionTest {
         fun frame(lines: List<String>) = TerminalFrame(1u, lines[0].length.toUShort(), lines.size.toUShort(),
             true, listOf(style), lines.mapIndexed { index, line ->
                 TerminalRow(index.toUShort(), false, line.map { TerminalCell(it.toString(), CellWidth.NARROW, 0u) })
-            }, null, 0u, Scrollback(lines.size.toULong(), 0u))
+            }, null, 0u, Scrollback(lines.size.toULong(), 0u), TerminalModes(false, false))
         val grid = TerminalGrid()
         grid.apply(frame(listOf("ab", "cd")))
         val selection = TerminalSelection(grid.rows, grid.columns, CellPosition(1, 0))

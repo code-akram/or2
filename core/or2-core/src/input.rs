@@ -87,6 +87,14 @@ pub enum ViewportScroll {
     Bottom,
     /// Rows to move; negative moves up into history.
     Delta(i32),
+    /// A swipe while the program tracks the mouse: `rows` wheel events (negative = up) at the
+    /// touched cell, encoded with the terminal's mouse format. Without mouse tracking it is a
+    /// [`ViewportScroll::Delta`] of `rows`.
+    Wheel {
+        rows: i32,
+        column: u16,
+        row: u16,
+    },
 }
 
 #[cfg(test)]

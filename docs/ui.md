@@ -269,7 +269,10 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   The drag handle overlaps the top of the 36 dp header row, so the header costs no extra height.
   The card follows the terminal's own background (the remote can change it with OSC 11). The sidebar toggle opens the sessions sheet
   (switch session, disconnect). The terminal is edge to edge below it with a thin `accent`
-  scroll indicator on the right.
+  scroll indicator on the right. While the view is scrolled up (the scrollback, or a tmux/herdr
+  target's own history) a 28 dp round scroll-to-bottom button (a down chevron in `accent` on the
+  toolbar's `background` at ~85 %, in a 40 dp touch box) sits 4 dp in from the terminal's bottom-right
+  corner; tapping it returns to the live screen.
 - **Terminal toolbar:** a floating pill (`background` at ~85 %) of rounded keys (`surface`),
   30 dp wide (text keys as wide as their label) and 30 dp tall inside a 40 dp tall pill, each with
   a 34 x 40 dp touch box (the platform grows the hit area to 48 dp):

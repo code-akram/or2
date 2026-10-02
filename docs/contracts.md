@@ -3578,6 +3578,71 @@ sends `Bottom`, so typing never lands in tmux copy mode. Tests: Rust tests for t
 and X10 formats, the touch's cell) and the tmux/herdr commands against `LocalHost`/the herdr fixture;
 JVM tests for the routing and the button's visibility.
 
+**Implemented (branch `v011/scroll`).**
+
+- **Modes.** `TerminalEngine::frame` attaches `TerminalModes` from libghostty's `is_mouse_tracking()`
+  (DECSET 9, 1000, 1002, 1003) and `active_screen()`; `Frame::with_modes`, and a merged delta takes
+  the newest modes, so a mode change that dirties no row still reaches Kotlin (`TerminalGrid.modes`).
+  The mosh engine is the same `TerminalEngine`: mosh's server relays the mouse modes (1000-1006,
+  1015) in its diffs, so mouse tracking reports the same over mosh; it **never relays the alternate
+  screen** (its own emulator keeps it; `mosh-server` emits no 1047/1049), so `alternate_screen` is
+  false on a mosh terminal.
+- **Wheel.** `ViewportScroll::Wheel` encodes `rows` presses of button 4 (up) or 5 (down) with
+  libghostty's mouse `Encoder` (`set_options_from_terminal`: the terminal's tracking mode and
+  format; SGR, UTF-8, urxvt, X10), at the centre of the touched cell (clamped to the grid), at most
+  one viewport of events per call. One event per row, as Termux does. Without mouse tracking, or in
+  a mode that reports no wheel (X10 tracking, DECSET 9), it is a `Delta` of `rows` (viewport or
+  arrow keys), so a swipe always does something. The touched cell is where the finger went down
+  (the pane the user touched, even if the finger crosses into another).
+- **tmux (`tmux::scroll_command`, `tmux::scroll`).** One exec, tmux commands joined by `;`: `Up` is
+  `tmux -u copy-mode -e -t =<name>: ; send-keys -t =<name>: -X -N <lines> scroll-up` (a pane already
+  in copy mode keeps its position); `Down` is only `send-keys … -X -N <lines> scroll-down`
+  (entering copy mode to scroll down would flash it); `Bottom` is `send-keys … -X cancel`. `=<name>:`
+  targets the exact session's active pane (a bare `=<name>` is not a pane target, and a bare name
+  could match a prefix). tmux's "not in a mode" (a `Down`/`Bottom` after `-e` already left copy mode)
+  is success.
+- **herdr (`herdr::scroll_pane_in`, `herdr::ScrollOffsets`).** The pane is `pane_id`, else the one
+  herdr answers `pane.current` with (the session's focused pane, whose answer also carries its real
+  offset). Kotlin passes the focused pane from the session's herdr watch when it has a live view
+  (one round trip fewer), `None` otherwise; the target's own `pane_id` is not used (the user may
+  have moved focus since the terminal opened). `pane.scroll` answers with the pane's info, and its
+  `scroll.offset_from_bottom` (herdr clamps an offset past the top of the history) becomes the kept
+  offset, so a swipe down after an overshoot starts from the real top. Offsets are kept per
+  connection by (session, pane); `PaneNotFound` forgets the pane's. Verified against herdr 0.9.3.
+- **`scroll_target`** validates names (`InvalidName`), returns `Ok` without a round trip for a `Shell`
+  target or zero lines, and runs on the host's driver like `focus_herdr_pane` (`NotInstalled`,
+  `PaneNotFound`, `CommandFailed`).
+- **Kotlin.** `scrollRoute` (`TargetScroller.kt`) picks the route; `TerminalView.scrollRows` applies it
+  to swipes, flings and the history key's page up. `TargetScroller` keeps at most one `scroll_target`
+  in flight per terminal and sums the swipes meanwhile, tracks the lines scrolled up (a swipe down at
+  the bottom sends nothing), and holds input: any key, text, paste or composer submit while the target
+  is away (or a call is in flight) sends `Bottom` and goes out, in order, once that call has returned
+  (also when it failed). `HostConnections.scrollTarget` uses the host's current connection (a mosh
+  terminal outlives the one it opened on). The button (`ScrollToBottomButton`, a 28 dp disc in a 40 dp
+  box at the terminal's bottom right, docs/ui.md) shows while `scrollToBottomVisible`; tapping it, or
+  holding the history key, returns the target to `Bottom` and/or the viewport to its bottom.
+
+**Deviations.**
+
+- **A tmux target takes route 2 whichever screen is active** (not only on the alternate screen):
+  over SSH tmux is on the alternate screen for the terminal's whole life anyway, and over mosh the
+  alternate screen is never reported (above), so the condition would send tmux over mosh to the
+  local scrollback, which holds mosh's redraws rather than tmux's history.
+- **"Above the bottom" is `offset + rows < total_rows`**, not `offset > 0`: `Scrollback.offset` is the
+  first visible row counted from the top of the scrollback, so the bottom is `total_rows - rows`.
+
+**Tests.** Rust: `terminal_tests.rs` (modes in frames, including a row-less delta; SGR wheel at the
+touched cell, clamping and the one-viewport cap; any-event tracking; X10 format bytes; no tracking or
+DECSET 9 falls back to a delta/arrows), `frame.rs` (merged deltas report the newest modes),
+`mosh/ghostty.rs` (modes and wheel through mosh diffs), `herdr/scroll.rs` against the fake herdr
+(kept offsets, herdr's clamp, the focused pane via `pane.current`, `PaneNotFound`), `tests/local.rs`
+(the tmux commands on a private tmux server: exact-session targeting, copy mode, `-e`, zero lines, a
+missing session), `tests/host.rs` (`scroll_target` over SSH: tmux, `Shell`, zero lines, invalid
+names, a missing session), `tests/herdr_live.rs` (an isolated herdr 0.9.3 session), FFI conversions.
+JVM: `TargetScrollerTest` (routes, button visibility, coalescing, down at the bottom, input held
+behind `Bottom`, a failed call), `TerminalGridTest` (modes per frame), `HostConnectionsTest`
+(`scrollTarget` through the connection with the watch's focused pane).
+
 ## Tap links and OSC 52 (lane Links)
 
 - **Tap a link to open it.** A single tap on a URL opens it (`Intent.ACTION_VIEW`, through the system
