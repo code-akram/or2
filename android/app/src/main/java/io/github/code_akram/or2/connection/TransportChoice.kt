@@ -69,6 +69,13 @@ fun planOpen(pref: TransportPref, target: TerminalTarget, verdict: UdpVerdict, m
     }
 }
 
+/**
+ * How long a connection's `BLOCKED` verdict holds before the next AUTO tmux or herdr open tries mosh again in
+ * the background (a shell never does: it would wait). The owner's Mac dropped mosh until its firewall prompt
+ * was answered; a verdict for the connection's whole life kept it on SSH after that.
+ */
+const val UDP_RECHECK_MS = 5L * 60 * 1000
+
 /** AUTO's mosh budget once UDP is known to work on this connection (the whole start; explicit Mosh keeps 15 s). */
 const val AUTO_MOSH_BUDGET_MS = 5_000u
 

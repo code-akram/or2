@@ -204,6 +204,9 @@ class ActiveHost internal constructor(val host: Host) {
     /** The terminal whose background mosh attempt is this host's one in flight while the verdict is `UNKNOWN`. */
     internal var probingTerminal: ActiveTerminal? = null
 
+    /** When the verdict last became `BLOCKED` (monotonic ms): after [UDP_RECHECK_MS] a tmux or herdr open checks again. */
+    internal var blockedAtMs = 0L
+
     /** SSH terminals waiting for [probingTerminal]'s verdict before trying mosh in the background themselves. */
     internal val awaitingVerdict = mutableListOf<ActiveTerminal>()
 
@@ -889,7 +892,11 @@ class HostConnections(
     fun openTerminal(current: ActiveHost, target: TerminalTarget): ActiveTerminal {
         if (!owns(current) || current.retired) throw HostException.Closed()
         val port = current.mutablePort.value ?: throw HostException.NotConnected()
-        val plan = planOpen(current.transportPref, target, current.udpVerdict.value, current.moshServer.value)
+        val planned = planOpen(current.transportPref, target, current.udpVerdict.value, current.moshServer.value)
+        // A BLOCKED verdict is not forever: a firewall prompt answered later, or a network that changed, lets
+        // mosh through again. Past [UDP_RECHECK_MS] a tmux or herdr open (never a shell: it would wait) tries
+        // once more behind its SSH terminal, unseen.
+        val plan = if (recheckDue(current, target)) planned.copy(background = true) else planned
         val terminal = ActiveTerminal(nextTerminalId, current.host, target)
         terminal.origin = current
         terminal.fallbackEligible = plan.fallbackEligible
@@ -916,7 +923,7 @@ class HostConnections(
     private fun requestBackground(terminal: ActiveTerminal, current: ActiveHost) {
         when (current.udpVerdict.value) {
             UdpVerdict.OK -> startBackground(terminal, current)
-            UdpVerdict.BLOCKED -> Unit
+            UdpVerdict.BLOCKED -> if (current.probingTerminal == null && recheckDue(current, terminal.target)) startBackground(terminal, current)
             UdpVerdict.UNKNOWN ->
                 if (current.probingTerminal == null) startBackground(terminal, current) else current.awaitingVerdict += terminal
         }
@@ -936,7 +943,7 @@ class HostConnections(
         }
         terminal.background = session
         terminal.backgroundAttempt = attempt
-        if (current.udpVerdict.value == UdpVerdict.UNKNOWN) current.probingTerminal = terminal
+        if (current.udpVerdict.value != UdpVerdict.OK) current.probingTerminal = terminal
         return true
     }
 
@@ -1025,6 +1032,17 @@ class HostConnections(
     }
 
     /** [terminal]'s attempt no longer stands for the host's: the next terminal waiting for a verdict tries. */
+    /**
+     * Whether an AUTO tmux or herdr open on [current] should try mosh again behind its SSH terminal: the verdict
+     * has been `BLOCKED` for [UDP_RECHECK_MS], no attempt is in flight, and the probe did not say `mosh-server`
+     * is missing.
+     */
+    private fun recheckDue(current: ActiveHost, target: TerminalTarget): Boolean =
+        current.transportPref == TransportPref.AUTO && target !is TerminalTarget.Shell &&
+            current.udpVerdict.value == UdpVerdict.BLOCKED && current.probingTerminal == null &&
+            current.moshServer.value?.let { it.path != null } != false &&
+            monotonicMs() - current.blockedAtMs >= UDP_RECHECK_MS
+
     private fun releaseProbe(current: ActiveHost, terminal: ActiveTerminal) {
         if (current.probingTerminal !== terminal) return
         current.probingTerminal = null
@@ -1040,6 +1058,7 @@ class HostConnections(
             timing.mark("connect host=${current.host.id}", if (verdict == UdpVerdict.OK) "udp-ok" else "udp-blocked")
         }
         current.mutableUdpVerdict.value = verdict
+        if (verdict == UdpVerdict.BLOCKED) current.blockedAtMs = monotonicMs()
         if (verdict == UdpVerdict.UNKNOWN) return
         val waiting = current.awaitingVerdict.toList()
         current.awaitingVerdict.clear()

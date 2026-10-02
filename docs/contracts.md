@@ -3392,7 +3392,7 @@ wait for mosh, whatever the host's firewall does.
   `fallBackToSsh` swap run the other way: same id, thumbnail and navigation, the `attempt` counter
   drops the old session's frames) and the SSH session is disconnected; the verdict becomes `OK`. A
   background start that fails `TimedOut` or `NotInstalled { mosh-server }` sets `BLOCKED` and the
-  terminal stays on SSH, unseen. `BLOCKED` opens over SSH with no attempt. At most one background
+  terminal stays on SSH, unseen. `BLOCKED` opens over SSH with no attempt, until it is `UDP_RECHECK_MS` (5 min) old: then the next AUTO tmux or herdr open (never a shell) tries mosh once more behind its SSH terminal, unseen; `OK` swaps as usual, a failure blocks for another 5 min (added after the owner's Mac dropped mosh until its firewall prompt was answered, and the connection then kept SSH for its whole life). At most one background
   attempt per terminal; one in flight per host at a time (others wait for its verdict, never for UDP).
   Closing the terminal, or the user disconnecting the host, cancels the attempt and stops its server
   (the existing abandon/`terminate` path, its pid recorded like any mosh server's).

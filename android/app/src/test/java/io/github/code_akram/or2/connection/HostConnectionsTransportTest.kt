@@ -364,6 +364,47 @@ class HostConnectionsTransportTest {
     }
 
     @Test
+    fun aBlockedVerdictIsCheckedAgainByATmuxOrHerdrOpenAfterFiveMinutesNeverByAShell() = runTest {
+        val rig = rig()
+        rig.holder.openTerminal(rig.active, tmux)
+        state(rig, 0, SessionState.Connected)
+        fail(rig, 1, SessionFailure.TimedOut)
+        assertEquals(UdpVerdict.BLOCKED, rig.active.udpVerdict.value)
+        // Before UDP_RECHECK_MS: SSH and no attempt.
+        advanceTimeBy(UDP_RECHECK_MS - 1)
+        rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("b"))
+        assertEquals(3, rig.port.transports.size)
+        advanceTimeBy(1)
+        // A shell never checks again: it would have to wait for UDP.
+        rig.holder.openTerminal(rig.active, shell)
+        assertEquals(TerminalTransport.SSH, rig.port.transports.last())
+        assertEquals(4, rig.port.transports.size)
+        // A herdr open checks again, behind its SSH terminal; one attempt at a time.
+        val herdr = rig.holder.openTerminal(rig.active, TerminalTarget.Herdr(null, "w1:p1"))
+        rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("c"))
+        assertEquals(listOf(TerminalTransport.SSH, TerminalTransport.MOSH, TerminalTransport.SSH), rig.port.transports.drop(4))
+        state(rig, 4, SessionState.Connected)
+        state(rig, 5, SessionState.Connected) // UDP gets through now (say the firewall prompt was answered).
+        assertEquals(TerminalTransport.MOSH, herdr.transport.value)
+        assertEquals(UdpVerdict.OK, rig.active.udpVerdict.value)
+    }
+
+    @Test
+    fun aRecheckThatFailsBlocksForAnotherFiveMinutes() = runTest {
+        val rig = rig()
+        rig.holder.openTerminal(rig.active, tmux)
+        fail(rig, 1, SessionFailure.TimedOut)
+        advanceTimeBy(UDP_RECHECK_MS)
+        rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("b"))
+        assertEquals(TerminalTransport.MOSH, rig.port.transports.last())
+        fail(rig, 3, SessionFailure.TimedOut)
+        assertEquals(UdpVerdict.BLOCKED, rig.active.udpVerdict.value)
+        rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("c"))
+        assertEquals(TerminalTransport.SSH, rig.port.transports.last()) // Blocked again, from now.
+        assertEquals(5, rig.port.transports.size)
+    }
+
+    @Test
     fun anInconclusiveBackgroundFailureKeepsTheVerdictUnknown() = runTest {
         val rig = rig()
         val terminal = rig.holder.openTerminal(rig.active, tmux)
