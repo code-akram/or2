@@ -4,7 +4,7 @@
 //! probe. tmux uses its default socket; tests isolate it with `TMUX_TMPDIR` in the
 //! environment the commands run in, not with a production option.
 
-use crate::host::TmuxSession;
+use crate::host::{TargetScroll, TmuxSession};
 use crate::remote::{RemoteCommand, RemoteError, RemoteHost};
 
 /// Fields joined by `:`, with the name last. tmux turns `:` and `.` in session names into
@@ -33,6 +33,63 @@ pub fn list_command(tmux: &str) -> RemoteCommand {
 /// `name` must already be valid ([`crate::host::is_valid_tmux_session_name`]).
 pub fn attach_command(tmux: &str, name: &str) -> RemoteCommand {
     RemoteCommand::new(tmux).args(["-u", "new-session", "-A", "-s", name])
+}
+
+/// The tmux command that scrolls the active pane of session `name` (contracts.md, "Wheel-aware
+/// scrolling"), as one exec of commands joined by tmux's `;`:
+///
+/// - `Up`: `copy-mode -e -t =<name>:` then `send-keys -t =<name>: -X -N <lines> scroll-up`
+///   (`-e` leaves copy mode once a scroll down reaches the bottom; a pane already in copy mode
+///   stays where it is);
+/// - `Down`: `send-keys -X -N <lines> scroll-down`;
+/// - `Bottom`: `send-keys -X cancel`.
+///
+/// `=<name>:` is the exact session, never a prefix or pattern match. `name` must already be
+/// valid. `None` for zero lines.
+pub fn scroll_command(tmux: &str, name: &str, scroll: TargetScroll) -> Option<RemoteCommand> {
+    let target = format!("={name}:");
+    let send = |args: &[&str]| -> Vec<String> {
+        ["send-keys", "-t", target.as_str(), "-X"]
+            .iter()
+            .chain(args)
+            .map(|arg| (*arg).to_owned())
+            .collect()
+    };
+    let args: Vec<String> = match scroll {
+        TargetScroll::Up { lines: 0 } | TargetScroll::Down { lines: 0 } => return None,
+        TargetScroll::Up { lines } => ["copy-mode", "-e", "-t", target.as_str(), ";"]
+            .iter()
+            .map(|arg| (*arg).to_owned())
+            .chain(send(&["-N", &lines.to_string(), "scroll-up"]))
+            .collect(),
+        TargetScroll::Down { lines } => send(&["-N", &lines.to_string(), "scroll-down"]),
+        TargetScroll::Bottom => send(&["cancel"]),
+    };
+    Some(RemoteCommand::new(tmux).arg("-u").args(args))
+}
+
+/// Runs [`scroll_command`]. A pane that is not in copy mode (a `Down` or `Bottom` after tmux
+/// already left it) is success: there is nothing to scroll back.
+pub async fn scroll<H: RemoteHost>(
+    host: &H,
+    tmux: &str,
+    name: &str,
+    scroll: TargetScroll,
+) -> Result<(), TmuxError> {
+    let Some(command) = scroll_command(tmux, name, scroll) else {
+        return Ok(());
+    };
+    let output = host.exec(&command).await?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.success() || stderr.contains("not in a mode") {
+        return Ok(());
+    }
+    let first = stderr.lines().next().unwrap_or("").trim();
+    Err(TmuxError::Failed(if first.is_empty() {
+        format!("exit status {:?}", output.status)
+    } else {
+        first.chars().take(200).collect()
+    }))
 }
 
 /// Sessions, most recently active first (ties by name). No server, or a server without

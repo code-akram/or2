@@ -1218,6 +1218,92 @@ fn tmux_lists_sessions_attaches_creates_and_detaches_on_a_private_socket() {
 }
 
 #[test]
+fn scroll_target_scrolls_a_tmux_session_over_the_connection_and_a_shell_does_nothing() {
+    use or2_core::host::TargetScroll;
+    require_sshd!();
+    require_tmux!();
+    let live = Live::new();
+    let status = live
+        .sshd
+        .tmux()
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            "or2-scroll",
+            "-x",
+            "40",
+            "-y",
+            "10",
+        ])
+        .args(["sh", "-c", "seq 1 200; sleep 300"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mode = || {
+        let output = live
+            .sshd
+            .tmux()
+            .args(["display-message", "-p", "-t", "=or2-scroll:"])
+            .arg("#{pane_in_mode} #{scroll_position} #{history_size}")
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let deadline = Instant::now() + WAIT;
+    while mode().ends_with(" 0") {
+        assert!(Instant::now() < deadline, "no tmux history: {}", mode());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let tmux = TerminalTarget::Tmux {
+        session_name: "or2-scroll".into(),
+    };
+    let scroll = |target: TerminalTarget, pane: Option<&str>, scroll| {
+        block_on(
+            live.host
+                .scroll_target(target, pane.map(str::to_owned), scroll),
+        )
+    };
+    scroll(tmux.clone(), None, TargetScroll::Up { lines: 4 }).unwrap();
+    assert!(mode().starts_with("1 4 "), "{}", mode());
+    scroll(tmux.clone(), None, TargetScroll::Down { lines: 1 }).unwrap();
+    assert!(mode().starts_with("1 3 "), "{}", mode());
+    scroll(tmux.clone(), None, TargetScroll::Bottom).unwrap();
+    assert!(mode().starts_with("0 "), "{}", mode());
+    // Already at the bottom: nothing to do, and no error.
+    scroll(tmux.clone(), None, TargetScroll::Bottom).unwrap();
+
+    // A shell target and zero lines do nothing; bad names are refused before anything runs.
+    scroll(TerminalTarget::Shell, None, TargetScroll::Up { lines: 3 }).unwrap();
+    scroll(tmux.clone(), None, TargetScroll::Up { lines: 0 }).unwrap();
+    assert!(mode().starts_with("0 "), "{}", mode());
+    let bad = TerminalTarget::Tmux {
+        session_name: "a:b".into(),
+    };
+    assert_eq!(
+        scroll(bad, None, TargetScroll::Bottom),
+        Err(HostError::InvalidName)
+    );
+    let herdr = TerminalTarget::Herdr {
+        session: None,
+        pane_id: None,
+    };
+    assert_eq!(
+        scroll(herdr, Some("p;1"), TargetScroll::Bottom),
+        Err(HostError::InvalidName)
+    );
+    // A session tmux does not have is tmux's own failure.
+    let gone = TerminalTarget::Tmux {
+        session_name: "or2-gone".into(),
+    };
+    assert!(matches!(
+        scroll(gone, None, TargetScroll::Up { lines: 1 }),
+        Err(HostError::CommandFailed { .. })
+    ));
+    live.host.disconnect();
+}
+
+#[test]
 fn herdr_terminals_run_the_probed_herdr_with_the_session_and_report_a_failed_focus() {
     require_sshd!();
     let live = Live::new();

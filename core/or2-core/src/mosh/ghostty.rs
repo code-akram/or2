@@ -287,4 +287,46 @@ mod tests {
             "xyz"
         );
     }
+
+    /// mosh's server relays the program's mouse modes in its diffs (it never relays the
+    /// alternate screen, which its own emulator keeps): frames report them as over SSH, they
+    /// survive a state replacement, and a swipe becomes wheel events.
+    #[test]
+    fn mouse_modes_from_the_server_reach_frames_and_wheel_scrolls() {
+        use crate::frame::TerminalModes;
+        use crate::input::ViewportScroll;
+        let mut terminal = ClientTerminal::new(GhosttyScreen::new(size(20, 3)).unwrap());
+        terminal
+            .apply_diff(0, 1, b"\x1b[?1002h\x1b[?1006hvim", 0)
+            .unwrap();
+        let modes = terminal.live().engine().frame().unwrap().modes();
+        assert_eq!(
+            modes,
+            TerminalModes {
+                mouse_tracking: true,
+                alternate_screen: false
+            }
+        );
+        terminal.apply_diff(1, 2, b"\x1b[1;1Hvi", 0).unwrap();
+        assert_eq!(terminal.live().engine().frame().unwrap().modes(), modes);
+        let wheel = ViewportScroll::Wheel {
+            rows: -1,
+            column: 3,
+            row: 1,
+        };
+        assert_eq!(
+            terminal.live().engine().scroll(wheel).unwrap(),
+            b"\x1b[<64;4;2M"
+        );
+        terminal.apply_diff(2, 3, b"\x1b[?1002l", 0).unwrap();
+        assert!(
+            !terminal
+                .live()
+                .engine()
+                .frame()
+                .unwrap()
+                .modes()
+                .mouse_tracking
+        );
+    }
 }

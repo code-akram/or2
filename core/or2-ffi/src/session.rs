@@ -273,6 +273,14 @@ pub enum ViewportScroll {
     Delta {
         rows: i32,
     },
+    /// While the program tracks the mouse (`TerminalModes.mouse_tracking`): `rows` wheel events
+    /// (negative = up) at the touched cell (`column`, `row`), in the terminal's mouse format.
+    /// Without mouse tracking it is a `Delta` of `rows`.
+    Wheel {
+        rows: i32,
+        column: u16,
+        row: u16,
+    },
 }
 
 impl TryFrom<KeyInput> for core_input::KeyInput {
@@ -315,6 +323,7 @@ impl From<ViewportScroll> for core_input::ViewportScroll {
             ViewportScroll::Top => Self::Top,
             ViewportScroll::Bottom => Self::Bottom,
             ViewportScroll::Delta { rows } => Self::Delta(rows),
+            ViewportScroll::Wheel { rows, column, row } => Self::Wheel { rows, column, row },
         }
     }
 }

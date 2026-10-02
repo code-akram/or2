@@ -207,7 +207,7 @@ async fn serve_terminal(
                 screen.history_offset = match scroll {
                     ViewportScroll::Top => 0,
                     ViewportScroll::Bottom => HISTORY_ROWS,
-                    ViewportScroll::Delta(rows) => screen
+                    ViewportScroll::Delta(rows) | ViewportScroll::Wheel { rows, .. } => screen
                         .history_offset
                         .saturating_add_signed(i64::from(rows))
                         .min(HISTORY_ROWS),
@@ -389,6 +389,9 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                 } else {
                     Ok(())
                 });
+            }
+            HostCommand::ScrollTarget { reply, .. } => {
+                let _ = reply.send(Ok(()));
             }
             HostCommand::WatchHerdr {
                 session,

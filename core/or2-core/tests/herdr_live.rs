@@ -717,3 +717,92 @@ async fn a_directory_seeds_the_watch_and_the_focus_and_a_stale_path_is_rediscove
     handle.stop();
     task.await.unwrap();
 }
+
+/// The pane's `scroll.offset_from_bottom`, as herdr reports it.
+async fn offset_from_bottom(herdr: &Isolated, pane: &str) -> u64 {
+    let info = herdr
+        .call(RequestBody::PaneGet(PaneTarget {
+            pane_id: pane.to_owned(),
+        }))
+        .await;
+    info.pointer("/pane/scroll/offset_from_bottom")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("no scroll in {info}"))
+}
+
+#[tokio::test]
+async fn scroll_pane_moves_a_panes_history_by_lines_and_back_to_the_bottom() {
+    use or2_core::herdr::{ScrollOffsets, scroll_pane_in};
+    use or2_core::host::TargetScroll;
+    let Some(mut herdr) = Isolated::new() else {
+        return;
+    };
+    herdr.start();
+    let created = herdr
+        .call(RequestBody::WorkspaceCreate(WorkspaceCreateParams {
+            cwd: Some("/tmp".into()),
+            label: Some("or2-scroll".into()),
+            focus: true,
+            ..WorkspaceCreateParams::default()
+        }))
+        .await;
+    let pane = str_at(&created, "/root_pane/pane_id").to_owned();
+    herdr
+        .call(RequestBody::PaneSendText(PaneSendTextParams {
+            pane_id: pane.clone(),
+            text: "seq 1 500\n".into(),
+        }))
+        .await;
+    // Wait for the output to reach the pane's history.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let info = herdr
+            .call(RequestBody::PaneGet(PaneTarget {
+                pane_id: pane.clone(),
+            }))
+            .await;
+        let max = info
+            .pointer("/pane/scroll/max_offset_from_bottom")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if max > 100 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no history: {info}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (host, directory, offsets) = (LocalHost::new(), Directory::new(), ScrollOffsets::new());
+    let session = Some(herdr.name.as_str());
+    let scroll = async |pane_id: Option<&str>, scroll| {
+        scroll_pane_in(
+            &host,
+            herdr.herdr(),
+            &directory,
+            &offsets,
+            session,
+            pane_id,
+            scroll,
+        )
+        .await
+    };
+    // Without a pane: the focused one, which is this workspace's root pane.
+    scroll(None, TargetScroll::Up { lines: 7 }).await.unwrap();
+    assert_eq!(offset_from_bottom(&herdr, &pane).await, 7);
+    scroll(Some(&pane), TargetScroll::Up { lines: 5 })
+        .await
+        .unwrap();
+    assert_eq!(offset_from_bottom(&herdr, &pane).await, 12);
+    scroll(Some(&pane), TargetScroll::Down { lines: 2 })
+        .await
+        .unwrap();
+    assert_eq!(offset_from_bottom(&herdr, &pane).await, 10);
+    assert_eq!(offsets.get(session, &pane), 10);
+    scroll(Some(&pane), TargetScroll::Bottom).await.unwrap();
+    assert_eq!(offset_from_bottom(&herdr, &pane).await, 0);
+    assert_eq!(offsets.get(session, &pane), 0);
+    // A pane that does not exist.
+    assert_eq!(
+        scroll(Some("w9:p9"), TargetScroll::Up { lines: 1 }).await,
+        Err(HerdrError::PaneNotFound)
+    );
+}

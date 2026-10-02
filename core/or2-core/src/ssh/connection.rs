@@ -45,7 +45,8 @@ use super::terminal_session;
 use crate::herdr::{self, HerdrState, HerdrUnavailable, HerdrWatchDriver};
 use crate::host::{
     HostCapabilities, HostCommand, HostConnectRequest, HostDriver, HostError, HostHandle,
-    HostObserver, HostState, TerminalTarget, TerminalTransport, TmuxSession, UserCancel,
+    HostObserver, HostState, TargetScroll, TerminalTarget, TerminalTransport, TmuxSession,
+    UserCancel,
 };
 use crate::mosh;
 use crate::probe;
@@ -135,6 +136,8 @@ pub(super) struct SshHost {
     sessions: probe::SessionsCache,
     /// Keeps the app's pane focus and the terminal's own from both reaching herdr.
     pub(super) focus: herdr::FocusGate,
+    /// Where each herdr pane was scrolled to through this connection (`scroll_target`).
+    scroll_offsets: herdr::ScrollOffsets,
     /// The mosh servers this connection still has to stop (see [`mosh_session::ServerDebt`]).
     pub(super) servers: mosh_session::ServerDebt,
     /// The session-channel opens still waiting for the server's answer (see
@@ -190,6 +193,7 @@ impl SshHost {
             capabilities: OnceCell::new(),
             sessions: probe::SessionsCache::new(),
             focus: herdr::FocusGate::new(),
+            scroll_offsets: herdr::ScrollOffsets::new(),
             servers: mosh_session::ServerDebt::default(),
             opens: Mutex::new(Some(JoinSet::new())),
             me: me.clone(),
@@ -1044,6 +1048,22 @@ fn dispatch<D: DatagramTransport>(
                 }
             });
         }
+        HostCommand::ScrollTarget {
+            target,
+            pane_id,
+            scroll,
+            reply,
+        } => {
+            let host = Arc::clone(host);
+            let (mut closing, tracker) = (closing.clone(), tracker.clone());
+            runtime().spawn(async move {
+                let _tracker = tracker;
+                tokio::select! {
+                    result = scroll_target(&host, target, pane_id, scroll) => { let _ = reply.send(result); }
+                    _ = closed_reason(&mut closing) => {}
+                }
+            });
+        }
         HostCommand::WatchHerdr { session, driver } => {
             let host = Arc::clone(host);
             let (mut closing, tracker) = (closing.clone(), tracker.clone());
@@ -1168,6 +1188,58 @@ async fn focus_herdr_pane(
                 message: error.to_string(),
             },
         })
+}
+
+/// `HostHandle::scroll_target`: tmux through exec, herdr through `pane.scroll`, each with the
+/// program path from the probe. A `Shell` target never gets here.
+async fn scroll_target(
+    host: &Arc<SshHost>,
+    target: TerminalTarget,
+    pane_id: Option<String>,
+    scroll: TargetScroll,
+) -> Result<(), HostError> {
+    let capabilities = host.capabilities().await.map_err(host_error)?;
+    let missing = |program: &str| HostError::NotInstalled {
+        program: program.into(),
+    };
+    match target {
+        TerminalTarget::Shell => Ok(()),
+        TerminalTarget::Tmux { session_name } => {
+            let path = capabilities
+                .tmux
+                .as_deref()
+                .ok_or_else(|| missing("tmux"))?;
+            tmux::scroll(&**host, path, &session_name, scroll)
+                .await
+                .map_err(|error| match error {
+                    TmuxError::Remote(error) => host_error(error),
+                    TmuxError::Failed(message) => HostError::CommandFailed { message },
+                })
+        }
+        TerminalTarget::Herdr { session, .. } => {
+            let path = capabilities
+                .herdr
+                .as_deref()
+                .ok_or_else(|| missing("herdr"))?;
+            herdr::scroll_pane_in(
+                &**host,
+                path,
+                host.sessions.directory(),
+                &host.scroll_offsets,
+                session.as_deref(),
+                pane_id.as_deref(),
+                scroll,
+            )
+            .await
+            .map_err(|error| match error {
+                herdr::HerdrError::PaneNotFound => HostError::PaneNotFound,
+                herdr::HerdrError::Remote(error) => host_error(error),
+                error @ herdr::HerdrError::Failed(_) => HostError::CommandFailed {
+                    message: error.to_string(),
+                },
+            })
+        }
+    }
 }
 
 /// Runs a watch: herdr's client when the probe found herdr, else `Unavailable { NotInstalled }`

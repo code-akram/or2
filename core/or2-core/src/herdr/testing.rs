@@ -30,6 +30,11 @@ pub(super) enum Served {
     },
     Snapshot,
     Focus(String),
+    /// `pane.scroll` of `pane_id` to `offset` rows from the bottom, as requested.
+    Scroll {
+        pane_id: String,
+        offset: u64,
+    },
     Other(String),
 }
 
@@ -71,6 +76,11 @@ struct State {
     focus_error: Option<(String, String)>,
     /// A focus to hold after its request was recorded: how many focuses to let pass first.
     focus_gate: Option<(usize, Arc<Notify>, Arc<Notify>)>,
+    /// The history of every pane, in rows: `pane.scroll` answers with the offset clamped to it.
+    scroll_max: u64,
+    scroll_error: Option<(String, String)>,
+    /// The `pane.current` answer: the focused pane and its offset.
+    current: (String, u64),
     streams: Vec<mpsc::UnboundedSender<Command>>,
     served: Vec<Served>,
 }
@@ -99,6 +109,9 @@ impl FakeHost {
                 subscribe_script: VecDeque::new(),
                 focus_error: None,
                 focus_gate: None,
+                scroll_max: 1000,
+                scroll_error: None,
+                current: ("w1:p1".into(), 0),
                 streams: Vec::new(),
                 served: Vec::new(),
             })),
@@ -181,6 +194,21 @@ impl FakeHost {
 
     pub fn fail_focus(&self, code: &str, message: &str) {
         lock(&self.state).focus_error = Some((code.to_owned(), message.to_owned()));
+    }
+
+    /// Every pane's history is `rows` long: `pane.scroll` stops there.
+    pub fn set_scroll_max(&self, rows: u64) {
+        lock(&self.state).scroll_max = rows;
+    }
+
+    /// `pane.scroll` answers with this error from now on.
+    pub fn fail_scroll(&self, code: &str, message: &str) {
+        lock(&self.state).scroll_error = Some((code.to_owned(), message.to_owned()));
+    }
+
+    /// `pane.current` names `pane_id`, scrolled `offset` rows above its bottom.
+    pub fn set_current(&self, pane_id: &str, offset: u64) {
+        lock(&self.state).current = (pane_id.to_owned(), offset);
     }
 
     /// Pushes a line to every open event stream.
@@ -346,6 +374,43 @@ async fn serve(state: Arc<Mutex<State>>, stream: DuplexStream) {
             let reply = match failure {
                 Some((code, message)) => error(&code, &message),
                 None => format!("{{\"id\":{id:?},\"result\":{{\"type\":\"ok\"}}}}\n"),
+            };
+            let _ = conn.send(reply.as_bytes()).await;
+        }
+        // A `pane_info`/`pane_current` answer shaped like herdr 0.9.3's (captured from an
+        // isolated session), trimmed to the fields a scroll reads.
+        "pane.scroll" | "pane.current" => {
+            let pane_info = |pane_id: &str, offset: u64, max: u64, kind: &str| {
+                serde_json::json!({"id": id, "result": {"type": kind, "pane": {
+                    "agent_status": "unknown", "focused": true, "pane_id": pane_id,
+                    "revision": 0, "tab_id": "w1:t1", "terminal_id": "term_1",
+                    "workspace_id": "w1",
+                    "scroll": {"max_offset_from_bottom": max,
+                        "offset_from_bottom": offset.min(max), "viewport_rows": 40},
+                }}})
+                .to_string()
+                    + "\n"
+            };
+            let reply = {
+                let mut state = lock(&state);
+                if method == "pane.current" {
+                    state.served.push(Served::Other(method.clone()));
+                    let (pane, offset) = state.current.clone();
+                    pane_info(&pane, offset, state.scroll_max, "pane_current")
+                } else {
+                    let pane = request["params"]["pane_id"].as_str().unwrap_or("");
+                    let offset = request["params"]["offset_from_bottom"]
+                        .as_u64()
+                        .expect("offset_from_bottom");
+                    state.served.push(Served::Scroll {
+                        pane_id: pane.to_owned(),
+                        offset,
+                    });
+                    match &state.scroll_error {
+                        Some((code, message)) => error(code, message),
+                        None => pane_info(pane, offset, state.scroll_max, "pane_info"),
+                    }
+                }
             };
             let _ = conn.send(reply.as_bytes()).await;
         }

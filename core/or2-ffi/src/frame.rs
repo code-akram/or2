@@ -19,6 +19,16 @@ pub struct TerminalFrame {
     pub cursor: Option<TerminalCursor>,
     pub background: u32,
     pub scrollback: Scrollback,
+    /// What a vertical swipe scrolls (contracts.md, "Wheel-aware scrolling").
+    pub modes: TerminalModes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct TerminalModes {
+    /// The program asked for mouse reports: a swipe is wheel events (`ViewportScroll::Wheel`).
+    pub mouse_tracking: bool,
+    /// The alternate screen is active.
+    pub alternate_screen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -118,6 +128,7 @@ impl From<core::TakenFrame> for TerminalFrame {
             })
             .collect();
         let scrollback = frame.scrollback();
+        let modes = frame.modes();
         Self {
             sequence: taken.sequence,
             columns: frame.size().columns(),
@@ -130,6 +141,10 @@ impl From<core::TakenFrame> for TerminalFrame {
             scrollback: Scrollback {
                 total_rows: scrollback.total_rows,
                 offset: scrollback.offset,
+            },
+            modes: TerminalModes {
+                mouse_tracking: modes.mouse_tracking,
+                alternate_screen: modes.alternate_screen,
             },
         }
     }
@@ -225,8 +240,19 @@ mod tests {
                 offset: 100,
             },
         )
-        .unwrap();
+        .unwrap()
+        .with_modes(core::TerminalModes {
+            mouse_tracking: true,
+            alternate_screen: false,
+        });
         let ffi = TerminalFrame::from(core::TakenFrame { sequence: 7, frame });
+        assert_eq!(
+            ffi.modes,
+            TerminalModes {
+                mouse_tracking: true,
+                alternate_screen: false
+            }
+        );
         assert_eq!(
             (ffi.sequence, ffi.columns, ffi.rows, ffi.full),
             (7, 4, 3, false)
