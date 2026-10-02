@@ -2318,7 +2318,8 @@ version 2.
    `7KQ4-M2XD-9PTM`, with the camera below it.
 2. **Host:** `or2-pair` runs its checks, then asks `Code shown on your phone:`. The person types `K`.
 3. **Host:** derives a throwaway Ed25519 **bootstrap key** from `K` and a fresh pairing id, adds it to
-   `~/.ssh/authorized_keys` restricted to one forced command (`or2-pair enroll <id>`) with an expiry,
+   `~/.ssh/authorized_keys` restricted to one forced command (`or2-pair enroll <id>`) with an expiry
+   (OpenSSH 9.1 or newer),
    prints the QR (addresses, SSH port, host key, pairing id: **nothing secret**) and waits.
 4. **Phone:** scans, shows the review, **Pair**. It derives the same bootstrap key from `K` and the id,
    logs in on the SSH port (host key pinned from the QR) and sends its own public key.
@@ -2452,23 +2453,21 @@ restrict,command="<exe> enroll <id>",expiry-time="<YYYYMMDDHHMM>Z"
     took as expired five hours before it was written). The disposable test sshd (OpenSSH 10.5) honours
     it whatever its own `TZ` (`tests/sshd.rs`: a host in another time zone than sshd pairs; a `Z` time
     in the past is refused, one in the future accepted, with sshd five hours ahead of UTC).
-  - OpenSSH 7.7 up to 9.0: `restrict,command="…",expiry-time="…"` in the **host's local time** without
-    a suffix (these read it only in sshd's local time). **Verified**: 7.7 (2018-04-02) is the release
-    that added the option ("Add \"expiry-time\" option for authorized_keys files to allow for expiring
-    keys"). **Except when `TZ` is set** in `or2-pair`'s environment (set at all, even empty): its local
-    time may then not be sshd's, so the line is written as for 7.2 up to 7.7 (no `expiry-time`) and the
-    checks print a `warn` saying so ("TZ is set for or2-pair, and this sshd (before OpenSSH 9.1) reads
-    the key's expiry-time in its own time zone…"). The run's lock on its state file and the deadline are
-    the boundary anyway.
-  - OpenSSH 7.2 up to 7.7: `restrict,command="…"`, and a printed note that the key is removed
-    when `or2-pair` ends, without an expiry in the file (the forced command still stops answering at
-    the deadline, and as soon as the run is gone). `restrict` is from 7.2 (2016-02-29).
+  - OpenSSH 7.2 up to 9.0: `restrict,command="…"`, **no `expiry-time`**, and a printed note that the
+    key is written without an expiry in the file (this sshd is older than 9.1, the first that reads an
+    expiry time in UTC): `or2-pair` removes it when it ends, and the forced command still stops
+    answering at the deadline, and as soon as the run is gone. `restrict` is from 7.2 (2016-02-29).
+    7.7 (2018-04-02) added `expiry-time`, but up to 9.0 it is read only in sshd's own local time zone,
+    which `or2-pair` cannot know for sure (its `TZ` may not be sshd's, nor its service's zone), so none
+    is written: the run's lock on its state file and the deadline are the boundary, the expiry is
+    hygiene. (Fix check of the v2 fixes: version 2 as first fixed wrote the host's local time for 7.7
+    up to 9.0 unless `TZ` was set, which still guessed at sshd's zone.)
   - Older OpenSSH: `command="…",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-user-rc`,
     same note.
   - Not OpenSSH, or no readable banner: refuse automatic pairing and point to `--manual`. An option
     sshd does not know makes it ignore the whole line, so nothing is emitted blind.
-- `expiry-time`: the start of the run plus the window plus 10 minutes, in UTC with `Z` (9.1 or newer)
-  or in the host's local time without a suffix (7.7 up to 9.0, `TZ` not set).
+- `expiry-time` (9.1 or newer only): the start of the run plus the window plus 10 minutes, in UTC with
+  `Z`.
 - `<exe>`: `std::env::current_exe()`, canonicalized (an absolute path: non-interactive shells often lack
   `/opt/homebrew/bin` or `~/.cargo/bin` in `PATH`). sshd runs the command through the account's login
   shell, so the path must consist only of `A-Za-z0-9/._+-`; anything else is refused before anything is
@@ -2478,10 +2477,18 @@ restrict,command="<exe> enroll <id>",expiry-time="<YYYYMMDDHHMM>Z"
   and so is one that does not really start this program: the checks run `<shell> -c "<exe> --version"`
   (the account's shell, `/bin/sh` when the field is empty) with a 5 s limit, and anything but exit 0
   with a line `or2-pair <this version>` in its output (rc-file noise around it is fine) is a `fail`
-  naming the shell, the command and why (the exit status, the time limit, the missing line).
+  naming the shell, the command and why (the exit status, the time limit, the missing line). The limit
+  covers the output too: the shell runs in a process group of its own and its output is read inside
+  the same 5 s; at the limit the group is killed and what was read is used, so a job an rc file starts
+  in the background that keeps the output open does not hold the check (a shell that exited 0 with the
+  line passes). (Fix check of the v2 fixes: the output was read to its end after the shell exited.)
 - **The lock.** Every change of `authorized_keys` and of a run's state is made while holding an
   exclusive `flock` on `~/.ssh/or2-pair/lock` (a stable file, created 0600 and never removed, opened with
-  the checked-handle rules: no link followed, regular, owner, one name, StrictModes). One lock for
+  the checked-handle rules: no link followed, regular, owner, one name, StrictModes). Its mode is 0600
+  whatever the umask: a new one is set to 0600 (`fchmod`), and so is one of the account's own with
+  another mode, even one the account cannot open (it is checked by name first, then `fchmodat`); one
+  of another account that cannot be opened is refused with a message that says to remove it. (Fix
+  check of the v2 fixes: under umask 0777 it was created 000, and every later lock failed.) One lock for
   everything (the bootstrap append, `enroll`'s commit, the foreground's cleanup, the sweep), so no two of
   them interleave. A lock that is taken is tried again every 50 ms: `or2-pair` waits up to 3 s (a second
   signal during a cleanup ends the waiting after one more try), `enroll` up to 2 s. (Version 2 as first
@@ -2497,16 +2504,29 @@ restrict,command="<exe> enroll <id>",expiry-time="<YYYYMMDDHHMM>Z"
   file's mode (and group, where the account may) and on Linux its `security.selinux` extended attribute
   when it has one and the new file's differs (while SELinux is active, a label that cannot be set
   refuses the change: sshd might not be allowed to read the file; without SELinux the attribute means
-  nothing and only a privileged process may set it, so a stale one is not copied); then the target is
+  nothing and only a privileged process may set it, so a stale one is not copied), and its POSIX access
+  ACL (`system.posix_acl_access`) when it has one (an ACL that cannot be set always refuses the change:
+  whatever it let read the file could not any more). A label or ACL that cannot be set is reported in
+  words (what could not be copied, that nothing was changed, and the fix: `restorecon -v <file>`,
+  `setfacl -b <file>`, or `--manual`), not as a bare error number, and the old file stays as it was; then the target is
   checked again (the name is still the file that was read, same device and inode, not a link, regular,
   owner, one hard link, StrictModes), so a hard link added or a file swapped in meanwhile is refused
   with nothing changed; then `renameat` over it and an `fsync` of `~/.ssh`. A
   missing file is created by linking the new one to its name, which fails if the name appeared
-  meanwhile. A crash, a kill or a full disk leaves the old file or the new one, never a mix; a failure
+  meanwhile (the temporary name is then removed). A crash, a kill or a full disk leaves the old file or the new one, never a mix; a failure
   removes the temporary file. Between the second check and the rename a process of the same account can
   still swap the name (it could edit the file anyway). The backup rule is unchanged (one per run, before
   its first change). (Review of the v2 integration: the in-place rewrite, `ftruncate` and write on the
   same descriptor, could leave new and old bytes mixed, and rewrote a hard link added after the check.)
+- **A failure after the rename is not "nothing changed".** Once the new file has the name (the
+  `renameat`, or the link of a created file) the change is made. A step that fails after that (the
+  `fsync` of `~/.ssh`, removing the temporary name of a created file) is a **warning**, not an error:
+  "`<file>` was changed, but `<dir>` could not be synced to disk (…), so a crash before the system
+  writes it may undo the change" (or that the temporary name is left for the next run). The change
+  stands and is reported as made; the warning is printed by the run that made it (a `warn` line, or
+  "Warning: …" after the report), and `enroll`'s goes into its `.done` (below). (Fix check of the v2
+  fixes: a failed directory sync after the rename made `enroll` take back its `.done` and tell the
+  phone `failed` while the phone's key was installed and the bootstrap entry gone.)
 - **Removing.** One change under the lock drops every entry whose key type and key data equal the
   bootstrap key's (any options, any comment), and reports how many it dropped.
 - **Every ending removes it** (if the forced command has not already replaced it): the timeout, an
@@ -2515,6 +2535,8 @@ restrict,command="<exe> enroll <id>",expiry-time="<YYYYMMDDHHMM>Z"
   anything is written, without `SA_RESTART`. The ending takes the lock (above), then decides (see
   "The state file and `or2-pair enroll`"). The report says "The temporary key was removed" only when the
   removal dropped an entry; when there was none it says the key was already gone and nothing was removed.
+  That holds for every ending that removes, the recorded pairing whose key is not in the file included
+  (fix check of the v2 fixes: that one always said it was removed).
   If the lock cannot be taken or the removal fails, `or2-pair` prints the exact line to delete, says that
   the next run removes it, and that a phone pairing at that moment may have finished (look for its
   line).
@@ -2576,7 +2598,11 @@ restrict,command="<exe> enroll <id>",expiry-time="<YYYYMMDDHHMM>Z"
         fails, nothing else is done: `failed`.
      4. Installs the new `authorized_keys` (one crash-safe replacement). If that fails, `<id>.done` is
         removed again: `failed`. Either both happened or neither (a crash between the two leaves a
-        `.done` without the key, which the foreground does not report as a pairing, below).
+        `.done` without the key, which the foreground does not report as a pairing, below). A failure
+        after the new file has its name is not a failure of the replacement (see "A failure after the
+        rename"): the key is installed, so `<id>.done` stays, the phone is told `ok`, and the warning
+        is added to the record (`<id>.done` published again with it, renamed over the old one; best
+        effort, the record as first written stays right without it).
      5. Lets the lock go.
   5. Answers the phone `ok`; exits 0, or 1 on a refusal. (Review of the v2 integration: `enroll`
      checked the state without the lock, and wrote `.done` after the key and ignored its failure, so a
@@ -2588,18 +2614,20 @@ restrict,command="<exe> enroll <id>",expiry-time="<YYYYMMDDHHMM>Z"
   lock** (that waits for an `enroll` in its transaction) and then decides:
   - `<id>.done` is there (on any ending: an `enroll` that committed just before is reported as a
     pairing, not a timeout or a cancel): it reads it and checks that `authorized_keys` has an entry
-    with the phone's key fingerprint. Present: it prints `Paired …`. Not present (or the record
-    unreadable): it prints that the phone was recorded as paired but its key is not in the file, that
-    nothing was paired, and exits 1. Either way it removes the bootstrap entry if it is still there,
-    and the state files.
+    with the phone's key fingerprint. Present: it prints `Paired …` (and the record's warning, if it
+    has one, as "Warning: …"). Not present (or the record unreadable): it prints that the phone was
+    recorded as paired but its key is not in the file, that nothing was paired, what became of the
+    temporary key (removed, already gone, or the line to delete when it could not be removed), and
+    exits 1. Either way it removes the bootstrap entry if it is still there, and the state files.
   - `<id>.done` is not there after a `.done` was seen (the `enroll` took it back): the run goes on
     waiting.
   - Otherwise (timeout, signal): it removes the state file **first** (that closes the boundary), then
     the bootstrap entry, then what is left; an `enroll` that takes the lock afterwards finds no state and
     refuses. The run's lock on the state file goes with it.
 - The state file's `id`, `deadline` (Unix seconds, the start plus 5 minutes), `uid` and `fingerprint`
-  (`SHA256:…` of the bootstrap key) are JSON; `<id>.done` is `{"device":…,"fingerprint":…}`. Both
-  are read with a 4 KiB limit.
+  (`SHA256:…` of the bootstrap key) are JSON; `<id>.done` is `{"device":…,"fingerprint":…}`, plus
+  `"warning":…` (at most 1024 characters) when something failed after the key file took its new
+  contents. Both are read with a 4 KiB limit.
 
 ## The exchange
 
@@ -2693,10 +2721,15 @@ password prompt), and `or2-pair` prints the newline itself after the line is rea
 settings are put back on every way out: after the line, on an error or a panic (a drop guard), and on
 SIGINT, SIGTERM, SIGHUP, SIGQUIT and SIGTSTP during the prompt (handlers installed only for the prompt,
 not for signals that were ignored, restore the settings with `tcsetattr`, then re-raise the signal with
-its default action; the previous handlers come back with the guard). Something that is not a terminal
-is left alone. (Review of the v2 integration: echo was left on, so `K` reached scrollback and session
-recorders.) It is read from descriptor 0 a byte at a time into a zeroizing buffer, and `PairCode` is
-zeroized on drop.
+its default action; the previous handlers come back with the guard). SIGTSTP (Ctrl-Z) only stops the
+process, and the prompt is still waiting when it goes on: a SIGCONT handler, installed for the guard's
+life (even when SIGCONT was ignored), switches echo off again (the terminal's settings at that moment
+without `ECHO` and `ECHONL`) and handles SIGTSTP again, so the rest of the code is not echoed either.
+The guard stops the handlers from touching the terminal before it puts the settings back. (Fix check
+of the v2 fixes: after Ctrl-Z and `fg` the rest of the code was echoed.) Something that is not a
+terminal is left alone. (Review of the v2 integration: echo was left on, so `K` reached scrollback and
+session recorders.) It is read from descriptor 0 a byte at a time into a zeroizing buffer, and
+`PairCode` is zeroized on drop.
 
 **Addresses.** Every non-virtual unicast address is listed, now including global IPv6 (not link-local),
 plus the mDNS name: overlay (`zt*`, `tailscale*`, `ZeroTier*`, `utun*` in 100.64/10, `feth*`), then LAN,
@@ -2715,9 +2748,8 @@ cannot run commands or does not start this program, a program path sshd's shell 
 `sshd_config` certainly does for this account, below): the run prints the checks and ends with
 "automatic pairing is not possible here (the lines marked fail above say why); fix them, or run or2-pair
 --manual", before asking for the code and before changing anything. With `--manual` (or where no keys
-are installed) the same findings are `warn`. `--check` prints them either way and exits 0. An old sshd
-(before 7.7), or one from 7.7 up to 9.0 while `TZ` is set, is a `warn` that says the key is written
-without an expiry.
+are installed) the same findings are `warn`. `--check` prints them either way and exits 0. An sshd
+older than OpenSSH 9.1 is a `warn` that says the key is written without an expiry.
 
 **The `sshd_config` reading.** `Include` patterns are relative to `/etc/ssh` (a `*`/`?` in the file
 name, at most four levels deep, each file once); an `Include` inside a `Match` block belongs to that
@@ -2729,7 +2761,11 @@ comma-separated, a matching `!pattern` excludes); it **does not apply** when a `
 match (all criteria must hold); otherwise (`Group`, `Address`, `Host`, `LocalPort`, …) it **cannot be
 evaluated**. A finding is **certain** when the effective value says so and no block that cannot be
 evaluated sets that keyword before the deciding one and every `Include` could be read; it is
-**possible** when such a block or an unreadable `Include` could change the answer.
+**possible** when such a block or an unreadable `Include` could change the answer. Keywords and the
+enumerated values compared (`yes`/`no` of `PubkeyAuthentication`, `none` of `AuthorizedKeysCommand`
+and `ForceCommand`, `all` and `User` in `Match`) are read ignoring case, as sshd reads them (`sshd -T`
+reports `PubkeyAuthentication No` as `no` and `ForceCommand None` as `none`; fix check of the v2 fixes:
+those two were taken for enabled and for a command).
 - **`fail`** (certain, for this account): `PubkeyAuthentication no`; an `AuthorizedKeysFile` that does
   not include `.ssh/authorized_keys` (`%h`, `%u`, `%%` and `~/` expanded), unless an
   `AuthorizedKeysCommand` is also set (it might read that file itself: then `warn`); a `ForceCommand`
@@ -2882,20 +2918,30 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
 - **CLI**: payload round trip and `validate`/parser agreement; `K` parsing (check character, lenient
   input, typos, `Z` refused, no substitution or swap exception), generation uniform over the 31 symbols,
   and the host's and the phone's readings compared on the same inputs (`tests/code_agreement.rs`);
-  the derivation vector; options by sshd version and `TZ`, the UTC expiry; path character refusal; login
-  shell refusal and the shell run (failing exit, time limit, wrong output); `sshd_config` `fail` and
-  `warn` findings with `Match` evaluation and unreadable includes; `authorized_keys` append, remove (a
+  the derivation vector; options by sshd version (no `expiry-time` below 9.1), the UTC expiry; path
+  character refusal; login shell refusal and the shell run (failing exit, time limit, wrong output, a
+  background job holding the output stopped at the limit); `sshd_config` `fail` and `warn` findings
+  with `Match` evaluation and unreadable includes, values ignoring case; `authorized_keys` append, remove (a
   new file, mode kept, no temporary left), the combined replace, `gone`, sweep (dead and live state,
   leftover temporary files), backup once per run, a hard link or a swapped file after the check refused,
-  a failed replacement leaving the old file whole, the label copy; the state directory checks, the
-  complete publish (nothing visible before it), the liveness lock, the one lock; `enroll` (missing,
+  a failed replacement leaving the old file whole, the label and ACL copy, an ACL that cannot be set
+  refused in words with the old file kept, a directory sync that fails after the rename a warning with
+  the change kept (test-only fault injection: `safefs::fault`); the state directory checks, the
+  complete publish (nothing visible before it), the liveness lock, the one lock, a lock of the account
+  with an unusable mode repaired; `enroll` (missing,
   expired, foreign, unheld state; bounded request; `.done`; a `.done` that cannot be written installs
-  nothing; a replacement that fails takes the `.done` back; the lock held); the foreground's endings
+  nothing; a replacement that fails takes the `.done` back; a sync that fails after the rename keeps the
+  `.done`, with the warning, and answers `ok`; the lock held); the foreground's endings
   under the lock (a cleanup that meets an `enroll` in its commit reports the pairing; an `enroll` that
-  reaches the lock after the cleanup refuses; a `.done` without the key is not a pairing; nothing removed
-  is not reported as removed; the wall clock past the deadline; a held lock and a second signal); the
+  reaches the lock after the cleanup refuses; a `.done` without the key is not a pairing, and says
+  whether it removed the temporary key; nothing removed is not reported as removed; a pairing whose
+  sync failed is reported with the warning; the wall clock past the deadline; a held lock and a second
+  signal); the
   prompt (terminal required, re-prompt on typo, empty line; on a pseudo-terminal: echo off while typing
   and back after, nothing echoed, echo back after Ctrl-C at the prompt, the echo guard on a panic);
+  what needs a process of its own (`tests/process.rs`, the other half in a child: the prompt on a
+  pseudo-terminal in its own process group, a prefix typed, SIGTSTP, SIGCONT, the rest typed, nothing
+  echoed and echo back after; the lock under umask 0777 created 0600 and taken twice);
   cleanup on SIGINT, SIGTERM and SIGHUP of the built binary; SIGKILL of the built testhost (`enroll`
   refuses, the next run sweeps); `--manual`; the removed flags; the QR read back with `rqrr`.
 - **End to end against a disposable sshd** (gated like the existing sshd tests, required in the full
@@ -2904,7 +2950,8 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
   the run ended; `HostKeyMismatch`; `Gone` for a second phone; rc-file noise from a `.bashrc` that
   echoes; a `ForceCommand` the checks can read refuses before the prompt, and `NotOr2Pair` from one they
   cannot; a host under `TZ=<-05>5` with sshd under `TZ=UTC` pairs (the `Z` expiry), and sshd five hours
-  ahead of UTC refuses a past `Z` expiry and accepts a future one. The host crate's suite also runs
+  ahead of UTC refuses a past `Z` expiry and accepts a future one; `sshd -T` of a disposable configuration
+  reads `PubkeyAuthentication No` and `ForceCommand None` as the checks do. The host crate's suite also runs
   the product's own client (`or2_core::pair`, a dev-dependency) against the built testhost behind the disposable sshd: its parser
   reads the QR line the host printed (and agrees with the host crate's reference reader), `pair_enroll`
   pairs, and a different `K`, a different host key and an ended run give `BootstrapRefused`,

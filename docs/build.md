@@ -84,7 +84,7 @@ but is not linked into the app library, so it never appears in the licence data.
 with the rest of the workspace.
 
 `core/or2-pair` (the Easy pair host CLI, a workspace crate that does not depend on `or2-core` at run
-time) has unit tests next to the code and six integration suites. `tests/code_agreement.rs`: the host's
+time) has unit tests next to the code and seven integration suites. `tests/code_agreement.rs`: the host's
 reading of a typed code against the phone's (`or2_core::pair::PairCode`, a dev-dependency) on the same
 inputs, the contract's vectors and their bootstrap keys included. `tests/fifo.rs`: the built binary with a
 FIFO where `authorized_keys` should be (reports and exits, nothing changed). `tests/flow.rs`: the whole CLI flow in
@@ -92,12 +92,15 @@ a thread, in a temporary home and a temporary `/etc/ssh` with made-up interfaces
 pretend sshd banner (nothing of the user's `~/.ssh`, sshd, tmux or herdr is read), the phone played by a
 direct call of the forced command's code. `tests/cli.rs`: the built binary (usage, the removed `--bind` and
 `--pair-port`, `enroll`, and the cleanup on SIGINT, SIGTERM, SIGHUP and the timeout). `tests/manual_keys.rs`:
-the no-key-installation (Windows) behaviour. `tests/sshd.rs`: the end to end suite against a **disposable
+the no-key-installation (Windows) behaviour. `tests/process.rs`: what needs a process of its own, its other half
+run in a child (this test binary again): the code prompt on a pseudo-terminal through Ctrl-Z and `fg`, and the lock
+file under umask 0777. `tests/sshd.rs`: the end to end suite against a **disposable
 `sshd`** (its own host key, config and `authorized_keys`, a loopback port, run as the current user): the built
 `or2-pair-testhost` pairs with a test-only russh phone (derives the bootstrap key, pins the host key,
 authenticates, runs the exchange through the forced command, then logs in with the key it handed over), plus
 a different code, a run that ended, a host key mismatch, a second phone (`gone`), rc-file noise, a
-`ForceCommand`, `expiry-time` (local and UTC) and a host in another time zone than sshd. The `real_phone` module of the same file repeats the pairing with the
+`ForceCommand`, `sshd -T` against the checks' reading of `sshd_config` values, `expiry-time` in UTC and a host in
+another time zone than sshd. The `real_phone` module of the same file repeats the pairing with the
 product's own client (`or2_core::pair`, a dev-dependency of `or2-pair`): its strict parser reads the code the
 host printed and `pair_enroll` does the connection (success, a different code, a host key mismatch, a run
 that ended). Like the other sshd tests it skips (printing `SKIP`) without

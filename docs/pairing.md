@@ -139,12 +139,11 @@ ignored. If you can't read `sshd_config` (not root), these are only discovered w
 ### An old sshd
 
 From OpenSSH 9.1 the temporary key's expiry is written in UTC (`…Z`), which sshd reads the same whatever its time
-zone. OpenSSH 7.7 to 9.0 read it only in sshd's own local time: `or2-pair` writes its local time, except when `TZ` is
-set in its environment (its local time may then not be sshd's), when it writes no expiry and says so. Before
-OpenSSH 7.7 `authorized_keys` can't expire a key either. Without an expiry the temporary key is removed when
-`or2-pair` ends, and the pairing command still stops answering after 5 minutes or as soon as `or2-pair` is gone.
-Before 7.2 the options are written the old, longer way. A server that is not OpenSSH (Dropbear, for instance) can't
-be paired automatically.
+zone. Older versions get no expiry, and the checks say so: 7.7 to 9.0 read an expiry only in sshd's own local time,
+which `or2-pair` can't know for sure, and before 7.7 `authorized_keys` can't expire a key at all. The expiry is only
+tidiness: without it the temporary key is removed when `or2-pair` ends, and the pairing command still stops
+answering after 5 minutes or as soon as `or2-pair` is gone. Before 7.2 the options are written the old, longer way.
+A server that is not OpenSSH (Dropbear, for instance) can't be paired automatically.
 
 ### `--manual`: pair without the temporary key
 
