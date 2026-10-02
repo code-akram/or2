@@ -1468,7 +1468,7 @@ dependencies = [
  "data-encoding",
  "flate2",
  "hex",
- "hmac",
+ "hkdf",
  "libghostty-vt",
  "ocb3",
  "or2-core",

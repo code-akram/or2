@@ -1,9 +1,15 @@
-//! The pairing-code parser (table tests) and the exchange client against a scripted host.
+//! The pairing code `K`, the parser of the host's code, the bootstrap key derivation, and the
+//! phone's client against an in-process SSH server that plays `or2-pair` (every error mapping, the
+//! shell-noise rules, the timeouts, cancellation). The client against a real sshd with a forced
+//! command is in `tests/pair.rs`.
 
 use std::io;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
+use russh::server;
+use tokio::io::DuplexStream;
 
 use super::*;
 
@@ -11,14 +17,222 @@ const HOST_KEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAc39XUWT33SvSLy6vA7I83+XgmwnHmYtMQRjLeaZ2U7";
 const HOST_FINGERPRINT: &str = "SHA256:PK/nvGiFusFK9/6Qf8dSOX99mI5XQYiMAML2JHCjgQI";
 const ECDSA_KEY: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBJKzE3AhnQL0fsk77dWQaJJj+GHelMX7ge+TZ2xgJ/Y3O5aMMlnH6Hn/tnucj94OezBBvEj2VIcJGu8ABqUkhFA=";
-const PHONE_KEY: &str =
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBCJz8goXA2qGjRTNHhOwsljhOuCXG/+2B/zTJH/brc5";
-/// base32 of the bytes 0x00..0x0f.
-const OTP_TEXT: &str = "AAAQEAYEAUDAOCAJBIFQYDIOB4";
+/// A canonical pairing id (the last character carries no stray bit).
+const ID: &str = "abcdefghijklm";
+const CODE_TEXT: &str = "7KQ4-M2XD-9PTM";
 
-fn otp() -> Otp {
-    Otp::from_bytes(core::array::from_fn(|i| i as u8))
+// --- the pairing code K ------------------------------------------------------------------------
+
+#[test]
+fn the_check_character_is_the_weighted_sum_mod_31() {
+    // 7KQ4M2XD9PT: values 7 19 23 4 20 2 29 13 9 22 26, weights 1..=11:
+    // 7 + 38 + 69 + 16 + 100 + 12 + 203 + 104 + 81 + 220 + 286 = 1136 = 36 * 31 + 20, and 20 is `M`.
+    let code = PairCode::parse_typed(CODE_TEXT).unwrap();
+    assert_eq!(code.display(), "7KQ4-M2XD-9PTM");
+    assert_eq!(&code.data()[..], b"7KQ4M2XD9PT");
+    assert_eq!(
+        PairCode::parse_typed("7KQ4-M2XD-9PTA").unwrap_err(),
+        PairCodeError::Check
+    );
 }
+
+#[test]
+fn the_alphabet_is_crockford_base32() {
+    assert_eq!(ALPHABET.len(), 32);
+    for excluded in *b"ILOU" {
+        assert!(!ALPHABET.contains(&excluded));
+    }
+    let mut sorted = *ALPHABET;
+    sorted.sort_unstable();
+    assert_eq!(&sorted, ALPHABET, "digits, then letters, in order");
+}
+
+#[test]
+fn every_single_wrong_character_and_every_neighbour_swap_fails_the_check() {
+    let code = PairCode::parse_typed(CODE_TEXT).unwrap();
+    let plain: Vec<u8> = code.0.to_vec();
+    let typed = |values: &[u8]| -> String {
+        values
+            .iter()
+            .map(|v| char::from(ALPHABET[usize::from(*v)]))
+            .collect()
+    };
+    for position in 0..CODE_CHARS {
+        for value in 0..32u8 {
+            if value == plain[position] {
+                continue;
+            }
+            let mut changed = plain.clone();
+            changed[position] = value;
+            assert!(
+                PairCode::parse_typed(&typed(&changed)).is_err(),
+                "position {position} value {value}"
+            );
+        }
+    }
+    for position in 0..CODE_CHARS - 1 {
+        if plain[position] == plain[position + 1] {
+            continue;
+        }
+        let mut swapped = plain.clone();
+        swapped.swap(position, position + 1);
+        assert_eq!(
+            PairCode::parse_typed(&typed(&swapped)).unwrap_err(),
+            PairCodeError::Check,
+            "swap at {position}"
+        );
+    }
+}
+
+#[test]
+fn typed_input_is_read_leniently() {
+    for text in [
+        "7KQ4-M2XD-9PTM",
+        "7kq4-m2xd-9ptm",
+        "7KQ4M2XD9PTM",
+        " 7KQ4 M2XD 9PTM ",
+        "7-K-Q-4-M-2-X-D-9-P-T-M",
+    ] {
+        assert_eq!(
+            PairCode::parse_typed(text).unwrap().display(),
+            CODE_TEXT,
+            "{text:?}"
+        );
+    }
+    // `I` and `L` read as 1, `O` as 0.
+    let with_ones = PairCode::parse_typed("1I1L-0O00-000A").map(|c| c.display());
+    let plain = PairCode::parse_typed("1111-0000-000A").map(|c| c.display());
+    assert_eq!(with_ones, plain);
+    assert!(
+        plain.is_ok(),
+        "the check of 1111 0000 000 is 10, which is A"
+    );
+    for (text, expected) in [
+        ("", PairCodeError::Length),
+        ("7KQ4-M2XD-9PT", PairCodeError::Length),
+        ("7KQ4-M2XD-9PTMM", PairCodeError::Length),
+        ("7KQ4-M2XD-9PTU", PairCodeError::Character),
+        ("7KQ4-M2XD-9PT!", PairCodeError::Character),
+        ("7KQ4-M2XD-9PT\u{e9}", PairCodeError::Character),
+    ] {
+        assert_eq!(
+            PairCode::parse_typed(text).unwrap_err(),
+            expected,
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn a_generated_code_is_well_formed_and_differs_each_time() {
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..50 {
+        let code = PairCode::generate();
+        let shown = code.display();
+        assert_eq!(shown.len(), 14);
+        assert_eq!(
+            shown.matches('-').count(),
+            2,
+            "three groups of four: {shown}"
+        );
+        assert!(
+            shown.bytes().all(|b| b == b'-' || ALPHABET.contains(&b)),
+            "{shown}"
+        );
+        assert_eq!(
+            PairCode::parse_typed(&shown).unwrap().display(),
+            shown,
+            "the check character is valid"
+        );
+        seen.insert(shown);
+    }
+    assert_eq!(seen.len(), 50);
+}
+
+#[test]
+fn each_byte_value_maps_uniformly_onto_the_32_symbols() {
+    // 256 is a multiple of 32: masking the low five bits gives every symbol the same share.
+    let mut counts = [0usize; 32];
+    for byte in 0..=255u8 {
+        let code = PairCode::from_random(&[byte; DATA_CHARS]);
+        counts[usize::from(code.0[0])] += 1;
+    }
+    assert!(counts.iter().all(|count| *count == 8), "{counts:?}");
+}
+
+#[test]
+fn generated_characters_are_statistically_uniform() {
+    // 20 000 codes x 11 characters over 32 symbols: 6875 expected each, sigma about 82. A bound
+    // of 6 sigma (500) fails only for a broken generator.
+    let mut counts = [0usize; 32];
+    for _ in 0..20_000 {
+        let code = PairCode::generate();
+        for value in &code.0[..DATA_CHARS] {
+            counts[usize::from(*value)] += 1;
+        }
+    }
+    for (symbol, count) in counts.iter().enumerate() {
+        assert!(count.abs_diff(6875) < 500, "symbol {symbol}: {count}");
+    }
+}
+
+#[test]
+fn the_code_is_redacted_in_debug_and_wiped_on_drop() {
+    let code = PairCode::parse_typed(CODE_TEXT).unwrap();
+    let shown = format!("{code:?}");
+    assert_eq!(shown, "PairCode(<redacted>)");
+    assert!(!shown.contains("7KQ4"));
+    // The buffer is a `Zeroizing`, wiped when the code is dropped; the marker records it.
+    fn wiped_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    wiped_on_drop::<PairCode>();
+}
+
+// --- the bootstrap key -------------------------------------------------------------------------
+
+/// Computed with the openssl CLI (3.6), not with this code:
+///
+/// ```text
+/// openssl kdf -keylen 32 -kdfopt digest:SHA256 \
+///     -kdfopt hexkey:374b51344d325844395054 \                  # "7KQ4M2XD9PT"
+///     -kdfopt hexsalt:6162636465666768696a6b6c6d \             # "abcdefghijklm"
+///     -kdfopt hexinfo:6f72322d706169722f3220626f6f7473747261702065643235353139 \
+///     -kdfopt mode:EXTRACT_AND_EXPAND -binary HKDF | xxd -p -c 64
+/// # the seed, then the Ed25519 key it is the RFC 8032 seed of, as PKCS#8 (the fixed 16-byte
+/// # prefix of an Ed25519 PrivateKeyInfo, then the seed):
+/// printf '302e020100300506032b657004220420<seed hex>' | xxd -r -p |
+///     openssl pkey -inform DER -pubout -outform DER | xxd -p -c 64
+/// # the last 32 bytes are the public key
+/// ```
+const VECTOR_SEED: &str = "734c24be4849a8de10227c52bd2530221cd6d2e62062c650886f0db0b99aeed0";
+const VECTOR_PUBLIC: &str = "02d8bd7aee56213d1bcdd3f38649a9b749904226955d0d460f400ba630e0d628";
+
+#[test]
+fn the_bootstrap_key_matches_the_independently_computed_vector() {
+    let code = PairCode::parse_typed(CODE_TEXT).unwrap();
+    assert_eq!(&code.data()[..], b"7KQ4M2XD9PT");
+    assert_eq!(hex::encode(*code.bootstrap_seed(ID)), VECTOR_SEED);
+    let public = code.bootstrap_key(ID).public_key();
+    let blob = data_encoding::BASE64
+        .decode(public.openssh.split(' ').nth(1).unwrap().as_bytes())
+        .unwrap();
+    // The SSH wire form: string "ssh-ed25519", then the 32-byte public key as a string.
+    assert_eq!(hex::encode(&blob[blob.len() - 32..]), VECTOR_PUBLIC);
+    assert_eq!(public.algorithm, "ssh-ed25519");
+}
+
+#[test]
+fn the_bootstrap_key_depends_on_the_code_and_on_the_id() {
+    let code = PairCode::parse_typed(CODE_TEXT).unwrap();
+    let other = PairCode::parse_typed("1111-0000-000A").unwrap();
+    let key = |code: &PairCode, id: &str| code.bootstrap_public_key(id);
+    assert_eq!(key(&code, ID), key(&code, ID));
+    assert_ne!(key(&code, ID), key(&other, ID));
+    assert_ne!(key(&code, ID), key(&code, "abcdefghijkli"));
+    assert!(key(&code, ID).starts_with("ssh-ed25519 "));
+    assert_eq!(key(&code, ID).split(' ').count(), 2, "no comment");
+}
+
+// --- the parser --------------------------------------------------------------------------------
 
 /// Percent-encodes a value the way the host does: unreserved characters and `:` stay.
 fn enc(value: &str) -> String {
@@ -38,7 +252,7 @@ fn code(fields: &[(&str, &str)]) -> String {
         .iter()
         .map(|(key, value)| format!("{key}={}", enc(value)))
         .collect();
-    format!("or2-pair:1?{}", query.join("&"))
+    format!("or2-pair:2?{}", query.join("&"))
 }
 
 fn full() -> Vec<(&'static str, &'static str)> {
@@ -47,11 +261,10 @@ fn full() -> Vec<(&'static str, &'static str)> {
         ("user", "alice"),
         ("port", "22"),
         ("a", "100.101.102.103"),
-        ("a", "192.168.1.20"),
+        ("a", "2001:db8::9"),
         ("a", "work-mac.local"),
         ("hk", HOST_KEY),
-        ("pair", "192.168.1.20:41234"),
-        ("otp", OTP_TEXT),
+        ("id", ID),
     ]
 }
 
@@ -74,7 +287,7 @@ fn replaced<'a>(
 }
 
 #[test]
-fn a_full_code_parses_into_endpoints_and_a_key() {
+fn a_full_code_parses_into_endpoints_a_key_and_an_id() {
     let offer = PairOffer::parse(&code(&full())).unwrap();
     assert_eq!(offer.name, "Work Mac");
     assert_eq!(offer.username, "alice");
@@ -88,35 +301,18 @@ fn a_full_code_parses_into_endpoints_and_a_key() {
         hosts,
         [
             ("100.101.102.103".to_owned(), 22),
-            ("192.168.1.20".to_owned(), 22),
+            ("2001:db8::9".to_owned(), 22),
             ("work-mac.local".to_owned(), 22)
         ]
     );
     assert_eq!(offer.host_key.fingerprint(), HOST_FINGERPRINT);
-    let exchange = offer.exchange.unwrap();
-    assert_eq!(
-        exchange.endpoints,
-        [Endpoint::new("192.168.1.20", 41234).unwrap()]
-    );
-    assert_eq!(exchange.otp.0.as_slice(), &(0..16).collect::<Vec<u8>>()[..]);
+    assert_eq!(offer.pairing_id.as_deref(), Some(ID));
 }
 
 #[test]
-fn a_code_made_with_no_listen_has_no_exchange() {
-    let fields = without(&without(&full(), "pair"), "otp");
-    let offer = PairOffer::parse(&code(&fields)).unwrap();
-    assert!(offer.exchange.is_none());
-}
-
-#[test]
-fn several_pair_addresses_keep_their_order_and_ipv6_needs_brackets() {
-    let mut fields = without(&full(), "pair");
-    fields.push(("pair", "10.0.0.5:5000"));
-    fields.push(("pair", "[fd00::1]:5000"));
-    let offer = PairOffer::parse(&code(&fields)).unwrap();
-    let endpoints = offer.exchange.unwrap().endpoints;
-    assert_eq!(endpoints[0], Endpoint::new("10.0.0.5", 5000).unwrap());
-    assert_eq!(endpoints[1], Endpoint::new("fd00::1", 5000).unwrap());
+fn a_manual_code_has_no_pairing_id() {
+    let offer = PairOffer::parse(&code(&without(&full(), "id"))).unwrap();
+    assert_eq!(offer.pairing_id, None);
 }
 
 #[test]
@@ -147,7 +343,7 @@ fn refuses_what_is_not_a_pairing_code() {
         "",
         "hello",
         "https://example.org/?a=b",
-        "OR2-PAIR:1?x=y",
+        "OR2-PAIR:2?x=y",
         "or2-pair",
         "ssh-ed25519 AAAA",
     ] {
@@ -160,18 +356,29 @@ fn refuses_what_is_not_a_pairing_code() {
 }
 
 #[test]
-fn versions_other_than_one_are_named_unsupported_not_malformed() {
-    for text in ["or2-pair:2?name=x", "or2-pair:10?name=x", "or2-pair:0?x=y"] {
+fn other_versions_are_named_unsupported_with_their_number() {
+    for (text, version) in [
+        // Version 1 is the old listener code: its fields are never read.
+        ("or2-pair:1?name=x&pair=192.0.2.1:5&otp=AAAA", 1),
+        ("or2-pair:3?name=x", 3),
+        ("or2-pair:10?name=x", 10),
+        ("or2-pair:0?x=y", 0),
+        ("or2-pair:4294967295?x=y", u32::MAX),
+    ] {
         assert_eq!(
             PairOffer::parse(text).unwrap_err(),
-            PairParseError::UnsupportedVersion
+            PairParseError::UnsupportedVersion { version },
+            "{text}"
         );
     }
     for text in [
         "or2-pair:?name=x",
-        "or2-pair:1.1?name=x",
-        "or2-pair:v1?name=x",
-        "or2-pair:1",
+        "or2-pair:2.0?name=x",
+        "or2-pair:v2?name=x",
+        "or2-pair:02?name=x",
+        "or2-pair:+2?name=x",
+        "or2-pair:4294967296?name=x",
+        "or2-pair:2",
         "or2-pair:",
     ] {
         assert_eq!(
@@ -204,19 +411,11 @@ fn a_code_over_one_kilobyte_is_refused_before_it_is_parsed() {
 }
 
 #[test]
-fn every_required_field_is_required() {
-    for (field, expected) in [
-        ("name", PairParseError::MissingField("name")),
-        ("user", PairParseError::MissingField("user")),
-        ("port", PairParseError::MissingField("port")),
-        ("a", PairParseError::MissingField("a")),
-        ("hk", PairParseError::MissingField("hk")),
-        ("pair", PairParseError::MissingField("pair")),
-        ("otp", PairParseError::MissingField("otp")),
-    ] {
+fn every_required_field_is_required_but_the_id() {
+    for field in ["name", "user", "port", "a", "hk"] {
         assert_eq!(
             PairOffer::parse(&code(&without(&full(), field))).unwrap_err(),
-            expected,
+            PairParseError::MissingField(field),
             "{field}"
         );
     }
@@ -224,28 +423,31 @@ fn every_required_field_is_required() {
 
 #[test]
 fn single_fields_may_not_repeat_and_unknown_fields_are_refused() {
-    for field in ["name", "user", "port", "hk", "otp"] {
+    for field in ["name", "user", "port", "hk", "id"] {
         let mut fields = full();
         let again = *fields.iter().find(|(k, _)| *k == field).unwrap();
         fields.push(again);
-        let expected = match field {
-            "name" => "name",
-            "user" => "user",
-            "port" => "port",
-            "hk" => "hk",
-            _ => "otp",
-        };
         assert_eq!(
             PairOffer::parse(&code(&fields)).unwrap_err(),
-            PairParseError::DuplicateField(expected)
+            PairParseError::DuplicateField(field),
+            "{field}"
         );
     }
-    let mut fields = full();
-    fields.push(("extra", "1"));
-    assert_eq!(
-        PairOffer::parse(&code(&fields)).unwrap_err(),
-        PairParseError::UnknownField
-    );
+    // Version 1's fields are unknown in version 2.
+    for (field, value) in [
+        ("extra", "1"),
+        ("pair", "192.0.2.1:5000"),
+        ("otp", "AAAQEAYEAUDAOCAJBIFQYDIOB4"),
+        ("ID", ID),
+    ] {
+        let mut fields = full();
+        fields.push((field, value));
+        assert_eq!(
+            PairOffer::parse(&code(&fields)).unwrap_err(),
+            PairParseError::UnknownField,
+            "{field}"
+        );
+    }
 }
 
 #[test]
@@ -260,7 +462,7 @@ fn malformed_syntax_is_refused() {
         format!("{good}&a=x y"),
         format!("{good}#frag"),
         format!("{good}&a=\u{e9}"),
-        "or2-pair:1?".to_owned(),
+        "or2-pair:2?".to_owned(),
     ] {
         assert_eq!(
             PairOffer::parse(&text).unwrap_err(),
@@ -321,9 +523,10 @@ fn ports_are_decimal_one_to_65535() {
 #[test]
 fn addresses_are_names_or_ip_literals_at_most_eight_without_duplicates() {
     for (value, valid) in [
-        ("192.168.1.1", true),
+        ("192.0.2.1", true),
         ("host.local", true),
         ("fe80::1", true),
+        ("2001:db8::9", true),
         ("a_b-c.d", true),
         ("[::1]", false),
         ("a b", false),
@@ -383,626 +586,750 @@ fn the_host_key_must_be_a_plain_public_key() {
 }
 
 #[test]
-fn the_otp_is_exactly_26_canonical_base32_characters() {
+fn the_id_is_exactly_13_canonical_lowercase_base32_characters() {
     for (value, valid) in [
-        (OTP_TEXT, true),
-        ("aaaqeayeaudaocajbifqydiob4", false),
-        ("AAAQEAYEAUDAOCAJBIFQYDIOB", false),
-        ("AAAQEAYEAUDAOCAJBIFQYDIOB4A", false),
-        ("AAAQEAYEAUDAOCAJBIFQYDIOB=", false),
-        ("AAAQEAYEAUDAOCAJBIFQYDIOB1", false),
-        ("AAAQEAYEAUDAOCAJBIFQYDIOB8", false),
-        // The last character carries two bits too many: not the canonical encoding.
-        ("AAAQEAYEAUDAOCAJBIFQYDIOB5", false),
+        (ID, true),
+        ("aaaaaaaaaaaaa", true),
+        ("zzzzzzzzzzzzy", true),
+        // Wrong length.
+        ("abcdefghijkl", false),
+        ("abcdefghijklmn", false),
         ("", false),
+        // Upper case, padding, characters outside the alphabet.
+        ("ABCDEFGHIJKLM", false),
+        ("abcdefghijkl=", false),
+        ("abcdefghijkl1", false),
+        ("abcdefghijkl8", false),
+        ("abcdefghijkl-", false),
+        // The last character carries one stray bit: not the canonical encoding.
+        ("abcdefghijkln", false),
+        ("zzzzzzzzzzzzz", false),
     ] {
-        let parsed = PairOffer::parse(&code(&replaced(&full(), "otp", value)));
+        assert_eq!(is_pairing_id(value), valid, "{value:?}");
+        let parsed = PairOffer::parse(&code(&replaced(&full(), "id", value)));
         assert_eq!(parsed.is_ok(), valid, "{value:?}");
+        if !valid {
+            assert_eq!(parsed.unwrap_err(), PairParseError::InvalidField("id"));
+        }
     }
 }
 
-#[test]
-fn pair_addresses_are_ip_literals_with_a_listener_port() {
-    for (value, valid) in [
-        ("192.168.1.20:41234", true),
-        ("[fd00::1]:5000", true),
-        ("100.64.0.1:1", true),
-        ("host.local:5000", false),
-        ("192.168.1.20", false),
-        ("192.168.1.20:0", false),
-        ("192.168.1.20:65536", false),
-        ("192.168.1.20:x", false),
-        ("0.0.0.0:5000", false),
-        ("[::]:5000", false),
-        ("224.0.0.1:5000", false),
-        ("255.255.255.255:5000", false),
-        ("fd00::1:5000", false),
-        ("[192.168.1.1]:5000", false),
-        ("[fd00::1]5000", false),
-        (":5000", false),
-        ("", false),
-    ] {
-        let parsed = PairOffer::parse(&code(&replaced(&full(), "pair", value)));
-        assert_eq!(parsed.is_ok(), valid, "{value:?}");
+// --- the client against an in-process SSH server -----------------------------------------------
+
+/// What the fake `or2-pair` does.
+#[derive(Clone)]
+enum Step {
+    Data(Vec<u8>),
+    Stderr(Vec<u8>),
+    /// Exit status, EOF and close, as sshd does when the forced command ends.
+    Close,
+}
+
+#[derive(Default)]
+struct Scenario {
+    /// After `exec`.
+    on_exec: Vec<Step>,
+    /// After the request line arrived.
+    on_request: Vec<Step>,
+    /// Answers `exec` with a failure.
+    refuse_exec: bool,
+}
+
+#[derive(Default)]
+struct Observed {
+    commands: Mutex<Vec<String>>,
+    requests: Mutex<Vec<u8>>,
+    publickey_attempts: AtomicUsize,
+    other_attempts: AtomicUsize,
+    channel_closes: AtomicUsize,
+}
+
+struct Fake {
+    bootstrap: russh::keys::PublicKey,
+    scenario: Arc<Scenario>,
+    observed: Arc<Observed>,
+}
+
+impl server::Handler for Fake {
+    type Error = russh::Error;
+
+    async fn auth_none(&mut self, _: &str) -> Result<server::Auth, Self::Error> {
+        self.observed.other_attempts.fetch_add(1, Ordering::SeqCst);
+        Ok(server::Auth::reject())
     }
-    let mut fields = without(&full(), "pair");
-    for port in 1..=5 {
-        fields.push((
-            "pair",
-            [
-                "10.0.0.1:1",
-                "10.0.0.1:2",
-                "10.0.0.1:3",
-                "10.0.0.1:4",
-                "10.0.0.1:5",
-            ][port - 1],
-        ));
+
+    async fn auth_password(&mut self, _: &str, _: &str) -> Result<server::Auth, Self::Error> {
+        self.observed.other_attempts.fetch_add(1, Ordering::SeqCst);
+        Ok(server::Auth::reject())
     }
-    assert_eq!(
-        PairOffer::parse(&code(&fields)).unwrap_err(),
-        PairParseError::InvalidField("pair")
-    );
-}
 
-#[test]
-fn pair_and_otp_come_together() {
-    let only_otp = without(&full(), "pair");
-    assert_eq!(
-        PairOffer::parse(&code(&only_otp)).unwrap_err(),
-        PairParseError::MissingField("pair")
-    );
-}
-
-#[test]
-fn debug_output_never_contains_the_password() {
-    let offer = PairOffer::parse(&code(&full())).unwrap();
-    let shown = format!("{offer:?} {:?}", offer.exchange.as_ref().unwrap().otp);
-    assert!(!shown.contains(OTP_TEXT), "{shown}");
-    assert!(shown.contains("redacted"));
-    assert!(!shown.contains("[0, 1, 2"), "{shown}");
-}
-
-#[test]
-fn the_macs_match_an_independent_hmac_sha256() {
-    // Computed with an independent HMAC-SHA256 implementation: key 00..0f, nonce 20..3f.
-    //   request: b"or2-pair/3 request\0" + nonce + key line
-    //   verdict: b"or2-pair/3 verdict\0" + [ok] + lp(reason) + lp(nonce) + lp(fingerprint)
-    //   with lp(x) = big-endian u16 length of x, then x
-    let nonce: Vec<u8> = (0x20..0x40).collect();
-    assert_eq!(
-        STANDARD.encode(otp().request_mac(&nonce, PHONE_KEY)),
-        "XLn9M1XO1Mx6S7YuGYz9NfVoz9LYtdTtPq0L4MbcUsw="
-    );
-    for (ok, reason, fingerprint, expected) in [
-        (
-            true,
-            "",
-            "SHA256:abc",
-            "+eZyKeIYHHI/zf3VGTkfgL6oZO1bDySyNjDL31Z0iak=",
-        ),
-        (
-            false,
-            "declined",
-            "SHA256:abc",
-            "kv1uJPEuHGLlwbkD7ehkR0JRChE2ST3oeztTcxBO18Q=",
-        ),
-        (
-            false,
-            "authentication",
-            "",
-            "fCheMVf7/YA4f+s7BLO3+5kR3hvTNzHOTqD2oCz9ksY=",
-        ),
-    ] {
-        assert_eq!(
-            STANDARD.encode(otp().verdict_mac(&nonce, ok, reason, fingerprint)),
-            expected,
-            "{ok} {reason} {fingerprint}"
-        );
-    }
-}
-
-#[test]
-fn no_two_outcomes_share_a_verdict_mac() {
-    // Review of 6afa42e: v2 gave `ok:true` and `ok:false,reason:"ok"` the same MAC. Every
-    // distinct (ok, reason, nonce, fingerprint) tuple, including ones that would collide under a
-    // separator-only encoding, must now have its own.
-    let nonce = [9u8; 32];
-    let mut seen = std::collections::HashSet::new();
-    for (ok, reason, fingerprint) in [
-        (true, "", "SHA256:abc"),
-        (false, "ok", "SHA256:abc"),
-        (false, "", "SHA256:abc"),
-        (false, "declined", "SHA256:abc"),
-        (false, "declinedSHA256:abc", ""),
-        (false, "declined\0SHA256:abc", ""),
-        (false, "declined\0", "SHA256:abc"),
-        (false, "", "declined\0SHA256:abc"),
-        (true, "", "ok\0SHA256:abc"),
-        (true, "ok", "SHA256:abc"),
-    ] {
-        assert!(
-            seen.insert(otp().verdict_mac(&nonce, ok, reason, fingerprint)),
-            "{ok} {reason:?} {fingerprint:?}"
-        );
-    }
-}
-
-#[test]
-fn the_request_and_verdict_domains_are_distinct() {
-    // No key text makes a request MAC equal a verdict MAC (and vice versa): the domains differ.
-    let nonce = [9u8; 32];
-    let verdict = otp().verdict_mac(&nonce, true, "", "SHA256:abc");
-    let request = otp().request_mac(&nonce, "\x01\0\0\0\x20SHA256:abc");
-    assert_ne!(verdict, request);
-    assert!(!otp().verify_verdict(&nonce, true, "", "SHA256:abc", &request));
-}
-
-#[test]
-fn a_wiped_password_no_longer_matches() {
-    let nonce = [7u8; 32];
-    let before = otp().request_mac(&nonce, PHONE_KEY);
-    let mut wiped = otp();
-    wiped.wipe();
-    assert_ne!(wiped.request_mac(&nonce, PHONE_KEY), before);
-    assert!(!wiped.verify_verdict(
-        &nonce,
-        true,
-        "",
-        "SHA256:x",
-        &otp().verdict_mac(&nonce, true, "", "SHA256:x")
-    ));
-}
-
-// --- the exchange --------------------------------------------------------------------------------
-
-/// Hands out pre-made duplex streams, one per connect, to the endpoints in the order asked.
-struct Pipes {
-    streams: Mutex<Vec<DuplexStream>>,
-    asked: Mutex<Vec<Endpoint>>,
-}
-
-impl Pipes {
-    fn new(streams: Vec<DuplexStream>) -> Arc<Self> {
-        Arc::new(Self {
-            streams: Mutex::new(streams),
-            asked: Mutex::default(),
+    async fn auth_publickey(
+        &mut self,
+        _: &str,
+        key: &russh::keys::PublicKey,
+    ) -> Result<server::Auth, Self::Error> {
+        self.observed
+            .publickey_attempts
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(if key.key_data() == self.bootstrap.key_data() {
+            server::Auth::Accept
+        } else {
+            server::Auth::reject()
         })
     }
+
+    async fn channel_open_session(
+        &mut self,
+        _: russh::Channel<server::Msg>,
+        reply: server::ChannelOpenHandle,
+        _: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        reply.accept().await;
+        Ok(())
+    }
+
+    async fn exec_request(
+        &mut self,
+        channel: russh::ChannelId,
+        command: &[u8],
+        session: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        self.observed
+            .commands
+            .lock()
+            .unwrap()
+            .push(String::from_utf8_lossy(command).into_owned());
+        if self.scenario.refuse_exec {
+            return session.channel_failure(channel);
+        }
+        session.channel_success(channel)?;
+        play(&self.scenario.on_exec, session, channel)
+    }
+
+    async fn data(
+        &mut self,
+        channel: russh::ChannelId,
+        data: &[u8],
+        session: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        let complete = {
+            let mut requests = self.observed.requests.lock().unwrap();
+            requests.extend_from_slice(data);
+            requests.contains(&b'\n')
+        };
+        if complete {
+            play(&self.scenario.on_request, session, channel)?;
+        }
+        Ok(())
+    }
+
+    async fn channel_close(
+        &mut self,
+        _: russh::ChannelId,
+        _: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        self.observed.channel_closes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn play(
+    steps: &[Step],
+    session: &mut server::Session,
+    channel: russh::ChannelId,
+) -> Result<(), russh::Error> {
+    for step in steps {
+        match step {
+            Step::Data(bytes) => session.data(channel, bytes.clone())?,
+            Step::Stderr(bytes) => session.extended_data(channel, 1, bytes.clone())?,
+            Step::Close => {
+                session.exit_status_request(channel, 0)?;
+                session.eof(channel)?;
+                session.close(channel)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A transport whose every connection is a pipe to a fresh in-process server.
+struct Pipes {
+    host: russh::keys::PrivateKey,
+    bootstrap: russh::keys::PublicKey,
+    scenario: Arc<Scenario>,
+    observed: Arc<Observed>,
+    connections: AtomicUsize,
 }
 
 impl Transport for Pipes {
     type Stream = DuplexStream;
 
-    async fn connect(&self, endpoint: &Endpoint) -> io::Result<DuplexStream> {
-        self.asked.lock().unwrap().push(endpoint.clone());
-        self.streams
-            .lock()
-            .unwrap()
-            .pop()
-            .ok_or_else(|| io::Error::from(io::ErrorKind::ConnectionRefused))
+    async fn connect(&self, _: &Endpoint) -> io::Result<DuplexStream> {
+        self.connections.fetch_add(1, Ordering::SeqCst);
+        let (client, server_end) = tokio::io::duplex(64 * 1024);
+        let config = Arc::new(server::Config {
+            keys: vec![self.host.clone()],
+            auth_rejection_time: Duration::ZERO,
+            auth_rejection_time_initial: Some(Duration::ZERO),
+            ..Default::default()
+        });
+        let handler = Fake {
+            bootstrap: self.bootstrap.clone(),
+            scenario: Arc::clone(&self.scenario),
+            observed: Arc::clone(&self.observed),
+        };
+        tokio::spawn(async move {
+            if let Ok(session) = server::run_stream(config, server_end, handler).await {
+                let _ = session.await;
+            }
+        });
+        Ok(client)
     }
 }
 
-fn offer() -> PairOffer {
-    PairOffer::parse(&code(&full())).unwrap()
-}
+/// A transport that always fails to connect.
+struct Failing(io::ErrorKind);
 
-fn quick() -> PairTiming {
-    PairTiming {
-        step: Duration::from_secs(10),
-        verdict: Duration::from_secs(125),
+impl Transport for Failing {
+    type Stream = DuplexStream;
+
+    async fn connect(&self, _: &Endpoint) -> io::Result<DuplexStream> {
+        Err(io::Error::from(self.0))
     }
 }
 
-/// What a scripted host does after sending its hello.
-#[derive(Clone)]
-enum Host {
-    /// Answers as the real host does: `None` is a success, `Some(reason)` a refusal, each with
-    /// the verdict MAC the real password gives for this nonce and the key that was sent.
-    Verdict(Option<&'static str>),
-    /// Replies to whatever came with this raw text.
-    Raw(&'static str),
-    /// Sends the hello, reads the request, then says nothing for this long.
-    Silent(u64),
-    /// Closes right after reading the request.
-    Hangup,
+struct Setup {
+    transport: Arc<Pipes>,
+    offer: PairOffer,
+    code: PairCode,
+    phone: ClientKey,
 }
 
-struct Seen {
-    request: serde_json::Value,
-    mac_ok: bool,
+fn hello_line(id: &str) -> Vec<u8> {
+    format!("{{\"v\":2,\"hello\":\"or2-pair\",\"id\":\"{id}\"}}\n").into_bytes()
 }
 
-fn host(script: Host, hello: String) -> (DuplexStream, tokio::task::JoinHandle<Option<Seen>>) {
-    let (client, server) = tokio::io::duplex(4096);
-    let task = tokio::spawn(async move {
-        let mut server = BufReader::new(server);
-        server.write_all(hello.as_bytes()).await.ok()?;
-        let mut line = String::new();
-        server.read_line(&mut line).await.ok()?;
-        let request: serde_json::Value = serde_json::from_str(&line).ok()?;
-        let nonce = STANDARD.decode(NONCE_B64).unwrap();
-        let key = request["key"].as_str()?.to_owned();
-        let expected = otp().request_mac(&nonce, &key);
-        let mac_ok = request["mac"].as_str() == Some(STANDARD.encode(expected).as_str());
-        let seen = Seen { request, mac_ok };
-        match script {
-            Host::Verdict(reason) => {
-                let reply = signed(reason, &nonce, &fingerprint_of(&key).ok()?);
-                server.write_all(reply.as_bytes()).await.ok()?;
-            }
-            Host::Raw(raw) => {
-                server.write_all(raw.as_bytes()).await.ok()?;
-            }
-            Host::Silent(secs) => tokio::time::sleep(Duration::from_secs(secs)).await,
-            Host::Hangup => {}
+fn hello() -> Step {
+    Step::Data(hello_line(ID))
+}
+
+fn data(text: &str) -> Step {
+    Step::Data(text.as_bytes().to_vec())
+}
+
+impl Setup {
+    fn new(scenario: Scenario) -> Self {
+        let host = ClientKey::generate_ed25519("");
+        let code = PairCode::parse_typed(CODE_TEXT).unwrap();
+        let bootstrap = russh::keys::PublicKey::from_openssh(&code.bootstrap_public_key(ID))
+            .expect("the bootstrap public key is an OpenSSH key");
+        let transport = Arc::new(Pipes {
+            host: host.private_key().clone(),
+            bootstrap,
+            scenario: Arc::new(scenario),
+            observed: Arc::default(),
+            connections: AtomicUsize::new(0),
+        });
+        let offer = PairOffer {
+            name: "workstation".into(),
+            username: "dev".into(),
+            port: 22,
+            addresses: vec![
+                Endpoint::new("workstation.local", 22).unwrap(),
+                Endpoint::new("198.51.100.7", 22).unwrap(),
+            ],
+            host_key: HostKey::from_openssh(&host.public_key().openssh).unwrap(),
+            pairing_id: Some(ID.into()),
+        };
+        Self {
+            transport,
+            offer,
+            code,
+            phone: ClientKey::generate_ed25519("phone"),
         }
-        Some(seen)
-    });
-    (client, task)
-}
-
-/// 32 bytes 0x20..0x3f in standard base64.
-const NONCE_B64: &str = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=";
-
-fn hello() -> String {
-    format!("{{\"v\":3,\"nonce\":\"{NONCE_B64}\"}}\n")
-}
-
-/// The nonce of [`hello`].
-fn nonce() -> Vec<u8> {
-    STANDARD.decode(NONCE_B64).unwrap()
-}
-
-/// A verdict line as the real host writes it: `None` for success, `Some(reason)` for a refusal.
-fn signed(reason: Option<&str>, nonce: &[u8], fingerprint: &str) -> String {
-    let mac = otp().verdict_mac(
-        nonce,
-        reason.is_none(),
-        reason.unwrap_or_default(),
-        fingerprint,
-    );
-    match reason {
-        None => format!("{{\"ok\":true,\"mac\":\"{}\"}}\n", STANDARD.encode(mac)),
-        Some(reason) => format!(
-            "{{\"ok\":false,\"reason\":\"{reason}\",\"mac\":\"{}\"}}\n",
-            STANDARD.encode(mac)
-        ),
     }
-}
 
-/// [`signed`] for [`PHONE_KEY`] and [`hello`]'s nonce, as a `&'static str` for [`Host::Raw`].
-fn signed_for_phone(reason: Option<&str>) -> &'static str {
-    let fingerprint = fingerprint_of(PHONE_KEY).unwrap();
-    Box::leak(signed(reason, &nonce(), &fingerprint).into_boxed_str())
-}
-
-async fn run(script: Host, hello: String) -> (Result<(), PairError>, Option<Seen>) {
-    let (client, task) = host(script, hello);
-    let result = converse(client, &otp(), PHONE_KEY, "Pixel", quick()).await;
-    (result, task.await.unwrap())
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_good_exchange_sends_the_key_and_a_mac_the_host_can_verify() {
-    let (result, seen) = run(Host::Verdict(None), hello()).await;
-    assert_eq!(result, Ok(()));
-    let seen = seen.unwrap();
-    assert!(seen.mac_ok);
-    assert_eq!(seen.request["v"], 3);
-    assert_eq!(seen.request["key"], PHONE_KEY);
-    assert_eq!(seen.request["device"], "Pixel");
-    // The password itself is nowhere in the request.
-    assert!(!seen.request.to_string().contains(OTP_TEXT));
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_responder_that_does_not_know_the_password_cannot_forge_a_verdict() {
-    // Finding 5: an active attacker on the path replies to whatever the phone sent, without the
-    // password and without the real host. Neither a success nor a refusal may be taken for one.
-    let other_nonce = [3u8; 32];
-    let fingerprint = fingerprint_of(PHONE_KEY).unwrap();
-    let other_key = fingerprint_of(HOST_KEY).unwrap();
-    // The request MAC the phone itself sent, replayed back as a verdict.
-    let reflected = STANDARD.encode(otp().request_mac(&nonce(), PHONE_KEY));
-    let forgeries: Vec<(&str, String)> = vec![
-        ("success, no proof", "{\"ok\":true}\n".to_owned()),
-        (
-            "refusal, no proof",
-            "{\"ok\":false,\"reason\":\"declined\"}\n".to_owned(),
-        ),
-        (
-            "wrong-code refusal, no proof",
-            "{\"ok\":false,\"reason\":\"authentication\"}\n".to_owned(),
-        ),
-        (
-            "success, garbage proof",
-            "{\"ok\":true,\"mac\":\"AAAA\"}\n".to_owned(),
-        ),
-        (
-            "success, proof that is not base64",
-            "{\"ok\":true,\"mac\":\"!!!\"}\n".to_owned(),
-        ),
-        (
-            "a refusal's proof on a success",
-            signed(Some("declined"), &nonce(), &fingerprint)
-                .replace("\"ok\":false,\"reason\":\"declined\"", "\"ok\":true"),
-        ),
-        (
-            "a success's proof on a refusal",
-            signed(None, &nonce(), &fingerprint)
-                .replace("\"ok\":true", "\"ok\":false,\"reason\":\"declined\""),
-        ),
-        (
-            "a proof replayed from another exchange",
-            signed(None, &other_nonce, &fingerprint),
-        ),
-        (
-            "a proof about another key",
-            signed(None, &nonce(), &other_key),
-        ),
-        (
-            "the phone's own request MAC sent back",
-            format!("{{\"ok\":true,\"mac\":\"{reflected}\"}}\n"),
-        ),
-    ];
-    for (what, forged) in forgeries {
-        let forged: &'static str = Box::leak(forged.into_boxed_str());
-        let (result, _) = run(Host::Raw(forged), hello()).await;
-        assert_eq!(
-            result,
-            Err(PairError::HostNotAuthenticated),
-            "{what}: {forged}"
-        );
+    fn phone_line(&self) -> String {
+        self.phone.public_key().openssh
     }
-    // And the real thing, for contrast.
-    let (result, _) = run(Host::Raw(signed_for_phone(None)), hello()).await;
-    assert_eq!(result, Ok(()));
-}
 
-#[tokio::test(start_paused = true)]
-async fn a_success_proof_cannot_be_relabelled_as_a_refusal_or_the_reverse() {
-    // Review of 6afa42e: with the v2 MAC, `ok:true` and `ok:false,reason:"ok"` shared a MAC, so a
-    // proxy could turn a signed success into a "refusal" (and the phone spent its code although the
-    // key was installed). The verdict encoding is now unambiguous and the shape must match it.
-    let fingerprint = fingerprint_of(PHONE_KEY).unwrap();
-    let success = signed(None, &nonce(), &fingerprint);
-    let mac = success
-        .split("\"mac\":\"")
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .unwrap()
-        .to_owned();
-    let refusal = signed(Some("declined"), &nonce(), &fingerprint);
-    let refusal_mac = refusal
-        .split("\"mac\":\"")
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .unwrap()
-        .to_owned();
-    let forgeries = [
-        // The reproduced substitution: a success's MAC under a refusal with reason "ok".
-        format!("{{\"ok\":false,\"reason\":\"ok\",\"mac\":\"{mac}\"}}\n"),
-        // The same with no reason at all, and with the empty reason.
-        format!("{{\"ok\":false,\"mac\":\"{mac}\"}}\n"),
-        format!("{{\"ok\":false,\"reason\":\"\",\"mac\":\"{mac}\"}}\n"),
-        // A refusal's MAC under a success that carries the refusal's reason, or any reason.
-        format!("{{\"ok\":true,\"reason\":\"declined\",\"mac\":\"{refusal_mac}\"}}\n"),
-        format!("{{\"ok\":true,\"reason\":\"ok\",\"mac\":\"{mac}\"}}\n"),
-        // A refusal's MAC under another reason.
-        format!("{{\"ok\":false,\"reason\":\"busy\",\"mac\":\"{refusal_mac}\"}}\n"),
-    ];
-    for forged in forgeries {
-        let forged: &'static str = Box::leak(forged.into_boxed_str());
-        let (result, _) = run(Host::Raw(forged), hello()).await;
-        assert_eq!(result, Err(PairError::HostNotAuthenticated), "{forged}");
+    fn fingerprint(&self) -> String {
+        self.phone.public_key().fingerprint
     }
-    // Fields that were not MAC'd are not tolerated either.
-    let extra: &'static str =
-        Box::leak(format!("{{\"ok\":true,\"mac\":\"{mac}\",\"extra\":1}}\n").into_boxed_str());
-    let (result, _) = run(Host::Raw(extra), hello()).await;
-    assert_eq!(result, Err(PairError::Protocol));
-    let (result, _) = run(Host::Raw(signed_for_phone(None)), hello()).await;
-    assert_eq!(result, Ok(()));
-}
 
-#[tokio::test(start_paused = true)]
-async fn each_refusal_reason_has_its_own_error() {
-    for (reason, refusal) in [
-        ("declined", Refusal::Declined),
-        ("authentication", Refusal::AuthenticationFailed),
-        ("key", Refusal::KeyNotAccepted),
-        ("timeout", Refusal::TimedOut),
-        ("request", Refusal::BadRequest),
-        ("failed", Refusal::HostFailed),
-        ("busy", Refusal::Other),
-        ("who knows", Refusal::Other),
-    ] {
-        let (result, _) = run(Host::Verdict(Some(reason)), hello()).await;
-        assert_eq!(result, Err(PairError::Refused(refusal)), "{reason}");
-    }
-    // A refusal with no reason at all is signed over the empty verdict.
-    let fingerprint = fingerprint_of(PHONE_KEY).unwrap();
-    let mac = STANDARD.encode(otp().verdict_mac(&nonce(), false, "", &fingerprint));
-    let bare: &'static str =
-        Box::leak(format!("{{\"ok\":false,\"mac\":\"{mac}\"}}\n").into_boxed_str());
-    let (result, _) = run(Host::Raw(bare), hello()).await;
-    assert_eq!(result, Err(PairError::Refused(Refusal::Other)));
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_bad_hello_is_a_protocol_error() {
-    for text in [
-        // Older hosts (version 1 had no authenticated verdict, 2 an ambiguous one) and a newer one.
-        "{\"v\":1,\"nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}\n".to_owned(),
-        "{\"v\":2,\"nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}\n".to_owned(),
-        "{\"v\":4,\"nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}\n".to_owned(),
-        "{\"v\":3,\"nonce\":\"AAAA\"}\n".to_owned(),
-        "{\"v\":3,\"nonce\":\"!!!\"}\n".to_owned(),
-        "{\"v\":3}\n".to_owned(),
-        "not json\n".to_owned(),
-        "\n".to_owned(),
-        // Longer than the bound, never ending.
-        "x".repeat(HELLO_LIMIT + 1),
-        // Longer than the bound with the newline in it.
-        format!("{}\n", "x".repeat(HELLO_LIMIT + 1)),
-    ] {
-        let (client, _task) = host(Host::Hangup, text.clone());
-        let result = converse(client, &otp(), PHONE_KEY, "Pixel", quick()).await;
-        assert_eq!(
-            result,
-            Err(PairError::Protocol),
-            "{}",
-            &text[..text.len().min(40)]
-        );
-    }
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_garbled_verdict_is_a_protocol_error_and_a_hangup_is_a_lost_connection() {
-    for raw in [
-        "nope\n",
-        "{\"reason\":\"x\"}\n",
-        &format!("{}\n", "x".repeat(REPLY_LIMIT + 1)),
-    ] {
-        let (result, _) = run(
-            Host::Raw(Box::leak(raw.to_owned().into_boxed_str())),
-            hello(),
+    /// An `ok` verdict for the phone's key.
+    fn ok(&self) -> Step {
+        Step::Data(
+            format!(
+                "{{\"v\":2,\"ok\":true,\"user\":\"dev\",\"fingerprint\":\"{}\"}}\n",
+                self.fingerprint()
+            )
+            .into_bytes(),
         )
-        .await;
-        assert_eq!(result, Err(PairError::Protocol));
     }
-    let (result, _) = run(Host::Hangup, hello()).await;
-    assert_eq!(result, Err(PairError::ConnectionLost));
+
+    async fn enroll(&self, step: Duration) -> Result<PairResult, PairError> {
+        pair_enroll(
+            &self.transport,
+            &self.offer,
+            &self.code,
+            &self.phone_line(),
+            "OnePlus",
+            PairTiming { step },
+        )
+        .await
+    }
+
+    fn observed(&self) -> &Observed {
+        &self.transport.observed
+    }
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_silent_host_times_out_at_each_step() {
-    // No hello within 10 s.
-    let (client, _server) = tokio::io::duplex(64);
-    let started = tokio::time::Instant::now();
-    let result = converse(client, &otp(), PHONE_KEY, "Pixel", quick()).await;
-    assert_eq!(result, Err(PairError::TimedOut));
-    assert_eq!(started.elapsed(), Duration::from_secs(10));
-    // A hello, then no verdict: the wait is the verdict limit, not the step limit.
-    let (client, task) = host(Host::Silent(1000), hello());
-    let started = tokio::time::Instant::now();
-    let result = converse(client, &otp(), PHONE_KEY, "Pixel", quick()).await;
-    assert_eq!(result, Err(PairError::TimedOut));
-    assert_eq!(started.elapsed(), Duration::from_secs(125));
-    task.abort();
+/// Plenty for work in memory, short enough that the timeout tests do not drag.
+const STEP: Duration = Duration::from_secs(5);
+const SHORT: Duration = Duration::from_millis(400);
+
+fn scenario(on_exec: Vec<Step>, on_request: Vec<Step>) -> Scenario {
+    Scenario {
+        on_exec,
+        on_request,
+        refuse_exec: false,
+    }
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_slow_confirmation_inside_the_window_still_succeeds() {
-    let (client, server) = tokio::io::duplex(4096);
-    tokio::spawn(async move {
-        let mut server = BufReader::new(server);
-        server.write_all(hello().as_bytes()).await.unwrap();
-        let mut line = String::new();
-        server.read_line(&mut line).await.unwrap();
-        tokio::time::sleep(Duration::from_secs(100)).await;
-        server
-            .write_all(signed_for_phone(None).as_bytes())
-            .await
-            .unwrap();
-    });
+impl Setup {
+    /// The same host, phone and code with a fake host that runs `scenario` instead.
+    fn running(self, scenario: Scenario) -> Self {
+        Self {
+            transport: Arc::new(Pipes {
+                scenario: Arc::new(scenario),
+                host: self.transport.host.clone(),
+                bootstrap: self.transport.bootstrap.clone(),
+                observed: Arc::default(),
+                connections: AtomicUsize::new(0),
+            }),
+            ..self
+        }
+    }
+}
+
+/// A setup whose fake host runs `scenario`.
+fn with(scenario: Scenario) -> Setup {
+    Setup::new(Scenario::default()).running(scenario)
+}
+
+/// A setup whose fake host says hello and answers the request with `verdict(setup)`, then exits.
+fn answering(verdict: impl FnOnce(&Setup) -> Step) -> Setup {
+    let setup = Setup::new(Scenario::default());
+    let step = verdict(&setup);
+    setup.running(scenario(vec![hello()], vec![step, Step::Close]))
+}
+
+#[tokio::test]
+async fn pairs_with_one_handshake_one_authentication_and_the_documented_exchange() {
+    let setup = answering(|setup| setup.ok());
+    let result = setup.enroll(STEP).await.unwrap();
     assert_eq!(
-        converse(client, &otp(), PHONE_KEY, "Pixel", quick()).await,
-        Ok(())
+        result,
+        PairResult {
+            username: "dev".into(),
+            fingerprint: setup.fingerprint(),
+        }
     );
+    let observed = setup.observed();
+    assert_eq!(*observed.commands.lock().unwrap(), ["or2-pair"]);
+    // The request: the key without its comment, the device label, one line.
+    let key = setup.phone_line();
+    let key = key.split(' ').take(2).collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        String::from_utf8(observed.requests.lock().unwrap().clone()).unwrap(),
+        format!("{{\"v\":2,\"key\":\"{key}\",\"device\":\"OnePlus\"}}\n")
+    );
+    // One authentication: the bootstrap key, once. No password, no probing with other methods.
+    assert_eq!(observed.publickey_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(observed.other_attempts.load(Ordering::SeqCst), 0);
+    assert_eq!(setup.transport.connections.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test(start_paused = true)]
-async fn submit_validates_before_it_connects() {
-    let transport = Pipes::new(vec![]);
-    let bare = PairOffer::parse(&code(&without(&without(&full(), "pair"), "otp"))).unwrap();
-    assert_eq!(
-        submit_key(&transport, &bare, PHONE_KEY, "Pixel", quick()).await,
-        Err(PairError::NoExchange)
-    );
-    for key in [
-        "",
-        "garbage",
-        "ssh-ed25519 AAAA",
-        "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIAc39XUWT33SvSLy6vA7I83+XgmwnHmYtMQRjLeaZ2U7AAAABHNzaDo=",
+#[tokio::test]
+async fn every_refusal_reason_has_its_own_error() {
+    for (reason, expected) in [
+        ("expired", PairError::Expired),
+        ("gone", PairError::Gone),
+        ("key", PairError::KeyNotAccepted),
+        ("failed", PairError::HostFailed),
+        ("request", PairError::Refused),
+        ("something-new", PairError::Refused),
+        ("", PairError::Refused),
     ] {
-        assert_eq!(
-            submit_key(&transport, &offer(), key, "Pixel", quick()).await,
-            Err(PairError::InvalidKey),
-            "{key:?}"
-        );
+        let setup = answering(|_| {
+            data(&format!(
+                "{{\"v\":2,\"ok\":false,\"reason\":\"{reason}\"}}\n"
+            ))
+        });
+        assert_eq!(setup.enroll(STEP).await.unwrap_err(), expected, "{reason}");
     }
-    for device in ["", "  ", "a\nb", &"d".repeat(65)] {
-        assert_eq!(
-            submit_key(&transport, &offer(), PHONE_KEY, device, quick()).await,
-            Err(PairError::InvalidDevice)
-        );
-    }
-    assert!(transport.asked.lock().unwrap().is_empty());
+    // A refusal without a reason at all.
+    let setup = answering(|_| data("{\"v\":2,\"ok\":false}\n"));
+    assert_eq!(setup.enroll(STEP).await.unwrap_err(), PairError::Refused);
 }
 
-#[tokio::test(start_paused = true)]
-async fn submit_sends_a_clean_key_without_its_comment_through_the_transport() {
-    let (client, task) = host(Host::Verdict(None), hello());
-    let transport = Pipes::new(vec![client]);
-    let result = submit_key(
-        &transport,
-        &offer(),
-        &format!("{PHONE_KEY} phone@pixel\n"),
-        " Pixel 8 ",
-        quick(),
+#[tokio::test]
+async fn shell_noise_before_the_hello_is_skipped_within_four_kilobytes() {
+    let ok = |s: &Setup| s.ok();
+    let noise_of = |size: usize| -> Vec<u8> {
+        let mut noise = vec![b'x'; size - 1];
+        noise.push(b'\n');
+        noise
+    };
+    for (name, steps) in [
+        (
+            "a banner",
+            vec![data("Welcome to workstation\nLast login: never\n"), hello()],
+        ),
+        (
+            "noise on stderr",
+            vec![Step::Stderr(b"warning: something\n".to_vec()), hello()],
+        ),
+        ("an empty line", vec![data("\n\n"), hello()]),
+        (
+            "the hello split over chunks",
+            vec![
+                data("motd\n{\"v\":2,\"he"),
+                data("llo\":\"or2-pair\",\"id\":\"abcd"),
+                data("efghijklm\"}\n"),
+            ],
+        ),
+        (
+            "a carriage return before the newline",
+            vec![data(&format!(
+                "{}\r\n",
+                String::from_utf8(hello_line(ID)).unwrap().trim_end()
+            ))],
+        ),
+        (
+            "exactly 4096 bytes of noise",
+            vec![Step::Data(noise_of(NOISE_LIMIT)), hello()],
+        ),
+    ] {
+        let setup = Setup::new(Scenario::default());
+        let verdict = ok(&setup);
+        let setup = setup.running(scenario(steps, vec![verdict, Step::Close]));
+        assert!(setup.enroll(STEP).await.is_ok(), "{name}");
+    }
+    for (name, steps) in [
+        (
+            "4097 bytes of noise",
+            vec![Step::Data(noise_of(NOISE_LIMIT + 1)), hello()],
+        ),
+        (
+            "a long line without a newline",
+            vec![Step::Data(vec![b'x'; 5000])],
+        ),
+        (
+            "a hello that is not at the start of its line",
+            vec![
+                Step::Data([b"prompt> ".to_vec(), hello_line(ID)].concat()),
+                Step::Close,
+            ],
+        ),
+        ("silence and exit", vec![Step::Close]),
+        (
+            "output that is not the hello",
+            vec![data("sh: or2-pair: not found\n"), Step::Close],
+        ),
+    ] {
+        let setup = with(scenario(steps, vec![]));
+        assert_eq!(
+            setup.enroll(STEP).await.unwrap_err(),
+            PairError::NotOr2Pair,
+            "{name}"
+        );
+        assert!(
+            setup.observed().requests.lock().unwrap().is_empty(),
+            "{name}: nothing was sent"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_refused_exec_is_not_or2_pair() {
+    let setup = with(Scenario {
+        refuse_exec: true,
+        ..Scenario::default()
+    });
+    assert_eq!(setup.enroll(STEP).await.unwrap_err(), PairError::NotOr2Pair);
+}
+
+#[tokio::test]
+async fn a_hello_for_another_run_or_another_program_is_a_protocol_error() {
+    let long = format!(
+        "{{\"v\":2,\"hello\":\"or2-pair\",\"id\":\"{}\"}}\n",
+        "x".repeat(300)
+    );
+    for (name, line) in [
+        (
+            "another id",
+            String::from_utf8(hello_line("bcdefghijklmn")).unwrap(),
+        ),
+        (
+            "another program",
+            "{\"v\":2,\"hello\":\"other\",\"id\":\"abcdefghijklm\"}\n".to_owned(),
+        ),
+        ("not JSON", "{\"v\":2,\"hello\": nope\n".to_owned()),
+        (
+            "a missing id",
+            "{\"v\":2,\"hello\":\"or2-pair\"}\n".to_owned(),
+        ),
+        ("a hello over 256 bytes", long),
+    ] {
+        let setup = with(scenario(vec![data(&line)], vec![]));
+        assert_eq!(
+            setup.enroll(STEP).await.unwrap_err(),
+            PairError::Protocol,
+            "{name}"
+        );
+        assert!(setup.observed().requests.lock().unwrap().is_empty());
+    }
+    // A hello of version 3 is not a hello this app skips to: it is noise, then nothing.
+    let setup = with(scenario(
+        vec![
+            data("{\"v\":3,\"hello\":\"or2-pair\",\"id\":\"abcdefghijklm\"}\n"),
+            Step::Close,
+        ],
+        vec![],
+    ));
+    assert_eq!(setup.enroll(STEP).await.unwrap_err(), PairError::NotOr2Pair);
+}
+
+#[tokio::test]
+async fn a_bad_verdict_is_a_protocol_error_and_a_missing_one_is_a_lost_connection() {
+    let big = format!(
+        "{{\"v\":2,\"ok\":false,\"reason\":\"{}\"}}\n",
+        "x".repeat(600)
+    );
+    for (name, text) in [
+        ("not JSON", "ok\n".to_owned()),
+        (
+            "version 3",
+            "{\"v\":3,\"ok\":false,\"reason\":\"gone\"}\n".to_owned(),
+        ),
+        (
+            "no version",
+            "{\"ok\":false,\"reason\":\"gone\"}\n".to_owned(),
+        ),
+        (
+            "no user",
+            "{\"v\":2,\"ok\":true,\"fingerprint\":\"F\"}\n".to_owned(),
+        ),
+        ("over 512 bytes", big),
+    ] {
+        let setup = answering(|_| data(&text));
+        assert_eq!(
+            setup.enroll(STEP).await.unwrap_err(),
+            PairError::Protocol,
+            "{name}"
+        );
+    }
+    // Another key's fingerprint: the host installed something else.
+    let setup = answering(|_| {
+        data("{\"v\":2,\"ok\":true,\"user\":\"dev\",\"fingerprint\":\"SHA256:other\"}\n")
+    });
+    assert_eq!(setup.enroll(STEP).await.unwrap_err(), PairError::Protocol);
+    // The command exits after the hello without answering.
+    let setup = with(scenario(vec![hello()], vec![Step::Close]));
+    assert_eq!(
+        setup.enroll(STEP).await.unwrap_err(),
+        PairError::ConnectionLost
+    );
+    // The verdict may share a packet with what follows it, and lines may end in CRLF.
+    let setup = answering(|s| {
+        let Step::Data(mut bytes) = s.ok() else {
+            unreachable!()
+        };
+        bytes.insert(bytes.len() - 1, b'\r');
+        Step::Data(bytes)
+    });
+    assert!(setup.enroll(STEP).await.is_ok());
+}
+
+#[tokio::test]
+async fn a_different_code_is_refused_at_authentication_and_nothing_runs() {
+    let setup = with(scenario(vec![hello()], vec![]));
+    let wrong = PairCode::parse_typed("1111-0000-000A").unwrap();
+    let result = pair_enroll(
+        &setup.transport,
+        &setup.offer,
+        &wrong,
+        &setup.phone_line(),
+        "OnePlus",
+        PairTiming { step: STEP },
     )
     .await;
-    assert_eq!(result, Ok(()));
-    let seen = task.await.unwrap().unwrap();
-    assert_eq!(seen.request["key"], PHONE_KEY);
-    assert_eq!(seen.request["device"], "Pixel 8");
-    assert!(seen.mac_ok);
-    assert_eq!(
-        *transport.asked.lock().unwrap(),
-        [Endpoint::new("192.168.1.20", 41234).unwrap()]
-    );
+    assert_eq!(result.unwrap_err(), PairError::BootstrapRefused);
+    let observed = setup.observed();
+    assert_eq!(observed.publickey_attempts.load(Ordering::SeqCst), 1);
+    assert!(observed.commands.lock().unwrap().is_empty());
+    assert!(observed.requests.lock().unwrap().is_empty());
 }
 
-#[tokio::test(start_paused = true)]
-async fn submit_with_no_reachable_address_is_unreachable_and_a_hang_is_timed_out() {
-    let result = submit_key(&Pipes::new(vec![]), &offer(), PHONE_KEY, "Pixel", quick()).await;
-    assert_eq!(result, Err(PairError::Unreachable));
-
-    struct Hang;
-    impl Transport for Hang {
-        type Stream = DuplexStream;
-        async fn connect(&self, _: &Endpoint) -> io::Result<DuplexStream> {
-            std::future::pending().await
-        }
+#[tokio::test]
+async fn another_host_key_ends_the_connection_before_authentication() {
+    let setup = with(scenario(vec![hello()], vec![]));
+    // The server presents `host`; the code pinned another ed25519 key, then an ECDSA key the
+    // server does not have at all.
+    for pinned in [
+        HostKey::from_openssh(HOST_KEY).unwrap(),
+        HostKey::from_openssh(ECDSA_KEY).unwrap(),
+    ] {
+        let offer = PairOffer {
+            host_key: pinned,
+            ..setup.offer.clone()
+        };
+        let result = pair_enroll(
+            &setup.transport,
+            &offer,
+            &setup.code,
+            &setup.phone_line(),
+            "OnePlus",
+            PairTiming { step: STEP },
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), PairError::HostKeyMismatch);
     }
-    let result = submit_key(&Arc::new(Hang), &offer(), PHONE_KEY, "Pixel", quick()).await;
-    assert_eq!(result, Err(PairError::TimedOut));
+    let observed = setup.observed();
+    assert_eq!(observed.publickey_attempts.load(Ordering::SeqCst), 0);
+    assert_eq!(observed.other_attempts.load(Ordering::SeqCst), 0);
+    assert!(observed.commands.lock().unwrap().is_empty());
 }
 
-#[tokio::test(start_paused = true)]
-async fn submit_races_the_pair_addresses_and_uses_the_one_that_answers() {
-    let mut fields = without(&full(), "pair");
-    fields.push(("pair", "10.0.0.1:1111"));
-    fields.push(("pair", "10.0.0.2:2222"));
-    let offer = PairOffer::parse(&code(&fields)).unwrap();
-
-    struct Second(Mutex<Option<DuplexStream>>);
-    impl Transport for Second {
-        type Stream = DuplexStream;
-        async fn connect(&self, endpoint: &Endpoint) -> io::Result<DuplexStream> {
-            if endpoint.port() == 1111 {
-                return Err(io::Error::from(io::ErrorKind::HostUnreachable));
-            }
-            Ok(self.0.lock().unwrap().take().unwrap())
-        }
-    }
-    let (client, task) = host(Host::Verdict(None), hello());
-    let transport = Arc::new(Second(Mutex::new(Some(client))));
-    assert_eq!(
-        submit_key(&transport, &offer, PHONE_KEY, "Pixel", quick()).await,
-        Ok(())
+#[tokio::test]
+async fn a_silent_host_times_out_at_each_step() {
+    // No hello after the exec.
+    let setup = with(scenario(vec![], vec![]));
+    let started = Instant::now();
+    assert_eq!(setup.enroll(SHORT).await.unwrap_err(), PairError::TimedOut);
+    assert!(started.elapsed() >= SHORT && started.elapsed() < SHORT * 5);
+    // A hello and then no verdict.
+    let setup = with(scenario(vec![hello()], vec![]));
+    assert_eq!(setup.enroll(SHORT).await.unwrap_err(), PairError::TimedOut);
+    assert!(
+        !setup.observed().requests.lock().unwrap().is_empty(),
+        "the request was sent"
     );
-    assert!(task.await.unwrap().unwrap().mac_ok);
+    // Noise that never ends in a hello is also a wait for the hello.
+    let setup = with(scenario(vec![data("loading...\n")], vec![]));
+    assert_eq!(setup.enroll(SHORT).await.unwrap_err(), PairError::TimedOut);
+}
+
+#[tokio::test]
+async fn an_unreachable_host_is_unreachable_and_a_silent_one_times_out() {
+    let setup = Setup::new(Scenario::default());
+    for (kind, expected) in [
+        (io::ErrorKind::ConnectionRefused, PairError::Unreachable),
+        (io::ErrorKind::HostUnreachable, PairError::Unreachable),
+        (io::ErrorKind::TimedOut, PairError::TimedOut),
+    ] {
+        let result = pair_enroll(
+            &Arc::new(Failing(kind)),
+            &setup.offer,
+            &setup.code,
+            &setup.phone_line(),
+            "OnePlus",
+            PairTiming { step: STEP },
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), expected, "{kind:?}");
+    }
+}
+
+#[tokio::test]
+async fn cancelling_the_pairing_closes_the_channel_through_the_connection() {
+    // The host says hello and then waits for the verdict that never comes; the caller gives up.
+    let setup = with(scenario(vec![hello()], vec![]));
+    let outcome = tokio::time::timeout(Duration::from_millis(500), setup.enroll(STEP)).await;
+    assert!(outcome.is_err(), "still waiting for the verdict");
+    let observed = setup.observed();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while observed.channel_closes.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "the channel was never closed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_finished_pairing_closes_its_channel_when_the_host_has_not() {
+    // The host answers but leaves its channel open: the phone closes it.
+    let setup = Setup::new(Scenario::default());
+    let verdict = setup.ok();
+    let setup = setup.running(scenario(vec![hello()], vec![verdict]));
+    assert!(setup.enroll(STEP).await.is_ok());
+    let observed = setup.observed();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while observed.channel_closes.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "the channel was never closed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn inputs_are_checked_before_anything_is_connected() {
+    let setup = with(scenario(vec![hello()], vec![]));
+    let enroll = |offer: &PairOffer, key: &str, device: &str| {
+        let transport = Arc::clone(&setup.transport);
+        let (offer, key, device) = (offer.clone(), key.to_owned(), device.to_owned());
+        let code = PairCode::parse_typed(CODE_TEXT).unwrap();
+        async move {
+            pair_enroll(
+                &transport,
+                &offer,
+                &code,
+                &key,
+                &device,
+                PairTiming { step: STEP },
+            )
+            .await
+        }
+    };
+    let key = setup.phone_line();
+    let manual = PairOffer {
+        pairing_id: None,
+        ..setup.offer.clone()
+    };
+    assert_eq!(
+        enroll(&manual, &key, "d").await,
+        Err(PairError::NoPairingId)
+    );
+    let bad_id = PairOffer {
+        pairing_id: Some("not-an-id".into()),
+        ..setup.offer.clone()
+    };
+    assert_eq!(
+        enroll(&bad_id, &key, "d").await,
+        Err(PairError::InvalidOffer)
+    );
+    let no_address = PairOffer {
+        addresses: vec![],
+        ..setup.offer.clone()
+    };
+    assert_eq!(
+        enroll(&no_address, &key, "d").await,
+        Err(PairError::InvalidOffer)
+    );
+    for bad in ["", "nonsense", "ssh-dss AAAAB3NzaC1kc3M="] {
+        assert_eq!(
+            enroll(&setup.offer, bad, "d").await,
+            Err(PairError::InvalidKey),
+            "{bad:?}"
+        );
+    }
+    let long = "d".repeat(65);
+    for bad in ["", "  ", "a\nb", long.as_str()] {
+        assert_eq!(
+            enroll(&setup.offer, &key, bad).await,
+            Err(PairError::InvalidDevice),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(setup.transport.connections.load(Ordering::SeqCst), 0);
 }

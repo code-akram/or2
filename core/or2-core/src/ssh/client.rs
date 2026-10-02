@@ -1,10 +1,13 @@
 //! What an SSH connection to a host needs: the host-key handler, the transport relay,
 //! handshake failure mapping and public key authentication.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
+use russh::Preferred;
 use russh::client;
+use russh::keys::ssh_key::{Algorithm, HashAlg};
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, DuplexStream};
 use tokio::sync::{mpsc, oneshot};
@@ -24,6 +27,34 @@ pub(crate) fn config() -> Arc<client::Config> {
     Arc::new(client::Config {
         keepalive_interval: Some(KEEPALIVE_INTERVAL),
         keepalive_max: KEEPALIVE_MAX,
+        ..Default::default()
+    })
+}
+
+/// [`config`] that offers only the host-key algorithm of `pinned`: a host with several keys must
+/// present the one that was pinned (sshd picks a key of the first algorithm the client lists that
+/// it has), and one without a key of that algorithm fails the handshake. Pairing uses it.
+pub(crate) fn pinned_config(pinned: Algorithm) -> Arc<client::Config> {
+    let algorithms = match pinned {
+        // The hash is the signature's, not the key's: any RSA key signs with any of them.
+        Algorithm::Rsa { .. } => vec![
+            Algorithm::Rsa {
+                hash: Some(HashAlg::Sha512),
+            },
+            Algorithm::Rsa {
+                hash: Some(HashAlg::Sha256),
+            },
+            Algorithm::Rsa { hash: None },
+        ],
+        other => vec![other],
+    };
+    Arc::new(client::Config {
+        keepalive_interval: Some(KEEPALIVE_INTERVAL),
+        keepalive_max: KEEPALIVE_MAX,
+        preferred: Preferred {
+            key: Cow::Owned(algorithms),
+            ..Preferred::DEFAULT
+        },
         ..Default::default()
     })
 }

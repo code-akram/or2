@@ -1,73 +1,51 @@
-//! Easy pair for Kotlin (FFI API 11): parse a pairing code, and send the phone's key to the
-//! host that showed it. See docs/contracts.md, "Easy pair".
+//! Easy pair for Kotlin (FFI API 13): the pairing code the phone shows, parsing the code the host
+//! prints, and enrolling the phone's key over the host's own sshd. See docs/contracts.md, "Easy
+//! pair".
 //!
-//! The one-time password never reaches Kotlin: `PairOffer.exchange.secret` is an opaque object
-//! that Rust holds and zeroizes (`wipe()`, or when the last reference goes). Its generated
-//! `toString()` shows nothing, and `Debug` is redacted.
+//! The pairing code never leaves Rust except as the text on the screen (`PairCode.display`): it is
+//! an opaque object that Rust zeroizes when the last reference goes, and its `Debug` is redacted.
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use or2_core::pair as core;
 use or2_core::transport::{DirectTcp, Endpoint};
+use or2_core::trust::HostKey;
 
 use crate::host::HostAddress;
 use crate::keys::PublicKeyInfo;
 
-/// The one-time password, held by Rust. Opaque to Kotlin.
+/// The pairing code `K` (`7KQ4-M2XD-9PTM`): 55 random bits and a check character, shown on the
+/// Easy pair screen and typed into `or2-pair` on the host. Opaque to Kotlin.
 #[derive(uniffi::Object)]
-pub struct PairSecret {
-    otp: Mutex<Option<core::Otp>>,
+pub struct PairCode {
+    code: core::PairCode,
 }
 
-impl fmt::Debug for PairSecret {
+impl fmt::Debug for PairCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("PairSecret(<redacted>)")
-    }
-}
-
-impl PairSecret {
-    fn new(otp: core::Otp) -> Arc<Self> {
-        Arc::new(Self {
-            otp: Mutex::new(Some(otp)),
-        })
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<core::Otp>> {
-        self.otp
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn take_copy(&self) -> Option<core::Otp> {
-        self.lock().clone()
+        f.write_str("PairCode(<redacted>)")
     }
 }
 
 #[uniffi::export]
-impl PairSecret {
-    /// Overwrites the password now. Call it when the pairing flow ends, however it ends;
-    /// submitting afterwards fails with `Wiped`. Idempotent.
-    pub fn wipe(&self) {
-        if let Some(mut otp) = self.lock().take() {
-            otp.wipe();
-        }
-    }
-
-    pub fn is_wiped(&self) -> bool {
-        self.lock().is_none()
+impl PairCode {
+    /// The code as shown, three groups of four: `7KQ4-M2XD-9PTM`.
+    pub fn display(&self) -> String {
+        self.code.display()
     }
 }
 
-/// How to reach the host's one-shot listener.
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct PairExchange {
-    /// Where the host listens, in preference order (IP literals).
-    pub endpoints: Vec<HostAddress>,
-    pub secret: Arc<PairSecret>,
+/// A new pairing code from the operating system's random source. Draw one each time the Easy pair
+/// screen opens and after every pairing that reached the host, successful or not.
+#[uniffi::export]
+pub fn pair_new_code() -> Arc<PairCode> {
+    Arc::new(PairCode {
+        code: core::PairCode::generate(),
+    })
 }
 
-/// A validated pairing code.
+/// A validated pairing code from the host (the text of its QR).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct PairOffer {
     /// The host's own name for itself, to pre-fill the host's label.
@@ -77,18 +55,11 @@ pub struct PairOffer {
     pub port: u16,
     /// Where SSH reaches the host, in preference order.
     pub addresses: Vec<HostAddress>,
-    /// The host's key, to trust before the first connection (`fingerprint` is for display).
+    /// The host's key: pinned for the pairing, trusted afterwards (`fingerprint` is for display).
     pub host_key: PublicKeyInfo,
-    /// `None` for a code made with `--no-listen`: there is nothing to submit to, so the phone
-    /// shows its public key for the user to install by hand.
-    pub exchange: Option<PairExchange>,
-}
-
-fn address(endpoint: &Endpoint) -> HostAddress {
-    HostAddress {
-        host: endpoint.host().to_owned(),
-        port: endpoint.port(),
-    }
+    /// This run's pairing id. `None` for a code made with `--manual`: there is nothing to enrol
+    /// with, so the phone shows its public key for the user to install by hand.
+    pub pairing_id: Option<String>,
 }
 
 impl From<core::PairOffer> for PairOffer {
@@ -97,13 +68,37 @@ impl From<core::PairOffer> for PairOffer {
             name: offer.name,
             username: offer.username,
             port: offer.port,
-            addresses: offer.addresses.iter().map(address).collect(),
+            addresses: offer
+                .addresses
+                .iter()
+                .map(|endpoint| HostAddress {
+                    host: endpoint.host().to_owned(),
+                    port: endpoint.port(),
+                })
+                .collect(),
             host_key: offer.host_key.info().into(),
-            exchange: offer.exchange.map(|exchange| PairExchange {
-                endpoints: exchange.endpoints.iter().map(address).collect(),
-                secret: PairSecret::new(exchange.otp),
-            }),
+            pairing_id: offer.pairing_id,
         }
+    }
+}
+
+impl PairOffer {
+    /// The core's offer again; `None` if this is not what `parse_pair_payload` made.
+    fn to_core(&self) -> Option<core::PairOffer> {
+        let addresses = self
+            .addresses
+            .iter()
+            .map(|a| Endpoint::new(&a.host, a.port))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        Some(core::PairOffer {
+            name: self.name.clone(),
+            username: self.username.clone(),
+            port: self.port,
+            addresses,
+            host_key: HostKey::from_openssh(&self.host_key.openssh).ok()?,
+            pairing_id: self.pairing_id.clone(),
+        })
     }
 }
 
@@ -112,8 +107,9 @@ impl From<core::PairOffer> for PairOffer {
 pub enum PairParseError {
     #[error("this is not an or2 pairing code")]
     NotPairingCode,
-    #[error("this pairing code is from a newer or2-pair; update the app")]
-    UnsupportedVersion,
+    /// Version 1 is from an older `or2-pair` (update it on the host); a higher one needs a newer app.
+    #[error("this pairing code is version {version}, which this app does not read")]
+    UnsupportedVersion { version: u32 },
     #[error("the pairing code is too long")]
     TooLong,
     #[error("the pairing code is not well formed")]
@@ -133,7 +129,7 @@ impl From<core::PairParseError> for PairParseError {
         use core::PairParseError as E;
         match error {
             E::NotPairingCode => Self::NotPairingCode,
-            E::UnsupportedVersion => Self::UnsupportedVersion,
+            E::UnsupportedVersion { version } => Self::UnsupportedVersion { version },
             E::TooLong => Self::TooLong,
             E::Malformed => Self::Malformed,
             E::MissingField(field) => Self::MissingField {
@@ -150,47 +146,49 @@ impl From<core::PairParseError> for PairParseError {
     }
 }
 
-/// Why the key could not be sent, or was not accepted.
+/// What the host reported after it installed the phone's key.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PairResult {
+    /// The account the key was added to.
+    pub username: String,
+    /// `SHA256:…` of the key the host installed.
+    pub fingerprint: String,
+}
+
+/// Why the pairing did not complete. Nothing is saved on the host unless the pairing succeeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum PairError {
-    #[error("the pairing code has no listener (it was made with --no-listen)")]
-    NoExchange,
-    #[error("the pairing code was already used or wiped")]
-    Wiped,
+    #[error("this pairing code has no pairing id (it was made with --manual)")]
+    NoPairingId,
     #[error("the offer is not one `parse_pair_payload` made")]
     InvalidOffer,
     #[error("the phone key is not an OpenSSH public key this app can authorize")]
     InvalidKey,
     #[error("the device label must be 1 to 64 characters without control characters")]
     InvalidDevice,
-    #[error("the host cannot be reached on its pairing addresses")]
+    #[error("the host cannot be reached on its addresses")]
     Unreachable,
     #[error("the host did not answer in time")]
     TimedOut,
+    #[error("the host presented a different key than the pairing code")]
+    HostKeyMismatch,
+    #[error("the host did not accept this phone's code")]
+    BootstrapRefused,
+    #[error("something other than or2-pair answered on the host")]
+    NotOr2Pair,
     #[error("the host does not speak this pairing protocol")]
     Protocol,
     #[error("the connection to the host ended early")]
     ConnectionLost,
-    /// The answer did not prove the host knows the code (an old or wrong code, or someone else
-    /// answering): nothing was believed and the code is not spent.
-    #[error("the host's answer could not be verified")]
-    HostNotAuthenticated,
-    /// The person at the host answered no.
-    #[error("the host declined the key")]
-    Declined,
-    /// A wrong or already used code.
-    #[error("the pairing code did not verify")]
-    AuthenticationFailed,
-    #[error("the host does not accept this kind of key")]
+    #[error("or2-pair has stopped or timed out on the host")]
+    Expired,
+    #[error("another device already used this pairing")]
+    Gone,
+    #[error("the host does not accept this key")]
     KeyNotAccepted,
-    /// Nobody answered at the host before its window closed.
-    #[error("nobody confirmed on the host in time")]
-    HostTimedOut,
-    #[error("the host could not read the request")]
-    BadRequest,
-    /// The host could not write `authorized_keys`; the person at the host sees why.
     #[error("the host could not add the key")]
     HostFailed,
+    /// The host said `request`, or a reason this app does not know.
     #[error("the host refused")]
     Refused,
 }
@@ -198,23 +196,32 @@ pub enum PairError {
 impl From<core::PairError> for PairError {
     fn from(error: core::PairError) -> Self {
         use core::PairError as E;
-        use core::Refusal as R;
         match error {
-            E::NoExchange => Self::NoExchange,
+            E::NoPairingId => Self::NoPairingId,
+            E::InvalidOffer => Self::InvalidOffer,
             E::InvalidKey => Self::InvalidKey,
             E::InvalidDevice => Self::InvalidDevice,
             E::Unreachable => Self::Unreachable,
             E::TimedOut => Self::TimedOut,
+            E::HostKeyMismatch => Self::HostKeyMismatch,
+            E::BootstrapRefused => Self::BootstrapRefused,
+            E::NotOr2Pair => Self::NotOr2Pair,
             E::Protocol => Self::Protocol,
             E::ConnectionLost => Self::ConnectionLost,
-            E::HostNotAuthenticated => Self::HostNotAuthenticated,
-            E::Refused(R::Declined) => Self::Declined,
-            E::Refused(R::AuthenticationFailed) => Self::AuthenticationFailed,
-            E::Refused(R::KeyNotAccepted) => Self::KeyNotAccepted,
-            E::Refused(R::TimedOut) => Self::HostTimedOut,
-            E::Refused(R::BadRequest) => Self::BadRequest,
-            E::Refused(R::HostFailed) => Self::HostFailed,
-            E::Refused(R::Other) => Self::Refused,
+            E::Expired => Self::Expired,
+            E::Gone => Self::Gone,
+            E::KeyNotAccepted => Self::KeyNotAccepted,
+            E::HostFailed => Self::HostFailed,
+            E::Refused => Self::Refused,
+        }
+    }
+}
+
+impl From<core::PairResult> for PairResult {
+    fn from(result: core::PairResult) -> Self {
+        Self {
+            username: result.username,
+            fingerprint: result.fingerprint,
         }
     }
 }
@@ -225,108 +232,78 @@ pub fn parse_pair_payload(text: String) -> Result<PairOffer, PairParseError> {
     Ok(core::PairOffer::parse(&text)?.into())
 }
 
-/// Sends `public_key_line` (an OpenSSH public key line; its comment is not sent) to the host
-/// that made `offer`, proving the one-time password, and resolves when the person at the host
-/// has confirmed. Each connect, the host's greeting and the write take at most 10 s; the wait for
-/// the confirmation (a person typing `y`) at most the host's own 120 s window plus a margin.
-/// `device_label` is what the host shows (and puts in the key's comment); 1 to 64 characters.
+/// Enrols `public_key_line` (an OpenSSH public key line; its comment is not sent) with the host
+/// that made `offer`, using `code`, the pairing code shown on the phone and typed at the host. One
+/// SSH connection to the host's own sshd on the offer's addresses (raced), with its host key pinned
+/// from the offer; it logs in with a throwaway key derived from `code`, which `or2-pair` on the
+/// host authorized for this run. Every step takes at most 10 s. `device_label` is what the host
+/// shows (and puts in the key's comment); 1 to 64 characters.
 ///
-/// The secret is wiped on success and when the host refused (the code is spent then); after
-/// network failures it is kept, so the same code can be tried again while the host still
-/// listens. Cancelling the coroutine cancels the exchange and closes the connection. The
-/// transport is the app's direct TCP (the phone must reach the host's address itself).
+/// Cancelling the coroutine closes the channel and the connection. The transport is the app's
+/// direct TCP (the phone must reach the host's SSH port itself).
 #[uniffi::export(async_runtime = "tokio")]
-pub async fn pair_submit_key(
+pub async fn pair_enroll(
     offer: PairOffer,
+    code: Arc<PairCode>,
     public_key_line: String,
     device_label: String,
-) -> Result<(), PairError> {
-    let exchange = offer.exchange.ok_or(PairError::NoExchange)?;
-    let otp = exchange.secret.take_copy().ok_or(PairError::Wiped)?;
-    let endpoints = exchange
-        .endpoints
-        .iter()
-        .map(|a| Endpoint::new(&a.host, a.port))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| PairError::InvalidOffer)?;
-    if endpoints.is_empty() {
-        return Err(PairError::InvalidOffer);
-    }
-    let result = core::submit_exchange(
+) -> Result<PairResult, PairError> {
+    let offer = offer.to_core().ok_or(PairError::InvalidOffer)?;
+    core::pair_enroll(
         &Arc::new(DirectTcp),
-        &core::PairExchange { endpoints, otp },
+        &offer,
+        &code.code,
         &public_key_line,
         &device_label,
         core::PairTiming::default(),
     )
-    .await;
-    let spent = code_is_spent(&result);
-    if spent {
-        exchange.secret.wipe();
-    }
-    result.map_err(Into::into)
-}
-
-/// Whether the code has served: a success, or a refusal that carried the host's proof. Anything
-/// the host did not authenticate (including a forged success or refusal) and every network failure
-/// leaves the code usable.
-fn code_is_spent(result: &Result<(), core::PairError>) -> bool {
-    matches!(result, Ok(()) | Err(core::PairError::Refused(_)))
+    .await
+    .map(Into::into)
+    .map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const CODE: &str = "or2-pair:2?name=Work%20Mac&user=alice&port=22&a=192.0.2.20\
+        &hk=ssh-ed25519%20AAAAC3NzaC1lZDI1NTE5AAAAIAc39XUWT33SvSLy6vA7I83%2BXgmwnHmYtMQRjLeaZ2U7\
+        &id=abcdefghijklm";
+
     #[test]
-    fn only_an_authenticated_outcome_spends_the_code() {
-        use self::core::{PairError as E, Refusal};
-        assert!(code_is_spent(&Ok(())));
-        assert!(code_is_spent(&Err(E::Refused(Refusal::Declined))));
-        for kept in [
-            E::HostNotAuthenticated,
-            E::Protocol,
-            E::TimedOut,
-            E::Unreachable,
-            E::ConnectionLost,
-        ] {
-            assert!(!code_is_spent(&Err(kept)), "{kept:?}");
-        }
-        assert_eq!(
-            PairError::from(E::HostNotAuthenticated),
-            PairError::HostNotAuthenticated
-        );
+    fn a_new_code_shows_three_groups_and_hides_itself_from_debug() {
+        let code = pair_new_code();
+        let shown = code.display();
+        let groups: Vec<_> = shown.split('-').collect();
+        assert_eq!(groups.len(), 3, "{shown}");
+        assert!(groups.iter().all(|group| group.len() == 4));
+        let debug = format!("{code:?}");
+        assert!(!debug.contains(groups[0]), "{debug}");
+        assert!(debug.contains("redacted"), "{debug}");
+        assert_ne!(shown, pair_new_code().display());
     }
 
-    const CODE: &str = "or2-pair:1?name=Work%20Mac&user=alice&port=22&a=192.168.1.20\
-        &hk=ssh-ed25519%20AAAAC3NzaC1lZDI1NTE5AAAAIAc39XUWT33SvSLy6vA7I83%2BXgmwnHmYtMQRjLeaZ2U7\
-        &pair=192.168.1.20:41234&otp=AAAQEAYEAUDAOCAJBIFQYDIOB4";
-
     #[test]
-    fn parsing_maps_the_offer_without_exposing_the_password() {
+    fn parsing_maps_the_offer() {
         let offer = parse_pair_payload(CODE.into()).unwrap();
         assert_eq!(offer.name, "Work Mac");
-        assert_eq!(offer.addresses[0].host, "192.168.1.20");
+        assert_eq!(offer.username, "alice");
+        assert_eq!(offer.addresses[0].host, "192.0.2.20");
         assert_eq!(offer.addresses[0].port, 22);
         assert_eq!(
             offer.host_key.fingerprint,
             "SHA256:PK/nvGiFusFK9/6Qf8dSOX99mI5XQYiMAML2JHCjgQI"
         );
-        let exchange = offer.exchange.as_ref().unwrap();
-        assert_eq!(exchange.endpoints[0].port, 41234);
-        let shown = format!("{offer:?}");
-        assert!(!shown.contains("AAAQEAYEAUDAOCAJBIFQYDIOB4"), "{shown}");
-        assert!(shown.contains("redacted"), "{shown}");
-        assert!(!exchange.secret.is_wiped());
-        exchange.secret.wipe();
-        assert!(exchange.secret.is_wiped());
+        assert_eq!(offer.pairing_id.as_deref(), Some("abcdefghijklm"));
+        assert!(offer.to_core().is_some());
+        let manual = parse_pair_payload(CODE.split("&id=").next().unwrap().into()).unwrap();
+        assert_eq!(manual.pairing_id, None);
     }
 
     #[test]
-    fn parse_errors_carry_the_field_name() {
-        let bad = CODE.replace("&user=alice", "");
+    fn parse_errors_carry_the_field_name_and_the_version() {
         assert_eq!(
-            parse_pair_payload(bad).unwrap_err(),
+            parse_pair_payload(CODE.replace("&user=alice", "")).unwrap_err(),
             PairParseError::MissingField {
                 field: "user".into()
             }
@@ -335,22 +312,54 @@ mod tests {
             parse_pair_payload("nope".into()).unwrap_err(),
             PairParseError::NotPairingCode
         );
+        assert_eq!(
+            parse_pair_payload(CODE.replace("or2-pair:2", "or2-pair:1")).unwrap_err(),
+            PairParseError::UnsupportedVersion { version: 1 }
+        );
+        assert_eq!(
+            parse_pair_payload(CODE.replace("or2-pair:2", "or2-pair:3")).unwrap_err(),
+            PairParseError::UnsupportedVersion { version: 3 }
+        );
+    }
+
+    #[test]
+    fn every_core_error_has_its_own_ffi_error() {
+        use self::core::PairError as E;
+        let all = [
+            (E::NoPairingId, PairError::NoPairingId),
+            (E::InvalidOffer, PairError::InvalidOffer),
+            (E::InvalidKey, PairError::InvalidKey),
+            (E::InvalidDevice, PairError::InvalidDevice),
+            (E::Unreachable, PairError::Unreachable),
+            (E::TimedOut, PairError::TimedOut),
+            (E::HostKeyMismatch, PairError::HostKeyMismatch),
+            (E::BootstrapRefused, PairError::BootstrapRefused),
+            (E::NotOr2Pair, PairError::NotOr2Pair),
+            (E::Protocol, PairError::Protocol),
+            (E::ConnectionLost, PairError::ConnectionLost),
+            (E::Expired, PairError::Expired),
+            (E::Gone, PairError::Gone),
+            (E::KeyNotAccepted, PairError::KeyNotAccepted),
+            (E::HostFailed, PairError::HostFailed),
+            (E::Refused, PairError::Refused),
+        ];
+        for (core, ffi) in all {
+            assert_eq!(PairError::from(core), ffi);
+        }
     }
 
     #[tokio::test]
-    async fn a_wiped_secret_cannot_be_submitted_and_a_bare_code_has_nothing_to_submit() {
-        let offer = parse_pair_payload(CODE.into()).unwrap();
-        offer.exchange.as_ref().unwrap().secret.wipe();
+    async fn a_manual_code_has_nothing_to_enrol_with_and_a_forged_offer_is_refused() {
+        let manual = parse_pair_payload(CODE.split("&id=").next().unwrap().into()).unwrap();
         assert_eq!(
-            pair_submit_key(offer, "k".into(), "d".into()).await,
-            Err(PairError::Wiped)
+            pair_enroll(manual, pair_new_code(), "k".into(), "d".into()).await,
+            Err(PairError::NoPairingId)
         );
-        let bare = CODE.split("&pair=").next().unwrap();
-        let offer = parse_pair_payload(bare.into()).unwrap();
-        assert!(offer.exchange.is_none());
+        let mut forged = parse_pair_payload(CODE.into()).unwrap();
+        forged.host_key.openssh = "nonsense".into();
         assert_eq!(
-            pair_submit_key(offer, "k".into(), "d".into()).await,
-            Err(PairError::NoExchange)
+            pair_enroll(forged, pair_new_code(), "k".into(), "d".into()).await,
+            Err(PairError::InvalidOffer)
         );
     }
 }

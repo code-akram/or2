@@ -2315,7 +2315,7 @@ version 2.
 ## The flow
 
 1. **Phone:** Add host → **Easy pair**. The screen shows a **pairing code** `K` such as
-   `7KQ4-M2XD-9PTA`, with the camera below it.
+   `7KQ4-M2XD-9PTM`, with the camera below it.
 2. **Host:** `or2-pair` runs its checks, then asks `Code shown on your phone:`. The person types `K`.
 3. **Host:** derives a throwaway Ed25519 **bootstrap key** from `K` and a fresh pairing id, adds it to
    `~/.ssh/authorized_keys` restricted to one forced command (`or2-pair enroll <id>`) with an expiry,
@@ -2339,7 +2339,7 @@ gone.
 ## The pairing code `K` (phone)
 
 - 12 characters of Crockford base32 (`0-9`, `A-Z` without `I`, `L`, `O`, `U`), shown as three groups of
-  four (`7KQ4-M2XD-9PTA`): 11 random characters from the OS CSPRNG (55 bits) and a check character,
+  four (`7KQ4-M2XD-9PTM`): 11 random characters from the OS CSPRNG (55 bits) and a check character,
   `c = (Σ i·vᵢ for i = 1..11) mod 31`, where `vᵢ` is the value of the i-th character. Weights 1 to 11
   modulo the prime 31 catch every single wrong character and every swap of two neighbours.
 - Typed input is read leniently: case-insensitive, hyphens and spaces ignored, `I`/`L` read as `1`, `O`
@@ -2485,6 +2485,39 @@ host  -> {"v":2,"ok":true,"user":"<account>","fingerprint":"SHA256:…"}
   closes its channel and connection through the connection-owned close path when the exchange ends or
   the coroutine is cancelled.
 
+**As implemented** (`or2_core::pair`, with the SSH side in `ssh/pair_client.rs` on the host
+connection's `Client`, `relay`, `authenticate` and `SshHost` open and close paths). Decisions where
+the text above left room:
+
+- **Host key.** The handshake offers only the algorithm of `hk` (for RSA, `rsa-sha2-512`,
+  `rsa-sha2-256` and `ssh-rsa`). A host with several keys therefore presents the pinned one, a host
+  with no key of that algorithm fails the handshake, and both are `HostKeyMismatch`, as is any other
+  key of that algorithm. Nothing is authenticated or sent in those cases.
+- **Noise.** A line is the hello if it starts with `{"v":2,"hello"` at the start of a line, and it
+  must start within the first 4096 bytes of output (so at most 4096 bytes of noise, counting the
+  newlines); the hello line itself is at most 256 bytes (more is `Protocol`). Only standard output is
+  read; standard error is ignored. A hello must be exactly `v` 2, `hello` `or2-pair` and the scanned
+  `id`, else `Protocol`. An unfinished line is waited for (within the 10 s step), not guessed at.
+- **Channel ends.** The command ending (EOF or close of the channel while the connection is up)
+  before the hello is `NotOr2Pair`, and before the verdict `ConnectionLost`; a refused `exec` is
+  `NotOr2Pair`; a refused session channel (`MaxSessions`) is `Protocol`; a connection that ends under
+  any step is `ConnectionLost`. A step that exceeds its 10 s is `TimedOut`, including the hello, the
+  verdict, the handshake and the authentication.
+- **Verdict.** `ok: true` needs a non-empty `user` and a `fingerprint` equal to the `SHA256:`
+  fingerprint of the key the phone sent, else `Protocol` (the host installed something else). `ok: false`
+  maps `expired`, `gone`, `key` and `failed` to their errors, and `request`, no reason or any other
+  reason to `Refused`. A line over 512 bytes or JSON that does not parse is `Protocol`.
+- **Cancellation.** Dropping the future (cancelling the coroutine) hands the channel and the connection
+  to a task on the network runtime that closes the channel through the connection's close path,
+  disconnects and stops the relay, so the command's standard input ends at once.
+- **FFI.** `pair_enroll` rebuilds the core offer from the `PairOffer` record: an address or a
+  `host_key.openssh` that does not parse, or a malformed `pairing_id`, is `InvalidOffer`. `K` is a
+  `PairCode` object, never a string, on the way in.
+- **Tests** do not use a paused clock: the pairing connection's channel opens run on the process-wide
+  network runtime, so an auto-advancing clock on the caller's runtime would fire the 10 s step while
+  that runtime does its work. The timeout tests use a 400 to 700 ms step instead
+  (`PairTiming { step }`; the FFI always uses 10 s).
+
 ## Host CLI
 
 Flags kept: `--name`, `--user` (must be the account the process runs as, as in version 1),
@@ -2532,7 +2565,7 @@ Checks
   ok    tmux, herdr, mosh-server found
 
 Open or2 on your phone: Add host > Easy pair.
-Code shown on your phone: 7KQ4-M2XD-9PTA
+Code shown on your phone: 7KQ4-M2XD-9PTM
 
 This host
   name       workstation      user  dev      ssh port  22
@@ -2551,7 +2584,7 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
 ## FFI (API 13)
 
 - `pair_new_code() -> Arc<PairCode>`; `PairCode` is an opaque object with `display() -> String`
-  (`7KQ4-M2XD-9PTA`, for the screen) and a redacted `Debug`.
+  (`7KQ4-M2XD-9PTM`, for the screen) and a redacted `Debug`.
 - `parse_pair_payload(text) -> PairOffer` (`PairParseError` as in API 12; `UnsupportedVersion` now
   carries `version: u32`).
 - `PairOffer { name, username, port, addresses, host_key: PublicKeyInfo, pairing_id: Option<String> }`;
@@ -2568,7 +2601,7 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
 
 - **Add host** sheet unchanged (Easy pair, Set up manually).
 - **Easy pair screen**: the code `K` at the top ("Type this code into or2-pair on the host", the code in
-  monospace as `7KQ4-M2XD-9PTA`, the one large element at about 24 sp; everything else at the compact
+  monospace as `7KQ4-M2XD-9PTM`, the one large element at about 24 sp; everything else at the compact
   scale of `docs/ui.md`), a one-line hint with the command (`or2-pair`, copyable), then the camera and
   **Paste pairing code** as in version 1 (permission handling unchanged).
 - **Review** after the scan: name and user (user read-only when `pairing_id` is present), addresses, the

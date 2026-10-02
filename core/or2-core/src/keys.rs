@@ -69,6 +69,13 @@ impl ClientKey {
         Self(key)
     }
 
+    /// The Ed25519 key of an RFC 8032 seed (the pairing bootstrap key derives one from the code).
+    pub(crate) fn from_ed25519_seed(seed: &[u8; 32]) -> Self {
+        Self(PrivateKey::from(
+            ssh_key::private::Ed25519Keypair::from_seed(seed),
+        ))
+    }
+
     /// Parses an OpenSSH private key as the user supplied it, decrypting it if needed.
     /// The passphrase is ignored for unencrypted keys.
     pub fn import_openssh(pem: &[u8], passphrase: Option<&str>) -> Result<Self, KeyError> {

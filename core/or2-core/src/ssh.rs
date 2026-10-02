@@ -9,6 +9,7 @@
 mod client;
 mod connection;
 mod mosh_session;
+mod pair_client;
 mod pump;
 mod terminal_session;
 
@@ -22,6 +23,7 @@ use crate::transport::{DatagramTransport, DirectTcp, Transport};
 pub use connection::HostOptions;
 #[cfg(any(test, feature = "test-support"))]
 pub use connection::{SshRemote, connect_tapped};
+pub(crate) use pair_client::{Next, PairSession};
 
 pub(crate) fn runtime() -> &'static Runtime {
     static RUNTIME: OnceLock<Runtime> = OnceLock::new();

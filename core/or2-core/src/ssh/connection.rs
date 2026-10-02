@@ -98,8 +98,9 @@ const KEEPALIVE_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a watch whose capability probe failed waits before probing again.
 const WATCH_RETRY: Duration = Duration::from_secs(10);
 
-/// From the network task to the host thread.
-enum HostEvent {
+/// From the network task to the host thread. Pairing ([`super::pair_client`]) runs on the same
+/// connection machinery and answers only the host-key and transport-end events.
+pub(super) enum HostEvent {
     HostKey(HostKeyPrompt, oneshot::Sender<bool>),
     Authenticating,
     Connected {
@@ -176,6 +177,35 @@ pub(super) fn network_changed() {
 }
 
 impl SshHost {
+    /// Wraps an authenticated connection. The caller ends the connection's opens
+    /// ([`SshHost::end_opens`]) when it is done with it.
+    pub(super) fn new(
+        handle: Handle<Client<HostEvent>>,
+        exec_timeout: Duration,
+        #[cfg(test)] reader_gate: Arc<Mutex<Option<super::client::TestReaderGate>>>,
+    ) -> Arc<Self> {
+        Arc::new_cyclic(|me| SshHost {
+            handle,
+            exec_timeout,
+            capabilities: OnceCell::new(),
+            sessions: probe::SessionsCache::new(),
+            focus: herdr::FocusGate::new(),
+            servers: mosh_session::ServerDebt::default(),
+            opens: Mutex::new(Some(JoinSet::new())),
+            me: me.clone(),
+            #[cfg(test)]
+            reader_gate,
+        })
+    }
+
+    /// Tells the server this side is done. The caller bounds the wait.
+    pub(super) async fn disconnect(&self, reason: &str) {
+        let _ = self
+            .handle
+            .disconnect(russh::Disconnect::ByApplication, reason, "")
+            .await;
+    }
+
     /// The probe's answer, run once per connection. A failed probe is not cached.
     pub(super) async fn capabilities(&self) -> Result<&HostCapabilities, RemoteError> {
         self.capabilities
@@ -1269,18 +1299,12 @@ async fn hold(
     authenticate(&mut handle, username, &key).await?;
     // The key is needed for authentication only; do not keep it for the connection's lifetime.
     drop(key);
-    let host = Arc::new_cyclic(|me| SshHost {
+    let host = SshHost::new(
         handle,
-        exec_timeout: options.exec_timeout,
-        capabilities: OnceCell::new(),
-        sessions: probe::SessionsCache::new(),
-        focus: herdr::FocusGate::new(),
-        servers: mosh_session::ServerDebt::default(),
-        opens: Mutex::new(Some(JoinSet::new())),
-        me: me.clone(),
+        options.exec_timeout,
         #[cfg(test)]
         reader_gate,
-    });
+    );
     register(&host);
     // However this function ends, also when the host driver aborts it, the opens that are still
     // waiting end with the connection.

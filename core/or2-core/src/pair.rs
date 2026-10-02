@@ -1,83 +1,228 @@
-//! Easy pair, phone side: the strict parser of the pairing code and the client of the one-shot
-//! key exchange with `or2-pair` on the host. See `docs/contracts.md`, "Easy pair".
+//! Easy pair, phone side (version 2): the pairing code `K` the phone shows, the strict parser of
+//! the code the host prints as a QR, the bootstrap key both derive, and the client that enrols the
+//! phone's key over the host's own sshd. See `docs/contracts.md`, "Easy pair".
 //!
-//! The pairing code is a URI the host prints as a QR code (and as text for pasting):
-//!
-//! ```text
-//! or2-pair:1?name=<label>&user=<u>&port=<p>&a=<addr>&a=<addr>…&hk=<algo> <base64>
-//!           &pair=<ip>:<port>&otp=<base32 128-bit>
-//! ```
-//!
-//! Values are percent-encoded. `pair` (one to four, in preference order) and `otp` come together
-//! or not at all: a code made with `--no-listen` has neither and only describes the host. The
-//! parser is strict about every field and returns typed errors; it never guesses.
-//!
-//! The exchange (newline-delimited JSON over [`Transport`], every line bounded):
+//! The QR is public data (nothing secret in it):
 //!
 //! ```text
-//! host  -> {"v":3,"nonce":"<base64 of 32 bytes>"}
-//! phone -> {"v":3,"key":"<openssh public key>","device":"<label>","mac":"<base64 request MAC>"}
-//! host  -> {"ok":true,"mac":"<base64 verdict MAC>"}  |  {"ok":false,"reason":"<code>","mac":"…"}
+//! or2-pair:2?name=<label>&user=<u>&port=<p>&a=<addr>&a=<addr>…&hk=<algo> <base64>&id=<pairing id>
 //! ```
 //!
-//! The one-time password never crosses the network: only MACs do. The request MAC is
-//! `HMAC-SHA256(otp, "or2-pair/3 request" 0x00 || nonce || key)`; the host's answer carries
-//! `HMAC-SHA256(otp, "or2-pair/3 verdict" 0x00 || ok || lp(reason) || lp(nonce) || lp(fingerprint))`
-//! (`ok` one byte, 1 or 0; `lp` a big-endian u16 length and the bytes: no two outcomes share an
-//! encoding), which the phone verifies in constant time **before** it believes a success or a
-//! refusal (so a party that does not know the password cannot make the phone save a host or spend
-//! its code), and whose fields (`ok`, `reason`) must be exactly what was MAC'd. The password is
-//! held in [`Otp`] (zeroized on drop, redacted in `Debug`).
+//! Values are percent-encoded. `id` is absent in a code made with `--manual`, which only describes
+//! the host. The parser is strict about every field and returns typed errors; it never guesses.
+//!
+//! The one secret is [`PairCode`], shown on the phone and typed at the host. Both derive the same
+//! Ed25519 bootstrap key from it and the pairing id ([`PairCode`]'s derivation, below); the host
+//! authorizes that key for one forced command, and the phone logs in with it over SSH (host key
+//! pinned from the QR), runs `or2-pair` and exchanges newline-delimited JSON on the session channel:
+//!
+//! ```text
+//! host  -> {"v":2,"hello":"or2-pair","id":"<id>"}
+//! phone -> {"v":2,"key":"<algo> <base64>","device":"<label>"}
+//! host  -> {"v":2,"ok":true,"user":"<account>","fingerprint":"SHA256:…"}
+//!        | {"v":2,"ok":false,"reason":"expired|gone|key|failed|request"}
+//! ```
+//!
+//! SSH authenticates both ends and encrypts the channel, so the exchange carries no MACs.
 
 use std::fmt;
-use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use data_encoding::BASE32_NOPAD;
-use hmac::{Hmac, KeyInit, Mac};
+use hkdf::Hkdf;
+use rand::TryRng;
+use rand::rngs::SysRng;
 use russh::keys::ssh_key::{Algorithm, HashAlg, PublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::time::timeout;
 use zeroize::Zeroizing;
 
+use crate::keys::ClientKey;
+use crate::ssh::{Next, PairSession};
 use crate::transport::{Endpoint, RACE_STAGGER, RaceTiming, Transport, race_with};
 use crate::trust::HostKey;
 
 /// The URI scheme and version prefix of a pairing code.
 pub const PAYLOAD_PREFIX: &str = "or2-pair:";
+/// The version of the pairing code and of the exchange.
+pub const VERSION: u32 = 2;
 /// A pairing code is at most this many bytes (the host trims addresses to fit).
 pub const MAX_PAYLOAD_BYTES: usize = 1024;
 /// At most as many `a` addresses as a host may have.
 pub const MAX_ADDRESSES: usize = 8;
-/// At most this many `pair` addresses.
-pub const MAX_PAIR_ADDRESSES: usize = 4;
-/// The one-time password: 128 bits, 26 base32 characters.
-pub const OTP_BYTES: usize = 16;
-/// The host's nonce.
-pub const NONCE_BYTES: usize = 32;
 /// Longest label for a host name, user name or device.
 pub const MAX_LABEL_CHARS: usize = 64;
-/// The longest line the phone accepts from the host, and the host from the phone.
+/// The pairing id: 8 random bytes as 13 lowercase RFC 4648 base32 characters.
+pub const PAIRING_ID_CHARS: usize = 13;
+/// The command the phone asks sshd to run (the bootstrap key's forced command runs whatever is asked).
+pub const PAIR_COMMAND: &str = "or2-pair";
+/// The longest line the phone accepts from the host (the hello and the verdict), and the host from
+/// the phone.
 pub const HELLO_LIMIT: usize = 256;
-pub const REPLY_LIMIT: usize = 512;
-/// The version of the exchange (not of the pairing code): 2 authenticated the host's verdict,
-/// 3 authenticates it with an unambiguous encoding (`ok` and the reason are separate fields).
-pub const EXCHANGE_VERSION: u32 = 3;
-/// The MAC domains: distinct, so a MAC for one purpose is never valid for the other.
-const REQUEST_DOMAIN: &[u8] = b"or2-pair/3 request\0";
-const VERDICT_DOMAIN: &[u8] = b"or2-pair/3 verdict\0";
+pub const REQUEST_LIMIT: usize = 2048;
+pub const VERDICT_LIMIT: usize = 512;
+/// How many bytes of shell noise (an rc file that prints) may precede the hello.
+pub const NOISE_LIMIT: usize = 4096;
+/// The first bytes of the hello line; the phone skips everything before the first line that starts
+/// with them.
+const HELLO_PREFIX: &[u8] = br#"{"v":2,"hello""#;
+
+// --- the pairing code K ------------------------------------------------------------------------
+
+/// Crockford base32: `0-9` and `A-Z` without `I`, `L`, `O`, `U`.
+const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+/// Random characters of `K`; a twelfth is the check character.
+const DATA_CHARS: usize = 11;
+const CODE_CHARS: usize = DATA_CHARS + 1;
+const CHECK_MODULUS: u32 = 31;
+/// HKDF `info` of the bootstrap key.
+const BOOTSTRAP_INFO: &[u8] = b"or2-pair/2 bootstrap ed25519";
+
+/// Why typed input is not a pairing code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum PairCodeError {
+    #[error("a pairing code has 12 characters")]
+    Length,
+    #[error("a pairing code has only digits and letters (no I, L, O or U)")]
+    Character,
+    #[error("that code has a typo")]
+    Check,
+}
+
+/// The pairing code `K`: 11 random Crockford characters (55 bits from the OS CSPRNG) and a check
+/// character. It is the one secret of an Easy pair: shown on the phone, typed at the host, never
+/// logged or saved. Zeroized on drop; `Debug` never shows it.
+pub struct PairCode(Zeroizing<[u8; CODE_CHARS]>);
+
+// The only field is a `Zeroizing`, which wipes it when the code is dropped.
+impl zeroize::ZeroizeOnDrop for PairCode {}
+
+impl fmt::Debug for PairCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PairCode(<redacted>)")
+    }
+}
+
+impl PairCode {
+    /// A new code from the operating system's CSPRNG.
+    pub fn generate() -> Self {
+        let mut bytes = Zeroizing::new([0u8; DATA_CHARS]);
+        SysRng
+            .try_fill_bytes(&mut *bytes)
+            .expect("the operating system provides random bytes");
+        Self::from_random(&bytes)
+    }
+
+    /// One character per byte: the low five bits, so each of the 32 values is equally likely
+    /// whatever the byte's distribution is uniform over (256 is a multiple of 32).
+    fn from_random(bytes: &[u8; DATA_CHARS]) -> Self {
+        let mut values = Zeroizing::new([0u8; CODE_CHARS]);
+        for (value, byte) in values.iter_mut().zip(bytes) {
+            *value = byte & 31;
+        }
+        values[DATA_CHARS] = check_value(&values[..DATA_CHARS]);
+        Self(values)
+    }
+
+    /// Reads a code as a person types it: case-insensitive, hyphens and spaces ignored, `I` and
+    /// `L` read as `1`, `O` as `0`. A wrong check character is [`PairCodeError::Check`].
+    pub fn parse_typed(text: &str) -> Result<Self, PairCodeError> {
+        let mut values = Zeroizing::new([0u8; CODE_CHARS]);
+        let mut count = 0;
+        for character in text.chars().filter(|c| !matches!(c, '-' | ' ')) {
+            let mapped = match character.to_ascii_uppercase() {
+                'I' | 'L' => '1',
+                'O' => '0',
+                other => other,
+            };
+            let value = u8::try_from(mapped)
+                .ok()
+                .and_then(|byte| ALPHABET.iter().position(|a| *a == byte))
+                .ok_or(PairCodeError::Character)?;
+            if count == CODE_CHARS {
+                return Err(PairCodeError::Length);
+            }
+            values[count] = value as u8;
+            count += 1;
+        }
+        if count != CODE_CHARS {
+            return Err(PairCodeError::Length);
+        }
+        if values[DATA_CHARS] != check_value(&values[..DATA_CHARS]) {
+            return Err(PairCodeError::Check);
+        }
+        Ok(Self(values))
+    }
+
+    /// `7KQ4-M2XD-9PTM`: three groups of four, for the screen.
+    pub fn display(&self) -> String {
+        let mut text = String::with_capacity(CODE_CHARS + 2);
+        for (index, value) in self.0.iter().enumerate() {
+            if index > 0 && index % 4 == 0 {
+                text.push('-');
+            }
+            text.push(char::from(ALPHABET[usize::from(*value)]));
+        }
+        text
+    }
+
+    /// The 11 data characters as ASCII uppercase: the key material of the derivation.
+    fn data(&self) -> Zeroizing<[u8; DATA_CHARS]> {
+        let mut ascii = Zeroizing::new([0u8; DATA_CHARS]);
+        for (character, value) in ascii.iter_mut().zip(&self.0[..DATA_CHARS]) {
+            *character = ALPHABET[usize::from(*value)];
+        }
+        ascii
+    }
+
+    /// The bootstrap key's RFC 8032 seed: `HKDF-SHA256(ikm = the 11 data characters as ASCII
+    /// uppercase, salt = the pairing id's 13 ASCII characters, info = "or2-pair/2 bootstrap
+    /// ed25519")`, 32 bytes. Salting with the id binds the key to one run of `or2-pair`.
+    fn bootstrap_seed(&self, pairing_id: &str) -> Zeroizing<[u8; 32]> {
+        let ikm = self.data();
+        let mut seed = Zeroizing::new([0u8; 32]);
+        Hkdf::<Sha256>::new(Some(pairing_id.as_bytes()), &*ikm)
+            .expand(BOOTSTRAP_INFO, &mut *seed)
+            .expect("32 bytes is a valid HKDF-SHA256 output length");
+        seed
+    }
+
+    fn bootstrap_key(&self, pairing_id: &str) -> ClientKey {
+        ClientKey::from_ed25519_seed(&self.bootstrap_seed(pairing_id))
+    }
+
+    /// The bootstrap key's public half as an `authorized_keys` key (`ssh-ed25519 <base64>`): what
+    /// the host installs. Tests of the phone's client need it to play the host.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn bootstrap_public_key(&self, pairing_id: &str) -> String {
+        let key = self.bootstrap_key(pairing_id).public_key().openssh;
+        key.split(' ').take(2).collect::<Vec<_>>().join(" ")
+    }
+}
+
+/// `Σ i·vᵢ (i = 1..11) mod 31`: catches every single wrong character and every swap of two
+/// neighbours, as 31 is prime and the weights differ.
+fn check_value(data: &[u8]) -> u8 {
+    let sum: u32 = data
+        .iter()
+        .zip(1u32..)
+        .map(|(value, weight)| weight * u32::from(*value))
+        .sum();
+    (sum % CHECK_MODULUS) as u8
+}
+
+// --- the pairing code the host prints ----------------------------------------------------------
 
 /// Why a pairing code was refused. The field names are the payload's own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PairParseError {
     #[error("this is not an or2 pairing code")]
     NotPairingCode,
-    #[error("this pairing code is from a newer or2-pair; update the app")]
-    UnsupportedVersion,
+    /// A version other than 2: older ones need `or2-pair` updated on the host, newer ones this app.
+    #[error("this pairing code is version {version}, which this app does not read")]
+    UnsupportedVersion { version: u32 },
     #[error("the pairing code is longer than {MAX_PAYLOAD_BYTES} bytes")]
     TooLong,
     #[error("the pairing code is not well formed")]
@@ -92,112 +237,6 @@ pub enum PairParseError {
     InvalidField(&'static str),
 }
 
-/// The one-time password of an exchange. Zeroized on drop; `Debug` never shows it.
-#[derive(Clone)]
-pub struct Otp(Zeroizing<[u8; OTP_BYTES]>);
-
-impl fmt::Debug for Otp {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Otp(<redacted>)")
-    }
-}
-
-impl Otp {
-    pub fn from_bytes(bytes: [u8; OTP_BYTES]) -> Self {
-        Self(Zeroizing::new(bytes))
-    }
-
-    /// The payload's form: 26 uppercase base32 characters, no padding, canonical.
-    fn from_base32(text: &str) -> Option<Self> {
-        if text.len() != 26 {
-            return None;
-        }
-        let raw = Zeroizing::new(BASE32_NOPAD.decode(text.as_bytes()).ok()?);
-        let bytes: [u8; OTP_BYTES] = raw.as_slice().try_into().ok()?;
-        Some(Self::from_bytes(bytes))
-    }
-
-    fn hmac(&self, domain: &[u8]) -> Hmac<Sha256> {
-        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(self.0.as_slice())
-            .expect("HMAC accepts a key of any length");
-        mac.update(domain);
-        mac
-    }
-
-    /// `HMAC-SHA256(otp, "or2-pair/3 request" 0x00 || nonce || key)`: what the phone proves it
-    /// knows without sending the password. `key` is the exact text sent in the request's `key`
-    /// field.
-    pub fn request_mac(&self, nonce: &[u8], key: &str) -> [u8; 32] {
-        let mut mac = self.hmac(REQUEST_DOMAIN);
-        mac.update(nonce);
-        mac.update(key.as_bytes());
-        mac.finalize().into_bytes().into()
-    }
-
-    /// `HMAC-SHA256(otp, "or2-pair/3 verdict" 0x00 || ok || lp(reason) || lp(nonce) ||
-    /// lp(fingerprint))`: what the host proves in its answer. `ok` is one byte (1 for success, 0
-    /// for a refusal), `reason` the refusal reason (empty for a success and for a refusal without
-    /// one), `fingerprint` the `SHA256:` fingerprint of the key the phone sent, and `lp` a
-    /// big-endian `u16` length followed by the bytes. The encoding is injective: a success and a
-    /// refusal never share a MAC, whatever the reason. The two domains differ, so a request MAC
-    /// can never be replayed as a verdict, nor a verdict from another exchange (other nonce) or
-    /// about another key.
-    pub fn verdict_mac(&self, nonce: &[u8], ok: bool, reason: &str, fingerprint: &str) -> [u8; 32] {
-        self.verdict_hmac(nonce, ok, reason, fingerprint)
-            .finalize()
-            .into_bytes()
-            .into()
-    }
-
-    fn verdict_hmac(
-        &self,
-        nonce: &[u8],
-        ok: bool,
-        reason: &str,
-        fingerprint: &str,
-    ) -> Hmac<Sha256> {
-        fn field(mac: &mut Hmac<Sha256>, bytes: &[u8]) {
-            let length = u16::try_from(bytes.len()).unwrap_or(u16::MAX) /* bounded by the line limits */;
-            mac.update(&length.to_be_bytes());
-            mac.update(bytes);
-        }
-        let mut mac = self.hmac(VERDICT_DOMAIN);
-        mac.update(&[u8::from(ok)]);
-        field(&mut mac, reason.as_bytes());
-        field(&mut mac, nonce);
-        field(&mut mac, fingerprint.as_bytes());
-        mac
-    }
-
-    /// Whether `claimed` is the host's verdict MAC, compared in constant time.
-    pub fn verify_verdict(
-        &self,
-        nonce: &[u8],
-        ok: bool,
-        reason: &str,
-        fingerprint: &str,
-        claimed: &[u8],
-    ) -> bool {
-        self.verdict_hmac(nonce, ok, reason, fingerprint)
-            .verify_slice(claimed)
-            .is_ok()
-    }
-
-    /// Overwrites the password now (the owner is done with it) rather than at drop.
-    pub fn wipe(&mut self) {
-        use zeroize::Zeroize;
-        self.0.zeroize();
-    }
-}
-
-/// How to reach the host's one-shot listener.
-#[derive(Debug, Clone)]
-pub struct PairExchange {
-    /// Where the host listens, in preference order (IP literals).
-    pub endpoints: Vec<Endpoint>,
-    pub otp: Otp,
-}
-
 /// A parsed pairing code.
 #[derive(Debug, Clone)]
 pub struct PairOffer {
@@ -208,10 +247,11 @@ pub struct PairOffer {
     pub port: u16,
     /// Where SSH can reach the host, in preference order, each with [`PairOffer::port`].
     pub addresses: Vec<Endpoint>,
-    /// The host's public key, to trust before the first connection.
+    /// The host's public key: pinned for the pairing and trusted afterwards.
     pub host_key: HostKey,
-    /// `None` for a code made with `--no-listen`: the user installs the phone's key by hand.
-    pub exchange: Option<PairExchange>,
+    /// This run's pairing id. `None` for a code made with `--manual`: the user installs the
+    /// phone's key by hand.
+    pub pairing_id: Option<String>,
 }
 
 impl PairOffer {
@@ -226,12 +266,9 @@ impl PairOffer {
             .strip_prefix(PAYLOAD_PREFIX)
             .ok_or(PairParseError::NotPairingCode)?;
         let (version, query) = rest.split_once('?').ok_or(PairParseError::Malformed)?;
-        match version {
-            "1" => {}
-            v if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) => {
-                return Err(PairParseError::UnsupportedVersion);
-            }
-            _ => return Err(PairParseError::Malformed),
+        match version_number(version).ok_or(PairParseError::Malformed)? {
+            VERSION => {}
+            version => return Err(PairParseError::UnsupportedVersion { version }),
         }
         if !query.bytes().all(|b| b.is_ascii_graphic()) || query.contains('#') {
             return Err(PairParseError::Malformed);
@@ -247,6 +284,26 @@ impl PairOffer {
     }
 }
 
+/// A version number: digits only, no leading zero.
+fn version_number(text: &str) -> Option<u32> {
+    let plain = !text.is_empty()
+        && text.bytes().all(|b| b.is_ascii_digit())
+        && (text == "0" || !text.starts_with('0'));
+    plain.then(|| text.parse().ok()).flatten()
+}
+
+/// Whether `id` is a pairing id: exactly 13 lowercase base32 characters that decode to 8 bytes
+/// (canonical: the last character carries no stray bit).
+pub fn is_pairing_id(id: &str) -> bool {
+    id.len() == PAIRING_ID_CHARS
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
+        && BASE32_NOPAD
+            .decode(id.to_ascii_uppercase().as_bytes())
+            .is_ok_and(|bytes| bytes.len() == 8)
+}
+
 #[derive(Default)]
 struct Fields {
     name: Option<String>,
@@ -254,8 +311,7 @@ struct Fields {
     port: Option<String>,
     addresses: Vec<String>,
     hk: Option<String>,
-    pair: Vec<String>,
-    otp: Option<String>,
+    id: Option<String>,
 }
 
 impl Fields {
@@ -276,13 +332,9 @@ impl Fields {
             "user" => once(&mut self.user, "user", value),
             "port" => once(&mut self.port, "port", value),
             "hk" => once(&mut self.hk, "hk", value),
-            "otp" => once(&mut self.otp, "otp", value),
+            "id" => once(&mut self.id, "id", value),
             "a" => {
                 self.addresses.push(value);
-                Ok(())
-            }
-            "pair" => {
-                self.pair.push(value);
                 Ok(())
             }
             _ => Err(PairParseError::UnknownField),
@@ -315,26 +367,10 @@ impl Fields {
         let host_key = parse_host_key(&self.hk.ok_or(PairParseError::MissingField("hk"))?)
             .ok_or(PairParseError::InvalidField("hk"))?;
 
-        let exchange = match (self.pair.is_empty(), self.otp) {
-            (true, None) => None,
-            (false, Some(otp)) => {
-                if self.pair.len() > MAX_PAIR_ADDRESSES {
-                    return Err(PairParseError::InvalidField("pair"));
-                }
-                let mut endpoints: Vec<Endpoint> = Vec::new();
-                for pair in &self.pair {
-                    let endpoint =
-                        pair_endpoint(pair).ok_or(PairParseError::InvalidField("pair"))?;
-                    if endpoints.contains(&endpoint) {
-                        return Err(PairParseError::InvalidField("pair"));
-                    }
-                    endpoints.push(endpoint);
-                }
-                let otp = Otp::from_base32(&otp).ok_or(PairParseError::InvalidField("otp"))?;
-                Some(PairExchange { endpoints, otp })
-            }
-            (true, Some(_)) => return Err(PairParseError::MissingField("pair")),
-            (false, None) => return Err(PairParseError::MissingField("otp")),
+        let pairing_id = match self.id {
+            None => None,
+            Some(id) if is_pairing_id(&id) => Some(id),
+            Some(_) => return Err(PairParseError::InvalidField("id")),
         };
 
         Ok(PairOffer {
@@ -343,7 +379,7 @@ impl Fields {
             port,
             addresses,
             host_key,
-            exchange,
+            pairing_id,
         })
     }
 }
@@ -404,31 +440,6 @@ fn host_endpoint(host: &str, port: u16) -> Option<Endpoint> {
     Endpoint::new(host, port).ok()
 }
 
-/// `<ipv4>:<port>` or `[<ipv6>]:<port>`: always an IP literal, never a name to resolve, and
-/// never an address nothing can listen on.
-fn pair_endpoint(value: &str) -> Option<Endpoint> {
-    let (host, port) = if let Some(rest) = value.strip_prefix('[') {
-        let (host, port) = rest.split_once("]:")?;
-        (host, port)
-    } else {
-        value.rsplit_once(':')?
-    };
-    let ip: IpAddr = host.parse().ok()?;
-    if ip.is_unspecified() || ip.is_multicast() {
-        return None;
-    }
-    if let IpAddr::V4(v4) = ip
-        && v4.is_broadcast()
-    {
-        return None;
-    }
-    // An IPv4 literal had no brackets and an IPv6 one had: no `1.2.3.4` in brackets, no bare `::1:80`.
-    if ip.is_ipv6() != value.starts_with('[') {
-        return None;
-    }
-    Endpoint::new(host, parse_port(port)?).ok()
-}
-
 /// `<algorithm> <base64>` with nothing after it: the host's plain public key.
 fn parse_host_key(value: &str) -> Option<HostKey> {
     let mut tokens = value.split(' ');
@@ -443,90 +454,75 @@ fn parse_host_key(value: &str) -> Option<HostKey> {
     }
 }
 
-// --- the exchange ------------------------------------------------------------------------------
+// --- the enrolment -----------------------------------------------------------------------------
 
-/// How long each step may take. The host's own window is 120 s, so the wait for its verdict (a
-/// person typing `y`) is that plus a margin; everything else is quick.
+/// How long each step may take (the contract's 10 s). Tests shorten it.
 #[derive(Debug, Clone, Copy)]
 pub struct PairTiming {
-    /// Each connect, the host's hello and the write of the request: 10 s.
+    /// Each address of the race, the handshake, the authentication, the channel and `exec`, the
+    /// wait for the hello, the write of the request and the wait for the verdict.
     pub step: Duration,
-    /// The wait for the host's verdict after the request: 125 s.
-    pub verdict: Duration,
 }
 
 impl Default for PairTiming {
     fn default() -> Self {
         Self {
             step: Duration::from_secs(10),
-            verdict: Duration::from_secs(125),
         }
     }
 }
 
-/// Why the host said no (`{"ok":false,"reason":…}`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Refusal {
-    /// The person at the host answered `n`.
-    Declined,
-    /// The password did not match: an old or wrong code, or the code was already used.
-    AuthenticationFailed,
-    /// The host would not accept this kind of key.
-    KeyNotAccepted,
-    /// Nobody answered on the host before its window closed.
-    TimedOut,
-    /// The host could not read the request.
-    BadRequest,
-    /// The host could not write `authorized_keys` (its screen says why: permissions, a link...).
-    HostFailed,
-    /// A reason this app does not know.
-    Other,
-}
-
-impl Refusal {
-    fn of(reason: Option<&str>) -> Self {
-        match reason {
-            Some("declined") => Self::Declined,
-            Some("authentication") => Self::AuthenticationFailed,
-            Some("key") => Self::KeyNotAccepted,
-            Some("timeout") => Self::TimedOut,
-            Some("request") => Self::BadRequest,
-            Some("failed") => Self::HostFailed,
-            _ => Self::Other,
-        }
-    }
+/// What the host reported after it installed the phone's key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairResult {
+    /// The account the key was added to.
+    pub username: String,
+    /// `SHA256:…` of the key the host installed (the phone checks it is its own).
+    pub fingerprint: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PairError {
-    #[error("this pairing code has no listener (it was made with --no-listen)")]
-    NoExchange,
+    #[error("this pairing code has no pairing id (it was made with --manual)")]
+    NoPairingId,
+    #[error("the offer is not one `PairOffer::parse` made")]
+    InvalidOffer,
     #[error("the phone key is not an OpenSSH public key this app can authorize")]
     InvalidKey,
     #[error(
         "the device label must be 1 to {MAX_LABEL_CHARS} characters without control characters"
     )]
     InvalidDevice,
-    #[error("the host cannot be reached on its pairing addresses")]
+    #[error("the host cannot be reached on its addresses")]
     Unreachable,
     #[error("the host did not answer in time")]
     TimedOut,
+    /// The host presented a different key than the code's: the connection ended before
+    /// authentication and nothing was sent.
+    #[error("the host presented a different key than the pairing code")]
+    HostKeyMismatch,
+    /// The host did not accept the bootstrap key: another code was typed, the run ended or
+    /// expired, or sshd ignores `authorized_keys`.
+    #[error("the host did not accept this phone's code")]
+    BootstrapRefused,
+    /// Not the hello of `or2-pair` (a `ForceCommand`, another program, too much shell noise).
+    #[error("something other than or2-pair answered on the host")]
+    NotOr2Pair,
     #[error("the host does not speak this pairing protocol")]
     Protocol,
-    /// The answer did not carry a valid proof of the one-time password: not the host that made
-    /// the code (or an old or wrong code), so neither its success nor its refusal is believed.
-    #[error("the host's answer could not be verified")]
-    HostNotAuthenticated,
     #[error("the connection to the host ended early")]
     ConnectionLost,
-    #[error("the host refused: {0:?}")]
-    Refused(Refusal),
-}
-
-#[derive(Deserialize)]
-struct Hello {
-    v: u32,
-    nonce: String,
+    #[error("or2-pair has stopped or timed out on the host")]
+    Expired,
+    #[error("another device already used this pairing")]
+    Gone,
+    #[error("the host does not accept this key")]
+    KeyNotAccepted,
+    #[error("the host could not add the key")]
+    HostFailed,
+    /// `request`, or a reason this app does not know.
+    #[error("the host refused")]
+    Refused,
 }
 
 #[derive(Serialize)]
@@ -534,66 +530,71 @@ struct Request<'a> {
     v: u32,
     key: &'a str,
     device: &'a str,
-    mac: String,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Reply {
+struct Hello {
+    v: u32,
+    hello: String,
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct Verdict {
+    v: u32,
     ok: bool,
+    user: Option<String>,
+    fingerprint: Option<String>,
     reason: Option<String>,
-    /// `base64 HMAC-SHA256` of the verdict, see [`Otp::verdict_mac`].
-    mac: Option<String>,
 }
 
-/// `SHA256:…` of a public key line, as the host shows and signs it.
-fn fingerprint_of(key: &str) -> Result<String, PairError> {
-    let key = PublicKey::from_openssh(key.trim()).map_err(|_| PairError::InvalidKey)?;
-    Ok(key.fingerprint(HashAlg::Sha256).to_string())
-}
-
-/// A key the host may authorize, in the form that is sent: algorithm and key data, no comment.
-fn clean_key(line: &str) -> Result<String, PairError> {
+/// The phone's key as it is sent (`<algorithm> <base64>`, no comment) and its fingerprint.
+fn clean_key(line: &str) -> Result<(String, String), PairError> {
     let mut key = PublicKey::from_openssh(line.trim()).map_err(|_| PairError::InvalidKey)?;
     match key.algorithm() {
         Algorithm::Ed25519 | Algorithm::Ecdsa { .. } | Algorithm::Rsa { .. } => {}
         _ => return Err(PairError::InvalidKey),
     }
     key.set_comment("");
-    key.to_openssh().map_err(|_| PairError::InvalidKey)
+    let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+    let line = key.to_openssh().map_err(|_| PairError::InvalidKey)?;
+    Ok((line, fingerprint))
 }
 
-/// Sends `public_key_line` to the host named by `offer`, proving knowledge of the one-time
-/// password, and resolves when the host's user has confirmed (or refused). The password is used
-/// once and is not kept anywhere but the offer.
+/// Enrols `public_key_line` (an OpenSSH public key line; its comment is not sent) with the host
+/// that made `offer`, using the pairing code `code` the person typed there, and resolves with the
+/// host's report. One run, in order:
 ///
-/// Every connection goes through `transport`: the offer's `pair` addresses are raced, the
-/// winner carries the exchange. Reads are bounded and every step has its [`PairTiming`] limit.
-/// Dropping the future cancels it and closes the connection.
-pub async fn submit_key<T: Transport>(
+/// 1. the offer's addresses are raced through `transport` and **one** SSH handshake runs on the
+///    winner, accepting only the pinned host key ([`PairError::HostKeyMismatch`] otherwise);
+/// 2. one authentication with the bootstrap key derived from `code` and the pairing id, then the
+///    key is zeroized ([`PairError::BootstrapRefused`] if the host does not accept it);
+/// 3. one session channel, no PTY, `exec "or2-pair"`; shell noise before the hello is skipped up to
+///    [`NOISE_LIMIT`] bytes, and the hello's id must be the offer's;
+/// 4. the request, then the host's verdict, every refusal mapped to its own [`PairError`].
+///
+/// Every step has [`PairTiming::step`]. The channel and the connection are closed through the
+/// connection's own close path however this ends, and dropping the future cancels the pairing the
+/// same way.
+pub async fn pair_enroll<T: Transport>(
     transport: &Arc<T>,
     offer: &PairOffer,
+    code: &PairCode,
     public_key_line: &str,
     device: &str,
     timing: PairTiming,
-) -> Result<(), PairError> {
-    let exchange = offer.exchange.as_ref().ok_or(PairError::NoExchange)?;
-    submit_exchange(transport, exchange, public_key_line, device, timing).await
-}
-
-/// [`submit_key`] for the exchange part of an offer alone (the FFI keeps no whole offers).
-pub async fn submit_exchange<T: Transport>(
-    transport: &Arc<T>,
-    exchange: &PairExchange,
-    public_key_line: &str,
-    device: &str,
-    timing: PairTiming,
-) -> Result<(), PairError> {
-    let key = clean_key(public_key_line)?;
+) -> Result<PairResult, PairError> {
+    let id = offer.pairing_id.as_deref().ok_or(PairError::NoPairingId)?;
+    if !is_pairing_id(id) || offer.addresses.is_empty() {
+        return Err(PairError::InvalidOffer);
+    }
+    let (key, fingerprint) = clean_key(public_key_line)?;
     let device = label(device.to_owned()).ok_or(PairError::InvalidDevice)?;
+    let request = request_line(&key, &device)?;
+
     let raced = race_with(
         transport,
-        &exchange.endpoints,
+        &offer.addresses,
         RaceTiming {
             stagger: RACE_STAGGER,
             address_timeout: timing.step,
@@ -602,120 +603,193 @@ pub async fn submit_exchange<T: Transport>(
     )
     .await
     .map_err(|failure| {
-        if failure
+        let all_timed_out = failure
             .errors
             .iter()
-            .all(|error| error.kind() == std::io::ErrorKind::TimedOut)
-        {
+            .all(|error| error.kind() == std::io::ErrorKind::TimedOut);
+        if all_timed_out {
             PairError::TimedOut
         } else {
             PairError::Unreachable
         }
     })?;
-    converse(raced.stream, &exchange.otp, &key, &device, timing).await
+
+    let bootstrap = code.bootstrap_key(id);
+    let mut session = PairSession::open(
+        raced.stream,
+        &offer.username,
+        &offer.host_key,
+        bootstrap,
+        timing.step,
+    )
+    .await?;
+    let result = converse(&mut session, id, &request, &fingerprint, timing.step).await;
+    session.close().await;
+    result
 }
 
-/// The exchange on an established stream.
-pub async fn converse<S: AsyncRead + AsyncWrite + Unpin>(
-    mut stream: S,
-    otp: &Otp,
-    key: &str,
-    device: &str,
-    timing: PairTiming,
-) -> Result<(), PairError> {
-    let fingerprint = fingerprint_of(key)?;
-    let hello = within(timing.step, read_line(&mut stream, HELLO_LIMIT)).await??;
-    let hello: Hello = serde_json::from_slice(&hello).map_err(|_| PairError::Protocol)?;
-    if hello.v != EXCHANGE_VERSION {
-        return Err(PairError::Protocol);
-    }
-    let nonce = STANDARD
-        .decode(hello.nonce.as_bytes())
-        .ok()
-        .filter(|nonce| nonce.len() == NONCE_BYTES)
-        .ok_or(PairError::Protocol)?;
-
-    let request = Request {
-        v: EXCHANGE_VERSION,
+fn request_line(key: &str, device: &str) -> Result<Vec<u8>, PairError> {
+    let mut line = serde_json::to_vec(&Request {
+        v: VERSION,
         key,
         device,
-        mac: STANDARD.encode(otp.request_mac(&nonce, key)),
-    };
-    let mut line = serde_json::to_vec(&request).map_err(|_| PairError::Protocol)?;
-    line.push(b'\n');
-    within(timing.step, async {
-        stream
-            .write_all(&line)
-            .await
-            .map_err(|_| PairError::ConnectionLost)?;
-        stream.flush().await.map_err(|_| PairError::ConnectionLost)
     })
-    .await??;
-
-    let reply = within(timing.verdict, read_line(&mut stream, REPLY_LIMIT)).await??;
-    let reply: Reply = serde_json::from_slice(&reply).map_err(|_| PairError::Protocol)?;
-
-    // Nothing in the reply is believed, success or refusal, until it proves the host knows the
-    // one-time password: the MAC covers this exchange's nonce, whether it is a success, the
-    // reason and the fingerprint of the key that was sent, in an encoding no two outcomes share.
-    // A success that carries a reason is contradictory and as good as forged. Constant-time
-    // comparison.
-    if reply.ok && reply.reason.is_some() {
-        return Err(PairError::HostNotAuthenticated);
+    .map_err(|_| PairError::Protocol)?;
+    if line.len() >= REQUEST_LIMIT {
+        return Err(PairError::InvalidKey);
     }
-    let reason = reply.reason.as_deref().unwrap_or_default();
-    let authentic = reply
-        .mac
-        .as_deref()
-        .and_then(|mac| STANDARD.decode(mac.as_bytes()).ok())
-        .is_some_and(|mac| otp.verify_verdict(&nonce, reply.ok, reason, &fingerprint, &mac));
-    if !authentic {
-        return Err(PairError::HostNotAuthenticated);
-    }
-    if reply.ok {
-        Ok(())
-    } else {
-        Err(PairError::Refused(Refusal::of(reply.reason.as_deref())))
-    }
+    line.push(b'\n');
+    Ok(line)
 }
 
-async fn within<F: std::future::Future>(
-    limit: Duration,
-    future: F,
-) -> Result<F::Output, PairError> {
-    tokio::time::timeout(limit, future)
+/// The exchange on an open session.
+async fn converse(
+    session: &mut PairSession,
+    id: &str,
+    request: &[u8],
+    fingerprint: &str,
+    step: Duration,
+) -> Result<PairResult, PairError> {
+    let mut rest = timeout(step, read_hello(session, id))
         .await
-        .map_err(|_| PairError::TimedOut)
+        .map_err(|_| PairError::TimedOut)??;
+    timeout(step, session.send(request))
+        .await
+        .map_err(|_| PairError::TimedOut)??;
+    let line = timeout(step, read_line(session, &mut rest, VERDICT_LIMIT))
+        .await
+        .map_err(|_| PairError::TimedOut)??;
+    verdict(&line, fingerprint)
 }
 
-/// One line without its terminator, at most `limit` bytes: a longer one is a protocol error, not
-/// a reason to buffer without bound.
-async fn read_line<R: AsyncRead + Unpin>(
-    reader: &mut R,
+/// Reads until the hello line, skipping shell noise, and returns what followed it. The hello is
+/// the first line that starts with [`HELLO_PREFIX`] and begins within [`NOISE_LIMIT`] bytes;
+/// anything else is `NotOr2Pair`. Its `id` must be `id`.
+async fn read_hello(session: &mut PairSession, id: &str) -> Result<Vec<u8>, PairError> {
+    let mut buffer: Vec<u8> = Vec::new();
+    loop {
+        if let Some(found) = locate_hello(&buffer)? {
+            let hello: Hello = serde_json::from_slice(&buffer[found.start..found.end])
+                .map_err(|_| PairError::Protocol)?;
+            if hello.v != VERSION || hello.hello != PAIR_COMMAND || hello.id != id {
+                return Err(PairError::Protocol);
+            }
+            return Ok(buffer.split_off(found.after));
+        }
+        match session.next().await {
+            Next::Data(data) => buffer.extend_from_slice(&data),
+            // The command ran and exited without a hello (not found, a ForceCommand, an rc file).
+            Next::Closed => return Err(PairError::NotOr2Pair),
+            Next::Lost => return Err(PairError::ConnectionLost),
+        }
+    }
+}
+
+/// Where the hello line is in a buffer: its bytes are `start..end` (no terminator) and what
+/// follows it begins at `after`.
+struct Located {
+    start: usize,
+    end: usize,
+    after: usize,
+}
+
+/// The hello line in `buffer`: `None` if it may still come, an error if it cannot any more.
+fn locate_hello(buffer: &[u8]) -> Result<Option<Located>, PairError> {
+    let mut start = 0;
+    loop {
+        if start > NOISE_LIMIT {
+            return Err(PairError::NotOr2Pair);
+        }
+        let line = &buffer[start.min(buffer.len())..];
+        let end = line.iter().position(|byte| *byte == b'\n');
+        if line.starts_with(HELLO_PREFIX) {
+            return match end {
+                Some(end) if end <= HELLO_LIMIT => Ok(Some(Located {
+                    start,
+                    end: start + trim_cr(line, end),
+                    after: start + end + 1,
+                })),
+                _ if line.len() > HELLO_LIMIT => Err(PairError::Protocol),
+                _ => Ok(None),
+            };
+        }
+        match end {
+            Some(end) => start += end + 1,
+            // An unfinished line: it may still become the hello if it is its beginning, or the
+            // next line may start within the budget.
+            None if HELLO_PREFIX.starts_with(line) => return Ok(None),
+            None if buffer.len() > NOISE_LIMIT => return Err(PairError::NotOr2Pair),
+            None => return Ok(None),
+        }
+    }
+}
+
+/// `end` of a line without a trailing carriage return.
+fn trim_cr(line: &[u8], end: usize) -> usize {
+    if end > 0 && line[end - 1] == b'\r' {
+        end - 1
+    } else {
+        end
+    }
+}
+
+/// One line without its terminator, at most `limit` bytes, starting with what is already in
+/// `buffer`.
+async fn read_line(
+    session: &mut PairSession,
+    buffer: &mut Vec<u8>,
     limit: usize,
 ) -> Result<Vec<u8>, PairError> {
-    let mut line = Vec::new();
-    let mut chunk = [0u8; 128];
     loop {
-        let count = reader
-            .read(&mut chunk)
-            .await
-            .map_err(|_| PairError::ConnectionLost)?;
-        if count == 0 {
-            return Err(PairError::ConnectionLost);
-        }
-        let end = chunk[..count].iter().position(|byte| *byte == b'\n');
-        line.extend_from_slice(&chunk[..end.unwrap_or(count)]);
-        if line.len() > limit {
-            return Err(PairError::Protocol);
-        }
-        if end.is_some() {
+        if let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
+            if end > limit {
+                return Err(PairError::Protocol);
+            }
+            let mut line: Vec<u8> = buffer.drain(..=end).collect();
+            line.pop();
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
             return Ok(line);
         }
+        if buffer.len() > limit {
+            return Err(PairError::Protocol);
+        }
+        match session.next().await {
+            Next::Data(data) => buffer.extend_from_slice(&data),
+            // The command ended or the connection broke before it answered.
+            Next::Closed | Next::Lost => return Err(PairError::ConnectionLost),
+        }
     }
+}
+
+/// The host's verdict: a success carries the account and the fingerprint of the key it installed,
+/// which must be the key that was sent; a refusal carries a reason.
+fn verdict(line: &[u8], fingerprint: &str) -> Result<PairResult, PairError> {
+    let verdict: Verdict = serde_json::from_slice(line).map_err(|_| PairError::Protocol)?;
+    if verdict.v != VERSION {
+        return Err(PairError::Protocol);
+    }
+    if verdict.ok {
+        let user = verdict
+            .user
+            .filter(|user| !user.is_empty() && !user.chars().any(char::is_control))
+            .ok_or(PairError::Protocol)?;
+        if verdict.fingerprint.as_deref() != Some(fingerprint) {
+            return Err(PairError::Protocol);
+        }
+        return Ok(PairResult {
+            username: user,
+            fingerprint: fingerprint.to_owned(),
+        });
+    }
+    Err(match verdict.reason.as_deref() {
+        Some("expired") => PairError::Expired,
+        Some("gone") => PairError::Gone,
+        Some("key") => PairError::KeyNotAccepted,
+        Some("failed") => PairError::HostFailed,
+        _ => PairError::Refused,
+    })
 }
 
 #[cfg(test)]
