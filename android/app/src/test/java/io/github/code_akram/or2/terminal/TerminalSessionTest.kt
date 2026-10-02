@@ -72,6 +72,34 @@ class TerminalSessionTest {
         assertEquals(1, fake.calls)
     }
 
+    @Test fun inputFollowsTheRouteAtCallTimeWhileFramesStayWithTheBoundHandle() {
+        val old = FakeSession(frame)
+        val next = FakeSession(null)
+        var current: SessionInterface = old
+        val access = TerminalSession().apply { bind(old, SessionRoute { current }) }
+        assertTrue(access.call { sendText("a") })
+        assertEquals(1, old.calls)
+        // The terminal's handle is replaced (the swap) and the old one refuses input: the view, still
+        // bound to the old handle, types into the new one.
+        current = next
+        old.inputError = SessionException.NotConnected()
+        assertTrue(access.call { sendText("b") })
+        assertEquals(1, next.calls)
+        assertEquals(1, old.calls)
+        assertTrue(access.callOwn { requestFullFrame() }) // This view's own frames: the bound handle.
+        assertEquals(2, old.calls)
+        assertEquals(frame, access.takeFrame()) // Frames are still the bound handle's.
+        // The old handle destroyed ends the view's frames, never its input.
+        old.destroyed = true
+        assertNull(access.takeFrame())
+        assertTrue(access.gone)
+        assertTrue(access.call { sendText("c") })
+        assertEquals(2, next.calls)
+        // A destroyed route target is refused without ending anything more.
+        next.destroyed = true
+        assertFalse(access.call { sendText("d") })
+    }
+
     @Test fun notConnectedIsTransientAndClosedStillAllowsTheFinalFrame() {
         val fake = FakeSession(frame)
         val access = TerminalSession().apply { bind(fake) }

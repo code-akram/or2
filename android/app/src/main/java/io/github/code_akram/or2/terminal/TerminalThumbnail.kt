@@ -60,10 +60,10 @@ fun TerminalThumbnail(terminal: ActiveTerminal, holder: HostConnections, modifie
     LaunchedEffect(terminal, handle) {
         val session = TerminalSession()
         session.bind(handle ?: return@LaunchedEffect)
-        session.call { requestFullFrame() }
+        session.callOwn { requestFullFrame() }
         terminal.frameReady.conflate().collect {
             session.takeFrame()?.let { frame ->
-                if (grid.apply(frame)) version++ else session.call { requestFullFrame() }
+                if (grid.apply(frame)) version++ else session.callOwn { requestFullFrame() }
             }
             delay(150) // A glance, not a second terminal: a few redraws a second is plenty.
         }

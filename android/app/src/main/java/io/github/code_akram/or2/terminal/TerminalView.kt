@@ -36,13 +36,11 @@ import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.Underline
 import io.github.code_akram.or2.ffi.KeyInput
-import io.github.code_akram.or2.ffi.TargetScroll
 import io.github.code_akram.or2.ffi.TerminalKey
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.ViewportScroll
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dimens
-import kotlinx.coroutines.CoroutineScope
 import kotlin.math.ceil
 import kotlin.math.hypot
 import kotlin.math.roundToInt
@@ -270,8 +268,13 @@ class TerminalView(context: Context) : View(context) {
         contentDescription = "Terminal"
     }
 
-    fun bind(session: SessionInterface) {
-        this.session.bind(session)
+    /**
+     * Draws [session]'s frames. Input goes through [route] (the terminal's current session at call
+     * time) when given: a view still bound to a handle the terminal has just replaced (the
+     * SSH-to-mosh swap, before recomposition) types into the new one, never into the old.
+     */
+    fun bind(session: SessionInterface, route: SessionRoute? = null) {
+        this.session.bind(session, route)
         resizeSession()
     }
 
@@ -282,7 +285,7 @@ class TerminalView(context: Context) : View(context) {
 
     private fun requestSnapshot() {
         if (!connected || session.gone || requestedFull) return
-        if (sessionCall { requestFullFrame() }) requestedFull = true
+        if (session.callOwn { requestFullFrame() }) requestedFull = true
     }
 
     fun frameReady() {
@@ -546,13 +549,21 @@ class TerminalView(context: Context) : View(context) {
     }
 
     /**
-     * Lets a tmux or herdr [target] scroll its own history through [send] (`scroll_target`), one
-     * call at a time in [scope].
+     * Lets a tmux or herdr [target] scroll its own history through [scroller] (`scroll_target`), the
+     * terminal's own: its state outlives this view, so a view of a terminal scrolled away shows the
+     * button from the start. The screen calls [targetScrollChanged] when [TargetScroller.awayState] changes.
      */
-    fun useTargetScroll(target: TerminalTarget, scope: CoroutineScope, send: suspend (TargetScroll) -> Unit) {
+    fun useTargetScroll(target: TerminalTarget, scroller: TargetScroller) {
         this.target = target
-        targetScroller = TargetScroller(scope, send) { updateScrolledAway() }
+        targetScroller = scroller
+        updateScrolledAway()
     }
+
+    /** The target scroller's [TargetScroller.away] changed (also when it changed while no view showed it). */
+    fun targetScrollChanged() = updateScrolledAway()
+
+    /** Whether the scroll-to-bottom button should show now (what [onScrolledAwayChanged] last reported). */
+    val scrolledAway get() = reportedAway
 
     /** Runs [send] at once, or after the target's `Bottom` while it is scrolled away (no typing into copy mode). */
     private fun atBottom(send: () -> Unit) {
@@ -640,7 +651,7 @@ class TerminalView(context: Context) : View(context) {
 
     private fun resizeSession() {
         val size = currentGridSize() ?: return
-        if (size != lastSize && sessionCall { resize(size.columns, size.rows) }) lastSize = size
+        if (size != lastSize && session.callOwn { resize(size.columns, size.rows) }) lastSize = size
     }
 
     private fun UInt.opaque() = toInt() or (0xff shl 24)

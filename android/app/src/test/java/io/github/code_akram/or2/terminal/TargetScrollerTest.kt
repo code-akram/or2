@@ -6,6 +6,8 @@ import io.github.code_akram.or2.ffi.TerminalModes
 import io.github.code_akram.or2.ffi.TerminalTarget
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.plus
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -175,6 +177,98 @@ class TargetScrollerTest {
         assertEquals(listOf("z"), typed)
         assertEquals(listOf(TargetScroll.Up(4u), TargetScroll.Bottom), calls.sent)
         assertTrue(scroller.idle)
+        // tmux may still be in copy mode: the button stays and the next input tries Bottom again.
+        assertTrue(scroller.unconfirmed)
+        assertTrue(scroller.away)
+    }
+
+    @Test fun aFailedBottomKeepsTheTargetAwayUntilABottomSucceeds() = runTest {
+        val calls = Calls()
+        val away = mutableListOf<Boolean>()
+        val scroller = scroller(calls, away)
+        scroller.scroll(-6)
+        runCurrent()
+        calls.failure = IllegalStateException("not connected")
+        scroller.bottom()
+        assertFalse("optimistic while the Bottom is out", scroller.away)
+        runCurrent()
+        assertTrue(scroller.away)
+        assertTrue(scroller.awayState.value)
+        assertEquals(0L, scroller.awayLines)
+        // A swipe down is allowed (how far up is unknown) and does not clear it.
+        scroller.scroll(2)
+        runCurrent()
+        assertTrue(scroller.away)
+        // The next input sends Bottom first; once it succeeds, the target is live and the input goes out.
+        calls.failure = null
+        val gate = CompletableDeferred<Unit>()
+        calls.gate = gate
+        val typed = mutableListOf<String>()
+        scroller.input { typed += "i" }
+        runCurrent()
+        assertTrue(typed.isEmpty())
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(listOf("i"), typed)
+        assertFalse(scroller.away)
+        assertFalse(scroller.awayState.value)
+        assertEquals(listOf(TargetScroll.Up(6u), TargetScroll.Bottom, TargetScroll.Down(2u), TargetScroll.Bottom), calls.sent)
+        assertEquals(listOf(true, false, true, false), away)
+    }
+
+    @Test fun aSecondBottomQueuedBehindAFailedOneDecides() = runTest {
+        val calls = Calls()
+        val scroller = scroller(calls)
+        scroller.scroll(-1)
+        runCurrent()
+        val gate = CompletableDeferred<Unit>()
+        calls.gate = gate
+        calls.failure = IllegalStateException("not connected")
+        scroller.bottom()
+        runCurrent()
+        scroller.scroll(-3)
+        scroller.bottom() // Queued behind the one in flight.
+        val second = CompletableDeferred<Unit>()
+        calls.gate = second
+        gate.complete(Unit) // The first fails...
+        runCurrent()
+        assertEquals(listOf(TargetScroll.Up(1u), TargetScroll.Bottom, TargetScroll.Bottom), calls.sent)
+        assertFalse("...but the queued Bottom decides", scroller.unconfirmed)
+        calls.failure = null
+        second.complete(Unit)
+        runCurrent()
+        assertFalse(scroller.away)
+        assertTrue(scroller.idle)
+    }
+
+    @Test fun leavingSendsBottomOnlyWhileAway() = runTest {
+        val calls = Calls()
+        val scroller = scroller(calls)
+        scroller.leave()
+        runCurrent()
+        assertTrue(calls.sent.isEmpty())
+        scroller.scroll(-7)
+        runCurrent()
+        scroller.leave()
+        runCurrent()
+        assertEquals(listOf(TargetScroll.Up(7u), TargetScroll.Bottom), calls.sent)
+        assertFalse(scroller.away)
+    }
+
+    @Test fun aCancelledBottomLeavesTheTargetUnconfirmed() = runTest {
+        val calls = Calls()
+        val job = Job()
+        val scroller = TargetScroller(this + job, calls::send)
+        scroller.scroll(-5)
+        runCurrent()
+        calls.gate = CompletableDeferred()
+        scroller.leave()
+        runCurrent()
+        assertEquals(listOf(TargetScroll.Up(5u), TargetScroll.Bottom), calls.sent)
+        job.cancel()
+        runCurrent()
+        assertTrue(scroller.unconfirmed)
+        assertTrue(scroller.awayState.value)
     }
 
     @Test fun bottomDropsQueuedSwipes() = runTest {

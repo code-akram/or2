@@ -25,7 +25,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -51,7 +50,6 @@ import androidx.core.view.WindowInsetsCompat
 import io.github.code_akram.or2.ffi.KeyModifiers
 import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionState
-import io.github.code_akram.or2.ffi.TargetScroll
 import io.github.code_akram.or2.ffi.TerminalKey
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ui.Or2Colors
@@ -70,8 +68,11 @@ import kotlinx.coroutines.launch
  * open (Esc, Ctrl and Tab stay reachable). IME insets are owned here, so both ride on top of the
  * keyboard. [chrome] is the hoisted open/closed state; [onBackground] reports the terminal's own
  * background colour (the remote can change it) so the card around it can follow. A tmux or herdr
- * [target] scrolls its own history through [scrollTarget] (`scroll_target`) when the program does
- * not track the mouse; a small round button returns to the bottom while anything is scrolled up.
+ * [target] scrolls its own history through the terminal's [targetScroller] (`scroll_target`) when
+ * the program does not track the mouse; a small round button returns to the bottom while anything is
+ * scrolled up. Every input of the view (keys, IME text, paste, the composer, the toolbar and pad,
+ * wheel scrolls) goes to the terminal's [input] route, resolved at call time; [session] is only where
+ * this view's frames come from.
  */
 @Composable
 fun TerminalScreen(
@@ -86,7 +87,10 @@ fun TerminalScreen(
     /** A frame was drawn (reported to the timing markers, which ignore it unless a path is waiting for one). */
     onFrameDrawn: () -> Unit = {},
     target: TerminalTarget = TerminalTarget.Shell,
-    scrollTarget: (suspend (TargetScroll) -> Unit)? = null,
+    /** The terminal's own target scroller (its state outlives this view); null scrolls the local viewport. */
+    targetScroller: TargetScroller? = null,
+    /** The terminal's input route (its current session at call time); null sends input to [session]. */
+    input: SessionRoute? = null,
     /** A navigation swipe on the terminal ([SwipeClassifier]); null (a shell) recognises none. */
     onSwipe: ((Swipe) -> Unit)? = null,
     /** Ctrl+Shift+1..9: the open terminal at this index (0-based, Home's order). */
@@ -97,17 +101,14 @@ fun TerminalScreen(
     key(session) {
         val context = LocalContext.current
         val haptics = LocalHapticFeedback.current
-        val scope = rememberCoroutineScope()
-        val scrollTargetNow by rememberUpdatedState(scrollTarget)
         val view = remember(session, context) {
             TerminalView(context).apply {
-                bind(session)
-                if (scrollTarget != null && target !is TerminalTarget.Shell) {
-                    useTargetScroll(target, scope) { scroll -> scrollTargetNow?.invoke(scroll) }
-                }
+                bind(session, input)
+                if (targetScroller != null && target !is TerminalTarget.Shell) useTargetScroll(target, targetScroller)
             }
         }
-        var scrolledAway by remember { mutableStateOf(false) }
+        // A terminal scrolled away before this view existed (shown again, or swapped to mosh) shows the button at once.
+        var scrolledAway by remember { mutableStateOf(view.scrolledAway) }
         var ctrl by remember { mutableStateOf(false) }
         var alt by remember { mutableStateOf(false) }
         var selecting by remember { mutableStateOf(false) }
@@ -123,6 +124,7 @@ fun TerminalScreen(
             view.onSelectionChanged = { selecting = view.selection != null }
             view.onBackgroundChanged = { background(Color(it.toInt() or (0xff shl 24))) }
             view.onScrolledAwayChanged = { scrolledAway = it }
+            scrolledAway = view.scrolledAway
             onDispose {
                 view.onFrameDrawn = {}
                 view.onInputChanged = {}
@@ -134,6 +136,8 @@ fun TerminalScreen(
         LaunchedEffect(view, state, frameReady) {
             launch { state.collect { view.sessionState(it) } }
             launch { frameReady.collect { view.frameReady() } }
+            // The terminal's scroller outlives this view: a Bottom that returns (or fails) after a swap or a return reaches it.
+            if (view.targetScroller != null) launch { view.targetScroller?.awayState?.collect { view.targetScrollChanged() } }
         }
         fun clipboardText() = context.getSystemService(ClipboardManager::class.java).primaryClip
             ?.getItemAt(0)?.text?.toString().orEmpty()
