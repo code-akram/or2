@@ -272,6 +272,11 @@ interface UserCloseListener {
     fun terminalClosed(hostId: Long, target: TerminalTarget)
 }
 
+/** Every state a live herdr watch reports, in order, on the holder's main dispatcher (agent notifications). */
+fun interface HerdrObserver {
+    fun herdrStateChanged(host: Host, watch: HerdrSessionWatch, state: HerdrState)
+}
+
 /**
  * Application-owned: at most one [HostPort] per host and any number of terminals per
  * connection. All bookkeeping and listener delivery are confined to the main dispatcher.
@@ -296,6 +301,9 @@ class HostConnections(
 
     /** Told when the user (not the network) ends a host or terminal, so reattach forgets it. */
     var userClose: UserCloseListener? = null
+
+    /** Told every state of every herdr watch, after the watch's own state flow has it. */
+    var herdrObserver: HerdrObserver? = null
     private val mutableHosts = MutableStateFlow<Map<Long, ActiveHost>>(emptyMap())
     private val mutableTerminals = MutableStateFlow<List<ActiveTerminal>>(emptyList())
     private var nextTerminalId = 1L
@@ -683,6 +691,8 @@ class HostConnections(
                 override fun onHerdrStateChanged(state: HerdrState) {
                     scope.launch {
                         watch.mutableState.value = state
+                        // A stopped watch (its connection is over) has nothing more to say to the observer.
+                        if (watch.handle != null) herdrObserver?.herdrStateChanged(current.host, watch, state)
                         // The first herdr view of the host is when its inbox rows can appear.
                         if (state is HerdrState.Live && !current.timedLive) {
                             current.timedLive = true

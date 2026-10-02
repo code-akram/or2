@@ -17,6 +17,10 @@ import io.github.code_akram.or2.data.MIGRATION_1_2
 import io.github.code_akram.or2.data.MIGRATION_2_3
 import io.github.code_akram.or2.data.MIGRATION_3_4
 import io.github.code_akram.or2.keys.BiometricVault
+import io.github.code_akram.or2.notify.AgentAlertSettings
+import io.github.code_akram.or2.notify.AgentAlerts
+import io.github.code_akram.or2.notify.AgentNotifications
+import io.github.code_akram.or2.notify.AgentOpenRequests
 import io.github.code_akram.or2.ffi.networkChanged
 import io.github.code_akram.or2.service.ConnectionService
 import io.github.code_akram.or2.service.NetworkChanges
@@ -44,6 +48,15 @@ class Or2Application : Application() {
         NotificationPermission(prefs) { checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED }
     }
 
+    /** The `Agent notifications` switch in Settings (on by default). */
+    val agentAlertSettings by lazy { AgentAlertSettings(prefs) }
+
+    /** Agent notifications: one per Blocked or Done edge a live herdr watch sees, none for the pane on screen. */
+    val agentAlerts by lazy { AgentAlerts(AgentNotifications(this, prefs)) { agentAlertSettings.enabled.value } }
+
+    /** A notification's tap, from the activity's intent to the UI that opens the pane. */
+    val agentOpens = AgentOpenRequests()
+
     /** The battery exemption: the last step of adding a host, once; Home's card after a decline. */
     val battery by lazy { BatteryPrompt(prefs, isExempt = ::isBatteryExempt) }
 
@@ -67,7 +80,10 @@ class Or2Application : Application() {
     val connections by lazy {
         HostConnections({ request, listener -> (connectorOverride ?: HostConnector.Native).connect(request, listener) }, database.dao(),
             moshServers = moshServers, timing = timing)
-            .also { it.userClose = reattach }
+            .also {
+                it.userClose = reattach
+                it.herdrObserver = agentAlerts
+            }
     }
 
     /**

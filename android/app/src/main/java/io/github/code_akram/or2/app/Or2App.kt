@@ -21,6 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -30,6 +31,8 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.activity.compose.LocalActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -77,6 +80,12 @@ import io.github.code_akram.or2.inbox.inbox
 import io.github.code_akram.or2.inbox.linkStatus
 import io.github.code_akram.or2.inbox.pendingHostKeys
 import io.github.code_akram.or2.keys.KeysScreen
+import io.github.code_akram.or2.notify.AgentAlertSettings
+import io.github.code_akram.or2.notify.AgentOpenRequests
+import io.github.code_akram.or2.notify.AgentOpenStart
+import io.github.code_akram.or2.notify.AgentPaneKey
+import io.github.code_akram.or2.notify.OnScreen
+import io.github.code_akram.or2.notify.agentOpenStart
 import io.github.code_akram.or2.pair.AddHostSheet
 import io.github.code_akram.or2.pair.KeepAliveScreen
 import io.github.code_akram.or2.pair.PairDestination
@@ -86,6 +95,7 @@ import io.github.code_akram.or2.pair.ShownCode
 import io.github.code_akram.or2.session.HostTrustDialog
 import io.github.code_akram.or2.session.SessionScreen
 import io.github.code_akram.or2.session.hostErrorMessage
+import io.github.code_akram.or2.settings.SettingsScreen
 import io.github.code_akram.or2.terminal.TerminalThumbnail
 import io.github.code_akram.or2.terminal.display
 import io.github.code_akram.or2.ui.IconAction
@@ -139,6 +149,13 @@ class AppActions(
     val deviceLabel: String = "phone",
     /** **New key** on the pairing review and the host form: makes and stores an Ed25519 key (one biometric prompt). */
     val createKey: suspend (label: String, comment: String) -> KeyRecord = { _, _ -> error("key creation is not available") },
+    /** The `Agent notifications` switch (Settings), and what turning it changes ([setAgentAlerts]). */
+    val agentAlerts: AgentAlertSettings = AgentAlertSettings(MemoryPrefStore()),
+    val setAgentAlerts: (Boolean) -> Unit = {},
+    /** An agent notification's tap: the pane to open, its host connected first when it is not. */
+    val agentOpens: AgentOpenRequests = AgentOpenRequests(),
+    /** The terminal on screen while the app is resumed, else null: its herdr pane gets no notification. */
+    val onScreen: (OnScreen?) -> Unit = {},
 )
 
 /**
@@ -331,12 +348,60 @@ fun Or2App(
         if (!loaded || recovered) return@LaunchedEffect
         recovered = true
         val coldStart = actions.takeColdResume()
+        // An agent notification's tap started the app: the user asked for that pane, not the last terminal (the tap is
+        // handled once this has run, so a dead terminal screen is left first).
+        val tapped = actions.agentOpens.request.value != null
         val top = NavStack.decode(saved).current
         if (top is Destination.Terminal && connections.terminal(top.terminalId) == null) {
             navigate(NavStack())
-            if (shouldAutoResume(actions.reattach.last.value, hostsNow.value, connectedHosts)) resumeLast()
-        } else if (shouldAutoResumeOnLaunch(coldStart, actions.reattach.last.value, hostsNow.value, connectedHosts)) {
+            if (!tapped && shouldAutoResume(actions.reattach.last.value, hostsNow.value, connectedHosts)) resumeLast()
+        } else if (!tapped && shouldAutoResumeOnLaunch(coldStart, actions.reattach.last.value, hostsNow.value, connectedHosts)) {
             resumeLast()
+        }
+    }
+
+    // --- agent notifications: the pane on screen, and a notification's tap ------------------------
+    // The visible terminal of a resumed app is "on screen": its herdr pane gets no notification, and loses one it had.
+    val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
+    val onScreen = currentTerminal?.takeIf { lifecycleState.isAtLeast(Lifecycle.State.RESUMED) }?.let { OnScreen(it.host.id, it.target) }
+    LaunchedEffect(onScreen) { actions.onScreen(onScreen) }
+    DisposableEffect(actions) { onDispose { actions.onScreen(null) } }
+    // A tap opens the pane the way an inbox tap does; a host that is not connected connects first (the usual unlock),
+    // as a Resume does. Saved state: a recreation while the connect is pending keeps the pane.
+    val agentOpen by actions.agentOpens.request.collectAsStateWithLifecycle()
+    var pendingAgent by rememberSaveable(stateSaver = AgentPaneSaver) { mutableStateOf<AgentPaneKey?>(null) }
+    fun openAgentPane(pane: AgentPaneKey) {
+        actions.message(null)
+        activations.launchOpenAgent(pane.hostId, hostLabel(pane.hostId), pane.session, pane.paneId) { enter(it, replace = false) }
+    }
+    // After the launch's own recovery (which may leave a dead terminal screen and must not cancel this open).
+    LaunchedEffect(agentOpen, loaded, recovered) {
+        if (agentOpen == null || !loaded || !recovered) return@LaunchedEffect
+        val pane = actions.agentOpens.take() ?: return@LaunchedEffect
+        val host = hostsNow.value.find { it.id == pane.hostId }
+        if (host == null) {
+            actions.message("That host no longer exists.")
+            return@LaunchedEffect
+        }
+        when (agentOpenStart(connections.host(host.id)?.state?.value)) {
+            AgentOpenStart.OPEN -> openAgentPane(pane)
+            AgentOpenStart.WAIT -> pendingAgent = pane
+            AgentOpenStart.CONNECT -> {
+                pendingAgent = pane
+                if (!busy) connect(listOf(host))
+            }
+        }
+    }
+    val agentHostState = pendingAgent?.let { states[it.hostId] }
+    LaunchedEffect(pendingAgent, agentHostState, busy) {
+        val pane = pendingAgent ?: return@LaunchedEffect
+        when (resumeStep(agentHostState, busy)) {
+            ResumeStep.WAIT -> Unit
+            ResumeStep.ABORT -> pendingAgent = null
+            ResumeStep.OPEN -> {
+                pendingAgent = null
+                openAgentPane(pane)
+            }
         }
     }
 
@@ -375,6 +440,8 @@ fun Or2App(
         )
         when {
             !stoppedOnTerminal -> Unit
+            // Back through an agent notification: its pane is being opened, not the terminal the app was left on.
+            actions.agentOpens.request.value != null || pendingAgent != null || activations.pending.value != null -> Unit
             decision is Reattach.Show -> connections.terminal(decision.terminalId)?.let { terminal ->
                 activations.launchReuse(terminal) { activation ->
                     enterReattached(activation)
@@ -439,6 +506,7 @@ fun Or2App(
                         openInbox = { navigate(nav.push(Destination.Inbox)) },
                         openKeys = { navigate(nav.push(Destination.Keys)) },
                         openAbout = { navigate(nav.push(Destination.About)) },
+                        openSettings = { navigate(nav.push(Destination.Settings)) },
                         connectAll = { connect(connectable.map { it.host }) },
                         resume = resumeCard, onResume = { resumeLast() },
                         batteryCard = batteryCard, allowBattery = actions.requestBatteryExemption, dismissBattery = actions.battery::dismissCard,
@@ -463,6 +531,10 @@ fun Or2App(
                 )
                 Destination.About -> AboutRoute(back = ::pop, openLicenses = { navigate(nav.push(Destination.Licenses)) })
                 Destination.Licenses -> LicensesRoute(back = ::pop)
+                Destination.Settings -> {
+                    val agentAlerts by actions.agentAlerts.enabled.collectAsStateWithLifecycle()
+                    SettingsScreen(agentAlerts, actions.setAgentAlerts, back = ::pop)
+                }
                 Destination.Keys -> KeysScreen(keys, busy, actions.generateKey, actions.importKey, actions.deleteKey, back = ::pop)
                 Destination.EasyPair -> if (pairFlow == null) Column { TopBar(back = ::pop) } else PairDestination(
                     pairState, keys, pairFlow, actions.deviceLabel, actions.createKey,
@@ -545,6 +617,12 @@ fun Or2App(
             hostLabel = hosts.find { it.id == active.host.id }?.label ?: active.host.label)
     }
 }
+
+/** A pending notification tap ([AgentPaneKey]) as saved state; nothing pending saves nothing. */
+private val AgentPaneSaver: Saver<AgentPaneKey?, Array<String>> = Saver(
+    save = { it?.toParts() },
+    restore = { AgentPaneKey.fromParts(it) },
+)
 
 /** The Home card for the last terminal: what it was and how it was reached. */
 private fun resumeCardOf(last: LastTerminal, hosts: List<Host>): HomeResume? {

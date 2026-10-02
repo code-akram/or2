@@ -3490,6 +3490,70 @@ screen** (its terminal is the visible one and the app is resumed), **tap opens t
 - Tests: JVM tests for the edge rule (one per seq, no notification on screen, none on the first
   snapshot, cancel rules); the device suite checks the channel and a posted notification.
 
+**Implemented (branch `v011/notify`).**
+
+- **Seam.** `HostConnections.herdrObserver` (`HerdrObserver`, a `fun interface`) is told every state of
+  every herdr watch, on main, in delivery order, right after the watch's own state flow has it, and only
+  while the watch is running (`handle != null`: a watch stopped with its connection says nothing more).
+  It is fed from the native listener, not by collecting the `StateFlow`, so a quick Blocked → Working
+  pair cannot be conflated away. Nothing else in the holder changed.
+- **The rule** (`notify/AgentAlerts.kt`, plain JVM): a baseline per watch object (each connection makes
+  new ones, so a reconnect's first view is a baseline), cleared by any non-`Live` state (herdr stopped
+  or failed, then came back: that first view is a baseline too). A later view posts when a pane's
+  `state_change_seq` is greater than the one last seen and its status is `Blocked` or `Done`; a pane
+  first seen in a later view (no earlier seq) is baselined, never notified; a seq that went backwards
+  (herdr restarted under a live watch) is no advance. `Idle` and `Unknown` never notify, and `Done` →
+  `Idle` keeps the notification (only `Working`, opening and disappearing cancel it, as written).
+- **On screen** is reported by `Or2App`: the visible `Destination.Terminal`'s host and target while the
+  lifecycle is `RESUMED`, else null. A herdr terminal shows herdr's focused pane (shared state), so the
+  pane on screen is the session view's `focused_pane_id`, falling back to the target's pane id before
+  herdr reported one; an edge for that pane is recorded and never posted later. Becoming on screen
+  (any way in: inbox, thumbnail, switcher, the notification) and the focus moving to a notified pane
+  inside the shown terminal both cancel its notification.
+- **Notification.** Tag `agent:<host>:<d | s<len>:<session>>:<pane>` with the fixed id 2 (the
+  service's is 1, untagged): the length prefix keeps a session name and a herdr pane id (`w1:p2`) from
+  reading as another pair. `CATEGORY_STATUS`, auto-cancel, `setWhen` now. The channel is created by
+  `ConnectionService.createChannel` beside `connections`, and again (idempotent) before each post.
+  Nothing is posted without `POST_NOTIFICATIONS`.
+- **Tap.** `PendingIntent.getActivity` with `FLAG_IMMUTABLE | FLAG_UPDATE_CURRENT`, request code the
+  tag's hash and a data URI of the tag (so each pane's pending intent is distinct whatever the hash
+  does), `SINGLE_TOP | CLEAR_TOP`, action `io.github.code_akram.or2.action.OPEN_AGENT`. **Addition:**
+  `MainActivity` is exported (the launcher), so the intent also carries a random token made once and
+  kept in the app's prefs (`agent_open_token`); an intent without it is ignored, so another app cannot
+  drive or2 to a pane. `onCreate` (only without saved state, so a rotation does not repeat it) and
+  `onNewIntent` cancel the notification and hand the pane to `AgentOpenRequests`. `Or2App` takes it
+  once the stored hosts are read and the launch's own recovery has run: connected → `launchOpenAgent`
+  at once; connecting or waiting for a host-key decision → once connected; not connected → the usual
+  grouped unlock and connect, then `launchOpenAgent` (`resumeStep`, as a Resume; the pending pane is
+  saved state). A tap that started the app suppresses the cold-launch auto-resume, and a tap that
+  brought it back suppresses the return's reattach (the user asked for that pane).
+- **Settings** (new): `Destination.Settings` (`settings`), pushed from a fourth trailing icon on Home
+  (`Or2Icons.Settings`, "Settings", `nav-settings`). A `TopBar` "Settings", section `NOTIFICATIONS`, one
+  grouped row `Agent notifications` with the toggle (`settings-agent-alerts`) and a muted sentence under
+  the card. The switch is `AgentAlertSettings` (prefs key `agent_alerts_off`, so the default is on).
+  Turning it off cancels every agent notification and posts none (edges seen meanwhile are still
+  recorded, so turning it on never posts late); turning it on without the permission asks for it
+  (`allowNotifications`, the in-context path). The screen is `settings/SettingsScreen.kt`, built for
+  more rows (lane Links' `Copy from the host` belongs in it).
+- **Permission card.** Home's card reads `Show connection and agent notifications` and is the
+  `NotificationUse.AGENT_ALERTS` offer (its own dismissal key, no legacy key): a user who dismissed the
+  connection-only card, or answered the old connect-time request, is offered it once more, since agent
+  alerts are a new use. `CONNECTION` stays for its legacy flag.
+- **Not done:** a host whose watches stop without a state (the inbox flag turned off on a live
+  connection, a session no longer listed) keeps the notifications already up until they are opened;
+  a deliberate disconnect or a deleted host does not cancel them either (a tap on a deleted host's
+  notification says `That host no longer exists.`).
+- **Tests.** `AgentAlertsTest` (16): first snapshot, one per seq (re-deliveries, Blocked → Done,
+  Idle/Unknown, backwards), the notification's text, cancel on Working and on disappearing (not on
+  Idle), nothing on screen (and not late), on screen as the focused pane of that host and session,
+  showing or opening cancels, baseline after unavailable and on a new watch, a pane first seen later,
+  sessions and hosts kept apart, the switch, the setting's default, the tag's uniqueness and saved
+  state, the token, the connect-first decision, and the holder feeding it from live watches only.
+  `OneTimePromptsTest` (the `AGENT_ALERTS` offer), `NavigationTest` (`settings`). Device:
+  `AgentNotificationsDeviceTest` (the service creates the channel; a Blocked edge posts one
+  notification with its title, text, host, tap and auto-cancel, which opening cancels: skipped
+  without the permission), and `HomeUiDeviceTest`'s card text.
+
 ## Wheel-aware scrolling (lane Scroll)
 
 A vertical swipe scrolls what the user is looking at, never shell history:

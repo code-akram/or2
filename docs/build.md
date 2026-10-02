@@ -283,6 +283,11 @@ unreachable host's `failed`); `TerminalActivationsTest` the tap, reuse and reope
 terminal that starts beside its focus and is dismissed when the pane vanished; `OneTimePromptsTest` the
 battery step (the last step of adding a host, once; the card) and the notification offer, `AddHostEndTest`
 how adding a host ends on that step, and `ReattachTest` the cold-launch marker and decision.
+`AgentAlertsTest` (`notify/`) covers agent notifications: the edge rule (one per sequence number, none on a
+watch's first snapshot or for a pane first seen later, none for the pane on screen), the cancel rules, the
+switch, the tap's token and connect-first decision, and the holder feeding it from live watches; the device
+test `AgentNotificationsDeviceTest` checks the `agents` channel and a posted notification (the latter only
+where the permission is already granted).
 Timing markers are read on a debug build with `adb logcat -v time -s or2.timing:D` (one tag; one line per
 marker; host and pane ids only); see [contracts](contracts.md) "Timing markers".
 Tests that wait on those callbacks wait for the specific thing (a frame whose row shows the echo, the

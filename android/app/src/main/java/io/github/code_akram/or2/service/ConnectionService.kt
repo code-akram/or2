@@ -18,6 +18,7 @@ import android.os.Looper
 import io.github.code_akram.or2.MainActivity
 import io.github.code_akram.or2.R
 import io.github.code_akram.or2.app.Or2Application
+import io.github.code_akram.or2.notify.AgentNotifications
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -82,7 +83,10 @@ class ConnectionService : Service() {
             description = "Shown while or2 holds SSH or mosh connections open."
             setShowBadge(false)
         }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
+        // Agent alerts have their own channel, created with this one (the alerts need a connection too).
+        AgentNotifications.createChannel(manager)
     }
 
     private fun buildNotification(content: NotificationContent): Notification {

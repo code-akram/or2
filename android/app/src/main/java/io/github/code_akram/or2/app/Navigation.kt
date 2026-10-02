@@ -12,6 +12,9 @@ sealed interface Destination {
     /** About or2, and the open-source list pushed on top of it. */
     data object About : Destination
     data object Licenses : Destination
+
+    /** App-wide switches (agent notifications), pushed from Home. */
+    data object Settings : Destination
     data class HostPage(val hostId: Long) : Destination
 
     /** The add/edit host form; [hostId] 0 adds a new host. */
@@ -34,6 +37,7 @@ sealed interface Destination {
         Keys -> "keys"
         About -> "about"
         Licenses -> "licenses"
+        Settings -> "settings"
         is HostPage -> "host:$hostId"
         is HostForm -> "hostform:$hostId"
         is Terminal -> "terminal:$terminalId"
@@ -49,6 +53,7 @@ sealed interface Destination {
             text == "pair" -> EasyPair
             text == "about" -> About
             text == "licenses" -> Licenses
+            text == "settings" -> Settings
             text.startsWith("hostform:") -> text.removePrefix("hostform:").toLongOrNull()?.let(::HostForm)
             text.startsWith("host:") -> text.removePrefix("host:").toLongOrNull()?.let(::HostPage)
             text.startsWith("terminal:") -> text.removePrefix("terminal:").toLongOrNull()?.let(::Terminal)
