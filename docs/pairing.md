@@ -35,7 +35,8 @@ brew install --HEAD you/or2/or2-pair
 
 ## 2. Pair
 
-On the phone: Home, **+** (Add host), **Easy pair**. The screen shows a code such as `7KQ4-M2XD-9PTM`.
+On the phone: Home, **Easy pair with QR** (the first card on an empty Home, or **+** first). The screen shows a
+code such as `7KQ4-M2XD-9PTM`.
 
 On the host, in a terminal:
 

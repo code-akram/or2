@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.inbox.LinkStatus
+import io.github.code_akram.or2.pair.AddHostChooser
 import io.github.code_akram.or2.session.TransportBadge
 import io.github.code_akram.or2.terminal.Transport
 import io.github.code_akram.or2.ui.ActionCard
@@ -79,7 +80,9 @@ class HomeResume(val title: String, val detail: String)
 /**
  * The start screen: only trailing icon buttons on top (agents inbox, keys, about), then SESSIONS (live
  * thumbnails of open terminals; tap resumes), CONNECTIONS (host cards; long press for options)
- * and status chips, and a FAB that adds a host. Stateless: the caller supplies everything.
+ * and status chips, and a FAB that adds a host ([addHost] opens the add-host sheet). Without hosts, CONNECTIONS
+ * holds the same add-host chooser inline: [easyPair] and [manualHost] are its two cards. Stateless: the caller
+ * supplies everything.
  */
 @Composable
 fun HomeScreen(
@@ -93,6 +96,8 @@ fun HomeScreen(
     openSession: (HomeSession) -> Unit,
     openHost: (Host) -> Unit,
     addHost: () -> Unit,
+    easyPair: () -> Unit,
+    manualHost: () -> Unit,
     editHost: (Host) -> Unit,
     connectHost: (Host) -> Unit,
     disconnectHost: (Host) -> Unit,
@@ -142,7 +147,7 @@ fun HomeScreen(
                 SectionHeader("Connections", hint = if (hosts.isNotEmpty()) "Long press for options." else null,
                     topGap = if (sessions.isEmpty()) 16.dp else Or2Dimens.SectionGap)
                 if (hosts.isEmpty()) {
-                    EmptyConnections(keyCount, addHost, openKeys)
+                    EmptyConnections(easyPair, manualHost)
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         hosts.forEach { card ->
@@ -219,22 +224,18 @@ private fun BatteryCard(allow: () -> Unit, dismiss: () -> Unit, modifier: Modifi
     }
 }
 
+/**
+ * No hosts yet: the illustration, then the add-host chooser the "+" sheet shows too. Both of its paths can make the
+ * key on the phone, so there is no separate key step.
+ */
 @Composable
-private fun EmptyConnections(keyCount: Int, addHost: () -> Unit, openKeys: () -> Unit) {
+private fun EmptyConnections(easyPair: () -> Unit, manualHost: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(top = 24.dp).testTag("home-empty"), verticalArrangement = Arrangement.spacedBy(24.dp)) {
         EmptyState(
             Or2Icons.Server, "No connections yet",
             "Add a host to attach to its tmux sessions\nand watch its herdr agents here.",
         )
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (keyCount == 0) {
-                ActionCard("First step", "Add an SSH key", "Generate one on this phone. The private key stays in hardware-backed storage.",
-                    meta = "~1 min · needs your biometric", icon = Or2Icons.Key, onClick = openKeys,
-                    modifier = Modifier.testTag("home-add-key"))
-            }
-            ActionCard(if (keyCount == 0) "Then" else "First step", "Add a host", "Hostname, user and the key to use. Trust is asked once, per host key.",
-                meta = "~3 min · needs hostname + key", icon = Or2Icons.Server, onClick = addHost, modifier = Modifier.testTag("home-add-host-card"))
-        }
+        AddHostChooser(easyPair, manualHost, tagPrefix = "home-add-host")
     }
 }
 

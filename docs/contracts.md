@@ -2865,7 +2865,8 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
 
 ## Android
 
-- **Add host** sheet unchanged (Easy pair, Set up manually).
+- **Add host** sheet unchanged (Easy pair, Set up manually). (Later one chooser everywhere: see
+  [First run](#first-run-one-add-host-chooser).)
 - **Easy pair screen**: the code `K` at the top ("Type this code into or2-pair on the host", the code in
   monospace as `7KQ4-M2XD-9PTM`, the one large element at about 24 sp; everything else at the compact
   scale of `docs/ui.md`), a one-line hint with the command (`or2-pair`, copyable), then the camera and
@@ -2993,3 +2994,50 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
   stdin, then a real `connect_host` with the paired key and pinned host key), and `PairUiDeviceTest`
   with the new screen (screenshots of the Easy pair, review and pairing screens; the locked key choice
   of a save retry).
+
+# First run: one add-host chooser
+
+The owner compared the first run with Moshi's: Home's empty state offered "First step: Add an SSH key" and
+"Then: Add a host" (the manual path), while **+** opened a different chooser (Easy pair, Set up manually). Two
+designs for one job. Now there is one chooser, and no key step before it.
+
+## Android
+
+- **`AddHostChooser`** (`io.github.code_akram.or2.pair`, `AddHost.kt`): the two `ActionCard`s in `AddHostOptions`
+  order, `FASTEST` / **Easy pair with QR** ("Run one command on your Mac or Linux box and scan the QR. or2 installs
+  the SSH key for you.", "Recommended · ~1 min") then `SSH-FLUENT` / **Set up manually** ("Already comfortable
+  with SSH? Enter the hostname, user and key yourself.", "~3 min · needs hostname + key"). It is drawn in three
+  places with the same cards, copy and order: Home's empty state (under the `EmptyState`), the inbox's empty state
+  (no host shows agents) and the **+** sheet (`AddHostSheet`). Card tags are `<prefix>-easy` and
+  `<prefix>-manual`, the column `<prefix>-chooser`; the prefix is `add-host` in the sheet, `home-add-host` on Home
+  and `inbox-add-host` in the inbox, so a chooser inline and one in the sheet never share a tag. The Easy pair card
+  starts the flow and pushes `EasyPair`; the manual card pushes `HostForm(0)`; both close the sheet.
+- **No key step on Home.** The empty Home no longer has "Add an SSH key" (`home-add-key`) or "Add a host"
+  (`home-add-host-card`) cards. The keys icon on Home and the inbox still opens **SSH keys** for import and
+  management. Home's attention card "Add an SSH key" (`home-add-key`) remains only for hosts that exist while no
+  key is stored (a deleted key): a repair, not a first step.
+- **New key in the host form.** The key choice is `KeyPicker` (`io.github.code_akram.or2.keys`), the radio group
+  the Easy pair review uses too: stored keys (`host-key:<id>`), then **New key** (`host-key-new`), preselected for
+  a new host when the phone has no key. With **New key** chosen, **Save** first calls `AppActions.createKey` (the
+  former `generatePairKey`: `MainActivity.createKey`, Ed25519 generated in Rust, encrypted under a new vault key
+  after the "Save SSH key" biometric prompt, stored), named like Easy pair's (`newKeyLabel`: `Key for <name>`,
+  `newKeyComment`: `or2@<phone model>`). The stored key is then selected (a second **Save** never makes another),
+  the host is saved with it, and the form shows `PairInstallKeyScreen` with `trusted = false` (the key's public
+  line, Copy, Share; "<name> is saved. Add this line to ~/.ssh/authorized_keys on the host, then connect from Home
+  and trust its host key once."). **Done** closes the form. A failure (biometric cancelled, vault refused) is one
+  `danger` line (`host-form-error`, `newKeyErrorMessage`, the text Easy pair shows too) and nothing is saved. The
+  prompt is tied to the screen: leaving or recreating it cancels the key, and `createKey` deletes the vault entry
+  of a key that was not stored.
+- **`HostFormScreen`** takes `createKey` and `deviceLabel`; `save` only stores, and the form closes itself (or
+  shows the key line first). `openKeys` and the "Add a key" pill (`host-add-key`) are gone.
+
+## Tests
+
+- JVM: `AddHostOptionsTest` (order, copy, tags, no key step), `NavigationTest` (the chooser's two pushes from Home
+  and from the inbox, Back, saved state), `KeyOperationsTest` (new-key names and the failure line).
+- Device (compiled in the gate; run on the phone): `HomeUiDeviceTest.theEmptyStateAndTheAddHostSheetShowTheSameChooser`
+  (the inline cards and the sheet's carry the same texts in the same vertical order as `AddHostOptions`), the empty
+  Home's chooser wiring without a key step, `InboxUiDeviceTest` (the chooser in the inbox's empty state),
+  `HostFormUiDeviceTest` (New key preselected without keys; Save makes the key with Easy pair's names, saves the
+  host with it and shows its line; a failed key saves nothing) and `PairUiDeviceTest` (the sheet, unchanged).
+- UI gallery: `home-empty` shows the chooser; `host-form-new-key` is the form with no stored key.

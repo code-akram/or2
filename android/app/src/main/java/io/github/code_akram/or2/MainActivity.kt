@@ -42,6 +42,7 @@ import io.github.code_akram.or2.keys.authenticateCipher
 import io.github.code_akram.or2.keys.encryptKey
 import io.github.code_akram.or2.keys.importAndWipe
 import io.github.code_akram.or2.keys.keyErrorMessage
+import io.github.code_akram.or2.keys.newKeyErrorMessage
 import io.github.code_akram.or2.keys.readPrivateKey
 import io.github.code_akram.or2.keys.vaultErrorMessage
 import io.github.code_akram.or2.session.hostConnectErrorMessage
@@ -111,7 +112,7 @@ class MainActivity : FragmentActivity() {
         })[AppViewModel::class.java]
         pairModel = ViewModelProvider(this, object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
-            override fun <T : ViewModel> create(modelClass: Class<T>): T = PairViewModel(app.database.dao(), ::describeKeyError) as T
+            override fun <T : ViewModel> create(modelClass: Class<T>): T = PairViewModel(app.database.dao(), ::newKeyErrorMessage) as T
         })[PairViewModel::class.java]
         val actions = AppActions(
             saveHost = ::saveHost,
@@ -131,7 +132,7 @@ class MainActivity : FragmentActivity() {
             takeColdResume = app.sessionMarker::takeColdResume,
             pair = pairModel.flow,
             deviceLabel = Build.MODEL.takeIf { it.isNotBlank() } ?: "Android phone",
-            generatePairKey = { label, comment -> createKey(label) { generateEd25519Key(comment) } },
+            createKey = { label, comment -> createKey(label) { generateEd25519Key(comment) } },
         )
         setContent {
             val hosts by model.hosts.collectAsStateWithLifecycle()
@@ -183,7 +184,7 @@ class MainActivity : FragmentActivity() {
     /**
      * Encrypts and stores a new key (one biometric prompt) and returns its record. The entire material lifetime
      * stays inside this worker block: cancellation at a withContext return must never strand plaintext returned
-     * by native generation/import. Used by the keys screen and by Easy pair's "new key".
+     * by native generation/import. Used by the keys screen and by **New key** (Easy pair's review, the host form).
      */
     private suspend fun createKey(label: String, produce: () -> ClientKeyMaterial): KeyRecord = withContext(Dispatchers.IO) {
         val id = UUID.randomUUID().toString()
@@ -202,13 +203,6 @@ class MainActivity : FragmentActivity() {
         } finally {
             if (!saved) app.vault.delete(id)
         }
-    }
-
-    /** What the pairing screen says when its new key could not be made (the biometric was cancelled, the vault refused). */
-    private fun describeKeyError(error: Throwable): String = when (error) {
-        is KeyException -> keyErrorMessage(error)
-        is VaultException, is GeneralSecurityException -> vaultErrorMessage(error)
-        else -> "The key could not be created. Try again."
     }
 
     /**

@@ -136,6 +136,10 @@ class InboxUiDeviceTest {
         show(InboxState(emptyList(), emptyList()))
         compose.onNodeWithTag("inbox-no-hosts").assertIsDisplayed()
         compose.onNodeWithText("No hosts show agents here.", substring = true).assertIsDisplayed()
+        // The same add-host chooser as Home's empty state and its "+" sheet.
+        compose.onNodeWithTag("inbox-add-host-chooser").assertExists()
+        compose.onNodeWithTag("inbox-add-host-easy").assertExists()
+        compose.onNodeWithTag("inbox-add-host-manual").assertExists()
         show(InboxState(listOf(row(box, LinkStatus.CONNECTED, note = "No running herdr sessions")), emptyList()))
         compose.onNodeWithTag("inbox-empty").assertIsDisplayed()
         compose.onNodeWithText("No agent events yet").assertIsDisplayed()

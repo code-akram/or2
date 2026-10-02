@@ -129,10 +129,13 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   not Material's 24 dp padding and 280 dp minimum width. The host-key dialogs use it too.
 - **Inbox host rows:** the connect action (`Retry`, `Unlock`) is a chip-scale pill (28 dp, 12 sp), so it does not
   crowd the status text; herdr's note is mono 10.5 on the 16 sp line grid.
-- **Add host sheet:** Home's FAB (and the empty-state card and the inbox's add) opens a bottom sheet with a
-  handle and no title, holding two `ActionCard`s like Moshi's: `FASTEST` / **Easy pair with QR** (QR icon tile,
-  "Recommended · ~1 min") and `SSH-FLUENT` / **Set up manually** (server icon, "~3 min · needs hostname + key").
-  Compact scale throughout; the manual card opens the unchanged form.
+- **Add host chooser:** one chooser, like Moshi's, wherever adding a host starts: two `ActionCard`s 8 dp apart,
+  `FASTEST` / **Easy pair with QR** (QR icon tile, "Recommended · ~1 min") first and `SSH-FLUENT` /
+  **Set up manually** (server icon, "~3 min · needs hostname + key") second (`AddHostChooser`, its copy in
+  `AddHostOptions`). Home's empty state and the inbox's show it inline under their `EmptyState`; Home's FAB opens it
+  in a bottom sheet with a handle and no title. Same cards, copy and order in all three; the tags differ only by
+  prefix (`add-host-easy` in the sheet, `home-add-host-easy`, `inbox-add-host-easy`). There is no separate
+  "add an SSH key" step: both paths make the key on the phone (**New key**). Compact scale throughout.
 - **Easy pair screens:** a pushed screen with a light 16 sp title. The scan screen opens with the pairing code
   `K` (`7KQ4-M2XD-9PTM`) in mono at 24 sp (`Or2Type.PairCode`, selectable): the one large element in the app,
   because it is read off the phone and typed on the host. Under it the muted `Secondary` hint **Type this code
@@ -144,8 +147,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   new code), are one `danger` line under the card. The review is a form: name and user
   fields (the user read-only when the code carries a pairing id), the addresses as numbered mono rows in a
   grouped card, the host key's fingerprint in a `MonoBlock`
-  with one muted sentence, a radio group of keys (existing keys with their short fingerprints, then **New key**;
-  disabled, with a muted note, when the host already took a key and only saving is left),
+  with one muted sentence, a radio group of keys (`KeyPicker`, shared with the host form: existing keys with their
+  short fingerprints, then **New key**; disabled, with a muted note, when the host already took a key and only
+  saving is left),
   a `danger` line for the last failure and the full-width **Pair** pill (**Add host** for a `--manual` code)
   with a muted footnote.
   Progress is a centred 32 dp spinner, a 15 sp light **Pairing with <name>…** and a **Cancel** pill; nothing modal.
@@ -177,7 +181,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   (open sessions as live terminal thumbnail cards, ~38 % width, rounded 16 dp, the terminal inset
   8 dp so corners never slice glyphs, with a compact host pill and a transport pill — `SSH`/`Mosh`
   — overlaid, 13 sp title and mono path below; tap resumes), CONNECTIONS (host cards, "Long press for options." hint right-aligned in the
-  section header), then status chips. A FAB adds a host. When the last terminal can be resumed
+  section header), then status chips. A FAB adds a host (the add-host sheet). Without hosts, CONNECTIONS holds the
+  empty state (**No connections yet**) with the add-host chooser under it, and nothing else: no key card (the
+  keys icon still opens **SSH keys** for import and management). When the last terminal can be resumed
   (its session is gone or its host is not connected), a **Resume card** sits above SESSIONS: an
   `ActionCard` with the kicker `RESUME`, the title `Alpha: herdr w1:p2`, the muted line "Unlocks
   if needed, then returns to this terminal." and the transport it had as the mono meta line
@@ -186,6 +192,14 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   action and a close glyph (`Or2Card` on `SurfaceRaised`, `Secondary` muted text, no modal). A host
   that was unreachable shows, under its failure (or under `Asleep`), one `MonoSmall` muted line per
   address: `host:port \u00b7 what happened`.
+- **Key choice (host form):** an `SSH key` label, the muted hint `Choose a key` while nothing is chosen, and the
+  same `KeyPicker` radio group as the Easy pair review: the stored keys, then **New key** ("Ed25519, generated on
+  this phone. Asks for your biometric to save it."), preselected when the phone has no key, with one muted
+  `Secondary` sentence under the group while it is chosen. **Save** then makes the key first (the biometric
+  prompt; the pill reads **Working…**), selects it, saves the host and shows the key's public line on the
+  "Add the key to the host" screen (the one a `--manual` pairing code ends on, with a note that the host key is
+  trusted on first connect); **Done** closes the form. A key that could not be made is one `danger` line above
+  **Save**, and nothing is saved.
 - **Transport preference (host form):** under the inbox switch, a `Transport` label and an
   `Auto` / `SSH` / `Mosh` segmented control (the 32 dp control above) with one muted `Secondary`
   sentence that follows the selection (`Mosh when the host has mosh-server; SSH if mosh cannot

@@ -4,13 +4,23 @@ The manual path is always available, and unchanged by Easy pair: you give or2 th
 your user name and a key, and install the key yourself. For one command and a scan instead, see
 [Pair a host](pairing.md).
 
-## 1. A key on the phone
+## 1. Add the host
 
-1. Home, key icon (top right), then **SSH keys**.
-2. Under **New key**, enter a label and tap **Generate Ed25519** (or **Choose OpenSSH private key**
-   to import one; PEM and PKCS#8 files need `ssh-keygen -p` first). Confirm with your fingerprint:
-   the private key is encrypted with a hardware-backed key and never leaves the phone.
-3. Tap the key, then **Copy public key** (or **Share**).
+Home, **Set up manually** (the second card on an empty Home, or **+** first):
+
+- **Name**: what the card says.
+- **Addresses**: one to eight, in order of preference, each with its own port. All are tried; the
+  first to answer wins. List the address that works from every network first (a ZeroTier or
+  Tailscale address, or a DNS name): mosh keeps to the address SSH reached.
+- **Username**, **SSH key**, **Transport** (Auto: mosh when the host has `mosh-server`, else SSH).
+
+For **SSH key**, pick a stored key or **New key** (preselected when the phone has none). With **New key**,
+**Save** first makes an Ed25519 key on the phone and saves it with your fingerprint (the private key is
+encrypted with a hardware-backed key and never leaves the phone), then saves the host with it and shows the
+key's public line, with **Copy public key** and **Share public key**.
+
+To import an existing key (OpenSSH; PEM and PKCS#8 files need `ssh-keygen -p` first), or to copy a stored
+key's public line later: Home, key icon (top right), **SSH keys**.
 
 ## 2. Authorize it on the host
 
@@ -25,17 +35,7 @@ chmod 600 ~/.ssh/authorized_keys
 For a key that only needs a shell, the options `no-agent-forwarding,no-X11-forwarding` before the
 key are a sensible restriction (herdr and tmux need nothing more).
 
-## 3. Add the host
-
-Home, **+**, **Set up manually**:
-
-- **Name**: what the card says.
-- **Addresses**: one to eight, in order of preference, each with its own port. All are tried; the
-  first to answer wins. List the address that works from every network first (a ZeroTier or
-  Tailscale address, or a DNS name): mosh keeps to the address SSH reached.
-- **Username**, **SSH key**, **Transport** (Auto: mosh when the host has `mosh-server`, else SSH).
-
-## 4. Connect and trust the host key
+## 3. Connect and trust the host key
 
 Tap the host. After the biometric prompt the host presents its key and or2 asks you to trust it
 once. Compare the fingerprint with the host's own:

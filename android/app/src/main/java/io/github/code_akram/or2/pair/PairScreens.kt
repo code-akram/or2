@@ -19,8 +19,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -38,15 +36,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.hosts.hostFieldError
-import io.github.code_akram.or2.keys.shortFingerprint
-import io.github.code_akram.or2.ui.ActionCard
+import io.github.code_akram.or2.keys.KeyPicker
 import io.github.code_akram.or2.ui.BottomInsetSpacer
 import io.github.code_akram.or2.ui.GroupCard
 import io.github.code_akram.or2.ui.GroupDivider
@@ -57,7 +53,6 @@ import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Field
 import io.github.code_akram.or2.ui.Or2Icons
-import io.github.code_akram.or2.ui.Or2Sheet
 import io.github.code_akram.or2.ui.Or2Shapes
 import io.github.code_akram.or2.ui.Or2Type
 import io.github.code_akram.or2.ui.PillButton
@@ -65,33 +60,6 @@ import io.github.code_akram.or2.ui.PrimaryButton
 import io.github.code_akram.or2.ui.SectionHeader
 import io.github.code_akram.or2.ui.Spinner
 import io.github.code_akram.or2.ui.TopBar
-
-/**
- * Home's "+": two cards in a sheet, like Moshi's. Easy pair is the recommended one (a command on the host and a
- * scan); the manual form stays exactly as it was.
- */
-@Composable
-fun AddHostSheet(easyPair: () -> Unit, manual: () -> Unit, dismiss: () -> Unit) {
-    Or2Sheet(dismiss, title = null, done = null, modifier = Modifier.testTag("add-host-sheet")) {
-        Column(
-            Modifier.padding(horizontal = Or2Dimens.Gutter).padding(bottom = Or2Dimens.Gutter),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            ActionCard(
-                "Fastest", "Easy pair with QR",
-                "Run one command on your Mac or Linux box and scan the QR. or2 installs the SSH key for you.",
-                meta = "Recommended · ~1 min", icon = Or2Icons.QrCode, onClick = easyPair,
-                modifier = Modifier.testTag("add-host-easy"),
-            )
-            ActionCard(
-                "SSH-fluent", "Set up manually",
-                "Already comfortable with SSH? Enter the hostname, user and key yourself.",
-                meta = "~3 min · needs hostname + key", icon = Or2Icons.Server, onClick = manual,
-                modifier = Modifier.testTag("add-host-manual"),
-            )
-        }
-    }
-}
 
 /** The pairing screens in turn, driven by the flow's state; [PairFlow] holds all the logic. */
 @Composable
@@ -287,26 +255,12 @@ fun PairReviewScreen(
                     },
                     style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.testTag("pair-key-note"),
                 )
-                val keysEnabled = !review.working && !review.keyLocked
-                GroupCard(Modifier.selectableGroup()) {
-                    keys.forEach { key ->
-                        val selected = review.choice == KeyChoice.Existing(key.id)
-                        ListRow(
-                            key.label, subtitle = shortFingerprint(key.fingerprint), subtitleMono = true, icon = Or2Icons.Key,
-                            modifier = Modifier.testTag("pair-key:${key.id}").semantics(mergeDescendants = true) {}
-                                .selectable(selected, enabled = keysEnabled, role = Role.RadioButton) { edit(null, null, KeyChoice.Existing(key.id)) },
-                            trailing = if (selected) ({ Icon(Or2Icons.Check, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Accent) }) else null,
-                        )
-                        GroupDivider(inset = 44.dp)
-                    }
-                    val newSelected = review.choice == KeyChoice.New
-                    ListRow(
-                        "New key", subtitle = "Ed25519, generated on this phone. Asks for your biometric to save it.", icon = Or2Icons.Plus,
-                        modifier = Modifier.testTag("pair-key-new").semantics(mergeDescendants = true) {}
-                            .selectable(newSelected, enabled = keysEnabled, role = Role.RadioButton) { edit(null, null, KeyChoice.New) },
-                        trailing = if (newSelected) ({ Icon(Or2Icons.Check, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Accent) }) else null,
-                    )
-                }
+                KeyPicker(
+                    keys, selectedKeyId = (review.choice as? KeyChoice.Existing)?.keyId, newSelected = review.choice == KeyChoice.New,
+                    enabled = !review.working && !review.keyLocked,
+                    choose = { edit(null, null, KeyChoice.Existing(it)) }, chooseNew = { edit(null, null, KeyChoice.New) },
+                    tagPrefix = "pair-key",
+                )
             }
             if (review.error != null) {
                 Text(review.error, style = Or2Type.Secondary, color = Or2Colors.Danger, modifier = Modifier.testTag("pair-error"))
@@ -345,9 +299,13 @@ fun PairProgressScreen(name: String, cancel: () -> Unit) {
     }
 }
 
-/** A code made with --manual: the host is saved and trusted; the key is to be installed by hand. */
+/**
+ * The host is saved with a key that is to be installed by hand: after a code made with --manual (the host key came
+ * from the code, so it is [trusted]), and after the host form saved a host with a **New key** (not trusted yet: the
+ * first connection asks).
+ */
 @Composable
-fun PairInstallKeyScreen(hostLabel: String, keyLine: String, fingerprint: String, done: () -> Unit) {
+fun PairInstallKeyScreen(hostLabel: String, keyLine: String, fingerprint: String, done: () -> Unit, trusted: Boolean = true) {
     val context = LocalContext.current
     Column(Modifier.fillMaxSize()) {
         TopBar(title = "Add the key to the host")
@@ -356,8 +314,9 @@ fun PairInstallKeyScreen(hostLabel: String, keyLine: String, fingerprint: String
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                "$hostLabel is saved and its host key is trusted. Add this line to ~/.ssh/authorized_keys on the host, then connect from Home.",
-                style = Or2Type.Secondary, color = Or2Colors.TextMuted,
+                if (trusted) "$hostLabel is saved and its host key is trusted. Add this line to ~/.ssh/authorized_keys on the host, then connect from Home."
+                else "$hostLabel is saved. Add this line to ~/.ssh/authorized_keys on the host, then connect from Home and trust its host key once.",
+                style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.testTag("pair-install-note"),
             )
             Text(fingerprint, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.testTag("pair-install-fingerprint"))
             SelectionContainer { MonoBlock(keyLine, Modifier.testTag("pair-install-key")) }
