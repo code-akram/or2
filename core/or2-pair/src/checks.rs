@@ -115,47 +115,108 @@ pub const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 
 /// The real login shell, with a time limit (rc files that wait for input or hang are a finding,
 /// not a hung check).
+///
+/// The limit covers the output too: a process an rc file starts in the background can keep the
+/// output pipe open long after the shell has exited, so the pipe is read inside the same
+/// deadline, and at the limit the shell's process group (on Unix the shell gets one of its own,
+/// so that its background jobs are in it) is killed and whatever was read is used. Nothing waits
+/// on the reading thread past the limit.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemShell;
+
+/// At most this much of the shell's output is kept.
+const SHELL_OUTPUT_LIMIT: usize = 64 * 1024;
 
 impl ShellProbe for SystemShell {
     fn run(&self, shell: &str, command: &str) -> Result<String, String> {
         use std::io::Read;
         use std::process::{Command, Stdio};
-        use std::time::Instant;
-        let mut child = Command::new(shell)
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + SHELL_TIMEOUT;
+        let mut shell_command = Command::new(shell);
+        shell_command
             .arg("-c")
             .arg(command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut shell_command, 0);
+        let mut child = shell_command
             .spawn()
             .map_err(|error| format!("it could not be started: {error}"))?;
-        let mut stdout = child.stdout.take().expect("piped");
-        let reader = std::thread::spawn(move || {
-            let mut text = Vec::new();
-            let _ = stdout.by_ref().take(64 * 1024).read_to_end(&mut text);
-            String::from_utf8_lossy(&text).into_owned()
-        });
-        let started = Instant::now();
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if started.elapsed() < SHELL_TIMEOUT => {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!(
-                        "it did not finish within {} s",
-                        SHELL_TIMEOUT.as_secs()
-                    ));
-                }
-                Err(error) => return Err(error.to_string()),
+        // Ends the shell and everything it started in its group (background jobs of rc files);
+        // a group that is already gone is fine.
+        let end = |child: &mut std::process::Child| {
+            #[cfg(unix)]
+            if let Ok(group) = libc::pid_t::try_from(child.id()) {
+                // SAFETY: `kill` has no memory preconditions; the group is the shell's own.
+                unsafe { libc::kill(-group, libc::SIGKILL) };
             }
+            let _ = child.kill();
+            let _ = child.wait();
         };
-        let output = reader.join().unwrap_or_default();
+
+        let mut stdout = child.stdout.take().expect("piped");
+        let (chunks, received) = mpsc::channel::<Vec<u8>>();
+        // Ends at the end of the output, or when the receiver is gone and more arrives.
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            while let Ok(count) = stdout.read(&mut buffer) {
+                if count == 0 || chunks.send(buffer[..count].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut output = Vec::new();
+        let mut status = None;
+        let mut ended = false;
+        loop {
+            if status.is_none() {
+                match child.try_wait() {
+                    Ok(found) => status = found,
+                    Err(error) => {
+                        end(&mut child);
+                        return Err(error.to_string());
+                    }
+                }
+            }
+            if status.is_some() && ended {
+                break;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let step = (deadline - now).min(Duration::from_millis(20));
+            if ended {
+                std::thread::sleep(step);
+                continue;
+            }
+            match received.recv_timeout(step) {
+                Ok(chunk) => {
+                    let room = SHELL_OUTPUT_LIMIT.saturating_sub(output.len());
+                    output.extend_from_slice(&chunk[..chunk.len().min(room)]);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => ended = true,
+            }
+        }
+        if status.is_none() || !ended {
+            // The limit: the shell is still running, or something it left behind still holds
+            // the output.
+            end(&mut child);
+        }
+        let Some(status) = status else {
+            return Err(format!(
+                "it did not finish within {} s",
+                SHELL_TIMEOUT.as_secs()
+            ));
+        };
+        let output = String::from_utf8_lossy(&output).into_owned();
         if status.success() {
             Ok(output)
         } else {
@@ -1141,6 +1202,32 @@ mod tests {
                 .unwrap_err()
                 .contains("could not be started")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_background_job_that_holds_the_output_does_not_outlast_the_limit() {
+        // Fix check of the v2 fixes: the shell exited at once, but a job an rc file started in
+        // the background kept the output pipe open, and the check waited for it (8 s here)
+        // instead of stopping at the limit.
+        let started = std::time::Instant::now();
+        let result = SystemShell.run("/bin/sh", "sleep 8 & echo or2-pair X; exit 0");
+        let took = started.elapsed();
+        assert!(
+            took < SHELL_TIMEOUT + std::time::Duration::from_millis(1500),
+            "took {took:?}"
+        );
+        // The shell itself finished, and what it printed counts.
+        assert_eq!(result.as_deref(), Ok("or2-pair X\n"));
+        // A shell that does not finish is still a timeout, as soon as the limit.
+        let started = std::time::Instant::now();
+        let result = SystemShell.run("/bin/sh", "echo or2-pair X; sleep 8");
+        assert!(
+            started.elapsed() < SHELL_TIMEOUT + std::time::Duration::from_millis(1500),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(result.unwrap_err().contains("did not finish"));
     }
 
     #[test]
