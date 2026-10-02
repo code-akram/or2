@@ -15,37 +15,29 @@ Its notes list the known shortcomings.
 - M3: background survival, airplane-mode roaming, process-kill reattach, and the re-check timings.
 - Easy pair v2 against a host reached over its public address: paired, saved with its host key
   trusted, and connected.
+- Easy pair v2 with a Mac on the LAN, using the macOS `or2-pair` from the one-liner: paired smoothly and
+  connected with no host-key prompt.
+- The v0.1.0 release APK: installed on the phone in place of the debug build (SHA-256 checked); it ran the
+  Mac pairing above.
+  A debug build cannot be installed over it (a different signing key): try new builds as the
+  `.devicetest` app or as signed release builds, or uninstall first (losing the hosts and keys).
 - The device suite passes (117 of 118; the notification test skips without the permission). It runs as
   the separate `io.github.code_akram.or2.devicetest` app and never touches the daily app.
 
 **Not yet verified:**
-- **Easy pair with a Mac on the LAN.** This is also the first real run of the macOS `or2-pair` binaries.
-- **The release APK on the phone.** The phone runs a debug build; switching means one uninstall and
-  re-pairing.
 - **The M3 tests the owner deferred:** mobile data, Wi-Fi to mobile handover, and unplugged (Doze)
   background runs. These cover v0 acceptance step 3.
 
 ## Next, in order
 
-1. **Easy pair on the Mac (the owner, with the lead):**
-   1. On the Mac, run
-      `curl -fsSL https://raw.githubusercontent.com/code-akram/or2/main/scripts/install-or2-pair.sh | sh`,
-      then `or2-pair`.
-   2. On the phone, open Add host > Easy pair with QR, type the code into `or2-pair`, scan, then
-      answer the battery step.
-   3. Check it connects with no host-key prompt.
-   4. Tick the Easy pair acceptance item in [design](design.md#easy-pair-checklist).
-   5. If the macOS binary fails, fix it in v0.1.1.
-2. **v0.1.1 (patch):**
-   - Make `--remap-path-prefix` a permanent part of the Android native build. For v0.1.0 it was
-     applied by hand through `RUSTFLAGS` so that no build-machine paths were left in `libor2_ffi.so`.
-   - Fix whatever the Mac test finds.
-   - Tick the "Installer, release" item once the release APK has been installed on the phone.
-3. **The deferred M3 acceptance,** when the owner approves it: mobile data, handover, Doze.
-4. **The roadmap's "Next" items:** local agent notifications from herdr events (the permission card on
+1. **v0.1.1 (patch):** on `main`, not yet released. So far: the Android native build always remaps build
+   paths and fails on a leak, and a flaky live mosh test is fixed. The Mac test found nothing to fix. It is cut
+   when the owner decides what else goes in.
+2. **The deferred M3 acceptance,** when the owner approves it: mobile data, handover, Doze.
+3. **The roadmap's "Next" items:** local agent notifications from herdr events (the permission card on
    Home is the hook), wheel-aware scrolling and scroll-to-bottom, tap links, scanning for SSH servers,
    recent directories, gestures, hardware-keyboard shortcuts, OSC 52, app lock.
-5. **M4:** image paste over SFTP, notification actions, history sheet, ntfy, dictation (BYOK or
+4. **M4:** image paste over SFTP, notification actions, history sheet, ntfy, dictation (BYOK or
    on-device), and Wake-on-LAN with a TCP wake probe and keep-screen-on. **M5:** Chat View, diff viewer,
    web preview.
 

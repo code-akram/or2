@@ -472,10 +472,10 @@ address) the extra port was unreachable although SSH worked. Version 2 pairs ove
   runs without it ([contracts](contracts.md#permissions-none-on-connect)). Verified by `OneTimePromptsTest`,
   `AddHostEndTest`, `NavigationTest` and the device tests (`AddHostEndDeviceTest` and others), which pass on the phone (the `.devicetest` app,
   117 of 118 with the notification test skipped; 2026-10-02).
-- [ ] Phone acceptance of Easy pair: a real `or2-pair` code on a host reached over its public address
+- [x] Phone acceptance of Easy pair: a real `or2-pair` code on a host reached over its public address
   and on a LAN host, with the battery step, then connect. The public-address host passed on 2026-10-02 (paired,
-  saved with its host key trusted, connected); the LAN host (a Mac, also the first run of the macOS `or2-pair`)
-  is next ([status](status.md)).
+  saved with its host key trusted, connected), and so did the LAN host on 2026-10-02: a Mac, with the macOS
+  `or2-pair` from the v0.1.0 one-liner and the v0.1.0 release APK (paired and connected with no host-key prompt).
 - [x] Installer, Linux part: `cargo xtask dist` builds the static x86_64 and aarch64 Linux binaries with
   `SHA256SUMS` (built on the Arch runner; the x86_64 one runs, the aarch64 one is checked by `file` only), and
   `scripts/install-or2-pair.sh` (POSIX `sh`, ShellCheck-clean) installs one with its checksum verified, tested
@@ -487,12 +487,14 @@ address) the extra port was unreachable although SSH worked. Version 2 pairs ove
   and runs the binary before replacing anything; unknown init systems get no `systemctl`; a later `Match` block
   no longer reopens a decided setting. Tested in `install_or2_pair.rs` (truncation at every line, planted links,
   a binary that does not run, `--version`, unsafe destinations) and the `or2-pair` unit tests.
-- [ ] Installer, release: one release stream, tagged `vX.Y.Z` (workspace version = app `versionName`, checked by
+- [x] Installer, release: one release stream, tagged `vX.Y.Z` (workspace version = app `versionName`, checked by
   `dist --expect-version` and an xtask test). The first release, **v0.1.0** (the APK and the `or2-pair` binaries,
   [notes](releases/v0.1.0.md)), is published by pushing the tag `v0.1.0`: `.github/workflows/release.yml` builds
   the four binaries (the macOS ones only there, on a macOS runner) and creates the release; the APK is signed
   locally and uploaded with `gh release upload`. Ticked once the workflow has run, the release exists, the
-  one-liner installs from it and the APK installs on the phone.
+  one-liner installs from it and the APK installs on the phone. Done on 2026-10-02: the release exists with its four
+  binaries, the one-liner installed `or2-pair` on a Mac, and the v0.1.0 APK (its SHA-256 checked against the notes)
+  replaced the debug build on the phone and paired a host.
 
 ## Decisions
 
