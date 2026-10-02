@@ -219,6 +219,9 @@ signal are errors. It needs only `sh`, `ps` and `sleep`.
 
 Gradle builds the host library, generates Kotlin under `app/build/generated/uniffi/kotlin`,
 and cross-builds the release Rust library into `app/build/generated/uniffi/jniLibs/arm64-v8a`.
+That build remaps the repository to `/or2` and the cargo home to `/cargo` (`CARGO_ENCODED_RUSTFLAGS`, as
+`xtask dist` does), so no build-machine path is left in `libor2_ffi.so`; the task fails if either path is
+still in the library. The variable replaces any `RUSTFLAGS` or configured `rustflags` for that build.
 The app has minSdk 34, compile/targetSdk 36, and no Google Play Services/FCM dependencies. Easy pair adds
 CameraX 1.5.3 (`camera-core`, `camera-camera2`, `camera-lifecycle`, `camera-view`; Apache-2.0) and ZXing core 3.5.4
 (Apache-2.0); the lockfile has no `gms`, `firebase` or `play-services` entries (check it with `grep -i` after

@@ -8,6 +8,11 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+### Changed
+
+- The Android native library build now always remaps the repository and cargo home paths, and fails if a
+  build-machine path is left in `libor2_ffi.so` (v0.1.0 applied the remap by hand).
+
 ## [0.1.0] - 2026-10-02
 
 The first release: the Android app (a signed APK) and the `or2-pair` host CLI for Linux and macOS. See

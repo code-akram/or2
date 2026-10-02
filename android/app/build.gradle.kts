@@ -46,6 +46,12 @@ val generateRustBindings by tasks.registering(Exec::class) {
     outputs.dir(generatedBindings)
 }
 
+// The library keeps no build-machine paths: the repository and the cargo home are remapped (as `xtask dist`
+// does for or2-pair), and the build fails if either path is still in the library.
+val repoRoot: File = rootProject.file("..").canonicalFile
+val cargoHome: File = (providers.environmentVariable("CARGO_HOME").orNull?.takeIf { it.isNotBlank() }?.let(::File)
+    ?: File(System.getProperty("user.home"), ".cargo")).canonicalFile
+
 val buildRustAndroid by tasks.registering(Exec::class) {
     workingDir(rustRoot)
     commandLine(
@@ -53,8 +59,21 @@ val buildRustAndroid by tasks.registering(Exec::class) {
         "-o", generatedLibraries.get().asFile,
         "build", "--release", "--locked", "-p", "or2-ffi", "--lib",
     )
+    environment(
+        "CARGO_ENCODED_RUSTFLAGS",
+        listOf("--remap-path-prefix=$repoRoot=/or2", "--remap-path-prefix=$cargoHome=/cargo").joinToString("\u001f"),
+    )
     inputs.files(rustInputs)
     outputs.dir(generatedLibraries)
+    doLast {
+        val library = generatedLibraries.get().asFile.resolve("arm64-v8a/libor2_ffi.so")
+        // Latin-1 maps each byte to one char, so a byte search is a string search.
+        val contents = String(library.readBytes(), Charsets.ISO_8859_1)
+        for (path in listOf(repoRoot, cargoHome)) {
+            val needle = String(path.path.toByteArray(), Charsets.ISO_8859_1)
+            if (contents.contains(needle)) throw GradleException("$library still contains the build path $path")
+        }
+    }
 }
 
 // Release signing (docs/build.md, "Release signing"). The properties file named by OR2_SIGNING_PROPERTIES,
