@@ -8,6 +8,12 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-02
+
+Instant opens on every host, agent notifications, scrolling that follows the program, tap links and copy from the
+host, gestures, a redesigned terminal top and Home cards, and `or2-pair` on a rail. See
+[the release notes](docs/releases/v0.1.1.md).
+
 ### Added
 
 - Agent notifications: one notification when a herdr agent needs input or finishes, none for the pane on

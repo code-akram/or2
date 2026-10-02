@@ -3,11 +3,12 @@
 A free, open-source Android client for SSH and mosh, built for driving coding agents that run in
 tmux or herdr on your own machines.
 
-Status: v0.1.0, the first release (M1 to M3 and Easy pair). One SSH connection per host carries
+Status: v0.1.1 (M1 to M3, Easy pair, and the first Next items). One SSH connection per host carries
 terminals, tmux and a live herdr agent inbox across hosts; tap an agent to open its pane and answer
-from the composer. Mosh terminals roam across networks, a foreground service keeps sessions open in
-the background, and the app reattaches to the last pane. What is not tested yet is listed in
-[the release notes](docs/releases/v0.1.0.md#known-shortcomings-and-untested-areas); changes are in the
+from the composer, or let a notification bring you there. Terminals open at once and switch to mosh in
+the background; mosh roams across networks, a foreground service keeps sessions open in the background,
+and the app reattaches to the last pane. What is not tested yet is listed in
+[the release notes](docs/releases/v0.1.1.md#verified-and-still-untested); changes are in the
 [changelog](CHANGELOG.md).
 See [status and next steps](docs/status.md), [the design](docs/design.md), [contracts](docs/contracts.md)
 and [build instructions](docs/build.md).

@@ -6,9 +6,11 @@ Where or2 stands, and what comes next. Read this first when picking the work up;
 
 ## Where it stands
 
-**Released:** [v0.1.0](releases/v0.1.0.md), on 2026-10-02. It contains the signed APK and `or2-pair`
-for Linux x86_64/aarch64 (static) and macOS Intel/Apple silicon. It covers M1 to M3 and Easy pair v2.
-Its notes list the known shortcomings.
+**Released:** [v0.1.1](releases/v0.1.1.md) on 2026-10-02, after [v0.1.0](releases/v0.1.0.md) the same day.
+Each contains the signed APK and `or2-pair` for Linux x86_64/aarch64 (static) and macOS Intel/Apple silicon.
+v0.1.0 covers M1 to M3 and Easy pair v2; v0.1.1 adds instant opens (SSH first, mosh swapped in behind),
+agent notifications, wheel-aware scrolling, tap links and OSC 52, gestures and shortcuts, the redesigned
+terminal top and Home cards, and `or2-pair` on a rail. The notes list what is still untested.
 
 **Verified on the owner's phone** (OnePlus 10 Pro, Android 16, Wi-Fi, plugged in):
 - M2 acceptance.
@@ -21,22 +23,25 @@ Its notes list the known shortcomings.
   Mac pairing above.
   A debug build cannot be installed over it (a different signing key): try new builds as the
   `.devicetest` app or as signed release builds, or uninstall first (losing the hosts and keys).
-- The device suite passes (117 of 118; the notification test skips without the permission). It runs as
-  the separate `io.github.code_akram.or2.devicetest` app and never touches the daily app.
+- v0.1.1: installed over v0.1.0 (same key, hosts kept); instant opens and the switch to mosh on the Mac
+  (UDP verified both ways with captures; an earlier failure was a stale per-connection verdict, now
+  rechecked after five minutes); the new top bar, arrow pad and picker.
+- The device suite passes (137, with the two notification-posting tests skipped: the phone refuses the
+  permission to a test build). It runs as the separate `io.github.code_akram.or2.devicetest` app and never
+  touches the daily app.
 
 **Not yet verified:**
 - **The M3 tests the owner deferred:** mobile data, Wi-Fi to mobile handover, and unplugged (Doze)
   background runs. These cover v0 acceptance step 3.
+- **A posted agent notification on the phone,** end to end (tests cover it up to posting).
+- **The v0.1.1 Home cards** (card versus `>_` button), seen in the gallery and the device suite only.
 
 ## Next, in order
 
-1. **v0.1.1 (patch):** on `main`, not yet released. So far: the Android native build always remaps build
-   paths and fails on a leak, and a flaky live mosh test is fixed. The Mac test found nothing to fix. It is cut
-   when the owner decides what else goes in.
+1. **The owner's QA of v0.1.1** and any patch it needs (v0.1.2).
 2. **The deferred M3 acceptance,** when the owner approves it: mobile data, handover, Doze.
-3. **The roadmap's "Next" items:** local agent notifications from herdr events (the permission card on
-   Home is the hook), wheel-aware scrolling and scroll-to-bottom, tap links, scanning for SSH servers,
-   recent directories, gestures, hardware-keyboard shortcuts, OSC 52, app lock.
+3. **The rest of the roadmap's "Next" items:** scanning for SSH servers, recent directories, app lock, and
+   projecting herdr's `agent_session` into the inbox.
 4. **M4:** image paste over SFTP, notification actions, history sheet, ntfy, dictation (BYOK or
    on-device), and Wake-on-LAN with a TCP wake probe and keep-screen-on. **M5:** Chat View, diff viewer,
    web preview.
