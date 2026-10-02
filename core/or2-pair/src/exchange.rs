@@ -17,11 +17,13 @@
 //! rather than a closed channel.
 //!
 //! What the forced command does, in order: send the hello; read one bounded request line
-//! (10 s); check the state file (`expired` when it is missing, past its deadline, or names
-//! another uid); validate the key (`key`); in one locked write replace the bootstrap entry with
-//! the phone's key (`gone` when the entry is not there: another phone was first); record
-//! `<id>.done`; answer. **The security boundary is the state file and its deadline, not the
-//! cleanup.**
+//! (10 s); check the state file (`expired` when it is missing, not held by its run any more,
+//! past its deadline, or names another uid or id); validate the key (`key`); take the `or2-pair`
+//! lock (2 s, then `failed`) and check the state again under it; still under the lock, publish
+//! `<id>.done` and then replace the bootstrap entry with the phone's key in one new file (`gone`
+//! when the entry is not there: another phone was first; a replacement that fails removes the
+//! `.done` again, `failed`); let the lock go; answer. **The security boundary is the state file,
+//! its run's lock on it and its deadline, not the cleanup.**
 
 use std::io::{self, Read, Write};
 use std::sync::mpsc;
@@ -30,11 +32,11 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::account::Account;
-use crate::authorized_keys::{self, Replaced};
+use crate::authorized_keys::{self, Edit, Replaced};
 use crate::bootstrap::PairingId;
 use crate::date::DateTime;
 use crate::keyline::KeyLine;
-use crate::state::{Done, StateDir};
+use crate::state::{Done, Held, State, StateDir};
 
 pub const VERSION: u32 = 2;
 /// The request line is at most this many bytes.
@@ -149,10 +151,21 @@ fn read_line(
         .unwrap_or(Err("no line in time"))
 }
 
+/// Where `enroll` is, for tests that interleave it with the foreground's cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// The state file was read and the key validated; the lock is not taken yet.
+    Checked,
+    /// The lock is held and the state checked again; nothing is written yet.
+    Locked,
+}
+
 pub struct Enroll<'a> {
     pub account: &'a Account,
     pub now: &'a dyn Fn() -> DateTime,
     pub request_timeout: Duration,
+    /// Called at each [`Stage`] (tests only; `None` in the product).
+    pub hook: Option<&'a dyn Fn(Stage)>,
 }
 
 fn say(output: &mut dyn Write, text: &str) -> bool {
@@ -189,21 +202,14 @@ pub fn enroll(
         _ => return refuse(output, Reason::Request),
     };
 
-    // The state file is the authority: a run that is over, past its deadline or not this
-    // account's has nothing to enrol into.
-    let state = match StateDir::open(env.account, false)
-        .ok()
-        .flatten()
-        .and_then(|dir| dir.read_state(id).ok().flatten())
-    {
-        Some(state)
-            if state.id == id.as_str()
-                && state.uid == env.account.uid
-                && (env.now)().to_unix() <= state.deadline =>
-        {
-            state
-        }
-        _ => return refuse(output, Reason::Expired),
+    // The state file is the authority: a run that is over (gone, even killed), past its deadline
+    // or not this account's has nothing to enrol into. A first look here; the decisive one is
+    // made again under the lock.
+    let Some(dir) = StateDir::open(env.account, false).ok().flatten() else {
+        return refuse(output, Reason::Expired);
+    };
+    let Some(state) = live_state(&dir, id, env) else {
+        return refuse(output, Reason::Expired);
     };
 
     let Ok(key) = KeyLine::parse(&request.key) else {
@@ -216,36 +222,30 @@ pub fn enroll(
     }
     let device =
         authorized_keys::sanitize_device(&request.device).unwrap_or_else(|| "phone".into());
+    if let Some(hook) = env.hook {
+        hook(Stage::Checked);
+    }
 
-    let now = (env.now)();
-    let mut waited = Duration::ZERO;
-    let replaced = loop {
-        match authorized_keys::replace(env.account, &state.fingerprint, &key, &device, now) {
-            // Another `enroll` holds the lock: wait for it, then find the entry gone.
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock && waited < LOCK_PATIENCE => {
-                std::thread::sleep(Duration::from_millis(50));
-                waited += Duration::from_millis(50);
-            }
-            other => break other,
-        }
+    // The commit, under the one lock the foreground's cleanup takes too: the state checked
+    // again, the record published, `authorized_keys` replaced, all before anyone else may look.
+    // A second phone waits for the first one's commit and then finds the entry gone.
+    let Ok(held) = dir.lock(LOCK_PATIENCE, &|| false) else {
+        return refuse(output, Reason::Failed);
     };
-    let added = match replaced {
+    match live_state(&dir, id, env) {
+        Some(again) if again == state => {}
+        _ => return refuse(output, Reason::Expired),
+    }
+    if let Some(hook) = env.hook {
+        hook(Stage::Locked);
+    }
+    let added = match commit(env, &dir, &held, id, &state, &key, &device) {
         Ok(Replaced::Done { added }) => added,
         Ok(Replaced::Gone) => return refuse(output, Reason::Gone),
         Err(_) => return refuse(output, Reason::Failed),
     };
+    drop(held);
 
-    // The waiting `or2-pair` polls for this. Exclusive: only the one write that replaced the
-    // bootstrap entry gets here.
-    if let Ok(Some(dir)) = StateDir::open(env.account, false) {
-        let _ = dir.write_done(
-            id,
-            &Done {
-                device: device.clone(),
-                fingerprint: fingerprint.clone(),
-            },
-        );
-    }
     // The key is installed whether or not the phone hears this; the waiting run reports it.
     let _ = say(output, &verdict_ok(&env.account.name, &fingerprint));
     Outcome::Installed {
@@ -255,15 +255,67 @@ pub fn enroll(
     }
 }
 
+/// The state of the run `id` if it is live for this account: present and readable, its own id
+/// and uid, not past its deadline, and held by its run (see `state`).
+fn live_state(dir: &StateDir, id: &PairingId, env: &Enroll<'_>) -> Option<State> {
+    let state = dir.read_state(id).ok().flatten()?;
+    let live = state.id == id.as_str()
+        && state.uid == env.account.uid
+        && (env.now)().to_unix() <= state.deadline
+        && dir.held_by_its_run(id).unwrap_or(false);
+    live.then_some(state)
+}
+
+/// Under the lock: the record first, then the key file, so that either both are done or
+/// neither. The record (`<id>.done`, published complete) is written before `authorized_keys` is
+/// replaced; a replacement that fails takes the record back. The waiting run only trusts a record
+/// it reads under the same lock and whose key it finds in the file.
+fn commit(
+    env: &Enroll<'_>,
+    dir: &StateDir,
+    held: &Held,
+    id: &PairingId,
+    state: &State,
+    key: &KeyLine,
+    device: &str,
+) -> io::Result<Replaced> {
+    let edit = match Edit::open(env.account, held, false) {
+        Ok(edit) => edit,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Replaced::Gone),
+        Err(error) => return Err(error),
+    };
+    let Some((new, replaced)) = authorized_keys::replaced(
+        edit.contents(),
+        &state.fingerprint,
+        key,
+        device,
+        (env.now)(),
+    ) else {
+        return Ok(Replaced::Gone);
+    };
+    dir.write_done(
+        id,
+        &Done {
+            device: device.to_owned(),
+            fingerprint: key.fingerprint(),
+        },
+    )?;
+    if let Err(error) = edit.commit(&new, None) {
+        let _ = dir.remove_done(id);
+        return Err(error);
+    }
+    Ok(replaced)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::io::Cursor;
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
 
     use super::*;
-    use crate::state::State;
 
     const BOOT: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIALYvXruViE9G83T84ZJqbdJkEImlV0NRg9AC6Yw4NYo";
@@ -277,23 +329,36 @@ mod tests {
     struct Fixture {
         home: tempfile::TempDir,
         account: Account,
+        /// The run's hold on its state file: the run is live while it is kept.
+        liveness: Option<crate::state::Liveness>,
+    }
+
+    fn state(deadline: i64, uid: u32) -> State {
+        State {
+            id: ID.into(),
+            deadline,
+            uid,
+            fingerprint: KeyLine::parse(BOOT).unwrap().fingerprint(),
+        }
     }
 
     impl Fixture {
-        /// A home with a live run: the state file and the bootstrap entry.
+        /// A home with a live run: the state file (held, as the waiting run holds it) and the
+        /// bootstrap entry.
         fn live(deadline: i64) -> Self {
             let home = tempfile::tempdir().unwrap();
             fs::set_permissions(home.path(), fs::Permissions::from_mode(0o755)).unwrap();
             let account = Account::new("dev", home.path());
-            let fixture = Self { home, account };
+            let mut fixture = Self {
+                home,
+                account,
+                liveness: None,
+            };
             let dir = StateDir::open(&fixture.account, true).unwrap().unwrap();
-            dir.write_state(&State {
-                id: ID.into(),
-                deadline,
-                uid: fixture.account.uid,
-                fingerprint: KeyLine::parse(BOOT).unwrap().fingerprint(),
-            })
-            .unwrap();
+            fixture.liveness = Some(
+                dir.publish_state(&state(deadline, fixture.account.uid))
+                    .unwrap(),
+            );
             let line = format!(
                 "restrict,command=\"/x enroll {ID}\" {BOOT} or2-pair-bootstrap-{ID}\n{OTHER} mine\n"
             );
@@ -306,6 +371,10 @@ mod tests {
             self.account.keys_path()
         }
 
+        fn state_dir(&self) -> std::path::PathBuf {
+            self.home.path().join(".ssh/or2-pair")
+        }
+
         fn run(&self, request: &str) -> (Outcome, String) {
             self.run_bytes(request.as_bytes().to_vec())
         }
@@ -316,6 +385,7 @@ mod tests {
                 account: &self.account,
                 now: &now,
                 request_timeout: Duration::from_secs(5),
+                hook: None,
             };
             let mut out = Vec::new();
             let outcome = enroll(
@@ -412,6 +482,7 @@ mod tests {
         let none = Fixture {
             account: Account::new("dev", home.path()),
             home,
+            liveness: None,
         };
         let (outcome, out) = none.run(&request(PHONE, "p"));
         assert_eq!(outcome, Outcome::Refused(Reason::Expired));
@@ -438,27 +509,25 @@ mod tests {
             Outcome::Installed { .. }
         ));
 
-        // State written for another uid.
-        let f = Fixture::live(NOW + 300);
+        // State written for another uid (and held, so only the uid is wrong).
+        let mut f = Fixture::live(NOW + 300);
         let dir = StateDir::open(&f.account, false).unwrap().unwrap();
         let id = PairingId::parse(ID).unwrap();
         dir.remove(&id).unwrap();
-        dir.write_state(&State {
-            id: ID.into(),
-            deadline: NOW + 300,
-            uid: f.account.uid.wrapping_add(1),
-            fingerprint: KeyLine::parse(BOOT).unwrap().fingerprint(),
-        })
-        .unwrap();
+        f.liveness = Some(
+            dir.publish_state(&state(NOW + 300, f.account.uid.wrapping_add(1)))
+                .unwrap(),
+        );
         assert_eq!(
             f.run(&request(PHONE, "p")).0,
             Outcome::Refused(Reason::Expired)
         );
 
-        // State whose id is another run's.
+        // State whose id is another run's (held too).
         dir.remove(&id).unwrap();
+        let path = f.state_dir().join(format!("{ID}.json"));
         fs::write(
-            f.home.path().join(".ssh/or2-pair").join(format!("{ID}.json")),
+            &path,
             format!(
                 "{{\"id\":\"bbbbbbbbbbbbb\",\"deadline\":{},\"uid\":{},\"fingerprint\":\"SHA256:x\"}}",
                 NOW + 300,
@@ -466,17 +535,110 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::set_permissions(
-            f.home
-                .path()
-                .join(".ssh/or2-pair")
-                .join(format!("{ID}.json")),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let held = fs::File::open(&path).unwrap();
+        // SAFETY: `held` is open for the call.
+        assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
         assert_eq!(
             f.run(&request(PHONE, "p")).0,
             Outcome::Refused(Reason::Expired)
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn a_state_file_no_run_holds_is_expired() {
+        // Review of the v2 integration: a run killed with SIGKILL left a state file before its
+        // deadline and the bootstrap entry, and a holder of K could still enrol. The run's lock
+        // on its state file ends with the process, whatever ends it.
+        let mut f = Fixture::live(NOW + 300);
+        let before = fs::read_to_string(f.keys()).unwrap();
+        drop(f.liveness.take());
+        let (outcome, out) = f.run(&request(PHONE, "p"));
+        assert_eq!(outcome, Outcome::Refused(Reason::Expired));
+        assert_eq!(
+            lines(&out)[1],
+            "{\"v\":2,\"ok\":false,\"reason\":\"expired\"}"
+        );
+        assert_eq!(fs::read_to_string(f.keys()).unwrap(), before);
+    }
+
+    fn running_as_root() -> bool {
+        // SAFETY: `geteuid` has no preconditions.
+        unsafe { libc::geteuid() == 0 }
+    }
+
+    #[test]
+    fn a_record_that_cannot_be_written_installs_nothing() {
+        // Review of the v2 integration: a failed `.done` was ignored, the phone was told `ok`
+        // and its key installed, and the waiting run timed out. Now the record comes first.
+        if running_as_root() {
+            eprintln!("SKIP: root can write a read-only directory");
+            return;
+        }
+        let f = Fixture::live(NOW + 300);
+        let before = fs::read_to_string(f.keys()).unwrap();
+        fs::set_permissions(f.state_dir(), fs::Permissions::from_mode(0o500)).unwrap();
+        let (outcome, out) = f.run(&request(PHONE, "p"));
+        fs::set_permissions(f.state_dir(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(outcome, Outcome::Refused(Reason::Failed));
+        assert_eq!(
+            lines(&out)[1],
+            "{\"v\":2,\"ok\":false,\"reason\":\"failed\"}"
+        );
+        assert_eq!(fs::read_to_string(f.keys()).unwrap(), before);
+        let dir = StateDir::open(&f.account, false).unwrap().unwrap();
+        assert!(!dir.has_done(&PairingId::parse(ID).unwrap()));
+    }
+
+    #[test]
+    fn a_replacement_that_fails_takes_the_record_back() {
+        if running_as_root() {
+            eprintln!("SKIP: root can write a read-only directory");
+            return;
+        }
+        let f = Fixture::live(NOW + 300);
+        let before = fs::read_to_string(f.keys()).unwrap();
+        let ssh = f.home.path().join(".ssh");
+        // The new key file cannot be created next to the old one.
+        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o500)).unwrap();
+        let (outcome, _) = f.run(&request(PHONE, "p"));
+        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(outcome, Outcome::Refused(Reason::Failed));
+        assert_eq!(fs::read_to_string(f.keys()).unwrap(), before);
+        let dir = StateDir::open(&f.account, false).unwrap().unwrap();
+        assert!(
+            !dir.has_done(&PairingId::parse(ID).unwrap()),
+            "no record of a pairing that did not happen"
+        );
+        // The run is still live and the entry still there: a retry pairs.
+        assert!(matches!(
+            f.run(&request(PHONE, "p")).0,
+            Outcome::Installed { .. }
+        ));
+        assert!(dir.has_done(&PairingId::parse(ID).unwrap()));
+    }
+
+    #[test]
+    fn a_second_enroll_waits_for_the_lock_and_then_finds_the_entry_gone() {
+        let f = Fixture::live(NOW + 300);
+        let dir = StateDir::open(&f.account, false).unwrap().unwrap();
+        // Another `enroll` (or a sweep) holds the lock for longer than the patience.
+        let held = dir.lock(Duration::ZERO, &|| false).unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(
+            f.run(&request(PHONE, "p")).0,
+            Outcome::Refused(Reason::Failed)
+        );
+        assert!(started.elapsed() >= LOCK_PATIENCE);
+        drop(held);
+        assert!(matches!(
+            f.run(&request(PHONE, "a")).0,
+            Outcome::Installed { .. }
+        ));
+        assert_eq!(
+            f.run(&request(OTHER, "b")).0,
+            Outcome::Refused(Reason::Gone)
         );
     }
 
@@ -549,6 +711,7 @@ mod tests {
             account: &f.account,
             now: &now,
             request_timeout: Duration::from_millis(200),
+            hook: None,
         };
         let started = std::time::Instant::now();
         let mut out = Vec::new();
@@ -587,6 +750,7 @@ mod tests {
             account: &f.account,
             now: &now,
             request_timeout: Duration::from_secs(1),
+            hook: None,
         };
         let outcome = enroll(
             &PairingId::parse(ID).unwrap(),

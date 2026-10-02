@@ -33,6 +33,7 @@ fn enroll(world: &World, id: &str, key: &str, device: &str) -> (Outcome, String)
         account: &account,
         now: &DateTime::now,
         request_timeout: Duration::from_secs(5),
+        hook: None,
     };
     let request = format!("{{\"v\":2,\"key\":\"{key}\",\"device\":\"{device}\"}}\n");
     let mut out = Vec::new();
@@ -73,8 +74,10 @@ fn a_phone_pairs_and_its_key_replaces_the_temporary_one() {
             .nth(1)
             .and_then(|rest| rest.split('"').next())
             .unwrap();
-        assert_eq!(expiry.len(), 12);
-        assert!(expiry.bytes().all(|b| b.is_ascii_digit()), "{expiry}");
+        // OpenSSH 9.9 takes UTC: twelve digits and `Z`.
+        assert_eq!(expiry.len(), 13, "{expiry}");
+        assert!(expiry[..12].bytes().all(|b| b.is_ascii_digit()), "{expiry}");
+        assert!(expiry.ends_with('Z'), "{expiry}");
         assert!(
             line.starts_with(&format!(
                 "restrict,command=\"{EXE} enroll {id}\",expiry-time=\""
@@ -440,28 +443,36 @@ fn old_runs_are_swept_and_live_ones_are_left_alone() {
     let dead = "aaaaaaaaaaaaa"; // a state file past its deadline
     let orphan = "bbbbbbbbbbbbb"; // an entry with no state file
     let live = "ccccccccccccc"; // another run still waiting
+    let killed = "eeeeeeeeeeeee"; // a run killed with SIGKILL: before its deadline, nobody holds it
     let line = |id: &str, key: &str| {
         format!("restrict,command=\"/x enroll {id}\" {key} or2-pair-bootstrap-{id}\n")
     };
     world.write_keys(&format!(
-        "{OTHER_KEY} mine\n{}{}{}",
+        "{OTHER_KEY} mine\n{}{}{}{}",
         line(dead, PHONE_KEY),
         line(orphan, HOST_KEY),
         line(
             live,
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIALYvXruViE9G83T84ZJqbdJkEImlV0NRg9AC6Yw4NYo"
-        )
+        ),
+        line(killed, PHONE_KEY),
     ));
     let dir = StateDir::open(&account, true).unwrap().unwrap();
-    for (id, deadline) in [(dead, now - 100), (live, now + 1000)] {
-        dir.write_state(&State {
-            id: id.into(),
-            deadline,
-            uid: account.uid,
-            fingerprint: "SHA256:x".into(),
-        })
-        .unwrap();
+    let mut holds = Vec::new();
+    for (id, deadline) in [(dead, now - 100), (live, now + 1000), (killed, now + 1000)] {
+        holds.push(
+            dir.publish_state(&State {
+                id: id.into(),
+                deadline,
+                uid: account.uid,
+                fingerprint: "SHA256:x".into(),
+            })
+            .unwrap(),
+        );
     }
+    // The other run keeps its hold; the dead and the killed one are gone.
+    let other_run = holds.remove(1);
+    drop(holds);
     dir.write_done(
         &PairingId::parse("ddddddddddddd").unwrap(),
         &or2_pair::state::Done {
@@ -497,9 +508,14 @@ fn old_runs_are_swept_and_live_ones_are_left_alone() {
                 keys.contains(&format!("or2-pair-bootstrap-{live}")),
                 "{keys}"
             );
+            assert!(
+                !keys.contains(&format!("or2-pair-bootstrap-{killed}")),
+                "{keys}"
+            );
             let files = world.state_files();
             assert!(files.contains(&format!("{live}.json")), "{files:?}");
             assert!(!files.contains(&format!("{dead}.json")), "{files:?}");
+            assert!(!files.contains(&format!("{killed}.json")), "{files:?}");
             assert!(
                 !files.contains(&"ddddddddddddd.done".to_owned()),
                 "{files:?}"
@@ -518,6 +534,7 @@ fn old_runs_are_swept_and_live_ones_are_left_alone() {
     let backups = world.backups();
     assert_eq!(backups.len(), 1);
     assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), before);
+    drop(other_run);
 }
 
 #[test]
@@ -556,15 +573,50 @@ fn check_reports_leftovers_and_changes_nothing() {
 
 #[test]
 fn the_options_follow_the_sshd_version() {
-    for (banner, expiry, restrict, note) in [
-        ("SSH-2.0-OpenSSH_9.9", true, true, false),
-        ("SSH-2.0-OpenSSH_7.4p1 Debian-10", false, true, true),
-        ("SSH-2.0-OpenSSH_6.6.1p1 Ubuntu-2", false, false, true),
+    // (banner, TZ set, expiry-time written, ends in Z, restrict, the note printed)
+    for (banner, tz_set, expiry, utc, restrict, note) in [
+        ("SSH-2.0-OpenSSH_9.9", false, true, true, true, None),
+        ("SSH-2.0-OpenSSH_9.9", true, true, true, true, None),
+        (
+            "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3",
+            false,
+            true,
+            false,
+            true,
+            None,
+        ),
+        // Review of the v2 integration: with TZ set, sshd read the local time in another zone
+        // and the key had expired before the phone used it.
+        (
+            "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3",
+            true,
+            false,
+            false,
+            true,
+            Some("TZ is set"),
+        ),
+        (
+            "SSH-2.0-OpenSSH_7.4p1 Debian-10",
+            false,
+            false,
+            false,
+            true,
+            Some("cannot expire the key in the file"),
+        ),
+        (
+            "SSH-2.0-OpenSSH_6.6.1p1 Ubuntu-2",
+            false,
+            false,
+            false,
+            false,
+            Some("cannot expire the key in the file"),
+        ),
     ] {
         let world = World::new();
         let setup = Setup {
             banner: Ok(banner.into()),
             window: Duration::from_secs(1),
+            tz_set,
             ..Setup::default()
         };
         let result = pair(
@@ -577,6 +629,7 @@ fn the_options_follow_the_sshd_version() {
                 let keys = world.authorized_keys().unwrap();
                 let line = keys.lines().next().unwrap().to_owned();
                 assert_eq!(line.contains("expiry-time="), expiry, "{banner}: {line}");
+                assert_eq!(line.contains("Z\" "), utc, "{banner}: {line}");
                 assert_eq!(line.starts_with("restrict,"), restrict, "{banner}: {line}");
                 if !restrict {
                     assert!(
@@ -588,11 +641,15 @@ fn the_options_follow_the_sshd_version() {
         );
         assert!(result.phone.is_some(), "{banner}: {}", result.output);
         assert_eq!(result.exit.unwrap(), Exit::TimedOut);
-        assert_eq!(
-            result.output.contains("cannot expire the key in the file"),
-            note,
-            "{banner}"
-        );
+        match note {
+            Some(note) => assert!(result.output.contains(note), "{banner}: {}", result.output),
+            None => assert!(
+                !result.output.contains("without an expiry")
+                    && !result.output.contains("cannot expire"),
+                "{banner}: {}",
+                result.output
+            ),
+        }
         assert_eq!(
             world.authorized_keys().unwrap(),
             "",
@@ -638,6 +695,36 @@ fn what_makes_pairing_impossible_stops_the_run_before_the_prompt_and_before_any_
                     .unwrap();
             }),
             "StrictModes",
+        ),
+        (
+            "a ForceCommand for every user",
+            Box::new(|w, _| {
+                std::fs::write(w.etc.path().join("sshd_config"), "ForceCommand /bin/true\n")
+                    .unwrap();
+            }),
+            "ForceCommand",
+        ),
+        (
+            "a ForceCommand for this user",
+            Box::new(|w, _| {
+                std::fs::write(
+                    w.etc.path().join("sshd_config"),
+                    "Match User alice\n  ForceCommand /bin/true\n",
+                )
+                .unwrap();
+            }),
+            "ForceCommand",
+        ),
+        (
+            "an AuthorizedKeysFile without ~/.ssh/authorized_keys",
+            Box::new(|w, _| {
+                std::fs::write(
+                    w.etc.path().join("sshd_config"),
+                    "AuthorizedKeysFile /etc/ssh/keys/%u\n",
+                )
+                .unwrap();
+            }),
+            "AuthorizedKeysFile",
         ),
         (
             "PubkeyAuthentication no",
@@ -688,10 +775,11 @@ fn what_makes_pairing_impossible_stops_the_run_before_the_prompt_and_before_any_
 
 #[test]
 fn sshd_config_warnings_are_shown_but_do_not_stop_the_pairing() {
+    // A ForceCommand in a Match block that cannot be evaluated here may not apply: a warning.
     let world = World::new();
     std::fs::write(
         world.etc.path().join("sshd_config"),
-        "ForceCommand /bin/true\n",
+        "Match Group wheel\n  ForceCommand /bin/true\n",
     )
     .unwrap();
     let setup = Setup {

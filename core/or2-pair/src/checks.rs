@@ -96,6 +96,75 @@ pub struct CheckInput<'a> {
     pub manual_keys: bool,
     /// Pairing ids of earlier runs that are over: their leftovers are reported, not removed.
     pub stale: &'a [bootstrap::PairingId],
+    /// This program's version: what `<exe> --version` must print.
+    pub version: &'a str,
+    /// Runs the login shell for the shell check.
+    pub shell: &'a dyn ShellProbe,
+    /// Whether `TZ` is set in this process's environment (see `bootstrap::dialect_for`).
+    pub tz_set: bool,
+}
+
+/// Runs `<shell> -c <command>` and returns its standard output if it exits 0, or why not. The
+/// checks ask the account's login shell to start this program the way sshd will.
+pub trait ShellProbe {
+    fn run(&self, shell: &str, command: &str) -> Result<String, String>;
+}
+
+/// How long the login shell gets to print this program's version.
+pub const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The real login shell, with a time limit (rc files that wait for input or hang are a finding,
+/// not a hung check).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemShell;
+
+impl ShellProbe for SystemShell {
+    fn run(&self, shell: &str, command: &str) -> Result<String, String> {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        use std::time::Instant;
+        let mut child = Command::new(shell)
+            .arg("-c")
+            .arg(command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("it could not be started: {error}"))?;
+        let mut stdout = child.stdout.take().expect("piped");
+        let reader = std::thread::spawn(move || {
+            let mut text = Vec::new();
+            let _ = stdout.by_ref().take(64 * 1024).read_to_end(&mut text);
+            String::from_utf8_lossy(&text).into_owned()
+        });
+        let started = Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if started.elapsed() < SHELL_TIMEOUT => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "it did not finish within {} s",
+                        SHELL_TIMEOUT.as_secs()
+                    ));
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        };
+        let output = reader.join().unwrap_or_default();
+        if status.success() {
+            Ok(output)
+        } else {
+            Err(match status.code() {
+                Some(code) => format!("it exited with status {code}"),
+                None => "it was ended by a signal".to_owned(),
+            })
+        }
+    }
 }
 
 pub fn run(input: &CheckInput<'_>) -> Vec<Check> {
@@ -182,15 +251,26 @@ fn sshd(input: &CheckInput<'_>, blocking: Level) -> Check {
                     blocking,
                     format!("sshd on port {port} showed no version banner; use --manual"),
                 ),
-                Ok(Dialect::Expiry) => check(
+                Ok(Dialect::ExpiryUtc) => check(
                     Level::Ok,
                     format!("sshd is answering on port {port} ({what})"),
+                ),
+                Ok(Dialect::Expiry) if !input.tz_set => check(
+                    Level::Ok,
+                    format!("sshd is answering on port {port} ({what})"),
+                ),
+                Ok(Dialect::Expiry) => check(
+                    Level::Warn,
+                    format!(
+                        "sshd is answering on port {port} ({what}); {}",
+                        bootstrap::TZ_NOTE
+                    ),
                 ),
                 Ok(_) => check(
                     Level::Warn,
                     format!(
                         "sshd is answering on port {port} ({what}); {}",
-                        Dialect::Restrict.note().unwrap_or_default()
+                        bootstrap::OLD_SSHD_NOTE
                     ),
                 ),
             }
@@ -239,20 +319,40 @@ fn authorized_keys(account: &Account, blocking: Level) -> Vec<Check> {
     }]
 }
 
+/// The login shell: not one that refuses commands (`nologin`, `false`), and one that really
+/// starts this program: `<shell> -c "<exe> --version"` must exit 0 and print this version (rc
+/// files may print around it, as they may around the pairing command), within
+/// [`SHELL_TIMEOUT`]. An unknown shell is `/bin/sh` (what an empty account database field means).
 fn shell(input: &CheckInput<'_>, blocking: Level) -> Vec<Check> {
     let shell = input.account.shell.as_deref();
-    match bootstrap::check_login_shell(shell) {
-        Ok(()) => shell
-            .map(|shell| {
-                check(
-                    Level::Ok,
-                    format!("login shell {shell} can run the pairing command"),
-                )
-            })
-            .into_iter()
-            .collect(),
-        Err(error) => vec![check(blocking, error.to_string())],
+    if let Err(error) = bootstrap::check_login_shell(shell) {
+        return vec![check(blocking, error.to_string())];
     }
+    let shell = shell.unwrap_or("/bin/sh");
+    // A path that fails its own check is reported there; it is not run.
+    let Some(exe) = input
+        .exe
+        .as_ref()
+        .ok()
+        .and_then(|path| bootstrap::check_exe_path(path).ok())
+    else {
+        return Vec::new();
+    };
+    let expected = format!("or2-pair {}", input.version);
+    let command = format!("{exe} --version");
+    let why = match input.shell.run(shell, &command) {
+        Ok(output) if output.lines().any(|line| line.trim() == expected) => {
+            return vec![check(Level::Ok, format!("login shell {shell} runs {exe}"))];
+        }
+        Ok(_) => format!("it ran but did not print `{expected}`"),
+        Err(why) => why,
+    };
+    vec![check(
+        blocking,
+        format!(
+            "the login shell {shell} could not run `{command}` ({why}); sshd runs the pairing command through it, so pairing would fail. Fix the shell or its startup files, or use --manual"
+        ),
+    )]
 }
 
 fn exe(input: &CheckInput<'_>, blocking: Level) -> Vec<Check> {
@@ -275,18 +375,38 @@ fn exe(input: &CheckInput<'_>, blocking: Level) -> Vec<Check> {
 
 // --- sshd_config, best effort -----------------------------------------------------------------
 
-/// What `sshd_config` (and what it includes) says that matters for pairing, outside `Match`
-/// blocks and with the first value of a keyword winning as in sshd.
+/// The settings of one part of `sshd_config` that matter for pairing (the first value of each
+/// keyword in that part, as in sshd).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Settings {
+    /// `PubkeyAuthentication`: `Some(false)` is `no`.
+    pub pubkey_authentication: Option<bool>,
+    /// The words of `AuthorizedKeysFile`.
+    pub authorized_keys_file: Option<Vec<String>>,
+    /// `AuthorizedKeysCommand`: `Some(false)` is `none`.
+    pub authorized_keys_command: Option<bool>,
+    /// `ForceCommand`: `Some(false)` is `none`.
+    pub force_command: Option<bool>,
+    pub authentication_methods: Option<String>,
+}
+
+/// A `Match` block: its criteria (the words after `Match`) and its settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MatchBlock {
+    pub criteria: Vec<String>,
+    pub settings: Settings,
+}
+
+/// What `sshd_config` (and what it includes) says that matters for pairing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SshdConfig {
     pub port: Option<u16>,
-    /// The first `PubkeyAuthentication`: `Some(false)` is `no`.
-    pub pubkey_authentication: Option<bool>,
-    /// The words of the first `AuthorizedKeysFile`.
-    pub authorized_keys_file: Option<Vec<String>>,
-    pub authorized_keys_command: bool,
-    pub force_command: bool,
-    pub authentication_methods: Option<String>,
+    /// Outside `Match` blocks.
+    pub global: Settings,
+    /// In file order.
+    pub blocks: Vec<MatchBlock>,
+    /// An `Include` named a file that could not be read: anything could be in it.
+    pub unreadable_include: bool,
 }
 
 const INCLUDE_DEPTH: usize = 4;
@@ -297,8 +417,8 @@ pub fn read_sshd_config(etc_ssh: &Path) -> Option<SshdConfig> {
     let text = std::fs::read_to_string(etc_ssh.join("sshd_config")).ok()?;
     let mut config = SshdConfig::default();
     let mut seen = HashSet::new();
-    let mut in_match = false;
-    parse_config(&text, etc_ssh, 0, &mut config, &mut seen, &mut in_match);
+    let mut block = None;
+    parse_config(&text, etc_ssh, 0, &mut config, &mut seen, &mut block);
     Some(config)
 }
 
@@ -320,7 +440,8 @@ fn directive(line: &str) -> Option<(String, Vec<String>)> {
     Some((keyword, words))
 }
 
-/// Whether `name` matches an `Include` pattern's file part (`*` and `?` only).
+/// Whether `name` matches a pattern with `*` and `?` (an `Include` file name, a `Match User`
+/// pattern).
 fn glob_match(pattern: &[u8], name: &[u8]) -> bool {
     match (pattern.first(), name.first()) {
         (None, None) => true,
@@ -333,21 +454,21 @@ fn glob_match(pattern: &[u8], name: &[u8]) -> bool {
     }
 }
 
-fn included_files(pattern: &str, etc_ssh: &Path) -> Vec<PathBuf> {
+/// The files an `Include` pattern names; `None` when it names one file that cannot be read.
+fn included_files(pattern: &str, etc_ssh: &Path) -> Option<Vec<PathBuf>> {
     let path = if Path::new(pattern).is_absolute() {
         PathBuf::from(pattern)
     } else {
         etc_ssh.join(pattern)
     };
     let (Some(dir), Some(file)) = (path.parent(), path.file_name().and_then(|f| f.to_str())) else {
-        return Vec::new();
+        return Some(Vec::new());
     };
     if !file.contains(['*', '?']) {
-        return vec![path];
+        return Some(vec![path]);
     }
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut files: Vec<PathBuf> = entries
         .flatten()
         .filter(|entry| {
             entry
@@ -358,7 +479,32 @@ fn included_files(pattern: &str, etc_ssh: &Path) -> Vec<PathBuf> {
         .map(|entry| entry.path())
         .collect();
     files.sort();
-    files
+    Some(files)
+}
+
+/// Records the first value of each keyword that matters into `settings`.
+fn set(settings: &mut Settings, keyword: &str, args: &[String]) {
+    let first = args.first().map(String::as_str);
+    match keyword {
+        "pubkeyauthentication" if settings.pubkey_authentication.is_none() && first.is_some() => {
+            settings.pubkey_authentication = Some(first != Some("no"));
+        }
+        "authorizedkeysfile" if settings.authorized_keys_file.is_none() => {
+            settings.authorized_keys_file = Some(args.to_vec());
+        }
+        "authorizedkeyscommand"
+            if settings.authorized_keys_command.is_none() && first.is_some() =>
+        {
+            settings.authorized_keys_command = Some(first != Some("none"));
+        }
+        "forcecommand" if settings.force_command.is_none() && first.is_some() => {
+            settings.force_command = Some(first != Some("none"));
+        }
+        "authenticationmethods" if settings.authentication_methods.is_none() => {
+            settings.authentication_methods = Some(args.join(" "));
+        }
+        _ => {}
+    }
 }
 
 fn parse_config(
@@ -367,62 +513,162 @@ fn parse_config(
     depth: usize,
     config: &mut SshdConfig,
     seen: &mut HashSet<PathBuf>,
-    in_match: &mut bool,
+    block: &mut Option<usize>,
 ) {
     for line in text.lines() {
         let Some((keyword, args)) = directive(line) else {
             continue;
         };
-        if keyword == "match" {
-            *in_match = true;
-            continue;
-        }
-        if *in_match {
-            continue;
-        }
-        let first = args.first().map(String::as_str);
         match keyword.as_str() {
+            "match" => {
+                config.blocks.push(MatchBlock {
+                    criteria: args,
+                    settings: Settings::default(),
+                });
+                *block = Some(config.blocks.len() - 1);
+            }
             "include" if depth < INCLUDE_DEPTH => {
                 for pattern in &args {
-                    for file in included_files(pattern, etc_ssh) {
+                    let Some(files) = included_files(pattern, etc_ssh) else {
+                        config.unreadable_include = true;
+                        continue;
+                    };
+                    for file in files {
                         if !seen.insert(file.clone()) {
                             continue;
                         }
-                        if let Ok(included) = std::fs::read_to_string(&file) {
-                            // A `Match` inside an included file ends with that file.
-                            let mut file_match = false;
-                            parse_config(
-                                &included,
-                                etc_ssh,
-                                depth + 1,
-                                config,
-                                seen,
-                                &mut file_match,
-                            );
+                        match std::fs::read_to_string(&file) {
+                            Ok(included) => {
+                                // Included where it stands (inside the current Match block, if
+                                // any); a `Match` inside an included file ends with that file.
+                                let mut inner = *block;
+                                parse_config(
+                                    &included,
+                                    etc_ssh,
+                                    depth + 1,
+                                    config,
+                                    seen,
+                                    &mut inner,
+                                );
+                            }
+                            Err(_) => config.unreadable_include = true,
                         }
                     }
                 }
             }
-            "port" if config.port.is_none() => {
-                config.port = first.and_then(|p| p.parse().ok()).filter(|p| *p != 0);
+            "port" if block.is_none() && config.port.is_none() => {
+                config.port = args
+                    .first()
+                    .and_then(|p| p.parse().ok())
+                    .filter(|p| *p != 0);
             }
-            "pubkeyauthentication" if config.pubkey_authentication.is_none() && first.is_some() => {
-                config.pubkey_authentication = Some(first != Some("no"));
-            }
-            "authorizedkeysfile" if config.authorized_keys_file.is_none() => {
-                config.authorized_keys_file = Some(args.clone());
-            }
-            "authorizedkeyscommand" if first.is_some_and(|c| c != "none") => {
-                config.authorized_keys_command = true;
-            }
-            "forcecommand" if first.is_some_and(|c| c != "none") => {
-                config.force_command = true;
-            }
-            "authenticationmethods" if config.authentication_methods.is_none() => {
-                config.authentication_methods = Some(args.join(" "));
-            }
-            _ => {}
+            _ => match *block {
+                Some(index) => set(&mut config.blocks[index].settings, &keyword, &args),
+                None => set(&mut config.global, &keyword, &args),
+            },
         }
+    }
+}
+
+/// Whether a `Match` block applies to `user`: `Some(true)` or `Some(false)` when that can be
+/// told from its criteria (`all`, `User` patterns), `None` when it depends on something else
+/// (a group, the client's address, a host name, a command).
+fn applies(criteria: &[String], user: &str) -> Option<bool> {
+    if criteria.len() == 1 && criteria[0].eq_ignore_ascii_case("all") {
+        return Some(true);
+    }
+    if criteria.is_empty() || !criteria.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut known = true;
+    for pair in criteria.chunks(2) {
+        if pair[0].eq_ignore_ascii_case("user") {
+            if !user_matches(&pair[1], user) {
+                // All criteria must hold: one that does not settles it.
+                return Some(false);
+            }
+        } else {
+            known = false;
+        }
+    }
+    known.then_some(true)
+}
+
+/// sshd's pattern list for `Match User`: comma-separated `*`/`?` patterns, a `!` pattern that
+/// matches excludes.
+fn user_matches(list: &str, user: &str) -> bool {
+    let mut matched = false;
+    for pattern in list.split(',') {
+        match pattern.strip_prefix('!') {
+            Some(negated) if glob_match(negated.as_bytes(), user.as_bytes()) => return false,
+            Some(_) => {}
+            None => matched |= glob_match(pattern.as_bytes(), user.as_bytes()),
+        }
+    }
+    matched
+}
+
+/// What sshd would use for one keyword for this account, as far as can be told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Resolved<T> {
+    /// The value from the first `Match` block that applies and sets it, else the global one.
+    value: Option<T>,
+    /// A `Match` block that may apply (it could not be evaluated) sets it before the value was
+    /// found, or an `Include` could not be read: the value may be another.
+    uncertain: bool,
+    /// The values set in `Match` blocks that may apply.
+    possible: Vec<T>,
+}
+
+impl SshdConfig {
+    fn resolve<T: Clone>(&self, user: &str, pick: impl Fn(&Settings) -> Option<T>) -> Resolved<T> {
+        let mut resolved = Resolved {
+            value: None,
+            uncertain: self.unreadable_include,
+            possible: Vec::new(),
+        };
+        let mut decided = false;
+        for block in &self.blocks {
+            let Some(value) = pick(&block.settings) else {
+                continue;
+            };
+            match applies(&block.criteria, user) {
+                Some(true) if !decided => {
+                    resolved.value = Some(value);
+                    decided = true;
+                }
+                Some(_) => {}
+                None => {
+                    if !decided {
+                        resolved.uncertain = true;
+                    }
+                    resolved.possible.push(value);
+                }
+            }
+        }
+        if !decided {
+            resolved.value = pick(&self.global);
+        }
+        resolved
+    }
+}
+
+/// How sure a finding is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Fine,
+    /// sshd will do it for this account: a `fail` when pairing.
+    Certain,
+    /// It may: a `warn`.
+    Maybe,
+}
+
+fn verdict<T>(resolved: &Resolved<T>, bad: impl Fn(&T) -> bool) -> Verdict {
+    match &resolved.value {
+        Some(value) if bad(value) && !resolved.uncertain => Verdict::Certain,
+        Some(value) if bad(value) => Verdict::Maybe,
+        _ if resolved.possible.iter().any(&bad) => Verdict::Maybe,
+        _ => Verdict::Fine,
     }
 }
 
@@ -458,50 +704,98 @@ fn key_alone_is_enough(methods: &str) -> bool {
             .any(|alternative| alternative == "publickey")
 }
 
+/// The findings of `sshd_config` for this account. What sshd will certainly do that makes
+/// pairing impossible is `blocking` (a `fail` when pairing): `PubkeyAuthentication no`, an
+/// `AuthorizedKeysFile` without `~/.ssh/authorized_keys` (unless an `AuthorizedKeysCommand` may
+/// read that file itself), a `ForceCommand`. What it may do (a `Match` block that cannot be
+/// evaluated, an `Include` that cannot be read) and what may get in the way otherwise (an
+/// `AuthorizedKeysCommand`, `AuthenticationMethods` that need more than a key) is a `warn`.
 fn config(input: &CheckInput<'_>, blocking: Level) -> Vec<Check> {
     let Some(config) = read_sshd_config(input.etc_ssh) else {
         return Vec::new();
     };
+    let user = input.account.name.as_str();
+    let level = |verdict: Verdict| match verdict {
+        Verdict::Certain => blocking,
+        _ => Level::Warn,
+    };
+    let maybe = |verdict: Verdict| {
+        if verdict == Verdict::Maybe {
+            " (in a Match block or an Include or2-pair cannot evaluate, so it may not apply)"
+        } else {
+            ""
+        }
+    };
     let mut out = Vec::new();
-    let try_manual = "; pairing would likely fail here, use --manual";
-    if config.pubkey_authentication == Some(false) {
+
+    let pubkey = verdict(&config.resolve(user, |s| s.pubkey_authentication), |on| !on);
+    if pubkey != Verdict::Fine {
         out.push(check(
-            blocking,
-            "sshd_config has `PubkeyAuthentication no`: sshd would not accept the phone's key at all; use --manual after enabling it",
-        ));
-    }
-    if let Some(words) = &config.authorized_keys_file
-        && !includes_default_keys(words, input.account)
-    {
-        out.push(check(
-            Level::Warn,
+            level(pubkey),
             format!(
-                "sshd_config's AuthorizedKeysFile ({}) does not include .ssh/authorized_keys{try_manual}",
-                words.join(" ")
+                "sshd_config has `PubkeyAuthentication no`{}: sshd would not accept the phone's key at all; use --manual after enabling it",
+                maybe(pubkey)
             ),
         ));
     }
-    if config.authorized_keys_command {
+
+    let command = config.resolve(user, |s| s.authorized_keys_command);
+    let command_verdict = verdict(&command, |on| *on);
+    let files = config.resolve(user, |s| s.authorized_keys_file.clone());
+    let excluded = verdict(&files, |words| !includes_default_keys(words, input.account));
+    if excluded != Verdict::Fine {
+        let words = files
+            .value
+            .as_ref()
+            .filter(|words| !includes_default_keys(words, input.account))
+            .or_else(|| files.possible.first())
+            .map(|words| words.join(" "))
+            .unwrap_or_default();
+        // An AuthorizedKeysCommand may read that file itself: not certain then.
+        let verdict = if command_verdict == Verdict::Fine {
+            excluded
+        } else {
+            Verdict::Maybe
+        };
         out.push(check(
-            Level::Warn,
-            format!("sshd_config sets an AuthorizedKeysCommand{try_manual}"),
-        ));
-    }
-    if config.force_command {
-        out.push(check(
-            Level::Warn,
+            level(verdict),
             format!(
-                "sshd_config sets a ForceCommand, which would run instead of the pairing command{try_manual}"
+                "sshd_config's AuthorizedKeysFile ({words}) does not include .ssh/authorized_keys{}: sshd would not read the temporary key there; use --manual",
+                maybe(verdict)
             ),
         ));
     }
-    if let Some(methods) = &config.authentication_methods
-        && !key_alone_is_enough(methods)
-    {
+    if command_verdict != Verdict::Fine {
+        out.push(check(
+            Level::Warn,
+            "sshd_config sets an AuthorizedKeysCommand; pairing would likely fail here, use --manual",
+        ));
+    }
+
+    let force = verdict(&config.resolve(user, |s| s.force_command), |on| *on);
+    if force != Verdict::Fine {
+        out.push(check(
+            level(force),
+            format!(
+                "sshd_config sets a ForceCommand{}, which would run instead of the pairing command; use --manual",
+                maybe(force)
+            ),
+        ));
+    }
+
+    let methods = config.resolve(user, |s| s.authentication_methods.clone());
+    if verdict(&methods, |methods| !key_alone_is_enough(methods)) != Verdict::Fine {
+        let shown = methods
+            .value
+            .iter()
+            .chain(&methods.possible)
+            .find(|methods| !key_alone_is_enough(methods))
+            .cloned()
+            .unwrap_or_default();
         out.push(check(
             Level::Warn,
             format!(
-                "sshd_config's AuthenticationMethods ({methods}) needs more than a key{try_manual}"
+                "sshd_config's AuthenticationMethods ({shown}) needs more than a key; pairing would likely fail here, use --manual"
             ),
         ));
     }
@@ -573,6 +867,15 @@ mod tests {
         Ok(text.to_owned())
     }
 
+    /// A login shell that answers what the test says, and remembers what it was asked.
+    struct FakeShell(Result<&'static str, &'static str>);
+
+    impl ShellProbe for FakeShell {
+        fn run(&self, _: &str, _: &str) -> Result<String, String> {
+            self.0.map(str::to_owned).map_err(str::to_owned)
+        }
+    }
+
     struct Setup {
         home: tempfile::TempDir,
         etc: tempfile::TempDir,
@@ -582,6 +885,8 @@ mod tests {
         platform: Platform,
         pairing: bool,
         account_shell: Option<String>,
+        shell_says: Result<&'static str, &'static str>,
+        tz_set: bool,
     }
 
     impl Setup {
@@ -595,6 +900,8 @@ mod tests {
                 platform: Platform::Linux,
                 pairing: true,
                 account_shell: Some("/bin/bash".into()),
+                shell_says: Ok("or2-pair test\n"),
+                tz_set: false,
             }
         }
 
@@ -612,6 +919,9 @@ mod tests {
                 pairing: self.pairing,
                 manual_keys: false,
                 stale: &[],
+                version: "test",
+                shell: &FakeShell(self.shell_says),
+                tz_set: self.tz_set,
             })
         }
 
@@ -738,6 +1048,9 @@ mod tests {
             pairing: true,
             manual_keys: false,
             stale: &[],
+            version: "test",
+            shell: &FakeShell(Ok("or2-pair test")),
+            tz_set: false,
         });
         assert!(
             checks
@@ -776,6 +1089,58 @@ mod tests {
     }
 
     #[test]
+    fn the_login_shell_must_really_start_this_program() {
+        // Review of the v2 integration: only the names nologin and false were refused; a shell
+        // whose startup files fail, or that cannot find the program, passed the checks.
+        for (says, why) in [
+            (Err("it exited with status 127"), "status 127"),
+            (Err("it did not finish within 5 s"), "within 5 s"),
+            (Ok("bash: or2-pair: command not found\n"), "did not print"),
+            (Ok("or2-pair 0.0.1\n"), "did not print `or2-pair test`"),
+        ] {
+            let mut setup = Setup::new(banner("SSH-2.0-OpenSSH_9.9"));
+            setup.shell_says = says;
+            let checks = setup.run();
+            let fails = texts(&checks, Level::Fail);
+            assert!(
+                fails.iter().any(|t| t.contains("login shell /bin/bash")
+                    && t.contains("--version")
+                    && t.contains(why)
+                    && t.contains("--manual")),
+                "{says:?}: {checks:?}"
+            );
+            // With --manual it is a warning.
+            setup.pairing = false;
+            assert!(texts(&setup.run(), Level::Fail).is_empty());
+        }
+        // Noise from startup files around the version is fine (the phone skips it too).
+        let mut setup = Setup::new(banner("SSH-2.0-OpenSSH_9.9"));
+        setup.shell_says = Ok("welcome\nor2-pair test\n");
+        assert!(texts(&setup.run(), Level::Fail).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_system_shell_runs_the_command_with_a_time_limit() {
+        assert_eq!(
+            SystemShell.run("/bin/sh", "echo or2-pair test").unwrap(),
+            "or2-pair test\n"
+        );
+        assert!(
+            SystemShell
+                .run("/bin/sh", "exit 3")
+                .unwrap_err()
+                .contains("status 3")
+        );
+        assert!(
+            SystemShell
+                .run("/nonexistent/shell", "true")
+                .unwrap_err()
+                .contains("could not be started")
+        );
+    }
+
+    #[test]
     fn leftover_pairing_keys_are_reported() {
         let setup = Setup::new(banner("SSH-2.0-OpenSSH_9.9"));
         let stale = [bootstrap::PairingId::parse("abcdefghijklm").unwrap()];
@@ -791,6 +1156,9 @@ mod tests {
             pairing: true,
             manual_keys: false,
             stale: &stale,
+            version: "test",
+            shell: &FakeShell(Ok("or2-pair test")),
+            tz_set: false,
         });
         assert!(
             checks
@@ -837,7 +1205,9 @@ mod tests {
             fails.iter().all(|f| !f.contains("PubkeyAuthentication")),
             "first value wins"
         );
-        // The others warn and suggest --manual.
+        // What sshd will certainly do that makes pairing impossible fails, before the prompt
+        // (review of the v2 integration: these were warnings, and the person typed a code for a
+        // run that could not work).
         let home = setup.home.path().display().to_string();
         for (config, word) in [
             (
@@ -845,11 +1215,35 @@ mod tests {
                 "AuthorizedKeysFile",
             ),
             ("AuthorizedKeysFile none\n", "AuthorizedKeysFile"),
+            ("ForceCommand /bin/true\n", "ForceCommand"),
+            ("Match User dev\n  ForceCommand /bin/true\n", "ForceCommand"),
+            (
+                "Match all\n  PubkeyAuthentication no\n",
+                "PubkeyAuthentication",
+            ),
+            (
+                "Match User d?v,other\n  AuthorizedKeysFile /k/%u\n",
+                "AuthorizedKeysFile",
+            ),
+        ] {
+            let (fails, _) = warns(config);
+            let hit = fails.iter().find(|w| w.contains(word));
+            assert!(
+                hit.is_some_and(|w| w.contains("--manual")),
+                "{config}: {fails:?}"
+            );
+        }
+        // What only may get in the way warns and suggests --manual.
+        for (config, word) in [
             (
                 "AuthorizedKeysCommand /usr/bin/fetch %u\n",
                 "AuthorizedKeysCommand",
             ),
-            ("ForceCommand /bin/true\n", "ForceCommand"),
+            // The command may read the file itself.
+            (
+                "AuthorizedKeysFile none\nAuthorizedKeysCommand /usr/bin/fetch %u\n",
+                "AuthorizedKeysFile",
+            ),
             (
                 "AuthenticationMethods publickey,password\n",
                 "AuthenticationMethods",
@@ -858,14 +1252,48 @@ mod tests {
                 "AuthenticationMethods publickey,keyboard-interactive:pam\n",
                 "AuthenticationMethods",
             ),
+            // A Match block that cannot be evaluated here: it may or may not apply.
+            (
+                "Match Group wheel\n  ForceCommand /bin/true\n",
+                "ForceCommand",
+            ),
+            (
+                "PubkeyAuthentication no\nMatch Address 10.0.0.0/8\n  PubkeyAuthentication yes\n",
+                "PubkeyAuthentication",
+            ),
+            (
+                "Match User dev Address 10.0.0.0/8\n  AuthorizedKeysFile /k/%u\n",
+                "AuthorizedKeysFile",
+            ),
+            // An include that cannot be read could hold anything.
+            (
+                "Include /nonexistent-or2/sshd.conf\nForceCommand /bin/true\n",
+                "ForceCommand",
+            ),
         ] {
-            let (_, warnings) = warns(config);
+            let (fails, warnings) = warns(config);
+            assert!(
+                fails.iter().all(|f| !f.contains("sshd_config")),
+                "{config}: {fails:?}"
+            );
             let hit = warnings.iter().find(|w| w.contains(word));
             assert!(
                 hit.is_some_and(|w| w.contains("--manual")),
                 "{config}: {warnings:?}"
             );
         }
+        // With --manual a certain finding is a warning too.
+        let mut manual = Setup::new(banner("SSH-2.0-OpenSSH_9.9"));
+        manual.pairing = false;
+        manual.config("ForceCommand /bin/true\n");
+        let checks = manual.run();
+        assert!(texts(&checks, Level::Fail).is_empty(), "{checks:?}");
+        assert!(
+            texts(&checks, Level::Warn)
+                .iter()
+                .any(|w| w.contains("ForceCommand")),
+            "{checks:?}"
+        );
         // And these are fine.
         for config in [
             "AuthorizedKeysFile .ssh/authorized_keys\n".to_owned(),
@@ -880,6 +1308,15 @@ mod tests {
             "AuthenticationMethods publickey password,publickey\n".to_owned(),
             "authorizedkeysfile=.ssh/authorized_keys\n".to_owned(),
             "# ForceCommand /bin/true\n".to_owned(),
+            // Match blocks for someone else.
+            "Match User other,!dev\n  ForceCommand /bin/true\n".to_owned(),
+            "Match User root\n  PubkeyAuthentication no\n".to_owned(),
+            "Match User other Group wheel\n  ForceCommand /bin/true\n".to_owned(),
+            "Match User *,!dev\n  AuthorizedKeysFile /k/%u\n".to_owned(),
+            // A matching block that sets it right overrides a global value.
+            "Match User dev\n  ForceCommand none\nMatch all\n  ForceCommand /bin/true\n".to_owned(),
+            "Match User dev\n  PubkeyAuthentication yes\nMatch all\nPubkeyAuthentication no\n"
+                .to_owned(),
         ] {
             let (fails, warnings) = warns(&config);
             assert!(
@@ -895,11 +1332,18 @@ mod tests {
     #[test]
     fn sshd_config_match_blocks_and_includes() {
         let setup = Setup::new(banner("SSH-2.0-OpenSSH_9.9"));
-        // A ForceCommand inside a Match block is for someone else.
-        setup.config("Port 2200\nMatch Group sftponly\n    ForceCommand internal-sftp\n    PubkeyAuthentication no\n");
+        // Settings inside a Match block are that block's, not global ones.
+        setup.config("Port 2200\nMatch Group sftponly\n    ForceCommand internal-sftp\n    PubkeyAuthentication no\n    Port 1\n");
         let config = read_sshd_config(setup.etc.path()).unwrap();
         assert_eq!(config.port, Some(2200));
-        assert!(!config.force_command && config.pubkey_authentication.is_none());
+        assert!(
+            config.global.force_command.is_none() && config.global.pubkey_authentication.is_none()
+        );
+        assert_eq!(config.blocks.len(), 1);
+        assert_eq!(config.blocks[0].criteria, ["Group", "sftponly"]);
+        assert_eq!(config.blocks[0].settings.force_command, Some(true));
+        assert_eq!(config.blocks[0].settings.pubkey_authentication, Some(false));
+        assert!(!config.unreadable_include);
 
         // Includes: relative to /etc/ssh, with a wildcard, in file-name order; the first value
         // of a keyword wins across files.
@@ -919,9 +1363,12 @@ mod tests {
         setup.config("Include sshd_config.d/*.conf\nPort 22\n");
         let config = read_sshd_config(setup.etc.path()).unwrap();
         assert_eq!(config.port, Some(2222));
-        assert!(config.force_command && config.pubkey_authentication.is_none());
+        assert!(
+            config.global.force_command == Some(true)
+                && config.global.pubkey_authentication.is_none()
+        );
         assert_eq!(
-            config.authentication_methods.as_deref(),
+            config.global.authentication_methods.as_deref(),
             Some("publickey,password")
         );
 
@@ -931,15 +1378,65 @@ mod tests {
         assert_eq!(
             read_sshd_config(setup.etc.path())
                 .unwrap()
+                .global
                 .pubkey_authentication,
             Some(false)
         );
 
-        // An include loop ends, and an unreadable file is no finding.
+        // An Include inside a Match block belongs to that block.
+        std::fs::remove_file(dir.join("30-match.conf")).unwrap();
+        setup.config("Match User dev\n  Include sshd_config.d/10-first.conf\n");
+        let config = read_sshd_config(setup.etc.path()).unwrap();
+        assert_eq!(config.global.force_command, None);
+        assert_eq!(config.blocks[0].settings.force_command, Some(true));
+
+        // An include loop ends; a file that cannot be read is no finding by itself, but makes
+        // every other finding uncertain.
         setup.config("Include sshd_config\nInclude missing.conf\nPort 2201\n");
-        assert_eq!(read_sshd_config(setup.etc.path()).unwrap().port, Some(2201));
+        let config = read_sshd_config(setup.etc.path()).unwrap();
+        assert_eq!(config.port, Some(2201));
+        assert!(config.unreadable_include);
         std::fs::remove_file(setup.etc.path().join("sshd_config")).unwrap();
         assert_eq!(read_sshd_config(setup.etc.path()), None);
+    }
+
+    #[test]
+    fn match_user_patterns_follow_sshd() {
+        for (criteria, user, expected) in [
+            ("all", "dev", Some(true)),
+            ("User dev", "dev", Some(true)),
+            ("user dev", "dev", Some(true)),
+            ("User other", "dev", Some(false)),
+            ("User d*", "dev", Some(true)),
+            ("User ?ev", "dev", Some(true)),
+            ("User a,b,dev", "dev", Some(true)),
+            ("User *,!dev", "dev", Some(false)),
+            ("User !root", "dev", Some(false)),
+            ("User dev Group wheel", "dev", None),
+            ("User other Group wheel", "dev", Some(false)),
+            ("Group wheel", "dev", None),
+            ("Address 10.0.0.0/8", "dev", None),
+            ("Host *.example.net", "dev", None),
+            ("User", "dev", None),
+            ("", "dev", None),
+        ] {
+            let words: Vec<String> = criteria.split_whitespace().map(str::to_owned).collect();
+            assert_eq!(applies(&words, user), expected, "{criteria}");
+        }
+    }
+
+    #[test]
+    fn tz_with_an_sshd_that_reads_local_time_is_a_warning() {
+        let mut setup = Setup::new(banner("SSH-2.0-OpenSSH_8.9p1 Ubuntu-3"));
+        assert_eq!(setup.run()[0].level, Level::Ok);
+        setup.tz_set = true;
+        let checks = setup.run();
+        assert_eq!(checks[0].level, Level::Warn);
+        assert!(checks[0].text.contains("TZ is set"), "{}", checks[0].text);
+        // An sshd that takes UTC does not care.
+        let mut current = Setup::new(banner("SSH-2.0-OpenSSH_9.9"));
+        current.tz_set = true;
+        assert_eq!(current.run()[0].level, Level::Ok);
     }
 
     #[test]

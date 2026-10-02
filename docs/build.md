@@ -94,7 +94,7 @@ the no-key-installation (Windows) behaviour. `tests/sshd.rs`: the end to end sui
 `or2-pair-testhost` pairs with a test-only russh phone (derives the bootstrap key, pins the host key,
 authenticates, runs the exchange through the forced command, then logs in with the key it handed over), plus
 a different code, a run that ended, a host key mismatch, a second phone (`gone`), rc-file noise, a
-`ForceCommand`, and `expiry-time`. The `real_phone` module of the same file repeats the pairing with the
+`ForceCommand`, `expiry-time` (local and UTC) and a host in another time zone than sshd. The `real_phone` module of the same file repeats the pairing with the
 product's own client (`or2_core::pair`, a dev-dependency of `or2-pair`): its strict parser reads the code the
 host printed and `pair_enroll` does the connection (success, a different code, a host key mismatch, a run
 that ended). Like the other sshd tests it skips (printing `SKIP`) without

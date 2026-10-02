@@ -1,22 +1,23 @@
-//! The pairing code `K`: 12 characters of Crockford base32, shown on the phone as
+//! The pairing code `K`: 12 characters of Crockford base32 without `Z`, shown on the phone as
 //! `7KQ4-M2XD-9PTM` and typed at the host.
 //!
-//! 11 random data characters (55 bits) and a check character
-//! `c = (sum of i * v_i for i = 1..11) mod 31`, `v_i` being the value of the i-th character in
-//! [`ALPHABET`]. Weights 1 to 11 modulo the prime 31 catch every single wrong character and
-//! every swap of two neighbours, with one exception: `Z` has value 31, which is 0 modulo 31, so
-//! a `0` typed for a `Z` (or the reverse) passes the check. The derived key is then wrong and the
-//! host refuses the phone (`BootstrapRefused`); nothing is spent. The phone implements the same rules in `or2_core::pair`; the
-//! two sets of test vectors match, and the contract (`docs/contracts.md`, "The pairing code")
-//! is the one source.
+//! 11 random data characters, each one of the 31 symbols `0-9` and `A-Y` without `I`, `L`, `O`,
+//! `U` (about 54.5 bits), and a check character `c = (sum of i * v_i for i = 1..11) mod 31`, `v_i`
+//! being the value of the i-th character in [`ALPHABET`] (0 to 30). Every value is below the
+//! prime 31, so weights 1 to 11 catch every single wrong character and every swap of two
+//! neighbours, with no exception; `c` is 0 to 30, so `Z` never appears in a code, and a typed `Z`
+//! is refused as a character codes never use. The phone implements the same rules in
+//! `or2_core::pair`; the two sets of test vectors match, and the contract (`docs/contracts.md`,
+//! "The pairing code") is the one source.
 //!
 //! Typed input is read leniently: case-insensitive, hyphens and white space ignored, `I` and `L`
 //! read as `1`, `O` as `0`. The code is zeroized on drop and never printed, logged or saved.
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
-/// Crockford's alphabet: no `I`, `L`, `O` or `U`.
-pub const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+/// Crockford's alphabet without `Z` (no `I`, `L`, `O`, `U` either): the 31 symbols of a code,
+/// in value order.
+pub const ALPHABET: &[u8; 31] = b"0123456789ABCDEFGHJKMNPQRSTVWXY";
 
 /// Random characters in a code.
 pub const DATA_LEN: usize = 11;
@@ -25,7 +26,7 @@ pub const DATA_LEN: usize = 11;
 pub enum CodeError {
     #[error("That code has the wrong length: it has {0} characters, not 12")]
     Length(usize),
-    #[error("That code has a character that codes never use (they use 0-9 and A-Z without U)")]
+    #[error("That code has a character that codes never use (they use 0-9 and A-Y, never U or Z)")]
     Character,
     #[error("That code has a typo")]
     Check,
@@ -91,30 +92,41 @@ impl PairCode {
         if chars.len() != DATA_LEN + 1 {
             return Err(CodeError::Length(chars.len()));
         }
-        let mut typed = [0u8; DATA_LEN + 1];
+        // Wiped on every way out, a refused character's early return included.
+        let mut typed = Zeroizing::new([0u8; DATA_LEN + 1]);
         for (slot, c) in typed.iter_mut().zip(chars) {
             *slot = normal(*c).ok_or(CodeError::Character)?;
         }
-        let mut data = [0u8; DATA_LEN];
-        data.copy_from_slice(&typed[..DATA_LEN]);
-        let right = check_of(&data) == typed[DATA_LEN];
-        typed.zeroize();
-        if right {
-            Ok(Self { data })
+        let mut code = Self {
+            data: [0u8; DATA_LEN],
+        };
+        code.data.copy_from_slice(&typed[..DATA_LEN]);
+        if check_of(&code.data) == typed[DATA_LEN] {
+            Ok(code)
         } else {
-            data.zeroize();
+            // `code` is zeroized as it drops.
             Err(CodeError::Check)
         }
     }
 
     /// A new random code. The phone draws its own in production; this is for tests and for
-    /// tools that play the phone.
+    /// tools that play the phone. Uniform over the 31 symbols: a byte is used only below 248
+    /// (8 · 31), as its value modulo 31.
     pub fn generate(random: &dyn Fn(&mut [u8])) -> Self {
-        let mut bytes = [0u8; DATA_LEN];
-        random(&mut bytes);
-        let data = bytes.map(|b| ALPHABET[usize::from(b & 31)]);
-        bytes.zeroize();
-        Self { data }
+        let mut code = Self {
+            data: [0u8; DATA_LEN],
+        };
+        let mut bytes = Zeroizing::new([0u8; DATA_LEN]);
+        let mut filled = 0;
+        while filled < DATA_LEN {
+            let wanted = &mut bytes[..DATA_LEN - filled];
+            random(wanted);
+            for byte in wanted.iter().filter(|byte| **byte < 248) {
+                code.data[filled] = ALPHABET[usize::from(*byte % 31)];
+                filled += 1;
+            }
+        }
+        code
     }
 
     /// The 11 data characters as ASCII uppercase.
@@ -145,11 +157,11 @@ mod tests {
     // The vectors the phone's `or2_core::pair` tests hold too (contract: "The pairing code").
     // The check character is `(sum i * v_i, i = 1..11) mod 31`, for example for 7KQ4M2XD9PT:
     // 7 + 2*19 + 3*23 + 4*4 + 5*20 + 6*2 + 7*29 + 8*13 + 9*9 + 10*22 + 11*26 = 1136 = 36*31 + 20,
-    // and value 20 is `M`.
+    // and value 20 is `M`; for YYYYYYYYYYY: 30 * 66 = 1980 = 63*31 + 27, value 27 is `V`.
     const VECTORS: [(&str, char); 5] = [
         ("7KQ4M2XD9PT", 'M'),
         ("00000000000", '0'),
-        ("ZZZZZZZZZZZ", '0'),
+        ("YYYYYYYYYYY", 'V'),
         ("11111111111", '4'),
         ("0123456789A", '6'),
     ];
@@ -168,6 +180,8 @@ mod tests {
 
     #[test]
     fn every_single_wrong_character_and_every_neighbour_swap_fails_the_check() {
+        // With values 0 to 30 below the prime 31 there is no exception (there was one while `Z`,
+        // value 31, could be a data character: `0` and `Z` were the same modulo 31).
         let good = "7KQ4M2XD9PTM";
         assert!(PairCode::parse(good).is_ok());
         let chars: Vec<char> = good.chars().collect();
@@ -175,9 +189,7 @@ mod tests {
             for a in ALPHABET {
                 let mut typed = chars.clone();
                 typed[i] = *a as char;
-                // 0 and Z are the same modulo 31 (see the module docs).
-                if typed == chars || value(*a).unwrap() % 31 == value(chars[i] as u8).unwrap() % 31
-                {
+                if typed == chars {
                     continue;
                 }
                 let text: String = typed.iter().collect();
@@ -204,14 +216,24 @@ mod tests {
     }
 
     #[test]
-    fn zero_and_z_are_the_one_pair_the_check_cannot_tell_apart() {
-        // Z is 31, which is 0 modulo 31: a documented limit of the contract's formula.
-        let all_z = PairCode::parse("ZZZZZZZZZZZ0").unwrap();
-        let first_zero = PairCode::parse("0ZZZZZZZZZZ0").unwrap();
-        assert_ne!(
-            all_z, first_zero,
-            "both pass the check, and they are different codes"
-        );
+    fn z_is_never_part_of_a_code_and_a_typed_z_is_refused() {
+        assert!(!ALPHABET.contains(&b'Z'));
+        for typed in [
+            "ZZZZZZZZZZZ0",
+            "0ZZZZZZZZZZ0",
+            "7KQ4M2XD9PTZ",
+            "z0000000000-0",
+        ] {
+            assert_eq!(
+                PairCode::parse(typed).unwrap_err(),
+                CodeError::Character,
+                "{typed}"
+            );
+        }
+        // A check character is never Z: every sum modulo 31 is a value of the alphabet.
+        for sum in 0..31 * 66 {
+            assert_ne!(ALPHABET[sum % 31], b'Z');
+        }
     }
 
     #[test]
@@ -243,9 +265,10 @@ mod tests {
             PairCode::parse("7KQ4M2XD9PTMM").unwrap_err(),
             CodeError::Length(13)
         );
-        // U is not in the alphabet; neither is punctuation or a non-ASCII letter.
+        // U and Z are not in the alphabet; neither is punctuation or a non-ASCII letter.
         for typed in [
             "7KQ4M2XD9PTU",
+            "7KQ4M2XD9PTZ",
             "7KQ4M2XD9PT!",
             "7KQ4M2XD9PTé",
             "7KQ4M2XD9PT_",
@@ -271,5 +294,34 @@ mod tests {
         assert_eq!(PairCode::parse(&code.display()).unwrap(), code);
         assert_eq!(format!("{code:?}"), "PairCode(..)");
         assert_eq!(code.display().len(), 14);
+    }
+
+    #[test]
+    fn generated_codes_are_uniform_over_the_31_symbols_and_never_hold_z() {
+        // Every byte value in turn: 248 to 255 are skipped, the other 248 map to each of the 31
+        // symbols 8 times. 248 codes use the usable bytes of 11 rounds: 88 of each symbol.
+        let next = std::cell::Cell::new(0u32);
+        let random = |buf: &mut [u8]| {
+            for byte in buf {
+                *byte = (next.get() % 256) as u8;
+                next.set(next.get() + 1);
+            }
+        };
+        let mut counts = [0u32; 31];
+        for _ in 0..248 {
+            let code = PairCode::generate(&random);
+            for c in code.data() {
+                counts[value(*c).unwrap() as usize] += 1;
+            }
+            assert!(!code.display().contains('Z'));
+        }
+        assert!(counts.iter().all(|count| *count == 88), "{counts:?}");
+        // A source that only ever gives skipped bytes for a while still ends.
+        let calls = std::cell::Cell::new(0);
+        let stingy = |buf: &mut [u8]| {
+            calls.set(calls.get() + 1);
+            buf.fill(if calls.get() < 3 { 255 } else { 7 });
+        };
+        assert_eq!(PairCode::generate(&stingy).data(), b"77777777777");
     }
 }

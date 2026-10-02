@@ -78,6 +78,11 @@ pub struct Env<'a> {
     pub platform: Platform,
     pub net: &'a dyn Net,
     pub keyscan: &'a dyn Keyscan,
+    /// Runs the login shell for the checks ([`checks::SystemShell`]).
+    pub shell: &'a dyn checks::ShellProbe,
+    /// Whether `TZ` is set in this process's environment (an sshd from OpenSSH 7.7 up to 9.0
+    /// then gets no `expiry-time`: see `bootstrap::dialect_for`).
+    pub tz_set: bool,
     /// This program's canonical path (what sshd is told to run), or why it is unknown.
     pub exe: Result<PathBuf, String>,
     /// Where the code is typed.
@@ -242,6 +247,9 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
         pairing: !manual,
         manual_keys: !env.install_keys,
         stale: &stale,
+        version: env.version,
+        shell: env.shell,
+        tz_set: env.tz_set,
     });
     for check in &found {
         writeln!(out, "  {}  {}", check.level.tag(), check.text)?;
@@ -320,7 +328,7 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
     #[cfg(unix)]
     {
         // The checks already refused everything that fails here; these are the values.
-        let dialect = bootstrap::dialect(probe.as_ref().ok().map(String::as_str))
+        let dialect = bootstrap::dialect_for(probe.as_ref().ok().map(String::as_str), env.tz_set)
             .map_err(|_| RunError::Blocked)?;
         let exe = env
             .exe
@@ -372,6 +380,8 @@ fn pair(
             writeln!(out, "\nNo code was typed. Nothing was changed.")?;
             return Ok(Exit::Cancelled);
         };
+        // The terminal does not echo the code, not even the Enter that ended it.
+        writeln!(out)?;
         if line.trim().is_empty() {
             writeln!(out, "Cancelled. Nothing was changed.")?;
             return Ok(Exit::Cancelled);
@@ -433,44 +443,68 @@ fn pair(
         });
     }
 
-    let ended = live.wait(env.signals, env.poll, env.window);
+    let ended = live.wait(env.signals, env.poll, env.window, env.now);
     let line = live.line().to_owned();
     drop(live);
     let keys = env.account.keys_path();
     let mut report = String::new();
+    // What happened to the temporary key, said only as far as it is known.
+    let key_fate = |removed: bool| {
+        if removed {
+            "The temporary key was removed."
+        } else {
+            "The temporary key was already gone from authorized_keys; nothing was removed."
+        }
+    };
     let exit = match ended {
         Ended::Paired(done) => {
-            let (device, fingerprint) = done
-                .map(|done| (done.device, done.fingerprint))
-                .unwrap_or_else(|| ("the phone".to_owned(), "an unknown key".to_owned()));
             let _ = writeln!(
                 report,
-                "Paired \"{device}\" ({fingerprint}) as {}. The temporary key was replaced by the phone's key.",
-                host.user
+                "Paired \"{}\" ({}) as {}. The temporary key was replaced by the phone's key.",
+                done.device, done.fingerprint, host.user
             );
             let _ = writeln!(
                 report,
-                "To undo, delete the line ending or2-{device}-{} in {}.",
+                "To undo, delete the line ending or2-{}-{} in {}.",
+                done.device,
                 (env.now)().date(),
                 keys.display()
             );
             Exit::Paired
         }
-        Ended::TimedOut => {
+        Ended::NotInstalled(done) => {
+            let what = done.map_or_else(
+                || "A phone's pairing was recorded".to_owned(),
+                |done| {
+                    format!(
+                        "\"{}\" ({}) was recorded as paired",
+                        done.device, done.fingerprint
+                    )
+                },
+            );
             let _ = writeln!(
                 report,
-                "Timed out: no phone paired in time. The temporary key was removed. Run or2-pair again to retry."
+                "{what}, but its key is not in {}: nothing was paired. The temporary key was removed. Run or2-pair again to retry.",
+                keys.display()
+            );
+            Exit::Failed
+        }
+        Ended::TimedOut { removed } => {
+            let _ = writeln!(
+                report,
+                "Timed out: no phone paired in time. {} Run or2-pair again to retry.",
+                key_fate(removed)
             );
             Exit::TimedOut
         }
-        Ended::Interrupted => {
-            let _ = writeln!(report, "Cancelled. The temporary key was removed.");
+        Ended::Interrupted { removed } => {
+            let _ = writeln!(report, "Cancelled. {}", key_fate(removed));
             Exit::Interrupted
         }
         Ended::RemovalFailed(error) => {
             let _ = writeln!(
                 report,
-                "Could not remove the temporary pairing key: {error}\nDelete this line from {} (it can no longer be used: the pairing command refuses once the run is over; the next or2-pair also removes it):\n{line}",
+                "Could not remove the temporary pairing key: {error}\nIf a phone was pairing at this moment it may have finished: look in {} for its line. Delete this line from that file (it can no longer be used: the pairing command refuses once the run is over; the next or2-pair also removes it):\n{line}",
                 keys.display()
             );
             Exit::Failed

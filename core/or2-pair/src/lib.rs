@@ -160,6 +160,8 @@ pub fn run_main(options: &args::Options, code_from_stdin: bool) -> Result<Exit, 
         platform: Platform::current(),
         net: &StdNet,
         keyscan: &SystemKeyscan,
+        shell: &checks::SystemShell,
+        tz_set: std::env::var_os("TZ").is_some(),
         exe,
         prompt: &Stdin,
         can_ask: code_from_stdin || Stdin::available(),
@@ -191,6 +193,7 @@ pub fn enroll_main(id: &bootstrap::PairingId) -> ExitCode {
         account: &account,
         now: &now,
         request_timeout: exchange::REQUEST_TIMEOUT,
+        hook: None,
     };
     let outcome = exchange::enroll(
         id,

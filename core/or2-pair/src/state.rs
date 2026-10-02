@@ -1,11 +1,21 @@
-//! `~/.ssh/or2-pair/`: the state of the runs that are live (Unix only).
+//! `~/.ssh/or2-pair/`: the lock, and the state of the runs that are live (Unix only).
 //!
-//! For each live run, `<id>.json` (mode 0600): the pairing id, the deadline (Unix seconds), the
-//! account's uid and the bootstrap key's fingerprint. `or2-pair enroll <id>`, the forced command,
-//! refuses unless this file exists, is not past its deadline and names its own uid: that, not the
-//! cleanup, is what makes the bootstrap key useless after the window. When a phone's key has
-//! been installed, `enroll` writes `<id>.done` (created exclusively, mode 0600: the device label
-//! and the key's fingerprint), which the waiting `or2-pair` polls.
+//! - `lock` (mode 0600, kept): every change of `authorized_keys` and every change of a run's
+//!   state (publishing it, `enroll`'s commit, the cleanup, the sweep) happens while this process
+//!   holds an exclusive `flock` on it ([`StateDir::lock`], [`Held`]). One lock, so `enroll`'s
+//!   whole commit and the foreground's cleanup can never interleave.
+//! - `<id>.json` (mode 0600) for each live run: the pairing id, the deadline (Unix seconds), the
+//!   account's uid and the bootstrap key's fingerprint. Published complete (written under a
+//!   temporary name, synced, then linked to its name, which must not exist: an id is used once),
+//!   so no reader ever sees part of it. The foreground holds an exclusive `flock` on it for its
+//!   whole life ([`Liveness`]): a state file whose lock can be taken belongs to a run that is
+//!   gone, even one killed with SIGKILL, and `enroll` refuses it and the sweep removes it.
+//! - `<id>.done` (mode 0600, published the same way): written by `enroll`, under the lock, when
+//!   it commits a phone's key: the device label and the key's fingerprint.
+//!
+//! `or2-pair enroll <id>`, the forced command, refuses unless the state file exists, is held by
+//! its run, is not past its deadline and names its own uid and id: that, not the cleanup, is what
+//! makes the bootstrap key useless after the run.
 //!
 //! The directory (mode 0700) is opened relative to the checked `~/.ssh` handle and every file
 //! below it with the same checks as `authorized_keys`: no links followed, owner, mode, regular
@@ -15,6 +25,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -25,8 +36,18 @@ use crate::safefs::*;
 /// The directory's name inside `~/.ssh`.
 pub const DIR: &str = "or2-pair";
 
+/// The lock file's name inside it.
+pub const LOCK: &str = "lock";
+
+/// Temporary files in the directory start with this (a crash can leave one; the sweep removes
+/// them under the lock).
+const TEMP_PREFIX: &str = "tmp.";
+
 /// Neither file is larger than this.
 const MAX_BYTES: u64 = 4096;
+
+/// How often a lock that is taken is tried again.
+const LOCK_RETRY: Duration = Duration::from_millis(50);
 
 /// What a live run records for its forced command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +67,20 @@ pub struct Done {
     pub device: String,
     /// `SHA256:…` of the phone's key.
     pub fingerprint: String,
+}
+
+/// The `or2-pair/lock` held exclusively: `authorized_keys` and the state may be changed. Dropping
+/// it releases the lock.
+#[derive(Debug)]
+pub struct Held {
+    _fd: OwnedFd,
+}
+
+/// A run's own state file, kept open with an exclusive `flock` for as long as the run lives.
+/// Dropping it (or the process ending in any way) releases the lock, and the run counts as gone.
+#[derive(Debug)]
+pub struct Liveness {
+    _fd: OwnedFd,
 }
 
 #[derive(Debug)]
@@ -95,25 +130,84 @@ impl StateDir {
         }))
     }
 
+    /// Takes the lock, trying again every 50 ms while another process holds it, for up to
+    /// `patience`. `interrupted` is asked after each failed try: once it says yes, one more try
+    /// is made and then the wait ends. A lock still taken is `WouldBlock`.
+    pub fn lock(&self, patience: Duration, interrupted: &dyn Fn() -> bool) -> io::Result<Held> {
+        let path = self.path.join(LOCK);
+        let fd = open_file(
+            self.fd.as_raw_fd(),
+            LOCK,
+            &path,
+            libc::O_RDWR | libc::O_CREAT,
+            0o600,
+        )?;
+        // Created with 0600 (less with the umask); an existing one is checked like any other.
+        check_file(&fstat(fd.as_raw_fd())?, self.uid, &path)?;
+        let started = Instant::now();
+        let mut last_chance = false;
+        loop {
+            if try_lock(fd.as_raw_fd(), true)? {
+                return Ok(Held { _fd: fd });
+            }
+            if last_chance || started.elapsed() >= patience {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!(
+                        "another or2-pair holds {} (it is changing authorized_keys); try again in a moment",
+                        path.display()
+                    ),
+                ));
+            }
+            if interrupted() {
+                last_chance = true;
+            } else {
+                std::thread::sleep(LOCK_RETRY);
+            }
+        }
+    }
+
     fn file_path(&self, id: &PairingId, extension: &str) -> PathBuf {
         self.path.join(format!("{id}.{extension}"))
     }
 
-    fn create<T: Serialize>(&self, id: &PairingId, extension: &str, value: &T) -> io::Result<()> {
+    /// Publishes `<id>.<extension>` complete: written to a temporary name, synced, linked to its
+    /// name (which must not exist: `AlreadyExists`), the temporary name removed, the directory
+    /// synced. With `hold` the file is locked (exclusive `flock`) before it gets its name, and the
+    /// locked descriptor is returned. `before_link` runs just before the name appears (tests look
+    /// there).
+    fn publish<T: Serialize>(
+        &self,
+        id: &PairingId,
+        extension: &str,
+        value: &T,
+        hold: bool,
+        before_link: &dyn Fn(),
+    ) -> io::Result<OwnedFd> {
         let name = format!("{id}.{extension}");
-        let path = self.file_path(id, extension);
-        let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL;
-        let fd = open_file(self.fd.as_raw_fd(), &name, &path, flags, 0o600)?;
-        fchmod(fd.as_raw_fd(), 0o600)?;
-        let mut file = File::from(fd);
-        let result = serde_json::to_vec(value)
-            .map_err(io::Error::other)
-            .and_then(|bytes| file.write_all(&bytes))
-            .and_then(|()| file.sync_all());
-        if result.is_err() {
-            let _ = unlinkat(self.fd.as_raw_fd(), &name);
-        }
-        result
+        let temp = temp_name(&format!("{TEMP_PREFIX}{name}."));
+        let temp_path = self.path.join(&temp);
+        let dir = self.fd.as_raw_fd();
+        let flags = libc::O_RDWR | libc::O_CREAT | libc::O_EXCL;
+        let fd = open_file(dir, &temp, &temp_path, flags, 0o600)?;
+        let result = (|| {
+            fchmod(fd.as_raw_fd(), 0o600)?;
+            if hold && !try_lock(fd.as_raw_fd(), true)? {
+                return Err(io::Error::other(
+                    "a new state file was locked by someone else",
+                ));
+            }
+            let mut file = File::from(fd.try_clone()?);
+            let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            before_link();
+            linkat(dir, &temp, &name)
+        })();
+        let _ = unlinkat(dir, &temp);
+        result?;
+        fsync_dir(dir)?;
+        Ok(fd)
     }
 
     fn read<T: for<'de> Deserialize<'de>>(
@@ -139,10 +233,16 @@ impl StateDir {
             .map_err(|_| bad(&path, "is not a pairing state file"))
     }
 
-    /// Records a live run (created exclusively: an id is used once).
-    pub fn write_state(&self, state: &State) -> io::Result<()> {
+    /// Records a live run, complete and created once (an id is used once), and returns its lock:
+    /// the run is live for as long as the returned value is kept.
+    pub fn publish_state(&self, state: &State) -> io::Result<Liveness> {
+        self.publish_state_with(state, &|| {})
+    }
+
+    fn publish_state_with(&self, state: &State, before_link: &dyn Fn()) -> io::Result<Liveness> {
         let id = PairingId::parse(&state.id).map_err(io::Error::other)?;
-        self.create(&id, "json", state)
+        self.publish(&id, "json", state, true, before_link)
+            .map(|fd| Liveness { _fd: fd })
     }
 
     /// The live run `id`, `None` when there is none.
@@ -150,9 +250,25 @@ impl StateDir {
         self.read(id, "json")
     }
 
-    /// Records the phone's key as installed. `AlreadyExists` when it already was.
+    /// Whether the run that wrote `<id>.json` still holds it (is still running). A missing file
+    /// is `Ok(false)`.
+    pub fn held_by_its_run(&self, id: &PairingId) -> io::Result<bool> {
+        let name = format!("{id}.json");
+        let path = self.file_path(id, "json");
+        let fd = match open_file(self.fd.as_raw_fd(), &name, &path, libc::O_RDONLY, 0) {
+            Ok(fd) => fd,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        // A shared lock that can be taken means nobody holds the exclusive one; closing the
+        // descriptor releases it again.
+        Ok(!try_lock(fd.as_raw_fd(), false)?)
+    }
+
+    /// Records the phone's key as installed (complete, created once: `AlreadyExists` when it
+    /// already was).
     pub fn write_done(&self, id: &PairingId, done: &Done) -> io::Result<()> {
-        self.create(id, "done", done)
+        self.publish(id, "done", done, false, &|| {}).map(drop)
     }
 
     pub fn read_done(&self, id: &PairingId) -> io::Result<Option<Done>> {
@@ -164,54 +280,46 @@ impl StateDir {
         exists_at(self.fd.as_raw_fd(), &format!("{id}.done"))
     }
 
-    /// Removes only `<id>.json`, which is what ends `enroll`'s willingness (a missing file is
-    /// fine).
-    pub fn remove_state(&self, id: &PairingId) -> io::Result<()> {
-        match unlinkat(self.fd.as_raw_fd(), &format!("{id}.json")) {
+    fn remove_name(&self, name: &str) -> io::Result<()> {
+        match unlinkat(self.fd.as_raw_fd(), name) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
             _ => Ok(()),
         }
     }
 
+    /// Removes only `<id>.json`, which is what ends `enroll`'s willingness (a missing file is
+    /// fine).
+    pub fn remove_state(&self, id: &PairingId) -> io::Result<()> {
+        self.remove_name(&format!("{id}.json"))
+    }
+
+    /// Removes only `<id>.done` (an `enroll` whose commit failed takes its record back).
+    pub fn remove_done(&self, id: &PairingId) -> io::Result<()> {
+        self.remove_name(&format!("{id}.done"))
+    }
+
     /// Removes `<id>.json` and `<id>.done`; whatever is not there is fine.
     pub fn remove(&self, id: &PairingId) -> io::Result<()> {
-        let mut result = Ok(());
-        for extension in ["json", "done"] {
-            match unlinkat(self.fd.as_raw_fd(), &format!("{id}.{extension}")) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => result = Err(error),
+        let state = self.remove_state(id);
+        let done = self.remove_done(id);
+        state.and(done)
+    }
+
+    /// Removes the temporary files a crash left behind. Only while holding the lock (every
+    /// temporary file is written under it, so none of them is in use then).
+    pub fn remove_leftovers(&self, _held: &Held) -> io::Result<()> {
+        for name in list(self.fd.as_raw_fd())? {
+            if name.starts_with(TEMP_PREFIX) {
+                self.remove_name(&name)?;
             }
         }
-        result
+        Ok(())
     }
 
     /// The ids that have a `.json` or a `.done` file.
     pub fn ids(&self) -> io::Result<Vec<PairingId>> {
-        // A new open file description of this directory, so reading it never disturbs the
-        // handle that is kept.
-        let listing = openat(
-            self.fd.as_raw_fd(),
-            ".",
-            libc::O_RDONLY | libc::O_DIRECTORY,
-            0,
-        )?;
-        // SAFETY: `fdopendir` takes ownership of the descriptor on success.
-        let dir = unsafe { libc::fdopendir(listing.as_raw_fd()) };
-        if dir.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        std::mem::forget(listing);
         let mut ids = Vec::new();
-        loop {
-            // SAFETY: `dir` is an open directory stream until `closedir` below.
-            let entry = unsafe { libc::readdir(dir) };
-            if entry.is_null() {
-                break;
-            }
-            // SAFETY: `d_name` is a NUL-terminated name inside the entry.
-            let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
-            let name = name.to_string_lossy();
+        for name in list(self.fd.as_raw_fd())? {
             let stem = name
                 .strip_suffix(".json")
                 .or_else(|| name.strip_suffix(".done"));
@@ -221,8 +329,6 @@ impl StateDir {
                 ids.push(id);
             }
         }
-        // SAFETY: `dir` came from `fdopendir` and is closed once.
-        unsafe { libc::closedir(dir) };
         Ok(ids)
     }
 }
@@ -254,6 +360,15 @@ mod tests {
         (home, account)
     }
 
+    fn names(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     #[test]
     fn the_directory_is_created_private_and_holds_state_and_done_files() {
         let (home, account) = ssh_home();
@@ -267,7 +382,7 @@ mod tests {
 
         let live = id("aaaaaaaaaaaaa");
         assert!(dir.read_state(&live).unwrap().is_none());
-        dir.write_state(&state("aaaaaaaaaaaaa", 123)).unwrap();
+        let held = dir.publish_state(&state("aaaaaaaaaaaaa", 123)).unwrap();
         assert_eq!(
             dir.read_state(&live).unwrap().unwrap(),
             state("aaaaaaaaaaaaa", 123)
@@ -277,9 +392,13 @@ mod tests {
             fs::metadata(&file).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        // One name, no temporary file left.
+        assert_eq!(names(&path), ["aaaaaaaaaaaaa.json"]);
         // An id is used once.
-        let again = dir.write_state(&state("aaaaaaaaaaaaa", 456)).unwrap_err();
+        let again = dir.publish_state(&state("aaaaaaaaaaaaa", 456)).unwrap_err();
         assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(names(&path), ["aaaaaaaaaaaaa.json"]);
+        drop(held);
 
         assert!(!dir.has_done(&live));
         let done = Done {
@@ -302,7 +421,7 @@ mod tests {
             0o600
         );
 
-        dir.write_state(&state("bbbbbbbbbbbbb", 1)).unwrap();
+        let _other = dir.publish_state(&state("bbbbbbbbbbbbb", 1)).unwrap();
         let mut ids: Vec<String> = dir.ids().unwrap().iter().map(ToString::to_string).collect();
         ids.sort();
         assert_eq!(ids, ["aaaaaaaaaaaaa", "bbbbbbbbbbbbb"]);
@@ -310,6 +429,95 @@ mod tests {
         dir.remove(&live).unwrap();
         assert!(dir.read_state(&live).unwrap().is_none() && !dir.has_done(&live));
         dir.remove(&live).unwrap();
+    }
+
+    #[test]
+    fn a_state_file_is_live_exactly_while_its_run_holds_it() {
+        let (_home, account) = ssh_home();
+        let dir = StateDir::open(&account, true).unwrap().unwrap();
+        let live = id("aaaaaaaaaaaaa");
+        assert!(!dir.held_by_its_run(&live).unwrap(), "no file: not held");
+        let liveness = dir.publish_state(&state("aaaaaaaaaaaaa", 123)).unwrap();
+        // Another open of the file (another process, or this one: `flock` is per open file)
+        // cannot take it while the run keeps it...
+        assert!(dir.held_by_its_run(&live).unwrap());
+        assert!(
+            dir.held_by_its_run(&live).unwrap(),
+            "asking does not take it"
+        );
+        // ...and can as soon as the run is gone (a crash or a SIGKILL closes it the same way).
+        drop(liveness);
+        assert!(!dir.held_by_its_run(&live).unwrap());
+        assert!(
+            dir.read_state(&live).unwrap().is_some(),
+            "the file is still there"
+        );
+    }
+
+    #[test]
+    fn a_state_file_is_never_visible_before_it_is_complete() {
+        // Review of the v2 integration: the final name used to exist (empty) while the contents
+        // were written, and another run's sweep took it for dead and removed it.
+        let (home, account) = ssh_home();
+        let dir = StateDir::open(&account, true).unwrap().unwrap();
+        let live = id("aaaaaaaaaaaaa");
+        let path = home.path().join(".ssh").join(DIR);
+        let seen = std::cell::RefCell::new(Vec::new());
+        let looked = std::cell::Cell::new(false);
+        let liveness = dir
+            .publish_state_with(&state("aaaaaaaaaaaaa", 123), &|| {
+                // Written and synced, not yet named: nobody can see or judge it.
+                looked.set(true);
+                assert!(dir.read_state(&live).unwrap().is_none());
+                assert!(dir.ids().unwrap().is_empty());
+                assert!(!dir.held_by_its_run(&live).unwrap());
+                *seen.borrow_mut() = names(&path);
+            })
+            .unwrap();
+        assert!(looked.get());
+        let during = seen.borrow();
+        assert_eq!(during.len(), 1, "{during:?}");
+        assert!(during[0].starts_with(TEMP_PREFIX), "{during:?}");
+        // Named, complete and held.
+        assert_eq!(
+            dir.read_state(&live).unwrap().unwrap(),
+            state("aaaaaaaaaaaaa", 123)
+        );
+        assert!(dir.held_by_its_run(&live).unwrap());
+        assert_eq!(names(&path), ["aaaaaaaaaaaaa.json"]);
+        drop(liveness);
+    }
+
+    #[test]
+    fn one_lock_for_every_change_and_leftovers_are_removed_under_it() {
+        let (home, account) = ssh_home();
+        let dir = StateDir::open(&account, true).unwrap().unwrap();
+        let held = dir.lock(Duration::ZERO, &|| false).unwrap();
+        let lock = home.path().join(".ssh").join(DIR).join(LOCK);
+        assert_eq!(
+            fs::metadata(&lock).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // A second taker (another open of the file) waits and then gives up.
+        let other = StateDir::open(&account, false).unwrap().unwrap();
+        let started = Instant::now();
+        let error = other
+            .lock(Duration::from_millis(200), &|| false)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        // Being interrupted ends the waiting after one more try.
+        let started = Instant::now();
+        assert!(other.lock(Duration::from_secs(30), &|| true).is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        let leftover = home.path().join(".ssh").join(DIR).join("tmp.x.json.1-2-3");
+        fs::write(&leftover, "{").unwrap();
+        dir.remove_leftovers(&held).unwrap();
+        assert!(!leftover.exists());
+        assert!(lock.exists(), "the lock file stays");
+        drop(held);
+        assert!(other.lock(Duration::ZERO, &|| false).is_ok());
     }
 
     #[test]
@@ -366,5 +574,10 @@ mod tests {
             error.to_string().contains("writable by other users"),
             "{error}"
         );
+
+        // The lock file gets the same checks.
+        std::os::unix::fs::symlink(&target, ssh.join(DIR).join(LOCK)).unwrap();
+        let error = dir.lock(Duration::ZERO, &|| false).unwrap_err();
+        assert!(error.to_string().contains("symbolic link"), "{error}");
     }
 }

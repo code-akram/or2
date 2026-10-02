@@ -44,8 +44,9 @@ or2-pair
 ```
 
 It runs its checks (sshd and its version, `authorized_keys`, your `sshd_config`, your login shell), then asks
-`Code shown on your phone:`. Type the code (capitals or not, with or without the hyphens). A typo is caught and
-asked again; an empty line cancels with nothing changed. It then prints this host's name, user, host key and
+`Code shown on your phone:`. Type the code (capitals or not, with or without the hyphens); the terminal does not
+show it as you type, like a password. A typo is caught and asked again; an empty line or Ctrl-C cancels with
+nothing changed. It then prints this host's name, user, host key and
 addresses (overlay networks such as ZeroTier or Tailscale first, then LAN, then public IPv4 and IPv6, then
 `<hostname>.local`), a **QR code** and the same pairing code as text, and waits for up to 5 minutes.
 
@@ -69,12 +70,17 @@ no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA… or2-Pixel-8-2026-10-01
 The home comes from the system's account database, not `$HOME`, so `sudo or2-pair` pairs root, never the user who
 typed `sudo`. `~/.ssh` (mode 700) and the file (mode 600) are created if missing, the previous file is saved as
 `authorized_keys.or2-backup-<date>-<time>` once before the first change, and the state of a live run is kept in
-`~/.ssh/or2-pair/` while it runs. The label is `or2-<phone name>-<date>` (UTC), reduced to letters, digits, `.`, `_`
-and `-`.
+`~/.ssh/or2-pair/` while it runs (with a `lock` file that stays). Every change of `authorized_keys` writes a
+complete new file next to it (same permissions) and renames it into place, so a crash or a full disk leaves
+either the old file or the new one, never half of each. The label is `or2-<phone name>-<date>` (UTC), reduced to
+letters, digits, `.`, `_` and `-`.
 
-The temporary key is removed whenever the run ends: when the phone has paired, after 5 minutes, on Ctrl-C,
-SIGTERM or SIGHUP (closing the terminal), or if `or2-pair` crashes. If a removal ever fails it prints the exact line
-to delete, and the next `or2-pair` run removes it. Even before that, the key cannot be used after the run is over.
+The temporary key is removed whenever the run ends: when the phone has paired, after 5 minutes (also when the
+machine was asleep through them), on Ctrl-C, SIGTERM or SIGHUP (closing the terminal), or if `or2-pair` crashes.
+`or2-pair` says "removed" only when it removed it. If a removal ever fails it prints the exact line to delete, and
+the next `or2-pair` run removes it. Even before that, the key cannot be used after the run is over, however the run
+ended: the pairing command only works while the `or2-pair` that added the key is still running, so even a
+`kill -9` closes it at once.
 
 ### Options
 
@@ -101,10 +107,12 @@ list). If you can't `ssh` to the host from the phone's network, pairing can't wo
 ### `or2-pair` says "fail" and stops
 
 Each `fail` line says why automatic pairing can't work here: sshd isn't answering (it prints how to start it; on a
-non-standard port pass `--ssh-port`), the SSH server isn't OpenSSH, `authorized_keys` can't be written, the home
-directory or `~/.ssh` is writable by others (sshd would ignore the file: `chmod go-w ~ && chmod 700 ~/.ssh &&
-chmod 600 ~/.ssh/authorized_keys`), your login shell is `nologin` or `false`, or `or2-pair` is installed in a path
-that needs quoting. Fix it and run again, or use `--manual`.
+non-standard port pass `--ssh-port`), the SSH server isn't OpenSSH, `authorized_keys` (or `~/.ssh`, where the new
+file is written) can't be written, the home directory or `~/.ssh` is writable by others (sshd would ignore the
+file: `chmod go-w ~ && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys`), your login shell is `nologin` or
+`false` or cannot start `or2-pair` (the check runs `<your shell> -c "<or2-pair> --version"`, as sshd will; a
+startup file that fails or hangs shows up here), `or2-pair` is installed in a path that needs quoting, or
+`sshd_config` certainly keeps the phone out (next sections). Fix it and run again, or use `--manual`.
 
 ### "The host didn't accept this phone's code"
 
@@ -114,18 +122,25 @@ section). Run `or2-pair` again and type the code the phone shows now.
 
 ### sshd configurations that ignore `authorized_keys`
 
-`or2-pair` reads `/etc/ssh/sshd_config` and the files it includes, when it can, and warns and suggests `--manual`
-for: `PubkeyAuthentication no`, an `AuthorizedKeysFile` that doesn't include `.ssh/authorized_keys`, an
-`AuthorizedKeysCommand`, a `ForceCommand` (it would run instead of the pairing command; the phone says "something
-other than or2-pair answered"), and `AuthenticationMethods` that need more than a key. `Match` blocks are
-ignored (they apply to other users). If you can't read `sshd_config` (not root), these are only discovered when the
-phone is refused.
+`or2-pair` reads `/etc/ssh/sshd_config` and the files it includes, when it can. It stops with `fail` and suggests
+`--manual` when sshd will certainly keep the phone out for your account: `PubkeyAuthentication no`, an
+`AuthorizedKeysFile` that doesn't include `.ssh/authorized_keys`, or a `ForceCommand` (it would run instead of the
+pairing command), set globally or in a `Match User <you>` (or `Match all`) block. It only warns, and suggests
+`--manual`, when it can't be sure: the setting is in a `Match` block on something it can't check (a group, the
+phone's address), an included file can't be read, or an `AuthorizedKeysCommand` is set (which might read the file
+itself); and for `AuthenticationMethods` that need more than a key. `Match User` blocks for other accounts are
+ignored. If you can't read `sshd_config` (not root), these are only discovered when the phone is refused (for a
+`ForceCommand` the phone says "something other than or2-pair answered").
 
 ### An old sshd
 
-Before OpenSSH 7.7 `authorized_keys` can't expire a key, so the temporary key is only removed when `or2-pair` ends
-(it says so); the pairing command still stops answering after 5 minutes. Before 7.2 the options are written the
-old, longer way. A server that is not OpenSSH (Dropbear, for instance) can't be paired automatically.
+From OpenSSH 9.1 the temporary key's expiry is written in UTC (`…Z`), which sshd reads the same whatever its time
+zone. OpenSSH 7.7 to 9.0 read it only in sshd's own local time: `or2-pair` writes its local time, except when `TZ` is
+set in its environment (its local time may then not be sshd's), when it writes no expiry and says so. Before
+OpenSSH 7.7 `authorized_keys` can't expire a key either. Without an expiry the temporary key is removed when
+`or2-pair` ends, and the pairing command still stops answering after 5 minutes or as soon as `or2-pair` is gone.
+Before 7.2 the options are written the old, longer way. A server that is not OpenSSH (Dropbear, for instance) can't
+be paired automatically.
 
 ### `--manual`: pair without the temporary key
 
@@ -165,11 +180,13 @@ firewalld, and on macOS you allow `mosh-server` in System Settings > Network > F
 
 - The QR carries only public things (addresses, port, the host's public key, a random pairing id), so a screenshot
   or a glance over your shoulder gives nobody anything. The one secret is the code on the phone, which you type on
-  the host: `or2-pair` never prints, stores or logs it. Typing it is your approval; there is no `y` to skip past.
+  the host: `or2-pair` never prints, stores or logs it, and the terminal does not echo it. Typing it is your
+  approval; there is no `y` to skip past.
 - The phone trusts the host key from the scan and accepts no other, so someone in the middle sees nothing it could
-  use. The temporary key can only start `or2-pair enroll`, which refuses unless the run is live and within its 5
-  minutes, and the first phone to use it wins.
-- The honest limit: the code is 55 bits. Someone who reads it off your phone and can reach the host's SSH port could
+  use. The temporary key can only start `or2-pair enroll`, which refuses unless the run is live (the `or2-pair`
+  that added it is still running) and within its 5 minutes, and the first phone to use it wins.
+- The honest limit: the code is about 54.5 bits (11 random characters of 31). Someone who reads it off your phone
+  and can reach the host's SSH port could
   enrol a key within the window; after it, the temporary key is gone and the code is worthless. Guessing it online
   goes through sshd's own authentication limits (`MaxAuthTries`, `MaxStartups`, fail2ban).
 - Details and the wire format are in [contracts: Easy pair](contracts.md#easy-pair-qr-onboarding).

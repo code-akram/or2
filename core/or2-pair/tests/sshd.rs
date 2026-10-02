@@ -118,6 +118,11 @@ impl Sshd {
     /// `extra` is appended to `sshd_config`; `noise` makes every shell that sshd starts for a
     /// command print a line first (the rc-file case).
     fn start(layout: Layout, extra: &str, noise: bool) -> Self {
+        Self::start_in(layout, extra, noise, None)
+    }
+
+    /// The same, with sshd's `TZ` set to `tz` (it reads `expiry-time` in that zone).
+    fn start_in(layout: Layout, extra: &str, noise: bool, tz: Option<&str>) -> Self {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path();
         let home = dir.join("home");
@@ -185,14 +190,17 @@ impl Sshd {
             let port = free_port();
             fs::write(dir.join("config"), format!("Port {port}\n{config}")).unwrap();
             let log = dir.join("log");
-            let mut child = Command::new("/usr/bin/sshd")
+            let mut command = Command::new("/usr/bin/sshd");
+            command
                 .args(["-D", "-e", "-f"])
                 .arg(dir.join("config"))
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(fs::File::create(&log).unwrap())
-                .spawn()
-                .unwrap();
+                .stderr(fs::File::create(&log).unwrap());
+            if let Some(tz) = tz {
+                command.env("TZ", tz);
+            }
+            let mut child = command.spawn().unwrap();
             match wait_until_listening(&mut child, &log) {
                 Ok(()) => {
                     return Self {
@@ -246,7 +254,13 @@ impl Sshd {
             Layout::Home => self.home().join(".ssh/or2-pair"),
             Layout::Explicit => self.dir().join("or2-pair"),
         };
-        fs::read_dir(state).map(|d| d.count()).unwrap_or(0)
+        // Not the lock file, which stays.
+        fs::read_dir(state)
+            .map(|d| {
+                d.filter(|e| e.as_ref().unwrap().file_name() != "lock")
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     fn log(&self) -> String {
@@ -311,10 +325,12 @@ struct Host {
 
 impl Host {
     fn start(sshd: &Sshd, code: &PairCode, extra: &[&str]) -> Self {
-        let mut child = sshd
-            .host_command(extra)
-            .spawn()
-            .expect("run or2-pair-testhost");
+        Self::start_command(sshd.host_command(extra), code)
+    }
+
+    /// Starts this command (a [`Sshd::host_command`]), types `code` and waits until it waits.
+    fn start_command(mut command: Command, code: &PairCode) -> Self {
+        let mut child = command.spawn().expect("run or2-pair-testhost");
         let mut stdin = child.stdin.take().unwrap();
         writeln!(stdin, "{}", code.display()).unwrap();
         let stdout = child.stdout.take().unwrap();
@@ -969,20 +985,29 @@ fn a_forcecommand_in_sshd_config_is_not_or2_pair() {
         return;
     }
     let sshd = Sshd::start(Layout::Explicit, "ForceCommand echo not-or2-pair\n", false);
-    // The checks read the same configuration and warn about it.
+    // When the checks can read that configuration they refuse before the prompt, with nothing
+    // written (review of the v2 integration: this was a warning).
     fs::write(
         sshd.etc().join("sshd_config"),
         "ForceCommand echo not-or2-pair\n",
     )
     .unwrap();
     let code = new_code();
-    let host = Host::start(&sshd, &code, &[]);
+    let mut child = sshd.host_command(&[]).spawn().unwrap();
+    writeln!(child.stdin.take().unwrap(), "{}", code.display()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let shown = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(1), "{shown}");
     assert!(
-        host.seen.contains("warn  sshd_config sets a ForceCommand")
-            && host.seen.contains("--manual"),
-        "{}",
-        host.seen
+        shown.contains("fail  sshd_config sets a ForceCommand") && shown.contains("--manual"),
+        "{shown}"
     );
+    assert!(!shown.contains("Code shown on your phone"), "{shown}");
+    assert!(sshd.keys_text().is_empty() && sshd.state_files() == 0);
+
+    // Where they cannot read it (a configuration readable only by root), the phone finds out.
+    fs::remove_file(sshd.etc().join("sshd_config")).unwrap();
+    let host = Host::start(&sshd, &code, &[]);
     let offer = host.offer();
     let (_, phone_public) = phone_key();
     assert_eq!(
@@ -1018,6 +1043,74 @@ fn sshd_honours_the_expiry_time_option_this_tool_writes() {
     };
     let rt = runtime();
     for (expiry, accepted) in [("202001010000", false), ("209901010000", true)] {
+        fs::write(
+            sshd.keys(),
+            format!(
+                "restrict,command=\"/bin/echo hi\",expiry-time=\"{expiry}\" {} x\n",
+                key.openssh()
+            ),
+        )
+        .unwrap();
+        let result = rt.block_on(Phone::open(sshd.address(), &offer, &code));
+        match (accepted, result) {
+            (true, Ok(phone)) => rt.block_on(phone.close()),
+            (false, Err(PhoneError::BootstrapRefused)) => {}
+            (_, other) => panic!("expiry {expiry}: {:?}", other.err()),
+        }
+    }
+}
+
+#[test]
+fn a_host_whose_time_zone_differs_from_sshds_still_pairs() {
+    // Review of the v2 integration: with sshd under TZ=UTC and the host under TZ=Etc/GMT+5, the
+    // expiry written in the host's local time was read by sshd as UTC, five hours in the past,
+    // and the phone was refused. An sshd from 9.1 on is given UTC with `Z`. (`<-05>5` is
+    // Etc/GMT+5 written as a POSIX rule, which needs no time zone files.)
+    if !sshd_ready() {
+        return;
+    }
+    let sshd = Sshd::start_in(Layout::Explicit, "", false, Some("UTC"));
+    let code = new_code();
+    let mut command = sshd.host_command(&[]);
+    command.env("TZ", "<-05>5");
+    let host = Host::start_command(command, &code);
+    let offer = host.offer();
+    let keys = sshd.keys_text();
+    assert!(keys.contains("Z\" ssh-ed25519 "), "{keys}");
+    let (_, phone_public) = phone_key();
+    let paired = runtime().block_on(pair(sshd.address(), &offer, &code, &phone_public, "p"));
+    assert!(paired.is_ok(), "{paired:?}\n{}", sshd.log());
+    let (exit, seen) = host.finish();
+    assert_eq!(exit, Some(0), "{seen}");
+}
+
+#[test]
+fn sshd_reads_the_utc_expiry_this_tool_writes() {
+    // The `Z` form against the real sshd: an expiry that has passed in UTC is refused, one that
+    // has not is accepted, whatever sshd's own time zone (here five hours ahead of UTC).
+    if !sshd_ready() {
+        return;
+    }
+    let sshd = Sshd::start_in(Layout::Explicit, "", false, Some("<+05>-5"));
+    let code = new_code();
+    let id = PairingId::parse("abcdefghijklm").unwrap();
+    let key = bootstrap::public_key(&code, &id);
+    let offer = Offer {
+        user: current_user(),
+        port: sshd.port,
+        address: "127.0.0.1".into(),
+        host_key: sshd.host_key.clone(),
+        id: id.clone(),
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let rt = runtime();
+    // One hour ago in UTC (still in the future in sshd's zone, were it read as local time),
+    // and 20 minutes ahead.
+    for (deadline, accepted) in [(now - 3_600 - 600, false), (now + 1_200 - 600, true)] {
+        let expiry = bootstrap::expiry(bootstrap::Dialect::ExpiryUtc, deadline);
         fs::write(
             sshd.keys(),
             format!(

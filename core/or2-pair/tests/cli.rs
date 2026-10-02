@@ -194,6 +194,19 @@ mod live {
             self.home.path().join(".ssh/authorized_keys")
         }
 
+        /// The files of runs in `~/.ssh/or2-pair` (not its lock file), sorted.
+        fn state_files(&self) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(self.home.path().join(".ssh/or2-pair"))
+                .map(|dir| {
+                    dir.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                        .filter(|name| name != "lock")
+                        .collect()
+                })
+                .unwrap_or_default();
+            names.sort();
+            names
+        }
+
         fn write_keys(&self, text: &str) {
             fs::create_dir_all(self.home.path().join(".ssh")).unwrap();
             fs::set_permissions(
@@ -241,15 +254,22 @@ mod live {
     struct Running {
         child: Child,
         lines: mpsc::Receiver<String>,
-        _stdin: ChildStdin,
+        _stdin: Option<ChildStdin>,
         seen: String,
     }
 
     impl Running {
-        fn start(mut command: Command) -> Self {
-            let mut child = command.spawn().expect("run or2-pair-testhost");
-            let mut stdin = child.stdin.take().unwrap();
+        fn start(command: Command) -> Self {
+            let mut running = Self::spawn(command);
+            let mut stdin = running.child.stdin.take().unwrap();
             writeln!(stdin, "{CODE}").unwrap();
+            running._stdin = Some(stdin);
+            running
+        }
+
+        /// Starts it without typing anything.
+        fn spawn(mut command: Command) -> Self {
+            let mut child = command.spawn().expect("run or2-pair");
             let stdout = child.stdout.take().unwrap();
             let (sender, lines) = mpsc::channel();
             std::thread::spawn(move || {
@@ -262,7 +282,7 @@ mod live {
             Self {
                 child,
                 lines,
-                _stdin: stdin,
+                _stdin: None,
                 seen: String::new(),
             }
         }
@@ -410,10 +430,7 @@ mod live {
         running.until("Waiting for the phone");
         let keys = fs::read_to_string(host.keys()).unwrap();
         assert!(keys.contains("or2-pair-bootstrap-"), "{what}: {keys}");
-        let state = fs::read_dir(host.home.path().join(".ssh/or2-pair"))
-            .unwrap()
-            .count();
-        assert_eq!(state, 1, "{what}");
+        assert_eq!(host.state_files().len(), 1, "{what}");
         kill(&running.child, signal);
         let (code, seen) = running.finish();
         assert_eq!(code, Some(1), "{what}:\n{seen}");
@@ -422,12 +439,208 @@ mod live {
             "{what}:\n{seen}"
         );
         assert_eq!(fs::read_to_string(host.keys()).unwrap(), original, "{what}");
+        assert!(host.state_files().is_empty(), "{what}");
+    }
+
+    /// The pairing id in the code a run printed.
+    fn printed_id(seen: &str) -> String {
+        seen.lines()
+            .find(|line| line.starts_with("or2-pair:2?"))
+            .and_then(|line| line.split("&id=").nth(1))
+            .unwrap_or_else(|| panic!("no pairing code in:\n{seen}"))
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect()
+    }
+
+    /// `or2-pair enroll <id>` as sshd would start it, with a phone's request.
+    fn enroll(host: &Host, id: &str) -> (Option<i32>, String) {
+        let mut child = host
+            .command(env!("CARGO_BIN_EXE_or2-pair"))
+            .args(["enroll", id])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(
+            child.stdin.take().unwrap(),
+            "{{\"v\":2,\"key\":\"{OTHER_KEY}\",\"device\":\"p\"}}"
+        )
+        .unwrap();
+        let out = child.wait_with_output().unwrap();
+        (out.status.code(), text(&out.stdout))
+    }
+
+    #[test]
+    fn sigkill_leaves_nothing_usable_and_the_next_run_sweeps_it() {
+        // Review of the v2 integration: a run killed with SIGKILL (no handler, no destructor)
+        // left its state file and the bootstrap entry, and a holder of K could still enrol until
+        // the deadline. The run's lock on its state file ends with the process.
+        if !testhost_path_is_usable() {
+            return;
+        }
+        let host = Host::new();
+        let original = format!("# mine\n{OTHER_KEY} me@laptop\n");
+        host.write_keys(&original);
+        let mut running = Running::start(host.testhost(&[]));
+        running.until("Waiting for the phone");
+        let id = printed_id(&running.seen);
+        kill(&running.child, libc::SIGKILL);
+        let (code, _) = running.finish();
+        assert_eq!(code, None, "killed by the signal");
+
+        // What it left: the entry and the state file, before their deadline...
+        let left = fs::read_to_string(host.keys()).unwrap();
+        assert!(left.contains(&format!("or2-pair-bootstrap-{id}")), "{left}");
+        assert_eq!(host.state_files(), [format!("{id}.json")]);
+        // ...which the forced command refuses: nobody holds the state any more.
+        let (code, said) = enroll(&host, &id);
+        assert_eq!(code, Some(1), "{said}");
         assert_eq!(
-            fs::read_dir(host.home.path().join(".ssh/or2-pair"))
-                .unwrap()
-                .count(),
-            0,
-            "{what}"
+            said.lines().nth(1),
+            Some("{\"v\":2,\"ok\":false,\"reason\":\"expired\"}"),
+            "{said}"
+        );
+        assert_eq!(fs::read_to_string(host.keys()).unwrap(), left);
+
+        // The next run sweeps both, although the old deadline has not passed.
+        let mut command = host.testhost(&[]);
+        command.env("OR2_PAIR_TEST_WINDOW_SECS", "1");
+        let (code, seen) = Running::start(command).finish();
+        assert_eq!(code, Some(1), "{seen}");
+        assert!(seen.contains("Timed out"), "{seen}");
+        assert_eq!(fs::read_to_string(host.keys()).unwrap(), original);
+        assert!(host.state_files().is_empty(), "{:?}", host.state_files());
+    }
+
+    /// A pseudo-terminal: the side the person types into, and the terminal or2-pair reads.
+    #[cfg(target_os = "linux")]
+    fn pty() -> (fs::File, fs::File) {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        // SAFETY: plain calls on descriptors this function owns; `ptsname_r` writes at most
+        // `name.len()` bytes.
+        unsafe {
+            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+            assert!(master >= 0);
+            let master = OwnedFd::from_raw_fd(master);
+            assert_eq!(libc::grantpt(master.as_raw_fd()), 0);
+            assert_eq!(libc::unlockpt(master.as_raw_fd()), 0);
+            let mut name = [0 as libc::c_char; 128];
+            assert_eq!(
+                libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()),
+                0
+            );
+            let slave = libc::open(
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+            );
+            assert!(slave >= 0);
+            (fs::File::from(master), fs::File::from_raw_fd(slave))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn echoes(terminal: &fs::File) -> bool {
+        use std::os::fd::AsRawFd;
+        // SAFETY: `termios` is plain old data that `tcgetattr` fills.
+        let mut settings: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::tcgetattr(terminal.as_raw_fd(), &mut settings) },
+            0
+        );
+        settings.c_lflag & libc::ECHO != 0
+    }
+
+    /// Waits (polling the terminal's settings, up to 20 s) until its echo is `on`.
+    #[cfg(target_os = "linux")]
+    fn until_echo(terminal: &fs::File, on: bool) {
+        let limit = Instant::now() + Duration::from_secs(20);
+        while echoes(terminal) != on {
+            assert!(Instant::now() < limit, "the echo never became {on}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The real `or2-pair` with a terminal as its standard input.
+    #[cfg(target_os = "linux")]
+    fn on_a_terminal(host: &Host, terminal: &fs::File) -> Running {
+        let mut command = host.command(env!("CARGO_BIN_EXE_or2-pair"));
+        command
+            .args([
+                "--ssh-port",
+                &host.port.to_string(),
+                "--address",
+                "127.0.0.1",
+                "--name",
+                "Test",
+            ])
+            .stdin(terminal.try_clone().unwrap());
+        Running::spawn(command)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_code_is_typed_without_echo_and_the_echo_comes_back() {
+        // Review of the v2 integration: the terminal echoed K, into scrollback and recordings.
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        if !testhost_path_is_usable() {
+            return;
+        }
+        let host = Host::new();
+        let (mut master, terminal) = pty();
+        assert!(echoes(&terminal));
+        let mut running = on_a_terminal(&host, &terminal);
+        // While the code is asked for, the terminal does not echo.
+        until_echo(&terminal, false);
+        master.write_all(format!("{CODE}\n").as_bytes()).unwrap();
+        running.until("Waiting for the phone");
+        // After it, echo is back, and nothing of the code came back to the person's side.
+        assert!(echoes(&terminal));
+        // SAFETY: `master` is open; non-blocking, so an empty buffer is not a wait.
+        unsafe {
+            let flags = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
+            libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+        let mut echoed = Vec::new();
+        let mut buf = [0u8; 256];
+        while let Ok(count) = master.read(&mut buf) {
+            if count == 0 {
+                break;
+            }
+            echoed.extend_from_slice(&buf[..count]);
+        }
+        let echoed = String::from_utf8_lossy(&echoed);
+        assert!(!echoed.contains("7KQ4"), "{echoed:?}");
+        assert!(!running.seen.contains(CODE), "{}", running.seen);
+        kill(&running.child, libc::SIGINT);
+        let (code, seen) = running.finish();
+        assert_eq!(code, Some(1), "{seen}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ctrl_c_at_the_code_prompt_puts_the_echo_back() {
+        use std::os::unix::process::ExitStatusExt;
+        if !testhost_path_is_usable() {
+            return;
+        }
+        let host = Host::new();
+        let (mut master, terminal) = pty();
+        let running = on_a_terminal(&host, &terminal);
+        until_echo(&terminal, false);
+        // Half a code typed, then Ctrl-C (the signal, as the terminal would send it).
+        master.write_all(b"7KQ4-M2").unwrap();
+        kill(&running.child, libc::SIGINT);
+        let mut child = running.child;
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGINT), "{status:?}");
+        assert!(
+            echoes(&terminal),
+            "the echo was put back before the process ended"
+        );
+        assert!(
+            !host.home.path().join(".ssh").exists(),
+            "nothing was changed"
         );
     }
 

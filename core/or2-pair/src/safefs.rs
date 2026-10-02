@@ -79,19 +79,12 @@ pub fn fstat(fd: RawFd) -> io::Result<libc::stat> {
 
 /// What `name` is inside `dir`, without following it, when it is a symbolic link.
 fn is_symlink_at(dir: RawFd, name: &str) -> bool {
-    let name = c_name(name);
-    // SAFETY: as above.
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    let done = unsafe { libc::fstatat(dir, name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) };
-    done == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFLNK
+    stat_at(dir, name).is_ok_and(|stat| kind(&stat) == libc::S_IFLNK)
 }
 
 /// Whether `name` exists in `dir` (as anything, a link included), without following it.
 pub fn exists_at(dir: RawFd, name: &str) -> bool {
-    let name = c_name(name);
-    // SAFETY: as above.
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    unsafe { libc::fstatat(dir, name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) == 0 }
+    stat_at(dir, name).is_ok()
 }
 
 pub fn mkdirat(dir: RawFd, name: &str, mode: libc::mode_t) -> io::Result<()> {
@@ -112,22 +105,168 @@ pub fn fchmod(fd: RawFd, mode: libc::mode_t) -> io::Result<()> {
     retry(-1, || unsafe { libc::fchmod(fd, mode) }).map(|_| ())
 }
 
-/// An exclusive, non-blocking `flock`: another program holding it is an error to retry later.
-pub fn lock(fd: RawFd) -> io::Result<()> {
-    // SAFETY: `fd` is open.
-    let done = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-    if done == 0 {
+/// A non-blocking `flock` (exclusive or shared): `Ok(false)` when another open file holds a
+/// conflicting lock. `flock` locks belong to the open file description, so two opens of one file
+/// conflict even inside one process.
+pub fn try_lock(fd: RawFd, exclusive: bool) -> io::Result<bool> {
+    let kind = if exclusive {
+        libc::LOCK_EX
+    } else {
+        libc::LOCK_SH
+    };
+    loop {
+        // SAFETY: `fd` is open.
+        if unsafe { libc::flock(fd, kind | libc::LOCK_NB) } == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        match error.kind() {
+            io::ErrorKind::Interrupted => continue,
+            io::ErrorKind::WouldBlock => return Ok(false),
+            _ => return Err(error),
+        }
+    }
+}
+
+/// `fsync` of a directory: makes a rename or a new name in it durable.
+pub fn fsync_dir(dir: RawFd) -> io::Result<()> {
+    // SAFETY: `dir` is open.
+    retry(-1, || unsafe { libc::fsync(dir) }).map(|_| ())
+}
+
+/// Renames `from` to `to` inside `dir`, replacing `to` (never following a link: a link at `to`
+/// is replaced itself).
+pub fn renameat(dir: RawFd, from: &str, to: &str) -> io::Result<()> {
+    let (from, to) = (c_name(from), c_name(to));
+    // SAFETY: both names are valid NUL-terminated strings and `dir` an open directory.
+    retry(-1, || unsafe {
+        libc::renameat(dir, from.as_ptr(), dir, to.as_ptr())
+    })
+    .map(|_| ())
+}
+
+/// Gives the file `from` of `dir` the second name `to`; `AlreadyExists` when `to` exists (so a
+/// name is published once, complete, and never replaced).
+pub fn linkat(dir: RawFd, from: &str, to: &str) -> io::Result<()> {
+    let (from, to) = (c_name(from), c_name(to));
+    // SAFETY: as above.
+    retry(-1, || unsafe {
+        libc::linkat(dir, from.as_ptr(), dir, to.as_ptr(), 0)
+    })
+    .map(|_| ())
+}
+
+/// What `name` in `dir` is, without following a link.
+pub fn stat_at(dir: RawFd, name: &str) -> io::Result<libc::stat> {
+    let name = c_name(name);
+    // SAFETY: `stat` is plain old data that `fstatat` fills; the name is valid.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    retry(-1, || unsafe {
+        libc::fstatat(dir, name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW)
+    })?;
+    Ok(stat)
+}
+
+/// The names in `dir` (not `.` and `..`), read through a new open of it so the kept handle's
+/// position is never disturbed.
+pub fn list(dir: RawFd) -> io::Result<Vec<String>> {
+    let listing = openat(dir, ".", libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+    // SAFETY: `fdopendir` takes ownership of the descriptor on success.
+    let stream = unsafe { libc::fdopendir(listing.as_raw_fd()) };
+    if stream.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    std::mem::forget(listing);
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: `stream` is an open directory stream until `closedir` below.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: `d_name` is a NUL-terminated name inside the entry.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        let name = name.to_string_lossy().into_owned();
+        if name != "." && name != ".." {
+            names.push(name);
+        }
+    }
+    // SAFETY: `stream` came from `fdopendir` and is closed once.
+    unsafe { libc::closedir(stream) };
+    Ok(names)
+}
+
+/// A name for a temporary file that no other writer picks: this process, a counter and the clock.
+pub fn temp_name(prefix: &str) -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.subsec_nanos());
+    format!(
+        "{prefix}{}-{}-{nanos}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// The value of the extended attribute `name` of `fd`; `None` when it has none or the file
+/// system has no extended attributes.
+#[cfg(target_os = "linux")]
+fn get_xattr(fd: RawFd, name: &CString) -> io::Result<Option<Vec<u8>>> {
+    let mut value = vec![0u8; 256];
+    loop {
+        // SAFETY: `value` is valid for `value.len()` bytes; `name` is NUL-terminated.
+        let size =
+            unsafe { libc::fgetxattr(fd, name.as_ptr(), value.as_mut_ptr().cast(), value.len()) };
+        if size >= 0 {
+            value.truncate(size as usize);
+            return Ok(Some(value));
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::ERANGE) if value.len() < 64 * 1024 => value.resize(value.len() * 4, 0),
+            Some(libc::ENODATA) | Some(libc::ENOTSUP) => return Ok(None),
+            Some(libc::EINTR) => {}
+            _ => return Err(error),
+        }
+    }
+}
+
+/// Copies the extended attribute `name` of `from` to `to` when `from` has it and `to` has
+/// another value (Linux: the SELinux label `security.selinux`, so sshd may still read a replaced
+/// `authorized_keys`). A file system without extended attributes, or a file without this one,
+/// copies nothing. Setting it failing is an error (the caller decides whether that matters: see
+/// [`selinux_active`]).
+#[cfg(target_os = "linux")]
+pub fn copy_xattr(from: RawFd, to: RawFd, name: &str) -> io::Result<()> {
+    let name = c_name(name);
+    let Some(value) = get_xattr(from, &name)? else {
+        return Ok(());
+    };
+    if get_xattr(to, &name)?.as_deref() == Some(&value[..]) {
         return Ok(());
     }
-    let error = io::Error::last_os_error();
-    if error.kind() == io::ErrorKind::WouldBlock {
-        Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "another program has authorized_keys locked; try again in a moment",
-        ))
+    // SAFETY: `value` is valid for its length; `name` is NUL-terminated.
+    let done = unsafe { libc::fsetxattr(to, name.as_ptr(), value.as_ptr().cast(), value.len(), 0) };
+    if done == 0 {
+        Ok(())
     } else {
-        Err(error)
+        Err(io::Error::last_os_error())
     }
+}
+
+/// Whether SELinux is active on this machine (its file system is mounted). Without it a
+/// `security.selinux` attribute means nothing to anyone, and only a privileged process may set
+/// one, so a stale label on an old file that cannot be copied is no reason to refuse.
+#[cfg(target_os = "linux")]
+pub fn selinux_active() -> bool {
+    Path::new("/sys/fs/selinux/enforce").exists()
+}
+
+/// Whether `stat` is the file `other` (same device and inode).
+pub fn same_file(stat: &libc::stat, other: &libc::stat) -> bool {
+    stat.st_dev == other.st_dev && stat.st_ino == other.st_ino
 }
 
 pub fn writable_by_us(dir: RawFd) -> bool {

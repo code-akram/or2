@@ -2,7 +2,8 @@
 //! its removal and the sweep of old ones, and the care taken doing it.
 //!
 //! - everything goes through the checked handles of [`crate::safefs`] (no links followed, owner
-//!   and StrictModes checked, one regular file with one name, an exclusive `flock`),
+//!   and StrictModes checked, one regular file with one name), and every change is made while
+//!   holding the one `or2-pair` lock ([`crate::state::Held`], `~/.ssh/or2-pair/lock`),
 //! - **only on Unix.** There is no implementation for any other target: the changes always fail
 //!   there and [`writable`] always says no, so `or2-pair` never writes a key file where it cannot
 //!   check owners, links and permissions with handles (see `run::Env::install_keys`),
@@ -10,8 +11,11 @@
 //! - the file is backed up before the first change of a run (`authorized_keys.or2-backup-<stamp>`,
 //!   mode 0600), once per run, only when it exists and is not empty,
 //! - every change is **one locked operation** that reads the file again, computes the whole new
-//!   contents and rewrites the file in place (`ftruncate` and write on the same descriptor, so the
-//!   inode, mode, owner and SELinux label stay): append the bootstrap line; remove it; replace
+//!   contents and installs them crash-safely as a new file: written to a temporary name in the
+//!   same directory (`O_CREAT|O_EXCL`, 0600), synced, given the old file's mode (and on Linux its
+//!   `security.selinux` label), the old file checked again (still that name, one hard link, owner,
+//!   StrictModes), renamed over it, the directory synced. A crash or a full disk leaves the old
+//!   file or the new one, never a mix. The changes: append the bootstrap line; remove it; replace
 //!   it with the phone's key; sweep old bootstrap entries,
 //! - entries are matched by their parsed key (key type and key data), whatever options precede
 //!   them and whatever comment follows, exactly as sshd reads the file; every other line is kept
@@ -230,7 +234,9 @@ pub enum Writable {
 }
 
 #[cfg(unix)]
-pub use unix::{append, modify, remove, replace, stale, sweep, writable};
+pub use unix::{
+    Edit, append, has_fingerprint, modify, remove, replace, replaced, stale, sweep, writable,
+};
 
 /// Why nothing is written on a target without the Unix implementation.
 #[cfg(not(unix))]
@@ -245,12 +251,13 @@ pub fn writable(_: &Account) -> Writable {
 #[cfg(unix)]
 mod unix {
     use std::fs::File;
-    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::io::{Read, Write};
     use std::os::fd::{AsRawFd, OwnedFd};
 
     use super::*;
     use crate::bootstrap::{COMMENT_PREFIX, PairingId};
     use crate::safefs::*;
+    use crate::state::Held;
 
     fn backup_name(now: DateTime, attempt: u32) -> String {
         let suffix = if attempt == 0 {
@@ -284,84 +291,206 @@ mod unix {
         Err(io::Error::other("could not find a free backup name"))
     }
 
-    /// Rewrites the file in place: the new contents over the start, then the length cut. A
-    /// failure puts the old contents back (the backup holds them too).
-    fn rewrite(file: &mut File, old: &[u8], new: &[u8]) -> io::Result<()> {
-        let write = |file: &mut File, bytes: &[u8]| -> io::Result<()> {
-            file.seek(SeekFrom::Start(0))?;
-            file.write_all(bytes)?;
-            file.set_len(bytes.len() as u64)?;
-            file.sync_all()
-        };
-        write(file, new).inspect_err(|_| {
-            let _ = write(file, old);
-        })
+    /// The prefix of the temporary file a replacement is written to, next to the key file.
+    fn temp_prefix(name: &str) -> String {
+        format!(".{name}.or2-tmp-")
     }
 
-    /// The one locked operation: opens the checked handles, locks, reads the file, lets `change`
-    /// compute the new contents (`None`: no change) and rewrites the file in place. `create`
-    /// makes a missing `~/.ssh` and file; without it a missing file is `NotFound`. `backup` is
-    /// the run's backup, made before the first change. `after_open` is called once the file is
-    /// read (tests swap paths there).
+    /// `authorized_keys` opened through the checked handles and read, while the lock is held:
+    /// the first half of a change. [`Edit::commit`] installs new contents as a new file.
+    pub struct Edit<'h> {
+        _held: &'h Held,
+        dir: OwnedFd,
+        dir_path: PathBuf,
+        name: String,
+        path: PathBuf,
+        uid: u32,
+        /// The file as opened and checked; `None` when it does not exist yet.
+        file: Option<(OwnedFd, libc::stat)>,
+        contents: Vec<u8>,
+    }
+
+    impl<'h> Edit<'h> {
+        /// Opens and reads the key file. `create` makes a missing `~/.ssh` (and treats a missing
+        /// file as empty, to be created by the commit); without it a missing file is `NotFound`.
+        pub fn open(account: &Account, held: &'h Held, create: bool) -> io::Result<Self> {
+            let dir_path = account.ssh_dir();
+            let path = account.keys_path();
+            let name = account.keys_name();
+            let dir = open_ssh_dir(account, create)?
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+            // Opened for writing although it is replaced, not written: a file the account may
+            // not write is not changed behind its back either.
+            let file = match open_file(dir.as_raw_fd(), &name, &path, libc::O_RDWR, 0) {
+                Ok(fd) => {
+                    let stat = fstat(fd.as_raw_fd())?;
+                    check_file(&stat, account.uid, &path)?;
+                    Some((fd, stat))
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound && create => None,
+                Err(error) => return Err(error),
+            };
+            let mut contents = Vec::new();
+            if let Some((fd, _)) = &file {
+                File::from(fd.try_clone()?)
+                    .take(MAX_FILE_BYTES + 1)
+                    .read_to_end(&mut contents)?;
+                if contents.len() as u64 > MAX_FILE_BYTES {
+                    return Err(refuse(format!(
+                        "{} is larger than {} MiB; not touching it",
+                        path.display(),
+                        MAX_FILE_BYTES >> 20
+                    )));
+                }
+            }
+            Ok(Self {
+                _held: held,
+                dir,
+                dir_path,
+                name,
+                path,
+                uid: account.uid,
+                file,
+                contents,
+            })
+        }
+
+        /// The file's contents as read.
+        pub fn contents(&self) -> &[u8] {
+            &self.contents
+        }
+
+        /// Whether the file did not exist (the commit creates it, mode 0600).
+        pub fn created(&self) -> bool {
+            self.file.is_none()
+        }
+
+        /// The checks of [`Edit::open`] again, just before the new file takes the name: the name
+        /// must still be the file that was read (not swapped, not a link, not removed), with one
+        /// name (a hard link added since is refused), owner and StrictModes as before.
+        fn still_the_same(&self) -> io::Result<()> {
+            let Some((fd, opened)) = &self.file else {
+                // A file that appeared since is refused by the exclusive link below.
+                return Ok(());
+            };
+            let now = fstat(fd.as_raw_fd())?;
+            check_file(&now, self.uid, &self.path)?;
+            match stat_at(self.dir.as_raw_fd(), &self.name) {
+                Ok(named) if same_file(&named, opened) => Ok(()),
+                Ok(_) => Err(refuse(format!(
+                    "{} was replaced by another file while or2-pair was changing it; nothing was changed, run again",
+                    self.path.display()
+                ))),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Err(refuse(format!(
+                    "{} was removed while or2-pair was changing it; nothing was changed, run again",
+                    self.path.display()
+                ))),
+                Err(error) => Err(error),
+            }
+        }
+
+        /// Installs `new` crash-safely: a new file in the same directory (created exclusively,
+        /// mode 0600), fully written and synced, given the old file's mode (and on Linux its
+        /// SELinux label), the old file checked again, then renamed over it and the directory
+        /// synced. A crash leaves either the old file or the new one, never a mix. `backup`: the
+        /// run's backup, made before its first change.
+        pub fn commit(self, new: &[u8], backup: Option<&Backup>) -> io::Result<()> {
+            if let Some(backup) = backup
+                && !backup.used.replace(true)
+                && !self.contents.is_empty()
+            {
+                let path = write_backup(&self.dir, &self.dir_path, &self.contents, backup.now)?;
+                *backup.path.borrow_mut() = Some(path);
+            }
+            let dir = self.dir.as_raw_fd();
+            let temp = temp_name(&temp_prefix(&self.name));
+            let temp_path = self.dir_path.join(&temp);
+            let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL;
+            let fd = open_file(dir, &temp, &temp_path, flags, 0o600)?;
+            let installed = (|| {
+                match &self.file {
+                    Some((old, stat)) => {
+                        // `st_mode` is 16 bits wide on macOS and 32 on Linux.
+                        #[allow(clippy::useless_conversion)]
+                        let mode = u32::from(stat.st_mode) & 0o7777;
+                        fchmod(fd.as_raw_fd(), mode as libc::mode_t)?;
+                        if fstat(fd.as_raw_fd())?.st_gid != stat.st_gid {
+                            // Best effort: only a group the account belongs to can be kept.
+                            // SAFETY: `fd` is open; -1 leaves the owner as it is.
+                            unsafe {
+                                libc::fchown(fd.as_raw_fd(), u32::MAX as libc::uid_t, stat.st_gid)
+                            };
+                        }
+                        #[cfg(target_os = "linux")]
+                        if let Err(error) =
+                            copy_xattr(old.as_raw_fd(), fd.as_raw_fd(), "security.selinux")
+                            && selinux_active()
+                        {
+                            return Err(error);
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        let _ = old;
+                    }
+                    None => fchmod(fd.as_raw_fd(), 0o600)?,
+                }
+                let mut file = File::from(fd.try_clone()?);
+                file.write_all(new)?;
+                file.sync_all()?;
+                self.still_the_same()?;
+                if self.file.is_some() {
+                    renameat(dir, &temp, &self.name)
+                } else {
+                    // Created once: a name that appeared meanwhile is not replaced.
+                    linkat(dir, &temp, &self.name).map_err(|error| {
+                        if error.kind() == io::ErrorKind::AlreadyExists {
+                            refuse(format!(
+                                "{} appeared while or2-pair was creating it; nothing was changed, run again",
+                                self.path.display()
+                            ))
+                        } else {
+                            error
+                        }
+                    })?;
+                    unlinkat(dir, &temp)
+                }
+            })();
+            if installed.is_err() {
+                let _ = unlinkat(dir, &temp);
+            }
+            installed?;
+            fsync_dir(dir)
+        }
+    }
+
+    /// One change: [`Edit::open`], `change` computes the new contents from the old (`None`: no
+    /// change), [`Edit::commit`]. `after_open` is called once the file is read (tests swap paths
+    /// or add links there).
     pub fn modify<T>(
         account: &Account,
+        held: &Held,
         create: bool,
         backup: Option<&Backup>,
         after_open: &dyn Fn(),
         change: impl FnOnce(&[u8]) -> io::Result<(Option<Vec<u8>>, T)>,
     ) -> io::Result<Modified<T>> {
-        let dir_path = account.ssh_dir();
-        let file_path = account.keys_path();
-        let name = account.keys_name();
-        let dir = open_ssh_dir(account, create)?
-            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-
-        // The file: an existing one is opened as it is; a missing one is created exclusively,
-        // so a path planted in between is refused rather than written through.
-        let flags = libc::O_RDWR;
-        let (file, created) = match open_file(dir.as_raw_fd(), &name, &file_path, flags, 0) {
-            Ok(fd) => (fd, false),
-            Err(error) if error.kind() == io::ErrorKind::NotFound && create => {
-                let make = flags | libc::O_CREAT | libc::O_EXCL;
-                let fd = open_file(dir.as_raw_fd(), &name, &file_path, make, 0o600)?;
-                fchmod(fd.as_raw_fd(), 0o600)?;
-                (fd, true)
-            }
-            Err(error) => return Err(error),
-        };
-        check_file(&fstat(file.as_raw_fd())?, account.uid, &file_path)?;
-        lock(file.as_raw_fd())?;
-        let mut file = File::from(file);
-
-        let mut existing = Vec::new();
-        (&file)
-            .take(MAX_FILE_BYTES + 1)
-            .read_to_end(&mut existing)?;
-        if existing.len() as u64 > MAX_FILE_BYTES {
-            return Err(refuse(format!(
-                "{} is larger than {} MiB; not touching it",
-                file_path.display(),
-                MAX_FILE_BYTES >> 20
-            )));
-        }
+        let edit = Edit::open(account, held, create)?;
+        let created = edit.created();
         after_open();
-        let (new, value) = change(&existing)?;
+        let (new, value) = change(edit.contents())?;
         if let Some(new) = new {
-            if let Some(backup) = backup
-                && !backup.used.replace(true)
-                && !existing.is_empty()
-            {
-                let path = write_backup(&dir, &dir_path, &existing, backup.now)?;
-                *backup.path.borrow_mut() = Some(path);
-            }
-            rewrite(&mut file, &existing, &new)?;
+            edit.commit(&new, backup)?;
         }
         Ok(Modified { value, created })
     }
 
     /// Appends the bootstrap line.
-    pub fn append(account: &Account, backup: &Backup, line: &str) -> io::Result<Modified<()>> {
-        modify(account, true, Some(backup), &|| {}, |existing| {
+    pub fn append(
+        account: &Account,
+        held: &Held,
+        backup: &Backup,
+        line: &str,
+    ) -> io::Result<Modified<()>> {
+        modify(account, held, true, Some(backup), &|| {}, |existing| {
             Ok((Some(with_line(existing, line)), ()))
         })
     }
@@ -370,10 +499,11 @@ mod unix {
     /// file has none. Returns how many entries were dropped.
     pub fn remove(
         account: &Account,
+        held: &Held,
         fingerprint: &str,
         backup: Option<&Backup>,
     ) -> io::Result<usize> {
-        let done = modify(account, false, backup, &|| {}, |existing| {
+        let done = modify(account, held, false, backup, &|| {}, |existing| {
             let (kept, dropped) = without(existing, |e| fingerprint_of(&e.blob) == fingerprint);
             Ok(((dropped > 0).then_some(kept), dropped))
         });
@@ -384,28 +514,42 @@ mod unix {
         }
     }
 
-    /// In one write: drops the bootstrap entry (by fingerprint) and appends the phone's line (a
-    /// key already present only loses the bootstrap entry). `Gone` when the entry is not there.
+    /// The new contents of a replacement: the bootstrap entry (by fingerprint) dropped and the
+    /// phone's line appended (a key already present only loses the bootstrap entry). `None`
+    /// when the bootstrap entry is not there.
+    pub fn replaced(
+        existing: &[u8],
+        bootstrap: &str,
+        phone: &KeyLine,
+        device: &str,
+        now: DateTime,
+    ) -> Option<(Vec<u8>, Replaced)> {
+        let (kept, dropped) = without(existing, |e| fingerprint_of(&e.blob) == bootstrap);
+        if dropped == 0 {
+            return None;
+        }
+        if contains(&kept, phone) {
+            return Some((kept, Replaced::Done { added: false }));
+        }
+        let line = line_for(phone, device, &now.date());
+        Some((with_line(&kept, &line), Replaced::Done { added: true }))
+    }
+
+    /// In one write: drops the bootstrap entry and appends the phone's line (see [`replaced`]).
+    /// `Gone` when the entry is not there.
     pub fn replace(
         account: &Account,
+        held: &Held,
         bootstrap: &str,
         phone: &KeyLine,
         device: &str,
         now: DateTime,
     ) -> io::Result<Replaced> {
-        let done = modify(account, false, None, &|| {}, |existing| {
-            let (kept, dropped) = without(existing, |e| fingerprint_of(&e.blob) == bootstrap);
-            if dropped == 0 {
-                return Ok((None, Replaced::Gone));
-            }
-            if contains(&kept, phone) {
-                return Ok((Some(kept), Replaced::Done { added: false }));
-            }
-            let line = line_for(phone, device, &now.date());
-            Ok((
-                Some(with_line(&kept, &line)),
-                Replaced::Done { added: true },
-            ))
+        let done = modify(account, held, false, None, &|| {}, |existing| {
+            Ok(match replaced(existing, bootstrap, phone, device, now) {
+                Some((new, result)) => (Some(new), result),
+                None => (None, Replaced::Gone),
+            })
         });
         match done {
             Ok(done) => Ok(done.value),
@@ -414,14 +558,66 @@ mod unix {
         }
     }
 
-    /// Removes `or2-pair-bootstrap-<id>` entries for which `live(id)` is false. Returns the ids
-    /// of the dropped entries (the caller removes their state files).
+    /// Whether the key file has an entry for the key with this fingerprint (read through the
+    /// checked handles; a missing file has none).
+    pub fn has_fingerprint(account: &Account, fingerprint: &str) -> io::Result<bool> {
+        let contents = match read(account) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        Ok(contents
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| entry(&String::from_utf8_lossy(line)))
+            .any(|e| fingerprint_of(&e.blob) == fingerprint))
+    }
+
+    /// The key file's contents, read through the checked handles without the lock (every change
+    /// replaces the file whole, so a read sees one version or the other).
+    fn read(account: &Account) -> io::Result<Vec<u8>> {
+        let dir = open_ssh_dir(account, false)?
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        let path = account.keys_path();
+        let fd = open_file(
+            dir.as_raw_fd(),
+            &account.keys_name(),
+            &path,
+            libc::O_RDONLY,
+            0,
+        )?;
+        check_file(&fstat(fd.as_raw_fd())?, account.uid, &path)?;
+        let mut contents = Vec::new();
+        File::from(fd)
+            .take(MAX_FILE_BYTES + 1)
+            .read_to_end(&mut contents)?;
+        if contents.len() as u64 > MAX_FILE_BYTES {
+            return Err(refuse(format!(
+                "{} is larger than {} MiB; not touching it",
+                path.display(),
+                MAX_FILE_BYTES >> 20
+            )));
+        }
+        Ok(contents)
+    }
+
+    /// Removes `or2-pair-bootstrap-<id>` entries for which `live(id)` is false, and the
+    /// temporary files a crashed replacement left next to the key file. Returns the ids of the
+    /// dropped entries (the caller removes their state files).
     pub fn sweep(
         account: &Account,
+        held: &Held,
         backup: Option<&Backup>,
         live: &dyn Fn(&PairingId) -> bool,
     ) -> io::Result<Vec<PairingId>> {
-        let done = modify(account, false, backup, &|| {}, |existing| {
+        if let Some(dir) = open_ssh_dir(account, false)? {
+            let prefix = temp_prefix(&account.keys_name());
+            for name in list(dir.as_raw_fd())? {
+                if name.starts_with(&prefix) {
+                    let _ = unlinkat(dir.as_raw_fd(), &name);
+                }
+            }
+        }
+        let done = modify(account, held, false, backup, &|| {}, |existing| {
             let ids = dead_ids(existing, live);
             let (kept, dropped) = without(existing, |e| dead_id(e, live).is_some());
             Ok(((dropped > 0).then_some(kept), ids))
@@ -433,15 +629,13 @@ mod unix {
         }
     }
 
-    /// What [`sweep`] would remove, changing nothing (for `--check`).
+    /// What [`sweep`] would remove, changing nothing and taking no lock (for `--check`).
     pub fn stale(
         account: &Account,
         live: &dyn Fn(&PairingId) -> bool,
     ) -> io::Result<Vec<PairingId>> {
-        match modify(account, false, None, &|| {}, |existing| {
-            Ok((None, dead_ids(existing, live)))
-        }) {
-            Ok(done) => Ok(done.value),
+        match read(account) {
+            Ok(contents) => Ok(dead_ids(&contents, live)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(error) => Err(error),
         }
@@ -464,8 +658,9 @@ mod unix {
     }
 
     /// Checks that `authorized_keys` (or, when it does not exist, `~/.ssh` or `~`) can be
-    /// written and that sshd (StrictModes) would honour it: the same checks the changes make,
-    /// changing nothing. A refusal says what to fix.
+    /// changed and that sshd (StrictModes) would honour it: the same checks the changes make,
+    /// changing nothing. A change writes a new file in `~/.ssh`, so that directory must be
+    /// writable too. A refusal says what to fix.
     pub fn writable(account: &Account) -> Writable {
         inspect(account).unwrap_or_else(|error| Writable::No(error.to_string()))
     }
@@ -481,6 +676,16 @@ mod unix {
                 Writable::No(format!("{} is not writable", account.home.display()))
             });
         };
+        let directory = || {
+            if writable_by_us(dir.as_raw_fd()) {
+                Writable::Yes
+            } else {
+                Writable::No(format!(
+                    "{} is not writable (or2-pair replaces authorized_keys with a new file there)",
+                    dir_path.display()
+                ))
+            }
+        };
         match open_file(
             dir.as_raw_fd(),
             &account.keys_name(),
@@ -490,15 +695,9 @@ mod unix {
         ) {
             Ok(file) => {
                 check_file(&fstat(file.as_raw_fd())?, account.uid, &file_path)?;
-                Ok(Writable::Yes)
+                Ok(directory())
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                Ok(if writable_by_us(dir.as_raw_fd()) {
-                    Writable::Yes
-                } else {
-                    Writable::No(format!("{} is not writable", dir_path.display()))
-                })
-            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(directory()),
             Err(error)
                 if error.kind() == io::ErrorKind::PermissionDenied
                     && error.raw_os_error().is_some() =>
@@ -521,6 +720,7 @@ mod tests {
 
     use super::*;
     use crate::bootstrap::PairingId;
+    use crate::state::Held;
 
     const ED25519: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBCJz8goXA2qGjRTNHhOwsljhOuCXG/+2B/zTJH/brc5";
@@ -550,6 +750,17 @@ mod tests {
         Account::new("tester", home)
     }
 
+    /// The `or2-pair` lock, taken in a throwaway home of its own (these tests are about the key
+    /// file; the lock itself is tested in `state`, `exchange` and `pairing`).
+    fn held() -> Held {
+        let home = tempfile::tempdir().unwrap();
+        crate::state::StateDir::open(&account(home.path()), true)
+            .unwrap()
+            .unwrap()
+            .lock(std::time::Duration::ZERO, &|| false)
+            .unwrap()
+    }
+
     /// The outcome of appending a phone's line the way the replace does, for the file-handling
     /// tests below.
     #[derive(Debug, PartialEq, Eq)]
@@ -569,7 +780,7 @@ mod tests {
         hook: &dyn Fn(),
     ) -> io::Result<Added> {
         let backup = Backup::new(at());
-        let done = modify(account, true, Some(&backup), hook, |existing| {
+        let done = modify(account, &held(), true, Some(&backup), hook, |existing| {
             if contains(existing, key) {
                 return Ok((None, false));
             }
@@ -592,6 +803,21 @@ mod tests {
 
     fn writable(home: &Path) -> Writable {
         super::writable(&account(home))
+    }
+
+    /// The names in `~/.ssh`, sorted.
+    fn entries(home: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(ssh_dir(home))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn running_as_root() -> bool {
+        // SAFETY: `geteuid` has no preconditions.
+        unsafe { libc::geteuid() == 0 }
     }
 
     fn bootstrap_line(id: &str, blob_key: &str) -> String {
@@ -697,6 +923,153 @@ mod tests {
             fs::read_to_string(moved.join(backup.unwrap().file_name().unwrap())).unwrap(),
             before
         );
+    }
+
+    // --- the replacement is a new file, installed only over the file that was checked ---------
+
+    #[test]
+    fn a_hard_link_added_after_the_check_is_refused_and_nothing_changes() {
+        // Review of the v2 integration: the link count was checked once, before the in-place
+        // rewrite, so a link added in between was rewritten too.
+        let home = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        let before = format!("{OTHER}\n");
+        fs::write(path(home.path()), &before).unwrap();
+        let alias = elsewhere.path().join("alias");
+        let link = || fs::hard_link(path(home.path()), &alias).unwrap();
+        let error = add_as(&account(home.path()), &key(ED25519), "phone", &link).unwrap_err();
+        assert!(error.to_string().contains("hard link"), "{error}");
+        assert_eq!(fs::read_to_string(&alias).unwrap(), before);
+        assert_eq!(fs::read_to_string(path(home.path())).unwrap(), before);
+        // The backup was taken before the refusal; no temporary file is left.
+        assert!(
+            entries(home.path())
+                .iter()
+                .all(|name| name == "authorized_keys" || name.contains("or2-backup")),
+            "{:?}",
+            entries(home.path())
+        );
+    }
+
+    #[test]
+    fn a_file_swapped_in_after_the_check_is_not_replaced() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        fs::write(path(home.path()), format!("{OTHER}\n")).unwrap();
+        let theirs = format!("{ECDSA} put there meanwhile\n");
+        let swap = || {
+            let other = ssh_dir(home.path()).join("other");
+            fs::write(&other, &theirs).unwrap();
+            fs::rename(&other, path(home.path())).unwrap();
+        };
+        let error = add_as(&account(home.path()), &key(ED25519), "phone", &swap).unwrap_err();
+        assert!(
+            error.to_string().contains("replaced by another file"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(path(home.path())).unwrap(), theirs);
+        // A symbolic link swapped in is refused the same way, and its target is untouched.
+        let target = home.path().join("target");
+        fs::write(&target, "x\n").unwrap();
+        let link = || {
+            fs::remove_file(path(home.path())).unwrap();
+            std::os::unix::fs::symlink(&target, path(home.path())).unwrap();
+        };
+        assert!(add_as(&account(home.path()), &key(ED25519), "phone", &link).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "x\n");
+        assert!(
+            fs::symlink_metadata(path(home.path()))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn a_failed_replacement_leaves_the_old_file_whole() {
+        // Review of the v2 integration: the in-place rewrite overwrote the start of the file
+        // before it was sure to finish, so a failure (a full disk) or a kill left old and new
+        // mixed. Now nothing touches the old file until the new one is complete; here the new
+        // one cannot even be created.
+        if running_as_root() {
+            eprintln!("SKIP: root can write a read-only directory");
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        let before = format!("# mine\n{OTHER} me\n");
+        fs::write(path(home.path()), &before).unwrap();
+        let inode = fs::metadata(path(home.path())).unwrap().ino();
+        chmod(&ssh_dir(home.path()), 0o500);
+        let line = bootstrap_line("abcdefghijklm", ED25519);
+        let result = append(&account(home.path()), &held(), &Backup::new(at()), &line);
+        let check = writable(home.path());
+        chmod(&ssh_dir(home.path()), 0o700);
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(fs::read_to_string(path(home.path())).unwrap(), before);
+        assert_eq!(fs::metadata(path(home.path())).unwrap().ino(), inode);
+        assert_eq!(entries(home.path()), ["authorized_keys"]);
+        // The check says so before any pairing starts.
+        assert!(
+            matches!(&check, Writable::No(why) if why.contains("not writable")),
+            "{check:?}"
+        );
+    }
+
+    #[test]
+    fn a_temporary_file_a_crash_left_is_swept() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        fs::write(path(home.path()), format!("{OTHER}\n")).unwrap();
+        let leftover = ssh_dir(home.path()).join(".authorized_keys.or2-tmp-1-2-3");
+        fs::write(&leftover, "half a file").unwrap();
+        let unrelated = ssh_dir(home.path()).join(".authorized_keys.swp");
+        fs::write(&unrelated, "editor").unwrap();
+        sweep(&account(home.path()), &held(), None, &|_| true).unwrap();
+        assert!(!leftover.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_label_of_the_old_file_is_copied_to_the_new_one() {
+        // `security.selinux` cannot be set without SELinux; the copy is the same for any name,
+        // so a user attribute stands in for it where the file system has them.
+        use std::os::fd::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let from = fs::File::create(dir.path().join("from")).unwrap();
+        let to = fs::File::create(dir.path().join("to")).unwrap();
+        let name = c"user.or2-test";
+        let value = b"system_u:object_r:ssh_home_t:s0";
+        // SAFETY: valid descriptor, name and buffer.
+        let set = unsafe {
+            libc::fsetxattr(
+                from.as_raw_fd(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+            )
+        };
+        if set != 0 {
+            eprintln!("SKIP: this file system has no user extended attributes");
+            return;
+        }
+        crate::safefs::copy_xattr(from.as_raw_fd(), to.as_raw_fd(), "user.or2-test").unwrap();
+        let mut read = [0u8; 64];
+        // SAFETY: as above.
+        let size = unsafe {
+            libc::fgetxattr(
+                to.as_raw_fd(),
+                name.as_ptr(),
+                read.as_mut_ptr().cast(),
+                read.len(),
+            )
+        };
+        assert_eq!(&read[..size as usize], value);
+        // A file without the attribute copies nothing, without an error.
+        crate::safefs::copy_xattr(to.as_raw_fd(), from.as_raw_fd(), "user.or2-none").unwrap();
     }
 
     #[test]
@@ -1145,7 +1518,7 @@ mod tests {
     // --- remove, replace, sweep ----------------------------------------------------------------
 
     #[test]
-    fn remove_drops_the_entry_in_place_and_keeps_every_other_line_byte_for_byte() {
+    fn remove_drops_the_entry_and_keeps_every_other_line_byte_for_byte() {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(ssh_dir(home.path())).unwrap();
         let boot = key(ED25519);
@@ -1159,23 +1532,29 @@ mod tests {
         chmod(&path(home.path()), 0o640);
         let inode = fs::metadata(path(home.path())).unwrap().ino();
 
-        let removed = remove(&account(home.path()), &boot.fingerprint(), None).unwrap();
+        let removed = remove(&account(home.path()), &held(), &boot.fingerprint(), None).unwrap();
         assert_eq!(removed, 2);
         assert_eq!(
             fs::read_to_string(path(home.path())).unwrap(),
             format!("{mine}\n")
         );
         let meta = fs::metadata(path(home.path())).unwrap();
-        assert_eq!(meta.ino(), inode, "rewritten in place");
+        assert_ne!(meta.ino(), inode, "a new file took the name");
         assert_eq!(meta.mode() & 0o777, 0o640, "mode kept");
+        assert_eq!(meta.nlink(), 1);
+        assert_eq!(
+            entries(home.path()),
+            ["authorized_keys"],
+            "no temporary file left"
+        );
         // Nothing left to remove: no change, no error; a missing file is the same.
         assert_eq!(
-            remove(&account(home.path()), &boot.fingerprint(), None).unwrap(),
+            remove(&account(home.path()), &held(), &boot.fingerprint(), None).unwrap(),
             0
         );
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(
-            remove(&account(empty.path()), &boot.fingerprint(), None).unwrap(),
+            remove(&account(empty.path()), &held(), &boot.fingerprint(), None).unwrap(),
             0
         );
         assert!(
@@ -1198,6 +1577,7 @@ mod tests {
         let phone = key(PHONE);
         let done = replace(
             &account(home.path()),
+            &held(),
             &boot.fingerprint(),
             &phone,
             "Pixel-8",
@@ -1213,10 +1593,11 @@ mod tests {
                 phone.openssh()
             )
         );
-        assert_eq!(fs::metadata(path(home.path())).unwrap().ino(), inode);
+        assert_ne!(fs::metadata(path(home.path())).unwrap().ino(), inode);
         // The bootstrap entry is gone, so a second phone finds nothing to replace.
         let again = replace(
             &account(home.path()),
+            &held(),
             &boot.fingerprint(),
             &key(ECDSA),
             "b",
@@ -1230,6 +1611,7 @@ mod tests {
         assert_eq!(
             replace(
                 &account(empty.path()),
+                &held(),
                 &boot.fingerprint(),
                 &phone,
                 "x",
@@ -1252,6 +1634,7 @@ mod tests {
         fs::write(path(home.path()), &before).unwrap();
         let done = replace(
             &account(home.path()),
+            &held(),
             &boot.fingerprint(),
             &key(OTHER),
             "p",
@@ -1274,13 +1657,19 @@ mod tests {
         let account = account(home.path());
         let backup = Backup::new(at());
         let line = bootstrap_line("abcdefghijklm", ED25519);
-        append(&account, &backup, &line).unwrap();
+        append(&account, &held(), &backup, &line).unwrap();
         let saved = backup
             .path()
             .expect("the first change saves the file as it was");
         assert_eq!(fs::read_to_string(&saved).unwrap(), original);
         // The removal of the same run changes the file again, with no second backup.
-        remove(&account, &key(ED25519).fingerprint(), Some(&backup)).unwrap();
+        remove(
+            &account,
+            &held(),
+            &key(ED25519).fingerprint(),
+            Some(&backup),
+        )
+        .unwrap();
         assert_eq!(fs::read_to_string(path(home.path())).unwrap(), original);
         let backups = fs::read_dir(ssh_dir(home.path()))
             .unwrap()
@@ -1308,7 +1697,7 @@ mod tests {
         );
         fs::write(path(home.path()), &contents).unwrap();
         let alive = |id: &PairingId| id.as_str() == live;
-        let dropped = sweep(&account(home.path()), None, &alive).unwrap();
+        let dropped = sweep(&account(home.path()), &held(), None, &alive).unwrap();
         let ids: Vec<&str> = dropped.iter().map(PairingId::as_str).collect();
         assert_eq!(ids, [dead, odd]);
         let after = fs::read_to_string(path(home.path())).unwrap();
@@ -1321,7 +1710,7 @@ mod tests {
         );
         // Nothing dead: no change.
         assert!(
-            sweep(&account(home.path()), None, &alive)
+            sweep(&account(home.path()), &held(), None, &alive)
                 .unwrap()
                 .is_empty()
         );

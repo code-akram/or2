@@ -95,7 +95,7 @@ impl DateTime {
         Self::from_unix(seconds)
     }
 
-    /// `202610011345`: sshd's `expiry-time` (local time, no zone suffix).
+    /// `202610011345`: sshd's `expiry-time` (no zone suffix; `bootstrap::expiry` adds `Z` for UTC).
     pub fn compact_minutes(&self) -> String {
         format!(
             "{:04}{:02}{:02}{:02}{:02}",

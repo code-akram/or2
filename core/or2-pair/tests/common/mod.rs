@@ -78,11 +78,12 @@ impl World {
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
-    /// The files in `~/.ssh/or2-pair`, sorted.
+    /// The files of runs in `~/.ssh/or2-pair` (not its lock file), sorted.
     pub fn state_files(&self) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(self.ssh_dir().join("or2-pair"))
             .map(|dir| {
                 dir.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .filter(|name| name != or2_pair::state::LOCK)
                     .collect()
             })
             .unwrap_or_default();
@@ -173,6 +174,15 @@ impl Net for FakeNet {
     }
 }
 
+/// A login shell that starts the program (the run's version is "test").
+pub struct FakeShell;
+
+impl or2_pair::checks::ShellProbe for FakeShell {
+    fn run(&self, _: &str, _: &str) -> Result<String, String> {
+        Ok("or2-pair test\n".to_owned())
+    }
+}
+
 pub struct NoKeyscan;
 
 impl Keyscan for NoKeyscan {
@@ -218,6 +228,8 @@ pub struct Setup {
     pub install_keys: bool,
     pub platform: Platform,
     pub shell: Option<String>,
+    /// Whether `TZ` is set for the run.
+    pub tz_set: bool,
 }
 
 impl Default for Setup {
@@ -231,6 +243,7 @@ impl Default for Setup {
             install_keys: true,
             platform: Platform::Linux,
             shell: Some("/bin/bash".into()),
+            tz_set: false,
         }
     }
 }
@@ -275,6 +288,8 @@ pub fn pair<R>(
                 platform: setup.platform,
                 net: &net,
                 keyscan: &NoKeyscan,
+                shell: &FakeShell,
+                tz_set: setup.tz_set,
                 exe: setup.exe.clone(),
                 prompt: script,
                 can_ask: setup.can_ask,

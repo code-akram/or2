@@ -33,6 +33,8 @@ fn manual(
         platform,
         net: &net,
         keyscan: &NoKeyscan,
+        shell: &FakeShell,
+        tz_set: false,
         exe: Ok(EXE.into()),
         prompt: &script,
         can_ask: true,
@@ -136,11 +138,19 @@ fn a_login_only_account_has_no_home_to_write_to() {
     let account = Account::login_only("alice");
     assert_eq!(account.name, "alice");
     assert!(account.home.as_os_str().is_empty());
-    // Whatever the platform, nothing can be installed for it.
+    // Whatever the platform, nothing can be installed for it: it has no lock to take...
+    assert!(or2_pair::state::StateDir::open(&account, true).is_err());
+    // ...and even with someone else's lock no key file is opened.
+    let world = World::new();
+    let held = or2_pair::state::StateDir::open(&world.account(), true)
+        .unwrap()
+        .unwrap()
+        .lock(std::time::Duration::ZERO, &|| false)
+        .unwrap();
     let backup = or2_pair::authorized_keys::Backup::new(or2_pair::date::DateTime::from_unix(0));
-    assert!(or2_pair::authorized_keys::append(&account, &backup, "x").is_err());
+    assert!(or2_pair::authorized_keys::append(&account, &held, &backup, "x").is_err());
     assert!(
-        or2_pair::authorized_keys::remove(&account, "SHA256:x", None).is_err(),
+        or2_pair::authorized_keys::remove(&account, &held, "SHA256:x", None).is_err(),
         "even a removal needs a home"
     );
 }
