@@ -46,8 +46,32 @@ Updated 2026-10-02, end of day.
 - The device suite passes: 150 tests. The two notification-posting tests skip, because the phone refuses
   the permission to a test build.
 
+## Open bug: no agent notifications arrive (owner report, 2026-10-02 evening)
+
+The owner gets **no agent notifications** on the phone (the v0.1.2 candidate). Read-only checks of the phone the
+same evening:
+- `POST_NOTIFICATIONS` is granted (user-set), and app ops allow it.
+- The `agents` channel exists with `IMPORTANCE_HIGH` (4). It is not blocked, and the app's notifications are
+  on.
+- The ongoing `connections` notification shows normally.
+- **The `agents` channel has never posted anything** (`mLastNotificationUpdateTimeMs=0`).
+
+So Android is not blocking them: **or2 never posts one.** Suspects, in the order to check:
+1. Is the edge rule ever met? Notifications go out only on a `state_change_seq` advance into
+   Blocked or Done, observed by a live watch, never on the first snapshot after a connect. Do the herdr
+   reports of the owner's Claude Code panes advance `state_change_seq` the way the code expects?
+2. Over-eager "on screen" suppression.
+3. A host's `showInInbox` flag, or the Settings switch.
+4. The v0.1.2 identity rule, which affects only the Reply action, not posting.
+
+Start with a debug build as the `.devicetest` app paired to the Mac, or with a temporary log of the alert
+decisions, and watch an agent go Working → Blocked/Done. The device tests can't post (the permission is
+refused to test builds), so this was never seen end to end. Fix it before releasing v0.1.2, because Reply
+depends on it.
+
 ## Next, in order (tomorrow morning)
 
+0. **Fix the open notification bug above** (Reply cannot be tested without a notification).
 1. **The owner's QA of the v0.1.2 candidate** on the phone:
    1. Reply from a notification. Include a reply to an agent waiting at an approval dialog (Claude Code's
       "Do you want to …?"), and note exactly what a typed reply does there.
