@@ -171,21 +171,16 @@ class EntryUiDeviceTest {
         }
         var view = awaitTerminal()
         compose.onNodeWithTag("terminal-title").assertIsDisplayed()
-        compose.onNodeWithText("Fixture: shell").assertIsDisplayed()
+        compose.onNodeWithText("Fixture · shell").assertIsDisplayed()
         compose.onNodeWithText("SSH").assertIsDisplayed() // The transport badge.
-        // The header's round buttons are drawn small (an 18 dp disc in a 48 x 36 dp box) but are full 48 dp touch targets.
+        // The header's round discs are drawn small (16 dp, a pair 10 dp apart) but are full 48 dp touch targets.
         listOf("terminal-back", "terminal-panes").forEach {
             compose.onNodeWithTag(it).assertTouchTargetAtLeast(48)
         }
-        // Neighbouring buttons' touch targets do not overlap: their centres are at least 48 dp apart.
-        val back = compose.onNodeWithTag("terminal-back").fetchSemanticsNode()
-        val panes = compose.onNodeWithTag("terminal-panes").fetchSemanticsNode()
-        val density = back.layoutInfo.density.density
-        assertTrue(
-            "header buttons ${back.touchBoundsInRoot} / ${panes.touchBoundsInRoot}",
-            panes.touchBoundsInRoot.left >= back.touchBoundsInRoot.right - 1 &&
-                panes.touchBoundsInRoot.center.x - back.touchBoundsInRoot.center.x >= 48 * density - 1,
-        )
+        // Their boxes meet halfway between the discs: no gap and no overlap, so a tap between them goes to the nearer one.
+        val back = compose.onNodeWithTag("terminal-back").fetchSemanticsNode().boundsInRoot
+        val panes = compose.onNodeWithTag("terminal-panes").fetchSemanticsNode().boundsInRoot
+        assertEquals("header buttons $back / $panes", back.right, panes.left, 1f)
         compose.runOnIdle {
             val insets = ViewCompat.getRootWindowInsets(view)!!.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             assertEquals(compose.activity.window.decorView.width - insets.left - insets.right, view.width)

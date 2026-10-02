@@ -67,6 +67,15 @@ object Or2Colors {
     /** The terminal card follows the terminal's own default background (core/terminal.rs). */
     val TerminalBackground = Color(0xFF1E1E2E)
 
+    /**
+     * The terminal card's header (and any notice strip under it): halfway between the terminal's
+     * background and `surface`, one slight tonal step above the grid, with a `crust` hairline below.
+     */
+    val TerminalHeader = Color(0xFF222232)
+
+    /** The terminal header's drag handle: Catppuccin surface2, quieter than `subtle` so it never reads as a control bar. */
+    val Handle = Color(0xFF585B70)
+
     /** The floating toolbar pill: `background` at ~85 %. */
     val ToolbarPill = Background.copy(alpha = 0.85f)
 }
@@ -102,23 +111,41 @@ object Or2Dimens {
     val PadGap = 6.dp
     val SheetHandleWidth = 32.dp
     val SheetHandleHeight = 4.dp
-    val TerminalHandleWidth = 36.dp
 
-    /** The terminal header row and its buttons: a small visible disc in a 36 dp target (the platform grows it to 48). */
+    /** The terminal header's drag handle: thin (28 x 3 dp), 4 dp from the card's top edge, inside the 36 dp header. */
+    val TerminalHandleWidth = 28.dp
+    val TerminalHandleHeight = 3.dp
+    val TerminalHandleTop = 4.dp
+
+    /** The terminal header row and its buttons: a small visible disc in a 36 dp tall box (the platform grows it to 48). */
     val HeaderRow = 36.dp
-    val HeaderButtonDisc = 18.dp
-    val HeaderButtonGlyph = 12.dp
+    val HeaderButtonDisc = 16.dp
+    val HeaderButtonGlyph = 10.dp
     val HeaderButtonTouch = 36.dp
 
-    /** The header buttons' boxes are 48 dp wide, so neighbouring discs are 48 dp apart centre to centre and their touch targets never overlap. */
-    val HeaderButtonTouchWidth = 48.dp
+    /**
+     * The two discs are a pair: 10 dp apart edge to edge. Each sits centred in a box that reaches halfway to its
+     * neighbour (16 + 10 = 26 dp wide), so the boxes meet at the midpoint and a tap between the discs goes to the
+     * nearer one; the platform grows each to a 48 dp target. The first disc's edge is the 12 dp gutter.
+     */
+    val HeaderDiscGap = 10.dp
+    val HeaderButtonBox = HeaderButtonDisc + HeaderDiscGap
+
+    /** The least room between the centred title and the side elements. */
+    val HeaderTitleGap = 8.dp
     val TerminalInset = 4.dp
+
+    /** A notice strip under a header (connecting, closed): one compact line that takes layout space. */
+    val NoticeStrip = 28.dp
+    val NoticeIcon = 14.dp
 
     /** The arrow pad's extras pill: 36 dp tall, symbol keys 28 dp wide, navigation keys as wide as their label. */
     val PadExtrasHeight = 36.dp
     val PadExtraKeyWidth = 28.dp
     val PadExtraNavKeyWidth = 38.dp
-    val PadHandleTouch = 28.dp
+
+    /** The scroll-to-bottom chevron in its 28 dp disc. */
+    val ScrollButtonGlyph = 16.dp
 
     /** The composer's actions are 36 dp circles (the send button's fill); icon-only actions have a 40 dp touch box. */
     val ComposerAction = 36.dp
@@ -134,14 +161,13 @@ object Or2Shapes {
     val Thumbnail = RoundedCornerShape(12.dp)
     val Key = RoundedCornerShape(12.dp)
     val Composer = RoundedCornerShape(20.dp)
-    val PadBacking = RoundedCornerShape(16.dp)
     val Pill = RoundedCornerShape(percent = 50)
     val Circle = CircleShape
     val Sheet = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
     val TerminalCard = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
 }
 
-/** Light and regular weights only: emphasis comes from colour and size. */
+/** Light and regular weights only (the terminal header's host is the one medium): emphasis comes from colour and size. */
 object Or2Type {
     private val sans = FontFamily.Default
     private val mono get() = Or2Mono
@@ -171,6 +197,13 @@ object Or2Type {
         fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 24.sp, lineHeight = 30.sp, letterSpacing = 0.04.em,
     )
     val Badge = TextStyle(fontFamily = sans, fontWeight = FontWeight.Normal, fontSize = 11.sp, lineHeight = 14.sp)
+
+    /**
+     * The terminal header's centred title: the host in the sans at 12 sp, the one medium weight in the app (a short
+     * label that must win a glance over the terminal), then the target in mono 11 sp ([HeaderTarget]), muted.
+     */
+    val HeaderTitle = TextStyle(fontFamily = sans, fontWeight = FontWeight.Medium, fontSize = 12.sp, lineHeight = 16.sp)
+    val HeaderTarget = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 11.sp, lineHeight = 16.sp)
 
     /** Overlay pills on thumbnails and the terminal header's transport badge: small, they sit on the terminal. */
     val Pill = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 11.sp, lineHeight = 14.sp)

@@ -456,9 +456,11 @@ authenticating, connected with a blocked agent, failed, idle), `inbox`, `inbox-e
 `keys-empty`, `about`, `licenses`, `hostkey-first`, `hostkey-changed`, `add-host` (the add-host chooser in its sheet; `home-empty` shows it inline), `pair-scan`,
 `pair-scan-denied`, `pair-review`, `pair-review-new` (with a failure), `pair-progress`, `pair-install`
 (Easy pair; the camera preview itself is not in the gallery), `keepalive` (the battery step that ends adding a
-host), `keepalive-waiting` (Android's dialog up), `terminal`, `terminal-arrowpad`,
-`terminal-composer` (opens with a message typed and the keyboard up, to show the caret and the
-lit send button). The terminal screens run the native contract probe and replace its first
+host), `keepalive-waiting` (Android's dialog up), `terminal` (a shell over SSH), `terminal-tmux` (a tmux
+target over Mosh), `terminal-long` (a title long enough to ellipsize), `terminal-stale` (Mosh, `Last heard
+12 s ago`), `terminal-connecting` and `terminal-closed` (the notice strip under the header, the latter with
+**Close**), `terminal-arrowpad`, `terminal-composer` (opens with a message typed and the keyboard up, to show
+the caret and the lit send button). The terminal screens run the native contract probe and replace its first
 frame with a Catppuccin demo session (`gallery/DemoFrames.kt`). Use it to screenshot the phone
 without touching real hosts or the biometric prompt.
 
@@ -556,7 +558,9 @@ Its counterpart, `theServiceStartsAndKeepsRunningWithoutTheNotificationPermissio
 permission is *not* granted (the usual case for "or2 devicetest", since nothing asks for it on connect) and
 checks the service starts and keeps holding the connection without it.
 `TransportChromeDeviceTest` covers the header badge, the "Last heard N s ago" text past five seconds
-and the AUTO-fallback note. `VaultDeviceTest` creates and
+and the AUTO-fallback note; `TerminalHeaderDeviceTest` the header's composition (the title centred on the
+card and clear of the discs, the stale label and the pill, also when long; the handle over it), the notice
+strip taking layout space (Connecting, Closed with **Close**) and drag-down to minimise. `VaultDeviceTest` creates and
 deletes a disposable Keystore alias: it verifies hardware security level, per-use strong
 biometric policy, non-exportability and rejection without authentication (skips if strong
 biometrics are not enrolled). `EntryUiDeviceTest` displays first-use/changed-key dialogs using
@@ -564,12 +568,13 @@ fake public-key metadata without a network or production DB writes, checks the t
 and its switcher against fake host connections, and that the integrated screen retains the same
 terminal view and final grid through `Closed` until the session is closed. `InboxUiDeviceTest`,
 `HostScreenUiDeviceTest` and `HostFormUiDeviceTest` render the inbox, host screen (connection
-state, host-key prompt, the session picker sheet with herdr, tmux and Recent, "Skip" for a shell,
+state, host-key prompt, the session picker sheet with herdr, tmux and Recent, "Shell" for a plain shell,
 name validation) and the address-list host form (with **New key**) from fabricated state; `HomeUiDeviceTest` the Home
 screen (card progress and failure in place, long-press options, session thumbnails, chips, FAB, the empty
 state's add-host chooser matching the sheet's)
 and that a thumbnail holds the terminal's native handle until it leaves composition;
-`TerminalChromeDeviceTest` the key toolbar, latched modifiers, the arrow pad with auto-repeat, the
+`TerminalChromeDeviceTest` the key toolbar, latched modifiers, the arrow pad with auto-repeat (floating with no
+backing, closed by the toolbar's key), the
 composer's `submit_text` send and pinch-to-zoom persistence (with its own preferences file).
 Every device test runs against a scratch terminal-preferences file (`Or2TestRunner`, the
 instrumentation runner: a `TerminalView` reads the saved font size when it is built, so grid sizes

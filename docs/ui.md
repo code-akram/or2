@@ -20,7 +20,7 @@ Touch targets: visible sizes are small, hit areas are not. Every clickable's tou
 by the platform to at least 48 dp (hit testing; `touchBoundsInRoot`), and primary controls are
 drawn at least 40 dp tall (44 dp rows, fields and primary buttons, 40 dp arrow-pad keys and
 toolbar touch boxes). Only secondary controls are drawn below 40 dp (segmented 32, chips 28,
-pad extras 36, header discs 18 in a 48 x 36 dp box) and rely on the platform growth.
+pad extras 36, notice-strip actions 28, header discs 16 in a 26 x 36 dp box) and rely on the platform growth.
 
 ## Palette
 
@@ -39,7 +39,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 | `textMuted` | `#9399B2` (overlay2) | section headers, subtitles, values, hints, placeholders: every piece of secondary *text*. At least 4.5:1 on `background`, `surface`, `surfaceRaised`, the terminal card and `crust` (`ThemeTest` checks it) |
 | `placeholder` | `#A6ADC8` (subtext0) | field placeholders: one step above `textMuted` (6.7:1 on `surface`) because the light weight at 12-13 sp reads dimmer than its contrast; still dimmer than typed `text` |
 | `subtle` | `#6C7086` (overlay0) | icons, chevrons, drag handles, idle dots: dim by design, never used for text |
-| `crust` | `#11111B` | the composer card: darker than the terminal and the key pills around it |
+| `handle` | `#585B70` (surface2) | the terminal header's drag handle: quieter than `subtle`, a hint rather than a control |
+| `crust` | `#11111B` | the composer card: darker than the terminal and the key pills around it; the hairline under the terminal header |
+| `terminalHeader` | `#222232` | the terminal card's header and its notice strip: halfway between the terminal background `#1E1E2E` and `surface`, one slight tonal step above the grid |
 | `accent` | `#89B4FA` | primary buttons, FAB, toggles, selection, links, checkmarks; text on accent is `background` |
 | `accentMuted` | `#343B53` fill with `accent` text | badges ("PRO"-style tags, status kickers) |
 | `attention` | `#FAB387` (peach) | blocked agents, warnings, "needs attention" dots |
@@ -66,6 +68,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   dialog is security information; a 70 % accent was 4.1:1); toolbar and pad keys 12
   mono; composer text 13 mono; overlay pills on thumbnails and the terminal header's transport
   badge 11 mono; badge 11; chip 12. Small mono lines (10.5) sit on a 16 sp line grid.
+- The one medium weight: the terminal header's host (`Or2Type.HeaderTitle`, sans 12 sp medium in
+  `text`), followed by the target in mono 11 (`HeaderTarget`) in `textMuted`. It is a short label
+  that has to win a glance over a screen of terminal text; everything else stays light or regular.
 
 ## Layout
 
@@ -91,7 +96,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   navigation-bar inset, minus the keyboard when it is up), so lists are never cut flat above the
   gesture pill. The FAB and the notices sit above the bar.
 - Touch targets: see "Compact scale". Small drawn controls keep a layout box of 36-44 dp and the
-  platform grows the hit area to 48 dp: terminal header buttons are 18 dp discs in 48 x 36 dp boxes (neighbouring discs 48 dp apart, so their targets never overlap),
+  platform grows the hit area to 48 dp: terminal header buttons are 16 dp discs, a pair 10 dp apart, each
+  centred in a 26 x 36 dp box that reaches halfway to the other disc (the boxes meet at the midpoint, so where
+  the grown targets would overlap the box a tap lands in wins and a tap between the discs goes to the nearer one),
   status chips that are buttons are 28 dp, the composer's bare icon actions are 40 dp boxes (the
   send button is a 36 dp disc in a 40 dp box). The toolbar and arrow-pad-extras keys are 30 x 40 dp
   touch boxes (30 dp drawn) and 28-38 x 36 dp, shoulder to shoulder, so a tap lands on the nearest
@@ -153,6 +160,13 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   a `danger` line for the last failure and the full-width **Pair** pill (**Add host** for a `--manual` code)
   with a muted footnote.
   Progress is a centred 32 dp spinner, a 15 sp light **Pairing with <name>…** and a **Cancel** pill; nothing modal.
+- **Notice strip:** one compact line of status under a header (`NoticeStrip`): 28 dp tall, the 12 dp
+  gutter, a 14 dp icon (`info` or `warning` by default; a small accent spinner in its place while something is
+  in progress), `MonoSmall` text on one line, ellipsized, tinted by severity (`textMuted` for information,
+  `attention` for a warning, the icon too), and an optional trailing text action (`Chip` 12 sp in `accent`,
+  drawn 28 dp tall). It has no fill of its own (it sits on its container's) and takes layout space: it pushes
+  what is below it down and never overlays it. The terminal card uses it for Connecting / Authenticating /
+  Waiting for host-key approval (muted, spinner) and for a closed session (warning, with **Close**).
 - **Segmented control:** 32 dp `surfaceTrack` pill, selected segment `surface` with `text`, others
   `textMuted`.
 - **Toggle:** `accent` track with a `text` knob when on (a `background` knob read as a hole); `surfaceTrack` with a muted knob when off.
@@ -247,33 +261,47 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   A gone pane or a failed focus replaces it with the usual dismissible message and the screen
   stays where it was.
 - **Session picker sheet:** opens after a host connects (and from the host screen): a
-  segmented control (`herdr` / `tmux` / `Recent`) with a trailing "Skip" pill that opens a
-  plain shell; below, one grouped list of herdr sessions (`● Running`), tmux sessions (`●
+  segmented control (`herdr` / `tmux` / `Recent`) with a trailing **Shell** pill (`surfaceTrack`,
+  the `>_` prompt glyph before the label) that opens a plain shell; below, one grouped list of herdr sessions (`● Running`), tmux sessions (`●
   Attached`, with a "new session" field) or, under Recent, the open terminals of the host. A herdr
   row is title-only (44 dp) with its state at the right (`● Running`, or a dim `● Not running` and a
   muted title for a stopped one), never as a second caption line as well. The "Refresh" row's icon
   starts at the rows' text inset.
-- **Terminal screen:** the terminal sits in a full-height card with a 24 dp top radius and a
-  drag handle (drag down to minimise to the SESSIONS thumbnail). Header row inside the card, 36 dp:
-  a small round "minimise" button (18 dp disc with a 12 dp glyph, `attention`) and sidebar toggle (18 dp, green) in
-  48 x 36 dp boxes (48 dp touch targets that do not overlap), the mono title (`host: target`) in `textMuted`, and a trailing transport badge
-  (`Mosh` in a saturated teal pill with dark text, `SSH` in a `surfaceTrack` pill with full `text`).
-  The badge shows the transport the session really runs over (`SSH` after an AUTO fallback; it flips
-  `SSH` to `Mosh` when AUTO swaps a terminal to its background mosh session). A
-  mosh session that has heard nothing for more than 5 s greys it (the `SSH` look: `surfaceTrack`
-  with `textMuted` text, still reading `Mosh`) and a mono `MonoSmall` `Last heard 12 s ago` in `attention`
-  appears in the header row itself, just before the badge (the title gives way). Nothing is ever
-  drawn over the terminal's rows, and a flapping link never resizes the grid (the row keeps its
-  height); any line under the header takes layout space. It goes away on recovery and when the
-  session closes. There is no note under terminals: why AUTO uses SSH is said once, on the host
-  screen (see "UDP blocked").
-  The drag handle overlaps the top of the 36 dp header row, so the header costs no extra height.
-  The card follows the terminal's own background (the remote can change it with OSC 11). The sidebar toggle opens the sessions sheet
-  (switch session, disconnect). The terminal is edge to edge below it with a thin `accent`
-  scroll indicator on the right. While the view is scrolled up (the scrollback, or a tmux/herdr
-  target's own history) a 28 dp round scroll-to-bottom button (a down chevron in `accent` on the
-  toolbar's `background` at ~85 %, in a 40 dp touch box) sits 4 dp in from the terminal's bottom-right
-  corner; tapping it returns to the live screen.
+- **Terminal screen:** the terminal sits in a full-height card with a 24 dp top radius: the terminal
+  header (below), then the terminal edge to edge with a thin `accent` scroll indicator on the right. The
+  card below the header follows the terminal's own background (the remote can change it with OSC 11).
+  Nothing is ever drawn over the terminal's rows, and a flapping link never resizes the grid (the stale
+  label lives in the header row; any line under the header takes layout space). There is no note under
+  terminals: why AUTO uses SSH is said once, on the host screen (see "UDP blocked"). While the view is
+  scrolled up (the scrollback, or a tmux/herdr target's own history) a 28 dp round scroll-to-bottom button
+  (a down chevron in `accent` on the toolbar's `background` at ~85 %, in a 40 dp touch box) sits 4 dp in
+  from the terminal's bottom-right corner; tapping it returns to the live screen.
+- **Terminal header** (`TerminalHeader`): one composed 36 dp row on the `terminalHeader` tone
+  (`#222232`, one slight step above the grid), closed off from the grid by a `crust` hairline, so the
+  card reads as a window with a quiet title bar. In it:
+  - **Discs, at the left, as a pair:** "minimise" (`attention` orange, a minus glyph) and the sessions
+    sheet (`done` green, a sidebar glyph), 16 dp discs with a 10 dp glyph in `background`, 10 dp apart,
+    the first disc's edge on the 12 dp gutter. Each sits in a 26 x 36 dp box that meets its neighbour's at
+    the midpoint (see "Touch targets"). The minimise disc returns to Home (the session keeps running as a
+    SESSIONS thumbnail); the green one opens the sessions sheet (switch session, disconnect).
+  - **Title, centred on the card's full width** (not on the space left between the sides): `host ·
+    target`, the host in `text` sans 12 sp medium, the `·` in `subtle`, the target (`shell`, `tmux main`,
+    `herdr work w1:p2`) in mono 11 `textMuted`. It lives in a slot symmetric about the centre (the width less,
+    on both sides, the wider side plus 8 dp), so a long title ellipsizes at its end and stays centred, and
+    never meets the discs, the stale label or the pill.
+  - **At the right:** the transport pill, 12 dp from the edge (`Mosh` in a saturated teal pill with dark
+    text, `SSH` in a `surfaceTrack` pill with full `text`, mono 11). It shows the transport the session
+    really runs over (`SSH` after an AUTO fallback; it flips `SSH` to `Mosh` when AUTO swaps a terminal to
+    its background mosh session). A mosh session that has heard nothing for more than 5 s greys it (the
+    `SSH` look: `surfaceTrack` with `textMuted` text, still reading `Mosh`) and a `MonoSmall`
+    `Last heard 12 s ago` in `attention` appears just before it, 6 dp away, in the header row itself (the
+    centred title's slot narrows on both sides). It goes away on recovery and when the session closes.
+  - **Drag handle:** a thin 28 x 3 dp pill in `handle` (`#585B70`), 4 dp from the card's top edge,
+    centred over the title, inside the 36 dp row: it costs no height and is part of the header, not a bar
+    of its own. Dragging down anywhere on the header minimises (past 96 dp; less snaps back).
+  - **Notice strip under it:** while the session is not connected, a `NoticeStrip` (see Components) on the
+    same `terminalHeader` tone, above the hairline: `Connecting…` / `Authenticating…` muted with a spinner,
+    or a closed session's reason in `attention` with **Close**. It takes layout space.
 - **Terminal toolbar:** a floating pill (`background` at ~85 %) of rounded keys (`surface`),
   30 dp wide (text keys as wide as their label) and 30 dp tall inside a 40 dp tall pill, each with
   a 34 x 40 dp touch box (the platform grows the hit area to 48 dp):
@@ -283,12 +311,14 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   one key; `Alt` lives in the arrow pad's extras row. While text is selected `Copy` and `Clear`
   join the row. Horizontally scrollable when it overflows.
 - **Arrow pad:** the arrow key expands a floating 3×3 cluster above the toolbar: Backspace,
-  Up, Clear-line / Left, Enter, Right / Down; keys are 40 dp `surface` squares (Enter `surfaceTrack`) with 12 dp
-  radius and 6 dp gaps, on an opaque `crust` backing (16 dp radius, 6 dp padding) so scrolled terminal text
-  never shows between the keys; the grab handle that collapses it is inside the backing, at its top. Keys auto-repeat on hold (after 400 ms, every 60 ms).
-  Clear-line is an eraser outline. Below the cluster a 36 dp scrolling pill keeps `Alt`, `Home`,
-  `End`, `PgUp`, `PgDn` and the shell symbols (28 dp keys, label-wide navigation keys) one tap away,
-  with an edge fade on each side that has more keys behind it.
+  Up, Clear-line / Left, Enter, Right / Down; keys are 40 dp squares with 12 dp radius and 6 dp gaps, each
+  opaque on its own (`surface`, Enter `surfaceTrack`) with a `divider` hairline edge, so it stays legible over
+  terminal text. Nothing is drawn behind the cluster: no panel, border, shadow or grip; the keys float over the
+  terminal, which shows between them. The toolbar's arrow-pad key opens and closes it (it is lit while open).
+  Keys auto-repeat on hold (after 400 ms, every 60 ms).
+  Clear-line is an eraser outline. Below the cluster, 6 dp under it, a 36 dp scrolling pill (`background`
+  with the same `divider` hairline) keeps `Alt`, `Home`, `End`, `PgUp`, `PgDn` and the shell symbols (28 dp
+  keys, label-wide navigation keys) one tap away, with an edge fade on each side that has more keys behind it.
 - **Composer (chat input):** a rounded 20 dp `crust` card docked above the IME and above the key
   toolbar (which stays, so `Esc`, `Ctrl` and `Tab` remain reachable), in one row (about 40 dp for a single line, growing to five): a 13 sp mono
   placeholder (`Message <host>...`) or the text, a close action (40 dp box) and a

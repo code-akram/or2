@@ -85,7 +85,7 @@ data class HostTerminalItem(val id: Long, val title: String, val closed: Boolean
 
 /**
  * One host: its connection and, once connected, the session picker sheet (herdr, tmux or a
- * recent session, or "Skip" for a plain shell). Stateless: the caller owns the connection and
+ * recent session, or "Shell" for a plain shell). Stateless: the caller owns the connection and
  * supplies what it knows. The sheet opens by itself when the host connects, once per connection:
  * [pickerOffered] (kept by the caller, so it survives leaving and re-entering this screen, e.g. Back
  * from a terminal) says it already did, and [setPickerOffered] records it, or resets it when the
@@ -240,7 +240,7 @@ private fun StatusCard(host: Host, hostState: HostState?, link: LinkStatus) {
 enum class PickerTab(val label: String) { HERDR("herdr"), TMUX("tmux"), RECENT("Recent") }
 
 /**
- * The session picker: a segmented control (herdr, tmux, Recent) with a "Skip" pill that opens a
+ * The session picker: a segmented control (herdr, tmux, Recent) with a "Shell" pill (a prompt glyph) that opens a
  * plain shell, and one grouped list below. Hosts without tmux or herdr, failed listings and
  * errors are explained in muted text, never hidden.
  */
@@ -270,7 +270,7 @@ fun SessionPickerSheet(
                     tagPrefix = "picker-tab",
                 )
                 Spacer(Modifier.weight(1f))
-                PillButton("Skip", openShell, Modifier.testTag("host-shell"), icon = Or2Icons.Skip)
+                PillButton("Shell", openShell, Modifier.testTag("host-shell"), icon = Or2Icons.Terminal, iconFirst = true)
             }
             Column(
                 Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(Or2Dimens.Gutter)

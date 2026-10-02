@@ -167,9 +167,14 @@ class UiGalleryActivity : ComponentActivity() {
             "licenses" -> LicensesRoute(back = {})
             "hostkey-first" -> HostKey(changed = false)
             "hostkey-changed" -> HostKey(changed = true)
-            "terminal" -> Terminal(pad = false, composer = false)
-            "terminal-arrowpad" -> Terminal(pad = true, composer = false)
-            "terminal-composer" -> Terminal(pad = false, composer = true)
+            "terminal" -> Terminal()
+            "terminal-tmux" -> Terminal(target = "tmux main", transport = Transport.MOSH)
+            "terminal-long" -> Terminal(host = "build-box-staging-eu-west", target = "herdr personal w1:p2", transport = Transport.MOSH)
+            "terminal-stale" -> Terminal(target = "tmux main", transport = Transport.MOSH, health = LinkHealth(12_300uL, 12_300uL))
+            "terminal-connecting" -> Terminal(cardState = SessionState.Connecting)
+            "terminal-closed" -> Terminal(target = "tmux main", cardState = SessionState.Closed(CloseReason.Disconnected))
+            "terminal-arrowpad" -> Terminal(pad = true)
+            "terminal-composer" -> Terminal(composer = true)
             else -> Text("Unknown screen: $name", color = Or2Colors.Danger)
         }
     }
@@ -308,8 +313,15 @@ class UiGalleryActivity : ComponentActivity() {
             TmuxList.Loading, false, {}, {}, {}, {}, {}, {}, {}, {})
     }
 
+    /**
+     * The terminal screen over the probe's session; the card's own [cardState] and [health] are the
+     * gallery's (the probe stays connected underneath, so the demo frame still shows).
+     */
     @Composable
-    private fun Terminal(pad: Boolean, composer: Boolean) {
+    private fun Terminal(
+        host: String = "workstation", target: String = "shell", transport: Transport = Transport.SSH,
+        cardState: SessionState = SessionState.Connected, health: LinkHealth? = null, pad: Boolean = false, composer: Boolean = false,
+    ) {
         val session = remember { startProbe() }
         val state by probeState.collectAsStateWithLifecycle()
         // The composer opens with a message typed, so the caret, the focus ring and the lit send button show.
@@ -333,9 +345,9 @@ class UiGalleryActivity : ComponentActivity() {
                 }
             }
         }
-        TerminalCard("workstation: tmux main", Transport.SSH, SessionState.Connected, minimise = {}, openSwitcher = {}, endSession = {}) {
+        TerminalCard(host, target, transport, cardState, minimise = {}, openSwitcher = {}, endSession = {}, linkHealth = health) {
             TerminalScreen(session, probeState, probeFrames.receiveAsFlow(), Modifier.weight(1f),
-                composerHint = "Message workstation…", chrome = chrome)
+                composerHint = "Message $host…", chrome = chrome)
         }
     }
 
@@ -381,7 +393,8 @@ class UiGalleryActivity : ComponentActivity() {
             "home", "home-empty", "home-notices", "host-cards", "inbox", "inbox-empty", "picker-herdr", "picker-tmux", "picker-recent",
             "host-form", "host-form-new-key", "host-form-edit", "keys", "keys-empty", "about", "licenses", "hostkey-first", "hostkey-changed",
             "add-host", "pair-scan", "pair-scan-denied", "pair-review", "pair-review-new", "pair-progress", "pair-install", "keepalive", "keepalive-waiting",
-            "terminal", "terminal-arrowpad", "terminal-composer",
+            "terminal", "terminal-tmux", "terminal-long", "terminal-stale", "terminal-connecting", "terminal-closed",
+            "terminal-arrowpad", "terminal-composer",
         )
     }
 }

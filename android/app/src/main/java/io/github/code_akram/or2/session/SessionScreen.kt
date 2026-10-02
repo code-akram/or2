@@ -1,7 +1,6 @@
 package io.github.code_akram.or2.session
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -11,12 +10,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -31,17 +28,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -59,6 +53,7 @@ import io.github.code_akram.or2.ui.Badge
 import io.github.code_akram.or2.ui.GroupCard
 import io.github.code_akram.or2.ui.GroupDivider
 import io.github.code_akram.or2.ui.ListRow
+import io.github.code_akram.or2.ui.NoticeStrip
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Icons
@@ -67,13 +62,9 @@ import io.github.code_akram.or2.ui.Or2Sheet
 import io.github.code_akram.or2.ui.Or2Type
 import io.github.code_akram.or2.ui.PillButton
 import io.github.code_akram.or2.ui.StatusDot
-import io.github.code_akram.or2.ui.TextAction
 import io.github.code_akram.or2.ui.TopBar
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
-
-/** The mono header title: `host: target`. */
-fun terminalTitle(terminal: ActiveTerminal) = terminal.host.label + ": " + terminal.title
 
 /**
  * One terminal session in a full-height card. Minimising ([minimise]: the round button, or a
@@ -119,7 +110,7 @@ fun SessionScreen(
         // The card follows the terminal's own background, which the remote can change (OSC 11).
         var background by remember { mutableStateOf(Or2Colors.TerminalBackground) }
         if (hasConnected) {
-            TerminalCard(terminalTitle(terminal), transport.display(), state, minimise, openSwitcher = { switcher = true }, endSession,
+            TerminalCard(terminal.host.label, terminal.title, transport.display(), state, minimise, openSwitcher = { switcher = true }, endSession,
                 background = background, linkHealth = linkHealth) {
                 // Keep the borrowed handle composed through Closed so its final frame stays visible.
                 handle?.let { TerminalScreen(it, terminal.state, terminal.frameReady, Modifier.weight(1f),
@@ -145,19 +136,21 @@ fun SessionScreen(
 }
 
 /**
- * The full-height card: drag handle, header row (mono [title], [transport] badge), and the terminal
- * below. A mosh session that has not heard from the server for more than five seconds
- * ([linkHealth]) greys its badge and says how long ago, in the header row itself: nothing is ever
- * drawn over the terminal's rows, and a flapping link does not resize the grid (the row keeps its
- * height; the title gives way).
+ * The full-height card: the [TerminalHeader] (drag handle, the two discs, the centred `host · target`
+ * title, the [transport] pill) on the header's tonal step, a [NoticeStrip] under it while the session
+ * is not connected, a `crust` hairline, and the terminal below. A drag down anywhere on the header
+ * minimises. A mosh session that has not heard from the server for more than five seconds
+ * ([linkHealth]) greys its pill and says how long ago, in the header row itself: nothing is ever drawn
+ * over the terminal's rows, and a flapping link does not resize the grid (the title gives way).
  */
 @Composable
 fun TerminalCard(
-    title: String, transport: Transport, state: SessionState, minimise: () -> Unit, openSwitcher: () -> Unit, endSession: () -> Unit,
-    modifier: Modifier = Modifier, background: Color = Or2Colors.TerminalBackground, linkHealth: LinkHealth? = null,
+    host: String, target: String, transport: Transport, state: SessionState, minimise: () -> Unit, openSwitcher: () -> Unit,
+    endSession: () -> Unit, modifier: Modifier = Modifier, background: Color = Or2Colors.TerminalBackground, linkHealth: LinkHealth? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val stale = linkStaleLabel(linkHealth)
+    val notice = terminalNotice(state)
     var dragY by remember { mutableFloatStateOf(0f) }
     val threshold = with(LocalDensity.current) { 96.dp.toPx() }
     Box(
@@ -165,62 +158,28 @@ fun TerminalCard(
             .clip(Or2Shapes.TerminalCard).background(background).testTag("terminal-card"),
     ) {
         Column(Modifier.fillMaxSize()) {
-            Column(Modifier.pointerInput(Unit) {
-                detectVerticalDragGestures(
-                    onDragEnd = { if (dragY > threshold) minimise() else dragY = 0f },
-                    onDragCancel = { dragY = 0f },
-                    onVerticalDrag = { change, amount -> change.consume(); dragY = (dragY + amount).coerceAtLeast(0f) },
-                )
-            }.testTag("terminal-header")) {
-                // The grab handle overlaps the top of the 36 dp header row, so the header costs no extra height.
-                Box(Modifier.fillMaxWidth()) {
-                    Box(
-                        Modifier.align(Alignment.TopCenter).padding(top = 4.dp)
-                            .size(width = Or2Dimens.TerminalHandleWidth, height = Or2Dimens.SheetHandleHeight)
-                            .clip(Or2Shapes.Pill).background(Or2Colors.Subtle),
-                    )
-                    Row(
-                        Modifier.fillMaxWidth().heightIn(min = Or2Dimens.HeaderRow).padding(horizontal = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        RoundHeaderButton(Or2Icons.Minimize, "Minimise to home", Or2Colors.Attention, minimise, Modifier.testTag("terminal-back"))
-                        RoundHeaderButton(Or2Icons.Sidebar, "Panes and sessions", Or2Colors.Done, openSwitcher, Modifier.testTag("terminal-panes"))
-                        Text(
-                            title, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, maxLines = 1,
-                            overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(horizontal = 4.dp).testTag("terminal-title"),
+            Column(Modifier.fillMaxWidth().background(Or2Colors.TerminalHeader)) {
+                TerminalHeader(
+                    host, target, transport, stale, minimise, openSwitcher,
+                    Modifier.pointerInput(Unit) {
+                        detectVerticalDragGestures(
+                            onDragEnd = { if (dragY > threshold) minimise() else dragY = 0f },
+                            onDragCancel = { dragY = 0f },
+                            onVerticalDrag = { change, amount -> change.consume(); dragY = (dragY + amount).coerceAtLeast(0f) },
                         )
-                        if (stale != null) {
-                            Text(stale, style = Or2Type.MonoSmall, color = Or2Colors.Attention, maxLines = 1,
-                                modifier = Modifier.padding(end = 6.dp).testTag("terminal-link"))
-                        }
-                        TransportBadge(transport, Modifier.padding(end = 10.dp).testTag("terminal-transport"), small = true, stale = stale != null)
-                    }
+                    }.testTag("terminal-header"),
+                )
+                if (notice != null) {
+                    NoticeStrip(
+                        notice.text, Modifier.testTag("terminal-notice"), tone = notice.tone, busy = notice.busy,
+                        actionLabel = if (notice.closable) "Close" else null, onAction = endSession,
+                        actionModifier = Modifier.testTag("terminal-close"), textModifier = Modifier.testTag("terminal-status"),
+                    )
                 }
             }
-            if (state !is SessionState.Connected) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
-                    Text(sessionMessage(state), style = Or2Type.MonoSmall,
-                        color = if (state is SessionState.Closed) Or2Colors.Attention else Or2Colors.TextMuted,
-                        modifier = Modifier.weight(1f).testTag("terminal-status"))
-                    if (state is SessionState.Closed) TextAction("Close", endSession, modifier = Modifier.testTag("terminal-close"))
-                }
-            }
+            // A hairline in `crust` between the header's tone and the grid.
+            Box(Modifier.fillMaxWidth().height(Dp.Hairline).background(Or2Colors.Crust).testTag("terminal-header-line"))
             content()
-        }
-    }
-}
-
-@Composable
-private fun RoundHeaderButton(icon: ImageVector, description: String, color: Color, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    // A small round disc (18 dp) in a 48 x 36 dp box; the platform grows the height of the touch target to 48 dp,
-    // and neighbouring boxes do not overlap, so a tap between two discs goes to the nearer one.
-    Box(
-        modifier.size(Or2Dimens.HeaderButtonTouchWidth, Or2Dimens.HeaderButtonTouch).clip(Or2Shapes.Pill).clickable(role = Role.Button, onClick = onClick)
-            .semantics { contentDescription = description },
-        contentAlignment = Alignment.Center,
-    ) {
-        Box(Modifier.size(Or2Dimens.HeaderButtonDisc).clip(Or2Shapes.Circle).background(color), contentAlignment = Alignment.Center) {
-            Icon(icon, null, Modifier.size(Or2Dimens.HeaderButtonGlyph), tint = Or2Colors.Background)
         }
     }
 }

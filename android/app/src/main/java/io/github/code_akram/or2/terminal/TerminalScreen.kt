@@ -214,7 +214,7 @@ fun TerminalScreen(
                 if (scrolledAway) {
                     ScrollToBottomButton({ view.jumpToBottom() }, Modifier.align(Alignment.BottomEnd).padding(end = 4.dp, bottom = 4.dp))
                 }
-                if (chrome.padOpen) ArrowPad(pad, alt, { view.input.toggleAlt() }, collapse = { chrome.padOpen = false }, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp))
+                if (chrome.padOpen) ArrowPad(pad, alt, { view.input.toggleAlt() }, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp))
             }
             if (chrome.composerOpen) {
                 Composer(
@@ -298,7 +298,7 @@ private fun ScrollToBottomButton(onClick: () -> Unit, modifier: Modifier = Modif
             Modifier.size(Or2Dimens.Chip).clip(Or2Shapes.Circle).background(Or2Colors.ToolbarPill),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(Or2Icons.ArrowDown, null, Modifier.size(Or2Dimens.HeaderButtonGlyph + 4.dp), tint = Or2Colors.Accent)
+            Icon(Or2Icons.ArrowDown, null, Modifier.size(Or2Dimens.ScrollButtonGlyph), tint = Or2Colors.Accent)
         }
     }
 }

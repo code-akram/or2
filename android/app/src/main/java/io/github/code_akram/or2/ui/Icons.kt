@@ -81,7 +81,7 @@ object Or2Icons {
     val Pencil = icon("pencil", "M4 20h4L19 9l-4-4L4 16z", "M13 7l4 4")
     val Power = icon("power", "M12 3.5v8", "M7 6.8a7.5 7.5 0 1 0 10 0")
     val Refresh = icon("refresh", "M20 12a8 8 0 1 1-2.4-5.7", "M20 4.5V9h-4.5")
-    val Skip = icon("skip", "M6 5.5l9 6.5-9 6.5z", "M19 5v14")
+    /** A shell prompt, `>_`: the picker's "Shell" pill and the Resume card. */
     val Terminal = icon("terminal", "M5 7.5l4.5 4.5L5 16.5", "M12.5 17h6.5")
     val Layers = icon("layers", "M12 3.5l9 5-9 5-9-5z", "M3 12.5l9 5 9-5", "M3 16.5l9 5 9-5")
     val Grid = icon(

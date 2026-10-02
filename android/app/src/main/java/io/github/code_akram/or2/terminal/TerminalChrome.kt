@@ -2,6 +2,7 @@ package io.github.code_akram.or2.terminal
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -194,8 +195,10 @@ private fun RepeatKey(
 ) {
     val scope = rememberCoroutineScope()
     val current by rememberUpdatedState(onKey)
+    // A filled key floats on the terminal by itself, so it carries its own hairline edge.
+    val edge = if (container.alpha > 0f) Modifier.border(Dp.Hairline, Or2Colors.Divider, Or2Shapes.Key) else Modifier
     Box(
-        modifier.size(width, height).clip(Or2Shapes.Key).background(container)
+        modifier.size(width, height).clip(Or2Shapes.Key).background(container).then(edge)
             .pointerInput(Unit) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
@@ -239,26 +242,19 @@ val ExtraKeys = NavigationKeys + SymbolKeys
 
 /**
  * The floating 3x3 cluster above the toolbar: Backspace, Up, Clear-line / Left, Enter, Right /
- * Down; 40 dp `surface` squares with 12 dp radius that auto-repeat on hold. The keys sit on an
- * opaque `crust` backing (16 dp radius, 6 dp padding) so scrolled terminal text never shows in the
- * gaps between them, and the grab handle that collapses the pad is inside that backing, at its top.
- * A scrolling row below keeps the navigation and symbol keys one tap away.
+ * Down; 40 dp `surface` squares with 12 dp radius and a `divider` hairline that auto-repeat on hold.
+ * Nothing is drawn behind the cluster: the keys float over the terminal, each opaque on its own. The
+ * toolbar's arrow-pad key opens and closes it. A scrolling row below keeps the navigation and symbol
+ * keys one tap away.
  */
 @Composable
-fun ArrowPad(actions: PadActions, alt: Boolean, toggleAlt: () -> Unit, collapse: () -> Unit, modifier: Modifier = Modifier) {
+fun ArrowPad(actions: PadActions, alt: Boolean, toggleAlt: () -> Unit, modifier: Modifier = Modifier) {
     val haptics = LocalHapticFeedback.current
     Column(modifier.testTag("arrow-pad"), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(Or2Dimens.PadGap)) {
         Column(
-            Modifier.testTag("pad-backing").clip(Or2Shapes.PadBacking).background(Or2Colors.Crust).padding(Or2Dimens.PadGap),
+            Modifier.testTag("pad-cluster"),
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(Or2Dimens.PadGap),
         ) {
-            Box(
-                Modifier.heightIn(min = Or2Dimens.PadHandleTouch).widthIn(min = 64.dp).clickable(role = Role.Button, onClickLabel = "Collapse arrow pad", onClick = collapse)
-                    .semantics { contentDescription = "Collapse arrow pad" },
-                contentAlignment = Alignment.Center,
-            ) {
-                Box(Modifier.size(width = Or2Dimens.TerminalHandleWidth, height = Or2Dimens.SheetHandleHeight).clip(Or2Shapes.Pill).background(Or2Colors.Subtle))
-            }
             Row(horizontalArrangement = Arrangement.spacedBy(Or2Dimens.PadGap)) {
                 RepeatKey("Backspace", actions.backspace, Modifier.testTag("pad:Backspace"), icon = Or2Icons.Backspace)
                 RepeatKey("Up", actions.up, Modifier.testTag("pad:Up"), icon = Or2Icons.ArrowUp)
@@ -274,7 +270,7 @@ fun ArrowPad(actions: PadActions, alt: Boolean, toggleAlt: () -> Unit, collapse:
         val scroll = rememberScrollState()
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp).height(Or2Dimens.PadExtrasHeight).clip(Or2Shapes.Pill)
-                .background(Or2Colors.Background)
+                .background(Or2Colors.Background).border(Dp.Hairline, Or2Colors.Divider, Or2Shapes.Pill)
                 // An edge fade on each side that has more keys behind it: the row scrolls.
                 .drawWithContent {
                     drawContent()

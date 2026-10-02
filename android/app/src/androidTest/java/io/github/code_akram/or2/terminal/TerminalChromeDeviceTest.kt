@@ -176,18 +176,23 @@ class TerminalChromeDeviceTest {
     }
 
     @Test
-    fun theArrowPadKeysAndItsGripSitOnOneOpaqueBacking() {
+    fun theArrowPadFloatsWithoutABackingAndTheToolbarKeyClosesIt() {
         show(pad = true)
-        val backing = compose.onNodeWithTag("pad-backing").fetchSemanticsNode().boundsInRoot
-        val density = compose.activity.resources.displayMetrics.density
-        val inside = listOf("pad:Backspace", "pad:Clear", "pad:Left", "pad:Right", "pad:Down").map {
-            it to compose.onNodeWithTag(it).fetchSemanticsNode().boundsInRoot
-        } + ("grip" to compose.onNodeWithContentDescription("Collapse arrow pad").fetchSemanticsNode().boundsInRoot)
-        inside.forEach { (name, bounds) ->
-            // Every key and the grip lie within the backing, with the 6 dp padding around them.
-            assertTrue("$name $bounds in $backing", bounds.left >= backing.left + 5 * density && bounds.right <= backing.right - 5 * density)
-            assertTrue("$name $bounds in $backing", bounds.top >= backing.top + 5 * density && bounds.bottom <= backing.bottom - 5 * density)
-        }
+        // No panel behind the keys and no grip: the keys float over the terminal on their own.
+        compose.onNodeWithTag("pad-backing").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Collapse arrow pad").assertDoesNotExist()
+        // The cluster is exactly its keys: 3 x 40 dp keys and two 6 dp gaps wide, nothing around them.
+        val cluster = compose.onNodeWithTag("pad-cluster").fetchSemanticsNode().boundsInRoot
+        val left = compose.onNodeWithTag("pad:Left").fetchSemanticsNode().boundsInRoot
+        val right = compose.onNodeWithTag("pad:Right").fetchSemanticsNode().boundsInRoot
+        assertEquals(cluster.left, left.left, 1f)
+        assertEquals(cluster.right, right.right, 1f)
+        assertEquals(cluster.top, compose.onNodeWithTag("pad:Up").fetchSemanticsNode().boundsInRoot.top, 1f)
+        // The toolbar's arrow-pad key is the toggle that closes it again.
+        compose.onNodeWithTag("key:Arrows").performClick()
+        compose.onNodeWithTag("arrow-pad").assertDoesNotExist()
+        compose.onNodeWithTag("key:Arrows").performClick()
+        compose.onNodeWithTag("arrow-pad").assertIsDisplayed()
     }
 
     @Test

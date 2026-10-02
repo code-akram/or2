@@ -144,7 +144,7 @@ class HostScreenUiDeviceTest {
         compose.onNodeWithText("3 windows · 1 attached").assertIsDisplayed()
         compose.onNodeWithTag("tmux-attach:build").performClick()
         reopenPicker()
-        compose.onNodeWithTag("host-shell").performClick() // "Skip": a plain shell.
+        compose.onNodeWithTag("host-shell").assertTextEquals("Shell").performClick() // A plain shell.
         reopenPicker()
         pickerTab(1)
         compose.onNodeWithTag("host-refresh").performScrollTo().performClick()

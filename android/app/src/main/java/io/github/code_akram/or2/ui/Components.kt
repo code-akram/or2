@@ -411,24 +411,31 @@ fun PrimaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifi
 }
 
 /**
- * A secondary pill: `surfaceTrack` with text, optional trailing icon (e.g. "Skip"). [compact] is the
- * chip scale (28 dp, 12 sp) for an action that sits inside a list row (Retry, Unlock).
+ * A secondary pill: `surfaceTrack` with text and an optional icon, trailing by default or leading with
+ * [iconFirst] (the picker's prompt glyph before "Shell"). [compact] is the chip scale (28 dp, 12 sp) for
+ * an action that sits inside a list row (Retry, Unlock).
  */
 @Composable
 fun PillButton(
     text: String, onClick: () -> Unit, modifier: Modifier = Modifier, icon: ImageVector? = null,
     enabled: Boolean = true, container: Color = Or2Colors.SurfaceTrack, content: Color = Or2Colors.Text,
-    compact: Boolean = false,
+    compact: Boolean = false, iconFirst: Boolean = false,
 ) {
+    val tint = if (enabled) content else Or2Colors.TextMuted
     Row(
         modifier.heightIn(min = if (compact) Or2Dimens.Chip else Or2Dimens.Segmented + 4.dp).clip(Or2Shapes.Pill).background(container)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick).padding(horizontal = if (compact) 12.dp else 18.dp),
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .padding(start = if (icon != null && iconFirst) 12.dp else if (compact) 12.dp else 18.dp, end = if (compact) 12.dp else 18.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center,
     ) {
-        Text(text, style = if (compact) Or2Type.Chip else Or2Type.Body, color = if (enabled) content else Or2Colors.TextMuted, maxLines = 1)
-        if (icon != null) {
+        if (icon != null && iconFirst) {
+            Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = tint)
+            Spacer(Modifier.width(4.dp))
+        }
+        Text(text, style = if (compact) Or2Type.Chip else Or2Type.Body, color = tint, maxLines = 1)
+        if (icon != null && !iconFirst) {
             Spacer(Modifier.width(6.dp))
-            Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = if (enabled) content else Or2Colors.TextMuted)
+            Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = tint)
         }
     }
 }

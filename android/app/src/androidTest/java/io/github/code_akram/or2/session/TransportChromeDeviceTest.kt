@@ -36,7 +36,7 @@ class TransportChromeDeviceTest {
         compose.activity.setContent {
             Or2Theme {
                 TerminalCard(
-                    "workstation: tmux main", transport, SessionState.Connected, minimise = {}, openSwitcher = {}, endSession = {},
+                    "workstation", "tmux main", transport, SessionState.Connected, minimise = {}, openSwitcher = {}, endSession = {},
                     linkHealth = health,
                 ) { Box(Modifier.weight(1f).fillMaxWidth().testTag("terminal-body")) }
             }

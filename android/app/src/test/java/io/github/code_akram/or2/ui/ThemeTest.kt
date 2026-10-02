@@ -123,13 +123,38 @@ class ThemeTest {
     }
 
     @Test
-    fun theHeaderButtonsDoNotOverlapEachOther() {
-        // Visible discs 18 dp with a 12 dp glyph; 48 dp wide boxes put neighbouring centres 48 dp apart.
-        assertEquals(18.dp, Or2Dimens.HeaderButtonDisc)
-        assertEquals(12.dp, Or2Dimens.HeaderButtonGlyph)
-        assertEquals(48.dp, Or2Dimens.HeaderButtonTouchWidth)
+    fun theHeaderDiscsAreAPairWhoseBoxesMeetHalfway() {
+        // Visible discs 16 dp with a 10 dp glyph, 10 dp apart; each box reaches halfway to the other disc.
+        assertEquals(16.dp, Or2Dimens.HeaderButtonDisc)
+        assertEquals(10.dp, Or2Dimens.HeaderButtonGlyph)
+        assertEquals(10.dp, Or2Dimens.HeaderDiscGap)
+        assertEquals(Or2Dimens.HeaderButtonDisc + Or2Dimens.HeaderDiscGap, Or2Dimens.HeaderButtonBox)
+        // The handle is thin and fits above the title inside the 36 dp header.
+        assertEquals(28.dp, Or2Dimens.TerminalHandleWidth)
+        assertEquals(3.dp, Or2Dimens.TerminalHandleHeight)
+        assertEquals(4.dp, Or2Dimens.TerminalHandleTop)
+        assertEquals(28.dp, Or2Dimens.NoticeStrip)
         // The connecting spinner takes the server icon's slot exactly.
         assertEquals(Or2Dimens.Icon, Or2Dimens.Spinner)
+    }
+
+    @Test
+    fun theTerminalHeaderIsASlightTonalStepThatKeepsItsTextLegible() {
+        assertEquals("#222232", hex(Or2Colors.TerminalHeader))
+        assertEquals("#585B70", hex(Or2Colors.Handle))
+        // One step above the grid, below `surface`.
+        assertTrue(luminance(Or2Colors.TerminalHeader) > luminance(Or2Colors.TerminalBackground))
+        assertTrue(luminance(Or2Colors.TerminalHeader) < luminance(Or2Colors.Surface))
+        // The muted target, the notice strip's text and the stale label read on it.
+        assertTrue(contrast(Or2Colors.TextMuted, Or2Colors.TerminalHeader) >= 4.5)
+        assertTrue(contrast(Or2Colors.Attention, Or2Colors.TerminalHeader) >= 4.5)
+        assertTrue(contrast(Or2Colors.Accent, Or2Colors.TerminalHeader) >= 4.5)
+        // The handle is quieter than the icon grey: a hint, not a control bar.
+        assertTrue(contrast(Or2Colors.Handle, Or2Colors.TerminalHeader) < contrast(Or2Colors.Subtle, Or2Colors.TerminalHeader))
+        // The host is the one medium weight in the type scale.
+        assertEquals(500, Or2Type.HeaderTitle.fontWeight!!.weight)
+        assertEquals(12f, Or2Type.HeaderTitle.fontSize.value, 0f)
+        assertEquals(11f, Or2Type.HeaderTarget.fontSize.value, 0f)
     }
 
     @Test
