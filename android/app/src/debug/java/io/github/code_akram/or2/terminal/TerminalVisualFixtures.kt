@@ -4,6 +4,7 @@ import io.github.code_akram.or2.ffi.CellStyle
 import io.github.code_akram.or2.ffi.CellWidth
 import io.github.code_akram.or2.ffi.CursorShape
 import io.github.code_akram.or2.ffi.Scrollback
+import io.github.code_akram.or2.ffi.TerminalModes
 import io.github.code_akram.or2.ffi.TerminalCell
 import io.github.code_akram.or2.ffi.TerminalCursor
 import io.github.code_akram.or2.ffi.TerminalFrame
@@ -45,7 +46,7 @@ fun terminalVisualFrame(columns: UShort, rows: UShort, shape: CursorShape): Term
     }
     return TerminalFrame(1u, columns, rows, true, styles, changed,
         if (rows > 11u && columns >= 3u) TerminalCursor(1u, 11u, true, shape, false, 0x89b4fau) else null,
-        0x1e1e2eu, Scrollback(rows.toULong(), 0u))
+        0x1e1e2eu, Scrollback(rows.toULong(), 0u), TerminalModes(false, false))
 }
 
 /** Dense all-row update; frame production is excluded from measured apply/record durations. */
@@ -60,5 +61,5 @@ fun terminalStressFrame(columns: UShort, rows: UShort, sequence: ULong): Termina
             TerminalCell(alphabet[(column + row + (sequence % alphabet.length.toULong()).toInt()) % alphabet.length].toString(),
                 CellWidth.NARROW, (row % 2).toUInt())
         })
-    }, null, 0x1e1e2eu, Scrollback(rows.toULong(), 0u))
+    }, null, 0x1e1e2eu, Scrollback(rows.toULong(), 0u), TerminalModes(false, false))
 }

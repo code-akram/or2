@@ -26,7 +26,7 @@ class UiSession(private val initial: SessionState = SessionState.Connected) : Se
     val frame = TerminalFrame(1uL, 2u, 1u, true,
         listOf(CellStyle(0xffffffu, 0u, null, Underline.NONE, false, false, false, false, false)),
         listOf(TerminalRow(0u, false, listOf(TerminalCell("L", CellWidth.NARROW, 0u), TerminalCell("R", CellWidth.NARROW, 0u)))),
-        null, 0u, Scrollback(1uL, 0uL))
+        null, 0u, Scrollback(1uL, 0uL), TerminalModes(false, false))
 
     override fun takeFrame(): TerminalFrame? {
         check(!destroyed)
@@ -88,4 +88,5 @@ class UiPort(
     }
     override suspend fun focusHerdrPane(session: String?, paneId: String) = Unit
     override suspend fun stopMoshServer(pid: UInt) = Unit
+    override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll) = Unit
 }

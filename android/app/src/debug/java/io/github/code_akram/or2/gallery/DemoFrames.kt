@@ -4,6 +4,7 @@ import io.github.code_akram.or2.ffi.CellStyle
 import io.github.code_akram.or2.ffi.CellWidth
 import io.github.code_akram.or2.ffi.CursorShape
 import io.github.code_akram.or2.ffi.Scrollback
+import io.github.code_akram.or2.ffi.TerminalModes
 import io.github.code_akram.or2.ffi.TerminalCell
 import io.github.code_akram.or2.ffi.TerminalCursor
 import io.github.code_akram.or2.ffi.TerminalFrame
@@ -104,6 +105,6 @@ fun terminalDemoFrame(columns: Int, rows: Int, sequence: ULong = 1u): TerminalFr
     return TerminalFrame(
         sequence, columns.toUShort(), rows.toUShort(), true, styles, changed,
         TerminalCursor(promptColumn.toUShort(), (rows - 1).toUShort(), false, CursorShape.BLOCK, false, Mocha.BLUE),
-        Mocha.BG, Scrollback((rows * 3).toULong(), (rows * 2).toULong()),
+        Mocha.BG, Scrollback((rows * 3).toULong(), (rows * 2).toULong()), TerminalModes(false, false),
     )
 }

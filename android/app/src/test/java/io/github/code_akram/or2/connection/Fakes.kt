@@ -50,7 +50,7 @@ class FakeSession(val events: MutableList<String> = mutableListOf(), val transpo
     val lastFrame = TerminalFrame(1uL, 2u, 1u, true,
         listOf(CellStyle(0xffffffu, 0u, null, Underline.NONE, false, false, false, false, false)),
         listOf(TerminalRow(0u, false, listOf(TerminalCell("L", CellWidth.NARROW, 0u), TerminalCell("R", CellWidth.NARROW, 0u)))),
-        null, 0u, Scrollback(1uL, 0uL))
+        null, 0u, Scrollback(1uL, 0uL), TerminalModes(false, false))
     var pending: TerminalFrame? = lastFrame
     override fun transport() = transport
     override fun serverPid() = pid
@@ -155,6 +155,11 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         events += "stop:$pid"
         stopped += pid
         stopFailure?.let { throw it }
+    }
+    /** `scroll_target` calls in order: the target, the herdr pane passed and the scroll. */
+    val scrolls = mutableListOf<Triple<TerminalTarget, String?, TargetScroll>>()
+    override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll) {
+        scrolls += Triple(target, paneId, scroll)
     }
     override suspend fun focusHerdrPane(session: String?, paneId: String) {
         events += "focus:$session:$paneId"

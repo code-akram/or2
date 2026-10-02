@@ -115,7 +115,8 @@ fun SessionScreen(
                 // Keep the borrowed handle composed through Closed so its final frame stays visible.
                 handle?.let { TerminalScreen(it, terminal.state, terminal.frameReady, Modifier.weight(1f),
                     composerHint = "Message " + terminal.host.label + "…", openPanes = { switcher = true },
-                    onBackground = { background = it }, onFrameDrawn = { holder.timing.terminalFrame(terminal.id) }) }
+                    onBackground = { background = it }, onFrameDrawn = { holder.timing.terminalFrame(terminal.id) },
+                    target = terminal.target, scrollTarget = { holder.scrollTarget(terminal, it) }) }
             }
         } else {
             PendingTerminal(terminal, state, closed, endSession, minimise, open, select, note)

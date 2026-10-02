@@ -2,6 +2,8 @@ package io.github.code_akram.or2.terminal
 
 import android.content.ClipboardManager
 import android.graphics.RectF
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
@@ -9,8 +11,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -20,10 +24,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.Color
@@ -33,6 +39,9 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.ViewCompat
@@ -40,9 +49,14 @@ import androidx.core.view.WindowInsetsCompat
 import io.github.code_akram.or2.ffi.KeyModifiers
 import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionState
+import io.github.code_akram.or2.ffi.TargetScroll
 import io.github.code_akram.or2.ffi.TerminalKey
+import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dialog
+import io.github.code_akram.or2.ui.Or2Dimens
+import io.github.code_akram.or2.ui.Or2Icons
+import io.github.code_akram.or2.ui.Or2Shapes
 import io.github.code_akram.or2.ui.TextAction
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -53,7 +67,9 @@ import kotlinx.coroutines.launch
  * over it, and below it the floating key toolbar, with the composer above the toolbar while it is
  * open (Esc, Ctrl and Tab stay reachable). IME insets are owned here, so both ride on top of the
  * keyboard. [chrome] is the hoisted open/closed state; [onBackground] reports the terminal's own
- * background colour (the remote can change it) so the card around it can follow.
+ * background colour (the remote can change it) so the card around it can follow. A tmux or herdr
+ * [target] scrolls its own history through [scrollTarget] (`scroll_target`) when the program does
+ * not track the mouse; a small round button returns to the bottom while anything is scrolled up.
  */
 @Composable
 fun TerminalScreen(
@@ -67,11 +83,23 @@ fun TerminalScreen(
     chrome: TerminalChromeState = remember { TerminalChromeState() },
     /** A frame was drawn (reported to the timing markers, which ignore it unless a path is waiting for one). */
     onFrameDrawn: () -> Unit = {},
+    target: TerminalTarget = TerminalTarget.Shell,
+    scrollTarget: (suspend (TargetScroll) -> Unit)? = null,
 ) {
     key(session) {
         val context = LocalContext.current
         val haptics = LocalHapticFeedback.current
-        val view = remember(session, context) { TerminalView(context).apply { bind(session) } }
+        val scope = rememberCoroutineScope()
+        val scrollTargetNow by rememberUpdatedState(scrollTarget)
+        val view = remember(session, context) {
+            TerminalView(context).apply {
+                bind(session)
+                if (scrollTarget != null && target !is TerminalTarget.Shell) {
+                    useTargetScroll(target, scope) { scroll -> scrollTargetNow?.invoke(scroll) }
+                }
+            }
+        }
+        var scrolledAway by remember { mutableStateOf(false) }
         var ctrl by remember { mutableStateOf(false) }
         var alt by remember { mutableStateOf(false) }
         var selecting by remember { mutableStateOf(false) }
@@ -85,11 +113,13 @@ fun TerminalScreen(
             view.onInputChanged = { ctrl = view.input.ctrl; alt = view.input.alt }
             view.onSelectionChanged = { selecting = view.selection != null }
             view.onBackgroundChanged = { background(Color(it.toInt() or (0xff shl 24))) }
+            view.onScrolledAwayChanged = { scrolledAway = it }
             onDispose {
                 view.onFrameDrawn = {}
                 view.onInputChanged = {}
                 view.onSelectionChanged = {}
                 view.onBackgroundChanged = {}
+                view.onScrolledAwayChanged = {}
             }
         }
         LaunchedEffect(view, state, frameReady) {
@@ -144,6 +174,9 @@ fun TerminalScreen(
         Column(modifier.fillMaxSize().windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))) {
             Box(Modifier.weight(1f)) {
                 AndroidView(factory = { view }, modifier = Modifier.fillMaxSize().clipToBounds())
+                if (scrolledAway) {
+                    ScrollToBottomButton({ view.jumpToBottom() }, Modifier.align(Alignment.BottomEnd).padding(end = 4.dp, bottom = 4.dp))
+                }
                 if (chrome.padOpen) ArrowPad(pad, alt, { view.input.toggleAlt() }, collapse = { chrome.padOpen = false }, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp))
             }
             if (chrome.composerOpen) {
@@ -196,6 +229,27 @@ fun TerminalScreen(
                 },
                 dismiss = { TextAction("Cancel", { pendingPaste = null }, color = Or2Colors.Text) },
             ) { Text("They will run as typed.") }
+        }
+    }
+}
+
+/**
+ * The scroll-to-bottom button: a small round disc ([Or2Dimens.Chip]) with a down chevron, in a
+ * [Or2Dimens.KeyTouch] box over the terminal's bottom-right corner (the platform grows the target).
+ */
+@Composable
+private fun ScrollToBottomButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier.size(Or2Dimens.KeyTouch).clip(Or2Shapes.Circle)
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Scroll to bottom" }.testTag("scroll-to-bottom"),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier.size(Or2Dimens.Chip).clip(Or2Shapes.Circle).background(Or2Colors.ToolbarPill),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Or2Icons.ArrowDown, null, Modifier.size(Or2Dimens.HeaderButtonGlyph + 4.dp), tint = Or2Colors.Accent)
         }
     }
 }

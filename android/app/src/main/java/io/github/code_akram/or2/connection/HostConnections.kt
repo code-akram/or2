@@ -22,6 +22,7 @@ import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionListener
 import io.github.code_akram.or2.ffi.SessionState
+import io.github.code_akram.or2.ffi.TargetScroll
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.ffi.TmuxSession
@@ -78,6 +79,12 @@ interface HostPort : AutoCloseable {
      * alone); throws when the stop could not run, and the caller keeps the pid.
      */
     suspend fun stopMoshServer(pid: UInt)
+
+    /**
+     * API 14: scrolls the history a tmux or herdr [target] shows (copy mode, `pane.scroll`); [paneId]
+     * is the herdr pane, null for the focused one. A shell target does nothing.
+     */
+    suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll)
 }
 
 class NativeHostPort(private val connection: HostConnection) : HostPort {
@@ -94,6 +101,8 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
         connection.watchHerdr(session, listener)
     override suspend fun focusHerdrPane(session: String?, paneId: String) = connection.focusHerdrPane(session, paneId)
     override suspend fun stopMoshServer(pid: UInt) = connection.stopMoshServer(pid)
+    override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll) =
+        connection.scrollTarget(target, paneId, scroll)
     override fun close() = connection.close()
 }
 
@@ -662,6 +671,25 @@ class HostConnections(
         if (!owns(current) || current.retired) throw HostException.Closed()
         val port = current.mutablePort.value ?: throw HostException.NotConnected()
         port.focusHerdrPane(session, paneId)
+    }
+
+    /**
+     * Scrolls [terminal]'s tmux or herdr history (`scroll_target`) over its host's current connection
+     * (a mosh terminal outlives the one it was opened on). A herdr target scrolls the pane its
+     * session's watch reports focused, else the one herdr names as focused. Throws [HostException]
+     * when there is no connection or the scroll failed.
+     */
+    suspend fun scrollTarget(terminal: ActiveTerminal, scroll: TargetScroll) {
+        val current = mutableHosts.value[terminal.host.id] ?: throw HostException.Closed()
+        if (current.retired) throw HostException.Closed()
+        val port = current.mutablePort.value ?: throw HostException.NotConnected()
+        port.scrollTarget(terminal.target, focusedHerdrPane(current, terminal.target), scroll)
+    }
+
+    private fun focusedHerdrPane(current: ActiveHost, target: TerminalTarget): String? {
+        val herdr = target as? TerminalTarget.Herdr ?: return null
+        val watch = current.mutableWatches.value.firstOrNull { it.session == herdr.session }
+        return (watch?.state?.value as? HerdrState.Live)?.view?.focusedPaneId
     }
 
     private class HerdrWatchSpec(val session: String?, val name: String)

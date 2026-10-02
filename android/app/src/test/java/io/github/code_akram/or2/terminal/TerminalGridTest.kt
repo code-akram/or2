@@ -3,6 +3,7 @@ package io.github.code_akram.or2.terminal
 import io.github.code_akram.or2.ffi.CellStyle
 import io.github.code_akram.or2.ffi.CellWidth
 import io.github.code_akram.or2.ffi.Scrollback
+import io.github.code_akram.or2.ffi.TerminalModes
 import io.github.code_akram.or2.ffi.TerminalCell
 import io.github.code_akram.or2.ffi.TerminalFrame
 import io.github.code_akram.or2.ffi.TerminalRow
@@ -28,7 +29,7 @@ class TerminalGridTest {
     private fun row(index: Int, text: String) = TerminalRow(index.toUShort(), false,
         listOf(TerminalCell(text, CellWidth.NARROW, 0u)))
     private fun frame(full: Boolean, color: UInt, rows: List<TerminalRow>) = TerminalFrame(
-        1u, 1u, 2u, full, listOf(style(color)), rows, null, 0u, Scrollback(2u, 0u))
+        1u, 1u, 2u, full, listOf(style(color)), rows, null, 0u, Scrollback(2u, 0u), TerminalModes(false, false))
 
     @Test fun deltaResolvesItsOwnTableWithoutRecolouringCachedRows() {
         val grid = TerminalGrid()
@@ -49,6 +50,16 @@ class TerminalGridTest {
         assertTrue(grid.apply(frame(false, 3u, emptyList()).copy(scrollback = Scrollback(9u, 4u))))
         assertEquals(4uL, grid.scrollback.offset)
         assertEquals(2u, grid.rows[1].cells[0].style.foreground)
+    }
+
+    @Test fun everyFrameCarriesTheModesASwipeIsRoutedBy() {
+        val grid = TerminalGrid()
+        assertEquals(TerminalModes(false, false), grid.modes)
+        grid.apply(frame(true, 2u, listOf(row(0, "A"), row(1, "B"))).copy(modes = TerminalModes(true, true)))
+        assertEquals(TerminalModes(true, true), grid.modes)
+        // A delta without rows (a mode change dirties none) still updates them.
+        assertTrue(grid.apply(frame(false, 2u, emptyList())))
+        assertEquals(TerminalModes(false, false), grid.modes)
     }
 
     @Test fun resizeFloorsCellsAndNeverSendsZero() {
