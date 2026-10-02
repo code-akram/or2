@@ -323,14 +323,14 @@ impl Actor {
     }
 }
 
-fn discovery_error(error: DiscoveryError) -> HerdrError {
+pub(super) fn discovery_error(error: DiscoveryError) -> HerdrError {
     match error {
         DiscoveryError::Remote(error) => HerdrError::Remote(error),
         other => HerdrError::Failed(other.to_string()),
     }
 }
 
-fn wire_error(error: WireError) -> HerdrError {
+pub(super) fn wire_error(error: WireError) -> HerdrError {
     match error {
         WireError::Remote(error) => HerdrError::Remote(error),
         WireError::Herdr { code, .. } if code == PANE_NOT_FOUND => HerdrError::PaneNotFound,

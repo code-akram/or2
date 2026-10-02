@@ -21,6 +21,7 @@ pub mod wire;
 
 mod discovery;
 mod focus;
+mod navigate;
 mod project;
 #[cfg(test)]
 mod testing;
@@ -37,6 +38,7 @@ use crate::remote::{RemoteError, RemoteHost};
 pub(crate) use discovery::parse_listing;
 pub use discovery::{Directory, DiscoveryError, SessionEntry, list_sessions};
 pub use focus::{FocusGate, focus_pane_in};
+pub use navigate::navigate_in;
 pub use view::{Agent, AgentStatus, HerdrView, Pane, Tab, Workspace};
 /// The watch's intervals, for integration tests that cannot wait for the production ones.
 #[cfg(feature = "test-support")]

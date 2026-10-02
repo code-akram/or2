@@ -207,6 +207,55 @@ impl From<TerminalTarget> for core::TerminalTarget {
     }
 }
 
+/// A direction on screen, for moving between panes (API 14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NavDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// What `HostConnection.navigate` moves (API 14). Previous and next wrap around.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TargetNav {
+    /// The next tmux window, or herdr tab of the focused workspace.
+    NextWindow,
+    PreviousWindow,
+    /// The pane in `direction` (tmux: from the active pane; herdr: from `pane_id` or the focused one).
+    Pane {
+        direction: NavDirection,
+    },
+    /// The next tmux session (the terminal's tmux client switches to it), or herdr workspace.
+    NextSession,
+    PreviousSession,
+}
+
+impl From<NavDirection> for core::NavDirection {
+    fn from(direction: NavDirection) -> Self {
+        match direction {
+            NavDirection::Left => Self::Left,
+            NavDirection::Right => Self::Right,
+            NavDirection::Up => Self::Up,
+            NavDirection::Down => Self::Down,
+        }
+    }
+}
+
+impl From<TargetNav> for core::TargetNav {
+    fn from(nav: TargetNav) -> Self {
+        match nav {
+            TargetNav::NextWindow => Self::NextWindow,
+            TargetNav::PreviousWindow => Self::PreviousWindow,
+            TargetNav::Pane { direction } => Self::Pane {
+                direction: direction.into(),
+            },
+            TargetNav::NextSession => Self::NextSession,
+            TargetNav::PreviousSession => Self::PreviousSession,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct HerdrSessionInfo {
     pub name: String,
@@ -414,6 +463,28 @@ impl HostConnection {
         Ok(self.handle.stop_mosh_server(pid).await?)
     }
 
+    /// Moves what a terminal on `target` shows (API 14), for the swipe gestures: tmux over exec
+    /// (`next-window`, `previous-window`, `select-pane -L/-R/-U/-D`, and `switch-client -n/-p`
+    /// of the terminal's own tmux client, found with `list-clients`), herdr through its API (the
+    /// neighbouring tab of the focused workspace, `pane.focus_direction`, the neighbouring
+    /// workspace). Next and previous wrap around; nowhere to go is `Ok`. `pane_id` is the herdr
+    /// pane to move from (`None`: the focused one, which a herdr client shows); tmux ignores it.
+    /// A `Shell` target returns `Ok(())` and does nothing. `InvalidName` for a malformed name,
+    /// `NotInstalled` without the program, `PaneNotFound` for a vanished herdr pane,
+    /// `CommandFailed` otherwise (a tmux session move with no client attached to the target).
+    /// Cancelling the coroutine drops the reply only.
+    pub async fn navigate(
+        &self,
+        target: TerminalTarget,
+        pane_id: Option<String>,
+        nav: TargetNav,
+    ) -> Result<(), HostError> {
+        Ok(self
+            .handle
+            .navigate(target.into(), pane_id, nav.into())
+            .await?)
+    }
+
     /// Watches a herdr session (`None` is the default session); it ends with the connection.
     pub fn watch_herdr(
         &self,
@@ -588,6 +659,32 @@ mod tests {
         });
         assert_eq!((tmux.windows, tmux.created_unix), (3, -1));
         assert_eq!(tmux.activity_unix, i64::MAX);
+    }
+
+    #[test]
+    fn navigation_maps_every_move_and_direction() {
+        for (direction, core_direction) in [
+            (NavDirection::Left, core::NavDirection::Left),
+            (NavDirection::Right, core::NavDirection::Right),
+            (NavDirection::Up, core::NavDirection::Up),
+            (NavDirection::Down, core::NavDirection::Down),
+        ] {
+            assert_eq!(core::NavDirection::from(direction), core_direction);
+            assert_eq!(
+                core::TargetNav::from(TargetNav::Pane { direction }),
+                core::TargetNav::Pane {
+                    direction: core_direction
+                }
+            );
+        }
+        for (nav, core_nav) in [
+            (TargetNav::NextWindow, core::TargetNav::NextWindow),
+            (TargetNav::PreviousWindow, core::TargetNav::PreviousWindow),
+            (TargetNav::NextSession, core::TargetNav::NextSession),
+            (TargetNav::PreviousSession, core::TargetNav::PreviousSession),
+        ] {
+            assert_eq!(core::TargetNav::from(nav), core_nav);
+        }
     }
 
     #[test]
