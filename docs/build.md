@@ -94,7 +94,10 @@ the no-key-installation (Windows) behaviour. `tests/sshd.rs`: the end to end sui
 `or2-pair-testhost` pairs with a test-only russh phone (derives the bootstrap key, pins the host key,
 authenticates, runs the exchange through the forced command, then logs in with the key it handed over), plus
 a different code, a run that ended, a host key mismatch, a second phone (`gone`), rc-file noise, a
-`ForceCommand`, and `expiry-time`. Like the other sshd tests it skips (printing `SKIP`) without
+`ForceCommand`, and `expiry-time`. The `real_phone` module of the same file repeats the pairing with the
+product's own client (`or2_core::pair`, a dev-dependency of `or2-pair`): its strict parser reads the code the
+host printed and `pair_enroll` does the connection (success, a different code, a host key mismatch, a run
+that ended). Like the other sshd tests it skips (printing `SKIP`) without
 `/usr/bin/sshd` and `ssh-keygen`, unless `OR2_REQUIRE_SSHD` is set, which fails instead; set it in the full
 gate (`cargo test -p or2-pair --all-features`). The code is typed through a `CodePrompt` the tests
 script; the shipped binary reads a terminal only. An independent QR decoder (`rqrr`, dev-only) reads the

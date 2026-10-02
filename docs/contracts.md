@@ -2739,9 +2739,9 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
   not accept this kind of key: use an Ed25519 key." / "Read what or2-pair printed on the host."). The two
   version messages end with a full stop. Version 1 means `version < 2`.
 - **Tests.** `PairFlowTest` runs the flow over a fake backend whose codes and parser are the native ones.
-  `PairEndToEndTest` is written against this contract and skips until `or2-pair-testhost` is the version 2
-  host (it checks that `--help` lists `enroll`); the integration step must make it run (see the class
-  comment).
+  `PairEndToEndTest` runs the built `or2-pair-testhost` behind a disposable sshd (the fixture passes the
+  testhost's `OR2_PAIR_TEST_*` variables to the forced command with `SetEnv`) and finishes with a real
+  `connect_host`; it skips without sshd, and fails instead with `OR2_REQUIRE_SSHD`.
 
 ## Tests
 
@@ -2756,9 +2756,13 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
   gate): the or2-core client pairs through real sshd, the forced command and the built testhost in a
   temporary home, then logs in with the paired key. Also: `BootstrapRefused` for a different `K` and after
   the run ended; `HostKeyMismatch`; `Gone` for a second phone; rc-file noise from a `.bashrc` that
-  echoes; `NotOr2Pair` from a `ForceCommand`.
-- **`or2_core::pair`**: `PairCode` (alphabet, check character, uniformity bounds), the parser table, the
-  derivation vector, the client against a scripted exchange and every error mapping.
+  echoes; `NotOr2Pair` from a `ForceCommand`. The host crate's suite also runs the product's own client
+  (`or2_core::pair`, a dev-dependency) against the built testhost behind the disposable sshd: its parser
+  reads the QR line the host printed (and agrees with the host crate's reference reader), `pair_enroll`
+  pairs, and a different `K`, a different host key and an ended run give `BootstrapRefused`,
+  `HostKeyMismatch` and `BootstrapRefused`.
+- **`or2_core::pair`**: `PairCode` (alphabet, check character and the five shared check vectors,
+  uniformity bounds), the parser table, the derivation vector, the client against a scripted exchange and every error mapping.
 - **Kotlin**: `PairFlowTest` (fakes), `PairMessagesTest`, `PairEndToEndTest` (`or2-pair-testhost`
   behind a disposable sshd with `K` from the flow written to its stdin, then a real `connect_host` with
   the paired key and pinned host key), and `PairUiDeviceTest` with the new screen (screenshots of the

@@ -1034,3 +1034,141 @@ fn sshd_honours_the_expiry_time_option_this_tool_writes() {
         }
     }
 }
+
+// --- the product's phone client against the real host -------------------------------------------
+
+/// The same pairing with the phone the app ships: `or2_core::pair` parses the code the host
+/// printed (so its strict parser reads the host's real output), takes the code as its own
+/// `PairCode`, and `pair_enroll` does the whole connection. The test-only phone above follows the
+/// contract independently; these tests say the two real halves agree with each other too.
+mod real_phone {
+    use super::*;
+    use or2_core::keys::ClientKey;
+    use or2_core::pair::{
+        PairCode as PhoneCode, PairError, PairOffer as PhoneOffer, PairResult, PairTiming,
+        pair_enroll,
+    };
+    use or2_core::transport::DirectTcp;
+    use or2_core::trust::HostKey;
+
+    /// What the phone reads from the QR the host printed.
+    fn scan(host: &Host) -> PhoneOffer {
+        let line = host
+            .seen
+            .lines()
+            .find(|l| l.starts_with("or2-pair:2?"))
+            .unwrap_or_else(|| panic!("no code in:\n{}", host.seen));
+        PhoneOffer::parse(line).expect("the phone's parser reads the host's code")
+    }
+
+    /// The code the person typed, as the phone's own type holds it.
+    fn phone_code(code: &PairCode) -> PhoneCode {
+        PhoneCode::parse_typed(&code.display()).expect("both crates agree on the code's shape")
+    }
+
+    async fn enroll(
+        offer: &PhoneOffer,
+        code: &PhoneCode,
+        key: &ClientKey,
+    ) -> Result<PairResult, PairError> {
+        pair_enroll(
+            &Arc::new(DirectTcp),
+            offer,
+            code,
+            &key.public_key().openssh,
+            "Pixel 8",
+            PairTiming::default(),
+        )
+        .await
+    }
+
+    #[test]
+    fn the_phone_parses_what_the_host_prints_and_pairs() {
+        if !sshd_ready() {
+            return;
+        }
+        let sshd = Sshd::start(Layout::Explicit, "", false);
+        let code = new_code();
+        let mut host = Host::start(&sshd, &code, &[]);
+        let offer = scan(&host);
+        // The two readers agree on the offer.
+        let reference = host.offer();
+        assert_eq!(offer.username, reference.user);
+        assert_eq!(offer.port, reference.port);
+        assert_eq!(offer.addresses[0].host(), reference.address);
+        assert_eq!(offer.pairing_id.as_deref(), Some(reference.id.as_str()));
+
+        let phone = ClientKey::generate_ed25519("phone");
+        let rt = runtime();
+        let result = rt
+            .block_on(enroll(&offer, &phone_code(&code), &phone))
+            .expect("the real client pairs with the real host");
+        assert_eq!(result.username, current_user());
+        assert_eq!(result.fingerprint, phone.public_key().fingerprint);
+
+        host.until("Paired \"Pixel-8\"");
+        let (exit, seen) = host.finish();
+        assert_eq!(exit, Some(0), "{seen}\n{}", sshd.log());
+        let after = sshd.keys_text();
+        assert!(!after.contains("or2-pair-bootstrap-"), "{after}");
+        let key_data = phone.public_key().openssh;
+        assert!(
+            after.contains(key_data.split_whitespace().nth(1).unwrap()),
+            "{after}"
+        );
+        assert_eq!(sshd.state_files(), 0);
+        // The bootstrap key is spent: the same code now finds nothing.
+        assert_eq!(
+            rt.block_on(enroll(&offer, &phone_code(&code), &phone)),
+            Err(PairError::BootstrapRefused)
+        );
+    }
+
+    #[test]
+    fn a_wrong_code_a_wrong_host_key_and_a_finished_run_are_told_apart() {
+        if !sshd_ready() {
+            return;
+        }
+        let sshd = Sshd::start(Layout::Explicit, "", false);
+        let code = new_code();
+        let host = Host::start(&sshd, &code, &[]);
+        let offer = scan(&host);
+        let phone = ClientKey::generate_ed25519("phone");
+        let rt = runtime();
+
+        // Another code: refused by sshd, nothing spent.
+        assert_eq!(
+            rt.block_on(enroll(&offer, &phone_code(&new_code()), &phone)),
+            Err(PairError::BootstrapRefused)
+        );
+        // Another host key: the connection ends before anything is authenticated.
+        let mut other = offer.clone();
+        other.host_key = HostKey::from_openssh(&phone_key().1).expect("a public key line");
+        assert_eq!(
+            rt.block_on(enroll(&other, &phone_code(&code), &phone)),
+            Err(PairError::HostKeyMismatch)
+        );
+        assert!(sshd.keys_text().contains("or2-pair-bootstrap-"));
+        assert!(!sshd.log().contains("Accepted publickey"), "{}", sshd.log());
+
+        // The right code still pairs.
+        assert!(
+            rt.block_on(enroll(&offer, &phone_code(&code), &phone))
+                .is_ok()
+        );
+        let (exit, seen) = host.finish();
+        assert_eq!(exit, Some(0), "{seen}");
+
+        // A run that ended: its code is refused.
+        let sshd = Sshd::start(Layout::Explicit, "", false);
+        let host = Host::start(&sshd, &code, &[]);
+        let offer = scan(&host);
+        host.interrupt();
+        let (exit, seen) = host.finish();
+        assert_eq!(exit, Some(1), "{seen}");
+        assert_eq!(
+            rt.block_on(enroll(&offer, &phone_code(&code), &phone)),
+            Err(PairError::BootstrapRefused)
+        );
+    }
+}

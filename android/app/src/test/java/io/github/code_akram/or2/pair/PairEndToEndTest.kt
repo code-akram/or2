@@ -26,7 +26,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.File
 import java.net.InetAddress
@@ -45,11 +44,9 @@ private fun plain(line: String) = line.split(' ').take(2).joinToString(" ")
  * pairing flow; and then a real `connect_host` to the same sshd with the host key and the key the pairing
  * installed. Nothing of the user's own `~/.ssh`, sshd, tmux or herdr is involved.
  *
- * **What the integration step must finish.** This test is written against the contract; the host-CLI lane's
- * `or2-pair-testhost` is not on this branch. Until it is merged and speaks version 2 the tests skip (see
- * [assumeV2TestHost]); when it is, they must run, and what the CLI lane has to provide is exactly this:
- * - `or2-pair-testhost --help` lists the internal `enroll` subcommand, and `--name`, `--user`, `--ssh-port` and
- *   `--address` work as in the contract;
+ * **What the test relies on in `or2-pair-testhost`** (the contract's `or2-pair-testhost` paragraph):
+ * - `--name`, `--user`, `--ssh-port` and `--address` work as for `or2-pair`, and the forced command it installs
+ *   runs the internal `enroll` subcommand of the same binary;
  * - the environment names `OR2_PAIR_TEST_HOME`, `OR2_PAIR_TEST_USER` and `OR2_PAIR_TEST_AUTHORIZED_KEYS` of the
  *   contract, and `OR2_PAIR_TEST_ETC_SSH` (a directory standing in for `/etc/ssh`, where it finds
  *   `ssh_host_ed25519_key.pub`; recorded in the contract under `or2-pair-testhost`), all of them also visible
@@ -57,7 +54,7 @@ private fun plain(line: String) = line.split(' ').take(2).joinToString(" ")
  * - `K` is read from standard input, one line, with no terminal;
  * - standard output carries the QR's text on a line of its own (it starts with `or2-pair:2?`) and, once the
  *   phone is enrolled, the line `Paired "<device>" (SHA256:…) as <user>.` of the contract's sample output.
- * Check the first run with `OR2_REQUIRE_SSHD=1`, and drop the skip once it passes.
+ * Like the other sshd suites it skips without `/usr/bin/sshd`, and fails instead when `OR2_REQUIRE_SSHD` is set.
  */
 class PairEndToEndTest {
     /** The CLI host: a child process whose standard input takes `K` and whose standard output carries the QR. */
@@ -147,7 +144,6 @@ class PairEndToEndTest {
     @Test
     fun pairingThenConnectingNeedsNoFirstUsePromptAndAuthenticatesWithThePairedKey() = runBlocking<Unit> {
         assumeSshd()
-        assumeV2TestHost()
         world().use { world ->
             val fixture = world.fixture
             CliHost(world.home, world.etcSsh, world.authorized, world.user, fixture.port).use { cli ->
@@ -232,7 +228,6 @@ class PairEndToEndTest {
     @Test
     fun aDifferentCodeTypedOnTheHostIsRefusedWithANewCodeAndNothingSavedOrAuthorized() = runBlocking<Unit> {
         assumeSshd()
-        assumeV2TestHost()
         world().use { world ->
             CliHost(world.home, world.etcSsh, world.authorized, world.user, world.fixture.port).use { cli ->
                 val trust = Trust()
@@ -273,19 +268,4 @@ private fun testHostPath(): String {
     val path = System.getProperty("or2.pair.testhost")
     check(path != null && File(path).canExecute()) { "or2-pair-testhost was not built ($path)" }
     return path
-}
-
-/**
- * Skips the calling test while `or2-pair-testhost` is still the version 1 build (its flags are different and it
- * does not know `enroll`): a version 2 host lists the internal `enroll` subcommand in `--help`.
- */
-private fun assumeV2TestHost() {
-    val help = try {
-        val process = ProcessBuilder(testHostPath(), "--help").redirectErrorStream(true).start()
-        val text = process.inputStream.bufferedReader().readText()
-        if (process.waitFor(10, TimeUnit.SECONDS) && process.exitValue() == 0) text else ""
-    } catch (_: java.io.IOException) {
-        ""
-    }
-    assumeTrue("or2-pair-testhost is not the version 2 host yet (the host-CLI lane's); see the class comment", help.contains("enroll"))
 }

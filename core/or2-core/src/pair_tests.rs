@@ -150,6 +150,27 @@ fn a_generated_code_is_well_formed_and_differs_each_time() {
 }
 
 #[test]
+fn the_check_character_matches_the_vectors_the_host_crate_tests() {
+    // The same five vectors as `or2-pair`'s `code` tests (contract: "The pairing code"). For
+    // 7KQ4M2XD9PT: 7 + 2*19 + 3*23 + 4*4 + 5*20 + 6*2 + 7*29 + 8*13 + 9*9 + 10*22 + 11*26 = 1136
+    // = 36*31 + 20, and value 20 is `M`. `Z` (31) is 0 modulo 31, so the check is never `Z`.
+    for (data, check) in [
+        ("7KQ4M2XD9PT", 'M'),
+        ("00000000000", '0'),
+        ("ZZZZZZZZZZZ", '0'),
+        ("11111111111", '4'),
+        ("0123456789A", '6'),
+    ] {
+        let code = PairCode::parse_typed(&format!("{data}{check}")).unwrap();
+        assert_eq!(
+            code.display(),
+            format!("{}-{}-{}{check}", &data[..4], &data[4..8], &data[8..])
+        );
+        assert_eq!(&code.data()[..], data.as_bytes());
+    }
+}
+
+#[test]
 fn each_byte_value_maps_uniformly_onto_the_32_symbols() {
     // 256 is a multiple of 32: masking the low five bits gives every symbol the same share.
     let mut counts = [0usize; 32];

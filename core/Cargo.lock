@@ -1506,6 +1506,7 @@ dependencies = [
  "hkdf",
  "if-addrs",
  "libc",
+ "or2-core",
  "qrcode",
  "rand",
  "rqrr",
