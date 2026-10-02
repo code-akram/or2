@@ -298,6 +298,10 @@ class HostContractTest {
         assertEquals(TerminalTransport.MOSH, mosh.transport())
         assertEquals(TerminalTransport.SSH, ssh.first.transport())
         listener.awaitState<SessionState.Connected>()
+        // `on_server_pid` (API 14) was delivered before `Connected`, with the pid `server_pid()` reads; never for SSH.
+        assertEquals(4242u, listener.serverPids.poll())
+        assertEquals(4242u, mosh.serverPid())
+        assertTrue(ssh.second.serverPids.isEmpty())
         assertEquals("or2 contract probe tmux work", listener.awaitFrame(mosh).rowText(0))
         // The SSH terminal's own first frame is signalled too; take it now, or the wait for its echo
         // below would find that old signal, take whatever has been published so far (on a loaded

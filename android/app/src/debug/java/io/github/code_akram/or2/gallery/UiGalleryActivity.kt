@@ -353,6 +353,7 @@ class UiGalleryActivity : ComponentActivity() {
                     override fun onFrameReady() { probeFrames.trySend(Unit) }
                     override fun onLinkHealth(health: LinkHealth) = Unit
                     override fun onClipboardWrite(text: String) = Unit
+                    override fun onServerPid(pid: UInt) = Unit
                 },
             ).also { probe = it }
         } finally {

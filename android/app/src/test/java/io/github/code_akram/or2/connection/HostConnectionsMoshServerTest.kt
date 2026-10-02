@@ -1,6 +1,7 @@
 package io.github.code_akram.or2.connection
 
 import io.github.code_akram.or2.app.MemoryPrefStore
+import io.github.code_akram.or2.app.PrefStore
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.ffi.CloseReason
@@ -33,7 +34,7 @@ class HostConnectionsMoshServerTest {
 
     /** One app process: a holder over [store] whose every connection is a new [FakePort]. */
     private inner class Proc(
-        val scope: TestScope, val store: MemoryPrefStore, private val serverPid: UInt? = 4242u,
+        val scope: TestScope, val store: PrefStore, private val serverPid: UInt? = 4242u,
         /** Every connection's `stop_mosh_server` fails with it. */
         private val stopFailure: Exception? = null,
     ) {
@@ -70,7 +71,9 @@ class HostConnectionsMoshServerTest {
 
         fun open(target: Host = host): ActiveTerminal = holder.openTerminal(holder.host(target.id)!!, shell)
 
+        /** As Rust reports it: a mosh session names its server (`on_server_pid`) before it can be `Connected`. */
         fun sessionState(port: Int, terminal: Int, state: SessionState) {
+            if (state == SessionState.Connected) ports[port].serverStarted(terminal)
             ports[port].terminals[terminal].second.onStateChanged(state)
             scope.advanceUntilIdle()
         }
@@ -79,12 +82,15 @@ class HostConnectionsMoshServerTest {
     }
 
     @Test
-    fun aMoshSessionsServerIsRecordedWhenItConnectsAndForgottenWhenTheUserEndsIt() = runTest {
+    fun aMoshSessionsServerIsRecordedWhenRustNamesItAndForgottenWhenTheUserEndsIt() = runTest {
         val process = Proc(this, MemoryPrefStore())
         process.connect()
         process.open()
-        // Not before the session connects: a start that never connects is cleaned up in Rust.
         assertEquals(emptyList<UInt>(), process.recorded)
+        // Rust names the server before the session sends it anything: recorded right there, on Rust's
+        // thread, with no main-dispatcher turn in between.
+        process.ports[0].serverStarted(0)
+        assertEquals(listOf(4242u), process.recorded)
         process.sessionState(0, 0, SessionState.Connected)
         assertEquals(listOf(4242u), process.recorded)
 
@@ -111,6 +117,65 @@ class HostConnectionsMoshServerTest {
         process.sessionState(0, 0, SessionState.Connected)
         process.sessionState(0, 0, SessionState.Closed(CloseReason.Failed(SessionFailure.Internal("a screen fault"))))
         assertEquals(listOf(4242u), process.recorded)
+    }
+
+    @Test
+    fun aProcessThatDiesBeforeMainHandlesConnectedStillLeavesThePidOnDiskToStop() = runTest {
+        val store = DiskPrefStore()
+        val old = Proc(this, store)
+        old.connect()
+        old.open()
+        store.flush() // What the connect wrote is on the disk; only what follows is in question.
+        // On Rust's thread: the server is named, its first datagram is accepted and `Connected` is posted to
+        // the main dispatcher, which is slow to run it (no advance here). Then the process dies: nothing
+        // queued runs, and no `apply()` reaches the disk.
+        old.ports[0].serverStarted(0)
+        old.ports[0].terminals[0].second.onStateChanged(SessionState.Connected)
+        val disk = MemoryPrefStore().apply { putString("mosh_servers", store.disk.getString("mosh_servers")) }
+
+        // The next process connects to the host and stops the server, which no client will ever speak to again.
+        val fresh = Proc(this, disk)
+        fresh.connect()
+        assertEquals(listOf(4242u), fresh.ports[0].stopped)
+        assertEquals(emptyList<UInt>(), fresh.recorded)
+    }
+
+    @Test
+    fun aBackgroundAttemptIsRecordedBeforeItConnectsSparedByAReconnectAndForgottenWhenCancelled() = runTest {
+        val process = Proc(this, MemoryPrefStore())
+        process.connect()
+        val terminal = process.holder.openTerminal(process.holder.host(host.id)!!, TerminalTarget.Tmux("main"))
+        assertEquals(listOf(TerminalTransport.SSH, TerminalTransport.MOSH), process.ports[0].transports)
+        process.sessionState(0, 0, SessionState.Connected) // The SSH terminal (it names no server).
+        process.ports[0].serverStarted(1) // The background mosh session's server, still connecting.
+        assertEquals(listOf(4242u), process.recorded)
+
+        // The SSH connection drops and comes back while the attempt is still on its way: its server is ours.
+        process.lose()
+        process.connect()
+        assertTrue("a starting session's server is not an orphan", process.ports[1].stopped.isEmpty())
+
+        // The user closes the terminal: the attempt is cancelled, Rust stops its server and says Disconnected.
+        process.holder.disconnectTerminal(terminal)
+        process.sessionState(0, 1, SessionState.Closed(CloseReason.Disconnected))
+        assertEquals(emptyList<UInt>(), process.recorded)
+    }
+
+    @Test
+    fun aMoshStartThatFailsBeforeConnectingKeepsItsRecordLikeAnyFailure() = runTest {
+        val process = Proc(this, MemoryPrefStore())
+        process.connect()
+        process.open()
+        process.ports[0].serverStarted(0)
+        // AUTO's shell falls back to SSH on the same terminal; the stop Rust tried may not have reached the host.
+        process.sessionState(0, 0, SessionState.Closed(CloseReason.Failed(SessionFailure.TimedOut)))
+        assertEquals(listOf(TerminalTransport.MOSH, TerminalTransport.SSH), process.ports[0].transports)
+        assertEquals(listOf(4242u), process.recorded)
+        // The next connection stops it again: it is no session of this process any more.
+        process.lose()
+        process.connect()
+        assertEquals(listOf(4242u), process.ports[1].stopped)
+        assertEquals(emptyList<UInt>(), process.recorded)
     }
 
     @Test

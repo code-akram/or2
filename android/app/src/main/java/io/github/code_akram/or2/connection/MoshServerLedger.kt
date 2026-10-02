@@ -20,19 +20,22 @@ import java.security.MessageDigest
  * ([purge], see `HostConnections.hostEdited`). Entries written before identities existed carry none and
  * are dropped: they cannot be tied to a destination.
  *
- * Recorded when a mosh session connects; cleared when it closes by the user's disconnect or the
- * remote's own exit, when the server was stopped at the next connection, or when its host is deleted.
- * A session that closed `Failed` stays recorded: the stop Rust tried may not have reached the host, and
- * trying again is harmless.
+ * Recorded the moment Rust names a mosh session's server (`SessionListener.on_server_pid`: before the
+ * server has seen its client, so before `Connected`), and on disk before [record] returns, so a process
+ * death at any moment after still leaves the pid to stop. Cleared when the session closes by the user's
+ * disconnect or the remote's own exit, when the server was stopped at the next connection, or when its
+ * host is deleted. A session that closed `Failed` stays recorded: the stop Rust tried may not have
+ * reached the host, and trying again is harmless.
  */
 class MoshServerLedger(private val store: PrefStore) {
     private data class Entry(val hostId: Long, val pid: UInt, val identity: String)
 
     private val entries: MutableSet<Entry> = decode(store.getString(KEY)).toMutableSet()
 
+    /** On disk when this returns (`PrefStore.putStringDurably`, a blocking write): call it off the main thread. */
     @Synchronized
     fun record(host: Host, pid: UInt) {
-        if (entries.add(Entry(host.id, pid, host.moshIdentity()))) save()
+        if (entries.add(Entry(host.id, pid, host.moshIdentity()))) save(durably = true)
     }
 
     @Synchronized
@@ -57,7 +60,14 @@ class MoshServerLedger(private val store: PrefStore) {
     @Synchronized
     fun allPids(hostId: Long): List<UInt> = entries.filter { it.hostId == hostId }.map { it.pid }
 
-    private fun save() = store.putString(KEY, if (entries.isEmpty()) null else entries.joinToString(",") { "${it.hostId}:${it.pid}:${it.identity}" })
+    /**
+     * Only a new record must reach the disk at once. A clear that a process death loses costs one
+     * repeated stop at the next connection, which is harmless.
+     */
+    private fun save(durably: Boolean = false) {
+        val text = if (entries.isEmpty()) null else entries.joinToString(",") { "${it.hostId}:${it.pid}:${it.identity}" }
+        if (durably) store.putStringDurably(KEY, text) else store.putString(KEY, text)
+    }
 
     private companion object {
         const val KEY = "mosh_servers"

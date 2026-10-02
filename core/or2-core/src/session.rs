@@ -189,6 +189,13 @@ pub trait SessionObserver: Send + Sync {
     /// The host's program set the clipboard (OSC 52 or OSC 1337 Copy), decoded to text. Only
     /// while connected; both transports call it.
     fn clipboard_write(&self, _text: String) {}
+    /// mosh only: the session's `mosh-server` is running on the host with this pid (nonzero),
+    /// at most once, before the first datagram is sent to it and so before `Connected`. The
+    /// driver waits for the call to return before it lets the server see a client: this is
+    /// the one callback that may block briefly, so the app can write the pid durably first
+    /// (a server that has seen its client has no idle timeout, and its key dies with the
+    /// app's process). Other transports never call it.
+    fn server_pid_known(&self, _pid: u32) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -415,12 +422,19 @@ impl SessionDriver {
         lock(&self.shared.state).clone()
     }
 
-    /// Records the `mosh-server` pid [`SessionHandle::server_pid`] reports. Set before the
-    /// move to `Connected`, so a listener that sees `Connected` can read it.
+    /// Records the `mosh-server` pid [`SessionHandle::server_pid`] reports and, for a real pid
+    /// on a session not yet closed, tells the observer ([`SessionObserver::server_pid_known`])
+    /// before returning. Set before the session sends anything to the server, so the pid is
+    /// known (and the app has recorded it) before the server can see its client, and a
+    /// listener that sees `Connected` can read it.
     pub fn set_server_pid(&self, pid: Option<u32>) {
-        self.shared
-            .server_pid
-            .store(pid.unwrap_or(NO_SERVER_PID), Ordering::SeqCst);
+        let pid = pid.unwrap_or(NO_SERVER_PID);
+        self.shared.server_pid.store(pid, Ordering::SeqCst);
+        if pid != NO_SERVER_PID
+            && let Some(observer) = &self.observer
+        {
+            observer.server_pid_known(pid);
+        }
     }
 
     /// Moves to `next` and notifies the observer. On `Closed` the observer is released
@@ -555,6 +569,31 @@ mod tests {
         assert_eq!(handle.server_pid(), None);
         driver.set_server_pid(Some(0));
         assert_eq!(handle.server_pid(), None);
+    }
+
+    #[test]
+    fn the_observer_hears_a_server_pid_when_it_is_set_before_connected_and_never_after_the_close() {
+        #[derive(Default)]
+        struct Pids(Mutex<Vec<String>>);
+        impl SessionObserver for Pids {
+            fn state_changed(&self, state: &SessionState) {
+                lock(&self.0).push(state.name().into());
+            }
+            fn frame_ready(&self) {}
+            fn server_pid_known(&self, pid: u32) {
+                lock(&self.0).push(format!("pid {pid}"));
+            }
+        }
+        let pids = Arc::new(Pids::default());
+        let (_handle, mut driver) = channel(pids.clone());
+        // No server named, or a zero: nothing to record.
+        driver.set_server_pid(None);
+        driver.set_server_pid(Some(0));
+        driver.set_server_pid(Some(4242));
+        driver.transition(SessionState::Connected).unwrap();
+        driver.close(CloseReason::Disconnected);
+        driver.set_server_pid(Some(5151));
+        assert_eq!(*lock(&pids.0), ["pid 4242", "Connected", "Closed"]);
     }
 
     fn events(recorder: &Recorder) -> Vec<String> {

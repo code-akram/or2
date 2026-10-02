@@ -35,6 +35,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -168,12 +169,27 @@ class ActiveHost internal constructor(val host: Host) {
     internal val mutableUdpVerdict = MutableStateFlow(UdpVerdict.UNKNOWN)
     val udpVerdict = mutableUdpVerdict.asStateFlow()
 
-    /** The program probe's answer about `mosh-server` (`mosh_server()`), asked once the host connected; null until it answered. */
+    /**
+     * The program probe's answer about `mosh-server` (`mosh_server()`, asked once the host connected and
+     * again while it fails, or the capability probe's); null until one answered.
+     */
     internal val mutableMoshServer = MutableStateFlow<MoshServerAnswer?>(null)
     val moshServer = mutableMoshServer.asStateFlow()
 
-    /** Completes once `mosh_server()` has answered or failed on this connection. */
+    /**
+     * Completes once [moshServer] is known, or the first round of `mosh_server()` queries is spent without
+     * an answer (the answer may still come later, from a retry round or the capability probe).
+     */
     internal val moshServerSettled = CompletableDeferred<Unit>()
+
+    /** A round of `mosh_server()` queries is running on this connection. */
+    internal var askingMoshServer = false
+
+    /** A `mosh_server()` query failed on this connection: the capability probe's answer is taken instead. */
+    internal var moshServerFailed = false
+
+    /** How long the last successful capability probe call took. */
+    internal var capabilitiesMs = 0L
 
     /** The terminal whose background mosh attempt is this host's one in flight while the verdict is `UNKNOWN`. */
     internal var probingTerminal: ActiveTerminal? = null
@@ -348,6 +364,14 @@ class HostConnections(
      * An explicit disconnect, a deletion and "Disconnect all" still reach it.
      */
     private val lingering = mutableListOf<ActiveHost>()
+
+    /**
+     * The `mosh-server`s this process's own sessions run, as (host id, pid): added on Rust's callback
+     * thread the moment a session's pid is known (before it connects, a background attempt's too) and
+     * removed on main when that session closes. A reconnect's reap spares them ([reapOrphans]). Guarded
+     * by itself: the only state here touched off the main dispatcher.
+     */
+    private val ownServers = mutableSetOf<Pair<Long, UInt>>()
 
     /** Opening, reusing and switching to agent terminals, with the pane focus each needs first. */
     val activations = TerminalActivations(this, scope)
@@ -630,11 +654,15 @@ class HostConnections(
     private suspend fun probe(current: ActiveHost) {
         try {
             val port = current.ready.await()
+            val started = monotonicMs()
             val caps = port.capabilities()
             if (!owns(current) || current.retired) return
+            current.capabilitiesMs = monotonicMs() - started
             current.mutableCapabilities.value = caps
             current.mutableCapabilitiesError.value = null
             timing.mark("connect host=${current.host.id}", "capabilities")
+            // Once `mosh_server()` has failed, the capabilities (the same program probe) answer it.
+            if (current.moshServerFailed) answerFromCapabilities(current, caps)
             syncWatches(current, port, caps)
         } catch (error: CancellationException) {
             throw error
@@ -644,32 +672,66 @@ class HostConnections(
     }
 
     /**
-     * Asks the program probe for `mosh-server` once per connection and keeps the answer with its round
-     * trip ([ActiveHost.moshServer]). A query that fails leaves the answer unknown, and the wait for it
-     * ([ActiveHost.moshServerSettled]) is over either way.
+     * Asks the program probe for `mosh-server` and keeps the answer with its round trip
+     * ([ActiveHost.moshServer]). A failed query is not the answer (Rust does not cache a failed program
+     * probe): the capability probe's answer is taken instead when it has one, now or when it comes
+     * ([probe]), and the query is asked again after each of [MOSH_SERVER_RETRY_DELAYS_MS] while the
+     * answer is unknown and the connection is this one and up. Unknown meanwhile: AUTO still opens at
+     * once (a shell over SSH, tmux and herdr with a background try). The wait for it
+     * ([ActiveHost.moshServerSettled]) is over with the answer or when the retries are spent; a later
+     * [refresh] starts another round. One round at a time per connection.
      */
     private suspend fun askMoshServer(current: ActiveHost) {
+        if (current.askingMoshServer) return
+        current.askingMoshServer = true
         try {
-            if (current.mutableMoshServer.value != null) return
             val port = current.ready.await()
-            val started = monotonicMs()
-            val path = port.moshServer()
-            if (current.mutableMoshServer.value == null) {
-                current.mutableMoshServer.value = MoshServerAnswer(path, monotonicMs() - started)
-                timing.mark("connect host=${current.host.id}", "mosh-server")
+            for (attempt in 0..MOSH_SERVER_RETRY_DELAYS_MS.size) {
+                if (attempt > 0) delay(MOSH_SERVER_RETRY_DELAYS_MS[attempt - 1])
+                if (current.mutableMoshServer.value != null || !owns(current) || current.retired) return
+                if (current.state.value !is HostState.Connected) return
+                try {
+                    val started = monotonicMs()
+                    val path = port.moshServer()
+                    answerMoshServer(current, path, monotonicMs() - started)
+                    return
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    current.moshServerFailed = true
+                    current.mutableCapabilities.value?.let { answerFromCapabilities(current, it); return }
+                }
             }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Exception) {
-            // Unknown: AUTO still opens at once (a shell over SSH, tmux and herdr with a background try).
         } finally {
+            current.askingMoshServer = false
             current.moshServerSettled.complete(Unit)
         }
     }
 
-    /** Re-queries capabilities and brings the watches in line with them. */
+    /**
+     * The answer the capability probe carries (it ran the same program probe). Its call's time is not one
+     * round trip (it includes herdr's listing, or nothing at all when cached), so the shell's budget takes
+     * it only above a conservative [UNMEASURED_PROBE_ROUND_TRIP_MS].
+     */
+    private fun answerFromCapabilities(current: ActiveHost, caps: HostCapabilities) =
+        answerMoshServer(current, caps.moshServer, maxOf(current.capabilitiesMs, UNMEASURED_PROBE_ROUND_TRIP_MS))
+
+    /** The first answer about `mosh-server` on this connection stands (the cheap query's or the capability probe's). */
+    private fun answerMoshServer(current: ActiveHost, path: String?, roundTripMs: Long) {
+        if (current.mutableMoshServer.value != null) return
+        current.mutableMoshServer.value = MoshServerAnswer(path, roundTripMs)
+        timing.mark("connect host=${current.host.id}", "mosh-server")
+        current.moshServerSettled.complete(Unit)
+    }
+
+    /**
+     * Re-queries capabilities and brings the watches in line with them. While `mosh-server` is still
+     * unknown and no query for it is running, it is asked again too (and the capabilities answer it).
+     */
     suspend fun refresh(current: ActiveHost) {
-        if (current.state.value is HostState.Connected) probe(current)
+        if (current.state.value !is HostState.Connected) return
+        if (current.mutableMoshServer.value == null && !current.askingMoshServer) scope.launch { askMoshServer(current) }
+        probe(current)
     }
 
     /**
@@ -878,7 +940,7 @@ class HostConnections(
             terminal.mutableState.value = SessionState.Connected
             timing.terminalConnected(terminal.id)
         }
-        recordMoshServer(terminal)
+        rememberMoshServer(terminal)
         if (current.probingTerminal === terminal) current.probingTerminal = null
         setVerdict(current, UdpVerdict.OK)
         // The view binds the new handle and draws its frame.
@@ -940,8 +1002,19 @@ class HostConnections(
     }
 
     private fun sessionListener(terminal: ActiveTerminal, current: ActiveHost, attempt: Int) = object : SessionListener {
+        /** This session's own server, once Rust named it (whatever the terminal shows by then). */
+        @Volatile private var serverPid: UInt? = null
+
+        override fun onServerPid(pid: UInt) {
+            serverPid = pid
+            serverStarted(terminal.host, pid)
+        }
+
         override fun onStateChanged(state: SessionState) {
-            scope.launch { sessionState(terminal, current, attempt, state) }
+            scope.launch {
+                if (state is SessionState.Closed) serverEnded(terminal.host, serverPid, state.reason)
+                sessionState(terminal, current, attempt, state)
+            }
         }
 
         override fun onFrameReady() {
@@ -968,7 +1041,7 @@ class HostConnections(
         // Preserve a transient Connected even if the UI observes only Closed.
         if (state == SessionState.Connected) {
             terminal.mutableHasConnected.value = true
-            recordMoshServer(terminal)
+            rememberMoshServer(terminal)
             timing.terminalConnected(terminal.id)
             // Any mosh terminal that connects shows UDP gets through on this connection.
             if (terminal.mutableTransport.value == TerminalTransport.MOSH) setVerdict(current, UdpVerdict.OK)
@@ -977,7 +1050,6 @@ class HostConnections(
         if (state is SessionState.Closed) cancelBackground(terminal)
         terminal.mutableState.value = state
         if (state is SessionState.Closed) timing.forgetTerminal(terminal.id)
-        if (state is SessionState.Closed) forgetMoshServer(terminal, state.reason)
         // Nothing is heard on a closed session: its last health must not keep saying "Last heard N s ago".
         if (state is SessionState.Closed) terminal.mutableLinkHealth.value = null
         // A shell the user exited is over: reattach must not offer it again.
@@ -990,30 +1062,45 @@ class HostConnections(
 
     // --- mosh servers orphaned by process death ------------------------------------------
 
-    /** A connected mosh session's server is written down at once: the process can die at any moment. */
-    private fun recordMoshServer(terminal: ActiveTerminal) {
-        val ledger = moshServers ?: return
+    /**
+     * `on_server_pid`, on Rust's callback thread: a mosh session's server runs on [host]. Written down
+     * here and durably, never on the main dispatcher's `Connected` path: Rust waits for this to return
+     * before the server sees its client (from then on it has no idle timeout, and its key dies with this
+     * process), so the record is on disk before the session can connect and a process death at any
+     * moment after leaves the pid to stop. A foreground session, a background attempt and a fallback's
+     * first try are all recorded alike.
+     */
+    private fun serverStarted(host: Host, pid: UInt) {
+        synchronized(ownServers) { ownServers += host.id to pid }
+        moshServers?.record(host, pid)
+    }
+
+    /**
+     * On main, when the session whose server was [pid] (null: it named none) closes, whether or not it
+     * still spoke for its terminal. A session the user ended, or whose server ended itself, leaves
+     * nothing running (Rust stopped the server before it reported the close, or the server announced its
+     * own end). A failure keeps the record: its stop may not have reached the host, and the next
+     * connection tries again.
+     */
+    private fun serverEnded(host: Host, pid: UInt?, reason: CloseReason) {
+        if (pid == null) return
+        synchronized(ownServers) { ownServers -= host.id to pid }
+        if (reason is CloseReason.Disconnected || reason is CloseReason.RemoteExited) moshServers?.clear(host, pid)
+    }
+
+    private fun ownServerPids(hostId: Long): Set<UInt> =
+        synchronized(ownServers) { ownServers.filter { it.first == hostId }.map { it.second }.toSet() }
+
+    /** The terminal's mosh server, for what it shows (Rust named it before the session connected). */
+    private fun rememberMoshServer(terminal: ActiveTerminal) {
         if (terminal.mutableTransport.value != TerminalTransport.MOSH) return
         val session = terminal.mutableHandle.value ?: return
         // A session object already destroyed (a late callback after its release) has nothing to say.
-        val pid = try {
+        terminal.moshServerPid = try {
             session.serverPid()
         } catch (_: Exception) {
             null
         } ?: return
-        terminal.moshServerPid = pid
-        ledger.record(terminal.host, pid)
-    }
-
-    /**
-     * A session the user ended, or whose server ended itself, leaves nothing running (Rust stopped the
-     * server before it reported the close, or the server announced its own end). A failure keeps the
-     * record: its stop may not have reached the host, and the next connection tries again.
-     */
-    private fun forgetMoshServer(terminal: ActiveTerminal, reason: CloseReason) {
-        val ledger = moshServers ?: return
-        val pid = terminal.moshServerPid ?: return
-        if (reason is CloseReason.Disconnected || reason is CloseReason.RemoteExited) ledger.clear(terminal.host, pid)
     }
 
     /**
@@ -1025,14 +1112,14 @@ class HostConnections(
     private fun reapOrphans(current: ActiveHost) {
         val ledger = moshServers ?: return
         // A pid only identifies a process on its own host: another host's live session says nothing
-        // about this host's orphan that happens to carry the same number.
-        val live = mutableTerminals.value
-            .filter { it.host.id == current.host.id && it.state.value !is SessionState.Closed }
-            .mapNotNull { it.moshServerPid }.toSet()
-        val orphans = orphanedServers(ledger.pids(current.host), live)
+        // about this host's orphan that happens to carry the same number. A session of this process
+        // counts from the moment its pid is known (a background attempt still on its way included).
+        val orphans = orphanedServers(ledger.pids(current.host), ownServerPids(current.host.id))
         if (orphans.isEmpty()) return
         scope.launch {
             for (pid in orphans) {
+                // The orphan ended meanwhile and a session of ours was given its number: not ours to stop.
+                if (pid in ownServerPids(current.host.id)) continue
                 try {
                     current.ready.await().stopMoshServer(pid)
                     ledger.clear(current.host, pid)

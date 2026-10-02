@@ -23,9 +23,10 @@ enum class UdpVerdict {
 }
 
 /**
- * The program probe's answer about `mosh-server` (`HostConnection.mosh_server()`, API 14): its [path],
- * null when it is not installed or the query failed, and how long the answer took ([roundTripMs]),
- * which is the program probe's round trip when this query ran it.
+ * The program probe's answer about `mosh-server` (`HostConnection.mosh_server()`, API 14, or the
+ * capability probe when that query failed): its [path], null when it is not installed, and how long the
+ * answer took ([roundTripMs]), which is the program probe's round trip when this query ran it, and
+ * [UNMEASURED_PROBE_ROUND_TRIP_MS] at least when the capability probe gave it. A failed query is no answer.
  */
 data class MoshServerAnswer(val path: String?, val roundTripMs: Long)
 
@@ -83,6 +84,16 @@ const val SHELL_MOSH_CEILING_MS = 15_000L
  */
 fun shellMoshBudgetMs(probeRoundTripMs: Long): UInt =
     (probeRoundTripMs * 6).coerceIn(SHELL_MOSH_FLOOR_MS, SHELL_MOSH_CEILING_MS).toUInt()
+
+/**
+ * The round trip taken for an answer about `mosh-server` that came from the capability probe instead of
+ * `mosh_server()` (that query failed): the least the shell's budget assumes, 3 s, since that call's own
+ * time measures herdr's listing too, or a cached answer, rather than one round trip.
+ */
+const val UNMEASURED_PROBE_ROUND_TRIP_MS = 500L
+
+/** The pauses before `mosh_server()` is asked again after a failure, while its answer is still unknown. */
+val MOSH_SERVER_RETRY_DELAYS_MS = listOf(250L, 1_000L, 2_000L, 4_000L)
 
 /** The program whose absence is mosh itself being unavailable; any other missing program is not a mosh problem. */
 const val MOSH_SERVER_PROGRAM = "mosh-server"

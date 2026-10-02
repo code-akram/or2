@@ -11,8 +11,15 @@ interface PrefStore {
     fun putBoolean(key: String, value: Boolean)
     fun getString(key: String): String?
 
-    /** A null [value] removes the entry. */
+    /** A null [value] removes the entry. May reach the disk after it returns. */
     fun putString(key: String, value: String?)
+
+    /**
+     * [putString], on the disk before it returns: for a record that must survive the process dying right
+     * after it is written (the mosh-server ledger). It blocks the caller for the write, so it is for such
+     * records only, off the main thread. A store without a disk just writes.
+     */
+    fun putStringDurably(key: String, value: String?) = putString(key, value)
 }
 
 /** A [PrefStore] in memory: the default for screens under test and the fake for unit tests. */
@@ -32,6 +39,15 @@ class SharedPrefsStore(context: Context, file: String = DEFAULT_FILE) : PrefStor
     override fun putBoolean(key: String, value: Boolean) = write { putBoolean(key, value) }
     override fun getString(key: String) = try { prefs.getString(key, null) } catch (_: RuntimeException) { null }
     override fun putString(key: String, value: String?) = write { if (value == null) remove(key) else putString(key, value) }
+
+    /** `commit()`: the file is written when this returns, unlike [putString]'s `apply()`. */
+    override fun putStringDurably(key: String, value: String?) {
+        try {
+            prefs.edit().apply { if (value == null) remove(key) else putString(key, value) }.commit()
+        } catch (_: RuntimeException) {
+            // As with any write here: a record that cannot be kept costs at most one orphaned server.
+        }
+    }
 
     private fun write(edit: android.content.SharedPreferences.Editor.() -> Unit) {
         try {
