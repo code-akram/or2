@@ -9,7 +9,8 @@ from the composer. Mosh terminals roam across networks, a foreground service kee
 the background, and the app reattaches to the last pane. What is not tested yet is listed in
 [the release notes](docs/releases/v0.1.0.md#known-shortcomings-and-untested-areas); changes are in the
 [changelog](CHANGELOG.md).
-See [the design](docs/design.md), [contracts](docs/contracts.md) and [build instructions](docs/build.md).
+See [status and next steps](docs/status.md), [the design](docs/design.md), [contracts](docs/contracts.md)
+and [build instructions](docs/build.md).
 
 ## Install
 

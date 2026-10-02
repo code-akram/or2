@@ -470,10 +470,12 @@ address) the extra port was unreachable although SSH worked. Version 2 pairs ove
   exemption is the last step of adding a host (after Easy pair, before the host connects; after the manual form's
   save), once, skipped when exempt; the notification permission is offered in context on Home, and the service
   runs without it ([contracts](contracts.md#permissions-none-on-connect)). Verified by `OneTimePromptsTest`,
-  `AddHostEndTest`, `NavigationTest` and the compile-checked device tests (`AddHostEndDeviceTest` and others);
-  the device tests are still to run on the phone.
+  `AddHostEndTest`, `NavigationTest` and the device tests (`AddHostEndDeviceTest` and others), which pass on the phone (the `.devicetest` app,
+  117 of 118 with the notification test skipped; 2026-10-02).
 - [ ] Phone acceptance of Easy pair: a real `or2-pair` code on a host reached over its public address
-  and on a LAN host, with the battery step, then connect.
+  and on a LAN host, with the battery step, then connect. The public-address host passed on 2026-10-02 (paired,
+  saved with its host key trusted, connected); the LAN host (a Mac, also the first run of the macOS `or2-pair`)
+  is next ([status](status.md)).
 - [x] Installer, Linux part: `cargo xtask dist` builds the static x86_64 and aarch64 Linux binaries with
   `SHA256SUMS` (built on the Arch runner; the x86_64 one runs, the aarch64 one is checked by `file` only), and
   `scripts/install-or2-pair.sh` (POSIX `sh`, ShellCheck-clean) installs one with its checksum verified, tested

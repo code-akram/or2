@@ -1,6 +1,7 @@
 # AGENTS.md
 
-Rules for humans and agents working in this repo. Read `docs/design.md` first.
+Rules for humans and agents working in this repo. Read `docs/status.md` (where things stand, what is next)
+and `docs/design.md` first.
 
 ## Architecture invariants
 
