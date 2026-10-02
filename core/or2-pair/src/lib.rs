@@ -18,6 +18,7 @@
 //! - [`pairing`], [`exchange`], [`signals`]: the live run and the forced command `or2-pair enroll`
 //!   (Unix),
 //! - [`net`]: the one socket, behind a small trait,
+//! - [`rail`]: how all of it is drawn: one clack-style rail, colour and glyphs as the terminal allows,
 //! - [`run`]: the whole flow, with its environment injected.
 
 pub mod account;

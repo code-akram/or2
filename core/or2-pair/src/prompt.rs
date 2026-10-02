@@ -23,6 +23,10 @@ pub trait CodePrompt {
     fn was_stopped(&self) -> bool {
         false
     }
+
+    /// What to write to standard output if a signal ends the process while a line is typed
+    /// (Ctrl-C): the end of the rail. Only a terminal prompt is ended that way.
+    fn on_ending_signal(&self, _note: &[u8]) {}
 }
 
 /// Standard input.
@@ -61,6 +65,13 @@ impl CodePrompt for Stdin {
     fn was_stopped(&self) -> bool {
         STOPPED.load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    fn on_ending_signal(&self, note: &[u8]) {
+        #[cfg(unix)]
+        echo::set_note(note);
+        #[cfg(not(unix))]
+        let _ = note;
+    }
 }
 
 #[cfg(unix)]
@@ -72,7 +83,7 @@ mod echo {
     use std::cell::UnsafeCell;
     use std::mem::MaybeUninit;
     use std::os::fd::RawFd;
-    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicUsize, Ordering};
 
     /// The settings to put back from a signal handler (which can only use what is already in
     /// memory): written before [`SAVED_FD`] names a descriptor, read only while it does.
@@ -155,14 +166,39 @@ mod echo {
     /// would have done.
     extern "C" fn restore_and_reraise(signal: libc::c_int) {
         let fd = SAVED_FD.swap(-1, Ordering::SeqCst);
-        // SAFETY: `tcsetattr` is async-signal-safe; `SAVED` holds valid settings whenever
-        // `SAVED_FD` named a descriptor.
+        // SAFETY: `tcsetattr` and `write` are async-signal-safe; `SAVED` holds valid settings
+        // whenever `SAVED_FD` named a descriptor; `NOTE` names `NOTE_LEN` bytes that are never
+        // freed once set.
         unsafe {
             if fd >= 0 {
                 libc::tcsetattr(fd, libc::TCSANOW, (*SAVED.0.get()).as_ptr());
+                let note = NOTE.load(Ordering::SeqCst);
+                if !note.is_null() {
+                    libc::write(
+                        libc::STDOUT_FILENO,
+                        note as *const libc::c_void,
+                        NOTE_LEN.load(Ordering::SeqCst),
+                    );
+                }
             }
             reraise_by_default(signal);
         }
+    }
+
+    /// What [`restore_and_reraise`] writes to standard output before the process ends: the end
+    /// of the rail, prepared ahead (a handler can only write bytes already in memory).
+    static NOTE: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
+    static NOTE_LEN: AtomicUsize = AtomicUsize::new(0);
+
+    /// Sets that note, once per process (later calls change nothing: the handler may be reading
+    /// it). Its bytes live as long as the process.
+    pub fn set_note(note: &[u8]) {
+        if !NOTE.load(Ordering::SeqCst).is_null() || note.is_empty() {
+            return;
+        }
+        let kept: &'static mut [u8] = Box::leak(note.to_vec().into_boxed_slice());
+        NOTE_LEN.store(kept.len(), Ordering::SeqCst);
+        NOTE.store(kept.as_mut_ptr(), Ordering::SeqCst);
     }
 
     /// SIGTSTP (Ctrl-Z): puts the terminal back for whatever runs while this process is stopped,

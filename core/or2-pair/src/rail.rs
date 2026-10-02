@@ -449,6 +449,18 @@ impl Rail {
         Self::line(out, &self.bar(), shown)
     }
 
+    /// The end of the rail if the process is ended while the question [`Rail::ask`] put waits
+    /// (Ctrl-C): `shown` on the answer's line, and the rail closed with `word`. Prepared ahead,
+    /// as bytes, for a signal handler to write.
+    pub fn ending_note(&self, shown: &str, word: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        // Writing to memory cannot fail.
+        let _ = self.answer(&mut out, Mark::Error, "", shown, true);
+        let _ = self.gap(&mut out);
+        let _ = self.close(&mut out, word);
+        out
+    }
+
     /// `typed` hidden: each character a mask, but for the separators a code may be typed with.
     pub fn mask(&self, typed: &str) -> String {
         let mask = self.glyphs().mask;
@@ -764,6 +776,17 @@ mod tests {
         assert!(
             !text.contains("\x1b[1A") && !text.contains("hidden"),
             "{text:?}"
+        );
+        // The note for an ending signal: the hint's line cleared, the end of the rail.
+        assert_eq!(
+            String::from_utf8(rail.ending_note("Cancelled.", "Cancelled")).unwrap(),
+            "\r\x1b[2K\x1b[2m│\x1b[0m  Cancelled.\n\x1b[2m│\x1b[0m\n\x1b[2m└\x1b[0m  Cancelled\n"
+        );
+        // Off a terminal it completes the answer's line.
+        assert_eq!(
+            String::from_utf8(styled(false, true, None).ending_note("Cancelled.", "Cancelled"))
+                .unwrap(),
+            "Cancelled.\n│\n└  Cancelled\n"
         );
     }
 

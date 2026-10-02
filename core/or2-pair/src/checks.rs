@@ -32,20 +32,11 @@ pub enum Level {
     Info,
 }
 
-impl Level {
-    pub fn tag(self) -> &'static str {
-        match self {
-            Self::Ok => "ok  ",
-            Self::Warn => "warn",
-            Self::Fail => "fail",
-            Self::Info => "info",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Check {
     pub level: Level,
+    /// The finding on its first line; its fix, when it has one, on the next lines (`\n`), which
+    /// the rail draws under it.
     pub text: String,
 }
 

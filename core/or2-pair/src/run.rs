@@ -431,6 +431,10 @@ fn pair(
         "Open or2 on your phone: Add host > Easy pair",
     )?;
     rail.gap(out)?;
+    // Ctrl-C while the code is typed ends the process (nothing is written yet): the rail still
+    // ends.
+    env.prompt
+        .on_ending_signal(&rail.ending_note("Cancelled. Nothing was changed.", "Cancelled"));
     let mut mistakes = 0;
     let code = loop {
         rail.ask(out, QUESTION, "hidden as you type; Enter when done")?;

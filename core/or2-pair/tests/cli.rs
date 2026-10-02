@@ -817,7 +817,9 @@ mod live {
         // Half a code typed, then Ctrl-C (the signal, as the terminal would send it).
         master.write_all(b"7KQ4-M2").unwrap();
         kill(&running.child, libc::SIGINT);
-        let mut child = running.child;
+        let Running {
+            mut child, lines, ..
+        } = running;
         let status = child.wait().unwrap();
         assert_eq!(status.signal(), Some(libc::SIGINT), "{status:?}");
         assert!(
@@ -827,6 +829,18 @@ mod live {
         assert!(
             !host.home.path().join(".ssh").exists(),
             "nothing was changed"
+        );
+        // The rail still ends: the answer's line says so, then the rail closes.
+        let mut seen = String::new();
+        while let Ok(line) = lines.recv_timeout(Duration::from_secs(1)) {
+            seen.push_str(&line);
+            seen.push('\n');
+        }
+        assert!(
+            seen.ends_with(
+                "◆  Code shown on your phone\n│  Cancelled. Nothing was changed.\n│\n└  Cancelled\n"
+            ),
+            "{seen}"
         );
     }
 
