@@ -41,6 +41,7 @@ class UiSession(private val initial: SessionState = SessionState.Connected) : Se
     override fun submitText(text: String) = Unit
     override fun sendKey(input: KeyInput) = Unit
     override fun scroll(scroll: ViewportScroll) = Unit
+    override fun mouseClick(column: UShort, row: UShort) = Unit
     override fun state() = initial
     override fun transport() = TerminalTransport.SSH
     override fun serverPid(): UInt? = null

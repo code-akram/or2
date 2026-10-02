@@ -36,6 +36,7 @@ class TerminalSessionTest {
         override fun sendKey(input: KeyInput) { touch(); inputError?.let { throw it } }
         override fun resize(columns: UShort, rows: UShort) { touch() }
         override fun scroll(scroll: ViewportScroll) { touch() }
+        override fun mouseClick(column: UShort, row: UShort) { touch() }
         override fun requestFullFrame() { touch() }
         override fun takeFrame(): TerminalFrame? { touch(); return frame.also { frame = null } }
         override fun state(): SessionState { touch(); return SessionState.Connected }

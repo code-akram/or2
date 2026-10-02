@@ -480,4 +480,125 @@ class TargetScrollerTest {
         assertEquals(listOf(TargetScroll.Up(2u), TargetScroll.Bottom), calls.sent)
         assertFalse(scroller.away)
     }
+
+    // --- route 1 (owner feedback on v0.1.1: herdr scrolled itself and the button never showed) ---
+
+    @Test fun aWheelSwipeUpMarksTheTargetAwayHowFarUnknownAndSendsNothing() = runTest {
+        val calls = Calls()
+        val away = mutableListOf<Boolean>()
+        val scroller = scroller(calls, away)
+        scroller.wheeled(-6)
+        runCurrent()
+        assertTrue("the wheel events already went out", calls.sent.isEmpty())
+        assertTrue(scroller.away)
+        assertTrue(scroller.unconfirmed)
+        assertEquals(0L, scroller.awayLines)
+        assertTrue(scroller.awayState.value)
+        assertEquals(listOf(true), away)
+        // The button: scrollToBottomVisible follows awayState whatever the screen.
+        assertTrue(scrollToBottomVisible(Scrollback(10u, 0u), mouse, 10, scroller.away))
+    }
+
+    @Test fun aWheelSwipeDownThatMayHaveReachedTheBottomKeepsItAway() = runTest {
+        val calls = Calls()
+        val scroller = scroller(calls)
+        scroller.wheeled(4)
+        assertFalse("down at the bottom marks nothing", scroller.away)
+        scroller.wheeled(-3)
+        scroller.wheeled(30)
+        runCurrent()
+        assertTrue(scroller.away)
+        assertTrue(scroller.unconfirmed)
+        assertTrue(calls.sent.isEmpty())
+    }
+
+    @Test fun theButtonAfterAWheelSwipeSendsBottomAndOnlyItsSuccessClearsAway() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val calls = Calls().apply { this.gate = gate }
+        val away = mutableListOf<Boolean>()
+        val scroller = scroller(calls, away)
+        scroller.wheeled(-5)
+        scroller.bottom()
+        runCurrent()
+        assertEquals(listOf<TargetScroll>(TargetScroll.Bottom), calls.sent)
+        assertTrue("the button stays while the Bottom is out", scroller.away)
+        gate.complete(Unit)
+        runCurrent()
+        assertFalse(scroller.away)
+        assertFalse(scroller.unconfirmed)
+        assertEquals(listOf(true, false), away)
+        assertTrue(scroller.idle)
+    }
+
+    @Test fun aFailedBottomAfterAWheelSwipeKeepsTheButton() = runTest {
+        val calls = Calls().apply { failure = IllegalStateException("no answer") }
+        val scroller = scroller(calls)
+        scroller.wheeled(-1)
+        scroller.bottom()
+        runCurrent()
+        assertEquals(listOf<TargetScroll>(TargetScroll.Bottom), calls.sent)
+        assertTrue(scroller.away)
+        calls.failure = null
+        scroller.bottom()
+        runCurrent()
+        assertFalse(scroller.away)
+    }
+
+    @Test fun inputAfterAWheelSwipeIsHeldBehindABottom() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val calls = Calls().apply { this.gate = gate }
+        val scroller = scroller(calls)
+        scroller.wheeled(-8)
+        val typed = mutableListOf<String>()
+        assertTrue(scroller.input { typed += "y" })
+        scroller.input { typed += "\r" }
+        runCurrent()
+        assertEquals(listOf<TargetScroll>(TargetScroll.Bottom), calls.sent)
+        assertTrue("held until herdr is back at the live screen", typed.isEmpty())
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(listOf("y", "\r"), typed)
+        assertFalse(scroller.away)
+        // Back at the bottom: the next key goes straight out.
+        scroller.input { typed += "n" }
+        assertEquals(listOf("y", "\r", "n"), typed)
+        assertEquals(1, calls.sent.size)
+    }
+
+    @Test fun aWheelSwipeUpWhileTheBottomIsOutKeepsTheTargetAway() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val calls = Calls().apply { this.gate = gate }
+        val scroller = scroller(calls)
+        scroller.wheeled(-2)
+        scroller.bottom()
+        runCurrent()
+        // The user swipes up again before herdr answered: that Bottom no longer means the bottom.
+        scroller.wheeled(-3)
+        gate.complete(Unit)
+        runCurrent()
+        assertTrue(scroller.away)
+        assertTrue(scroller.unconfirmed)
+        calls.gate = null
+        scroller.bottom()
+        runCurrent()
+        assertFalse(scroller.away)
+        assertEquals(listOf<TargetScroll>(TargetScroll.Bottom, TargetScroll.Bottom), calls.sent)
+    }
+
+    @Test fun hidingATerminalScrolledByTheWheelSendsBottom() = runTest {
+        val calls = Calls()
+        val scroller = scroller(calls)
+        scroller.wheeled(-2)
+        scroller.leave()
+        runCurrent()
+        assertEquals(listOf<TargetScroll>(TargetScroll.Bottom), calls.sent)
+        assertFalse(scroller.away)
+    }
+
+    @Test fun aClosedScrollerIgnoresTheWheel() = runTest {
+        val scroller = scroller(Calls())
+        scroller.close()
+        scroller.wheeled(-2)
+        assertFalse(scroller.away)
+    }
 }

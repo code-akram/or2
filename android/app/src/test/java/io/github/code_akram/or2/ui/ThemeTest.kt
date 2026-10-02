@@ -123,6 +123,31 @@ class ThemeTest {
     }
 
     @Test
+    fun arrowPadKeysAreBlueAndStandOutFromTheTerminal() {
+        // Owner feedback on v0.1.1: `surface` keys on the terminal were hard to tell apart from it.
+        assertEquals("#38425F", hex(Or2Colors.PadKey))
+        assertEquals(1f, Or2Colors.PadKey.alpha, 0f) // Opaque: terminal text never shows through a key.
+        assertEquals(hex(Or2Colors.Accent.copy(alpha = 0.24f).compositeOver(Or2Colors.TerminalBackground)), hex(Or2Colors.PadKey))
+        assertEquals(Or2Colors.Accent.copy(alpha = 0.55f), Or2Colors.PadKeyEdge)
+        // Blue, not grey: blue clearly dominates, as it does in `accent`.
+        assertTrue(Or2Colors.PadKey.blue - Or2Colors.PadKey.red > 0.1f && Or2Colors.PadKey.blue - Or2Colors.PadKey.green > 0.08f)
+        // The fill stands out from the terminal (and from the `surface` it replaced), and its hairline more so.
+        assertTrue(contrast(Or2Colors.PadKey, Or2Colors.TerminalBackground) >= 1.5)
+        assertTrue(contrast(Or2Colors.PadKey, Or2Colors.TerminalBackground) > 1.4 * contrast(Or2Colors.Surface, Or2Colors.TerminalBackground))
+        val edge = Or2Colors.PadKeyEdge.compositeOver(Or2Colors.TerminalBackground)
+        assertTrue(contrast(edge, Or2Colors.TerminalBackground) >= 3.0)
+        // Glyphs: `accent` on a key is at least 4.5:1; Enter (the primary key) is `background` on `accent`.
+        assertTrue("accent on the pad key is ${contrast(Or2Colors.Accent, Or2Colors.PadKey)}:1", contrast(Or2Colors.Accent, Or2Colors.PadKey) >= 4.5)
+        assertTrue(contrast(Or2Colors.Background, Or2Colors.Accent) >= 7.0)
+        assertTrue(luminance(Or2Colors.Accent) > luminance(Or2Colors.PadKey))
+        // The extras pill: `accent` labels on `background`, its hairline as the keys'.
+        assertTrue(contrast(Or2Colors.Accent, Or2Colors.Background) >= 7.0)
+        assertTrue(contrast(Or2Colors.PadKeyEdge.compositeOver(Or2Colors.Background), Or2Colors.Background) >= 3.0)
+        // A latched Alt (`accentMuted` fill) keeps its `accent` label legible.
+        assertTrue(contrast(Or2Colors.Accent, Or2Colors.AccentMuted) >= 4.5)
+    }
+
+    @Test
     fun theHeaderDiscsAreAPairWhoseBoxesMeetHalfway() {
         // Visible discs 16 dp with a 10 dp glyph, 10 dp apart; each box reaches halfway to the other disc.
         assertEquals(16.dp, Or2Dimens.HeaderButtonDisc)

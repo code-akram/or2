@@ -75,12 +75,26 @@ private fun demoLines(columns: Int): List<List<Span>> {
     )
 }
 
+/** Build output that fills every cell of every row, so whatever floats over the terminal sits on text. */
+private fun denseLines(columns: Int, rows: Int): List<List<Span>> {
+    val words = "Compiling or2-core terminal::tests::wheel ok warning unused import Palette Finished dev profile " +
+        "running 512 tests test result ok passed failed ignored measured filtered out "
+    return List(rows) { row ->
+        val start = (row * 17) % words.length
+        val text = (words.repeat(columns / words.length + 2)).substring(start, start + columns)
+        val colour = listOf(Mocha.FG, Mocha.MUTED, Mocha.GREEN, Mocha.TEAL, Mocha.YELLOW)[row % 5]
+        line(Span(text, colour))
+    }
+}
+
 /**
  * A full frame of [demoLines] bottom-aligned in [columns] x [rows], the cursor on the prompt.
- * Produced without the native core so the gallery can draw it anywhere, scaled or not.
+ * Produced without the native core so the gallery can draw it anywhere, scaled or not. [dense]
+ * fills every cell with text instead; [mouseTracking] is the frame's `TerminalModes.mouse_tracking`
+ * (herdr, tmux with `mouse on`).
  */
-fun terminalDemoFrame(columns: Int, rows: Int, sequence: ULong = 1u): TerminalFrame {
-    val lines = demoLines(columns).takeLast(rows)
+fun terminalDemoFrame(columns: Int, rows: Int, sequence: ULong = 1u, dense: Boolean = false, mouseTracking: Boolean = false): TerminalFrame {
+    val lines = (if (dense) denseLines(columns, rows) else demoLines(columns)).takeLast(rows)
     val blank = rows - lines.size
     val styleIndex = LinkedHashMap<Triple<UInt, UInt, Int>, UInt>()
     fun style(fg: UInt, bg: UInt, flags: Int): UInt = styleIndex.getOrPut(Triple(fg, bg, flags)) { styleIndex.size.toUInt() }
@@ -105,6 +119,6 @@ fun terminalDemoFrame(columns: Int, rows: Int, sequence: ULong = 1u): TerminalFr
     return TerminalFrame(
         sequence, columns.toUShort(), rows.toUShort(), true, styles, changed,
         TerminalCursor(promptColumn.toUShort(), (rows - 1).toUShort(), false, CursorShape.BLOCK, false, Mocha.BLUE),
-        Mocha.BG, Scrollback((rows * 3).toULong(), (rows * 2).toULong()), TerminalModes(false, false),
+        Mocha.BG, Scrollback((rows * 3).toULong(), (rows * 2).toULong()), TerminalModes(mouseTracking, mouseTracking),
     )
 }

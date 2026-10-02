@@ -44,6 +44,8 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 | `terminalHeader` | `#222232` | the terminal card's header and its notice strip: halfway between the terminal background `#1E1E2E` and `surface`, one slight tonal step above the grid |
 | `accent` | `#89B4FA` | primary buttons, FAB, toggles, selection, links, checkmarks; text on accent is `background` |
 | `accentMuted` | `#343B53` fill with `accent` text | badges ("PRO"-style tags, status kickers) |
+| `padKey` | `#38425F` (`accent` at 24 % over the terminal's `#1E1E2E`, opaque) with an `accent` glyph (4.7:1) | arrow-pad keys: blue, clearly apart from the terminal (1.65:1 against it, where `surface` was 1.1:1), and opaque so terminal text never shows through |
+| `padKeyEdge` | `accent` at 55 % (3.3:1 on the terminal) | the hairline of the arrow-pad keys and of the extras pill |
 | `attention` | `#FAB387` (peach) | blocked agents, warnings, "needs attention" dots |
 | `attentionSurface` | `#30272B` fill, `#6F4E3C` 1 px border | warning cards |
 | `working` | `#89B4FA` | working agents (accent, pulsing dot) |
@@ -302,7 +304,14 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   terminals: why AUTO uses SSH is said once, on the host screen (see "UDP blocked"). While the view is
   scrolled up (the scrollback, or a tmux/herdr target's own history) a 28 dp round scroll-to-bottom button
   (a down chevron in `accent` on the toolbar's `background` at ~85 %, in a 40 dp touch box) sits 4 dp in
-  from the terminal's bottom-right corner; tapping it returns to the live screen.
+  from the terminal's bottom-right corner; tapping it returns to the live screen. That includes a swipe up
+  that reached tmux (`mouse on`) or herdr as wheel events (the program tracks the mouse, so it scrolled
+  itself): or2 cannot know how far, so the button shows until a tap on it (or the first key typed) has
+  brought the target back to its live screen (v0.1.2, contracts.md).
+- **Taps on the terminal** (v0.1.2), in this order: a tap while text is selected clears the selection (and is never a link or a click); a
+  tap on a link opens it; while the program tracks the mouse (herdr, tmux with `mouse on`, vim with the
+  mouse) a tap is a left click at that cell, sent to the program, and the keyboard does not open (its
+  toolbar key does); otherwise a tap opens the keyboard. A long press still selects.
 - **Terminal header** (`TerminalHeader`): one composed 36 dp row on the `terminalHeader` tone
   (`#222232`, one slight step above the grid), closed off from the grid by a `crust` hairline, so the
   card reads as a window with a quiet title bar. In it:
@@ -346,13 +355,15 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   join the row. Horizontally scrollable when it overflows.
 - **Arrow pad:** the arrow key expands a floating 3×3 cluster above the toolbar: Backspace,
   Up, Clear-line / Left, Enter, Right / Down; keys are 40 dp squares with 12 dp radius and 6 dp gaps, each
-  opaque on its own (`surface`, Enter `surfaceTrack`) with a `divider` hairline edge, so it stays legible over
-  terminal text. Nothing is drawn behind the cluster: no panel, border, shadow or grip; the keys float over the
+  opaque on its own and blue, like the toolbar's arrow-pad icon (owner feedback on v0.1.1: grey keys on the
+  terminal were hard to tell from it): a `padKey` fill, an `accent` glyph and a `padKeyEdge` hairline. Enter,
+  the primary key, is filled `accent` with a `background` glyph (the composer's send button). Nothing is drawn behind the cluster: no panel, border, shadow or grip; the keys float over the
   terminal, which shows between them. The toolbar's arrow-pad key opens and closes it (it is lit while open).
   Keys auto-repeat on hold (after 400 ms, every 60 ms).
   Clear-line is an eraser outline. Below the cluster, 6 dp under it, a 36 dp scrolling pill (`background`
-  with the same `divider` hairline) keeps `Alt`, `Home`, `End`, `PgUp`, `PgDn` and the shell symbols (28 dp
-  keys, label-wide navigation keys) one tap away, with an edge fade on each side that has more keys behind it.
+  with the keys' `padKeyEdge` hairline) keeps `Alt`, `Home`, `End`, `PgUp`, `PgDn` and the shell symbols (28 dp
+  keys, label-wide navigation keys, `accent` labels; a latched `Alt` on `accentMuted`) one tap away, with an
+  edge fade on each side that has more keys behind it.
 - **Composer (chat input):** a rounded 20 dp `crust` card docked above the IME and above the key
   toolbar (which stays, so `Esc`, `Ctrl` and `Tab` remain reachable), in one row (about 40 dp for a single line, growing to five): a 13 sp mono
   placeholder (`Message <host>...`) or the text, a close action (40 dp box) and a

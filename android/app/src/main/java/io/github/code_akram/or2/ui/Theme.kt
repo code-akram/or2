@@ -78,6 +78,16 @@ object Or2Colors {
 
     /** The floating toolbar pill: `background` at ~85 %. */
     val ToolbarPill = Background.copy(alpha = 0.85f)
+
+    /**
+     * An arrow-pad key's fill: `accent` at 24 % composited over the terminal's background, opaque, so the
+     * key reads blue against the terminal and no terminal text shows through it. Its glyph is `accent`
+     * (4.7:1 here, ThemeTest).
+     */
+    val PadKey = Color(0xFF38425F)
+
+    /** The hairline of the arrow-pad keys and of the extras pill: `accent` at 55 % (3:1 on the terminal, ThemeTest). */
+    val PadKeyEdge = Accent.copy(alpha = 0.55f)
 }
 
 /**

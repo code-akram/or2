@@ -2,6 +2,16 @@ package io.github.code_akram.or2.terminal
 
 import android.os.SystemClock
 import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.test.captureToImage
+import io.github.code_akram.or2.ffi.CursorShape
+import io.github.code_akram.or2.ffi.TargetScroll
+import io.github.code_akram.or2.ffi.TerminalModes
+import io.github.code_akram.or2.ui.Or2Colors
+import kotlin.math.abs
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
@@ -60,6 +70,7 @@ class TerminalChromeDeviceTest {
         val submits = mutableListOf<String>()
         val keys = mutableListOf<KeyInput>()
         val scrolls = mutableListOf<ViewportScroll>()
+        val clicks = mutableListOf<Pair<Int, Int>>()
 
         /** When set, input is refused like a dropped session refuses it. */
         var refuse = false
@@ -77,6 +88,7 @@ class TerminalChromeDeviceTest {
         }
         override fun resize(columns: UShort, rows: UShort) = Unit
         override fun scroll(scroll: ViewportScroll) { scrolls += scroll }
+        override fun mouseClick(column: UShort, row: UShort) { clicks += column.toInt() to row.toInt() }
         override fun requestFullFrame() = Unit
         override fun takeFrame(): TerminalFrame? = null
         override fun state(): SessionState = SessionState.Connected
@@ -193,6 +205,101 @@ class TerminalChromeDeviceTest {
         compose.onNodeWithTag("arrow-pad").assertDoesNotExist()
         compose.onNodeWithTag("key:Arrows").performClick()
         compose.onNodeWithTag("arrow-pad").assertIsDisplayed()
+    }
+
+    /** The colour at ([xDp], half height) of a node's own pixels. */
+    private fun pixel(tag: String, xDp: Float): Color {
+        val image = compose.onNodeWithTag(tag).captureToImage().toPixelMap()
+        val density = instrumentation.targetContext.resources.displayMetrics.density
+        return image[(xDp * density).toInt(), image.height / 2]
+    }
+
+    private fun Color.near(other: Color) =
+        abs(red - other.red) < 0.03f && abs(green - other.green) < 0.03f && abs(blue - other.blue) < 0.03f
+
+    @Test
+    fun thePadKeysAreBlueAndNotTheTerminalBackground() {
+        show(pad = true)
+        compose.waitForIdle()
+        // 6 dp in from a key's left edge: the fill, clear of the rounded corners and the 20 dp glyph.
+        for (tag in listOf("pad:Up", "pad:Left", "pad:Down", "pad:Backspace")) {
+            val fill = pixel(tag, 6f)
+            assertFalse("$tag is the terminal's background", fill.near(Or2Colors.TerminalBackground))
+            assertFalse("$tag is the old surface grey", fill.near(Or2Colors.Surface))
+            assertTrue("$tag fill $fill is the pad's blue", fill.near(Or2Colors.PadKey))
+            assertTrue("$tag fill $fill reads blue", fill.blue > fill.red + 0.1f)
+        }
+        // Enter is the primary key: filled accent.
+        assertTrue(pixel("pad:Enter", 6f).near(Or2Colors.Accent))
+    }
+
+    private fun terminalView(): TerminalView {
+        fun find(view: View): TerminalView? {
+            if (view is TerminalView) return view
+            if (view is ViewGroup) for (index in 0 until view.childCount) find(view.getChildAt(index))?.let { return it }
+            return null
+        }
+        return find(compose.activity.window.decorView)!!
+    }
+
+    /** A herdr terminal showing a frame whose program tracks the mouse (herdr always does). */
+    private fun showHerdrTrackingTheMouse(sent: MutableList<TargetScroll>): TargetScroller {
+        lateinit var scroller: TargetScroller
+        compose.runOnUiThread {
+            scroller = TargetScroller(MainScope(), { scroll -> sent += scroll })
+            compose.activity.setContent {
+                Or2Theme {
+                    TerminalScreen(session, MutableStateFlow(SessionState.Connected), MutableSharedFlow(), Modifier.fillMaxSize(),
+                        target = TerminalTarget.Herdr(null, "w1:p1"), targetScroller = scroller)
+                }
+            }
+        }
+        compose.waitForIdle()
+        compose.runOnUiThread {
+            val view = terminalView()
+            val frame = terminalVisualFrame(20u, 13u, CursorShape.BAR)
+            assertTrue(view.grid.apply(frame.copy(modes = TerminalModes(mouseTracking = true, alternateScreen = true))))
+        }
+        return scroller
+    }
+
+    @Test
+    fun aWheelSwipeOnAHerdrTargetShowsTheButtonAndTheButtonSendsBottom() {
+        val sent = mutableListOf<TargetScroll>()
+        val scroller = showHerdrTrackingTheMouse(sent)
+        compose.onNodeWithTag("scroll-to-bottom").assertDoesNotExist()
+        compose.runOnUiThread {
+            val view = terminalView()
+            val downTime = SystemClock.uptimeMillis()
+            // The finger moves down: the content scrolls up, as wheel events (route 1).
+            view.send(MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, view.width / 2f, view.cellHeight * 2, 0))
+            view.send(MotionEvent.obtain(downTime, downTime + 50, MotionEvent.ACTION_MOVE, view.width / 2f, view.cellHeight * 4, 0))
+            view.send(MotionEvent.obtain(downTime, downTime + 100, MotionEvent.ACTION_MOVE, view.width / 2f, view.cellHeight * 7, 0))
+            view.send(MotionEvent.obtain(downTime, downTime + 400, MotionEvent.ACTION_UP, view.width / 2f, view.cellHeight * 7, 0))
+            assertTrue(session.scrolls.isNotEmpty() && session.scrolls.all { it is ViewportScroll.Wheel && it.rows < 0 })
+            assertTrue("herdr may be in its history now", scroller.away)
+            assertTrue("the wheel events went out; nothing else", sent.isEmpty())
+        }
+        compose.onNodeWithTag("scroll-to-bottom").assertIsDisplayed()
+        compose.onNodeWithTag("scroll-to-bottom").performClick()
+        compose.waitForIdle()
+        compose.runOnIdle { assertEquals(listOf<TargetScroll>(TargetScroll.Bottom), sent) }
+        compose.onNodeWithTag("scroll-to-bottom").assertDoesNotExist()
+    }
+
+    @Test
+    fun aTapIsAClickWhileTheProgramTracksTheMouse() {
+        showHerdrTrackingTheMouse(mutableListOf())
+        compose.runOnUiThread {
+            val view = terminalView()
+            val downTime = SystemClock.uptimeMillis()
+            val x = view.horizontalInset + view.cellWidth * 4.5f
+            val y = view.cellHeight * 2.5f
+            view.send(MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0))
+            view.send(MotionEvent.obtain(downTime, downTime + 40, MotionEvent.ACTION_UP, x, y, 0))
+            assertEquals(listOf(4 to 2), session.clicks)
+            assertTrue(session.keys.isEmpty() && session.texts.isEmpty())
+        }
     }
 
     @Test

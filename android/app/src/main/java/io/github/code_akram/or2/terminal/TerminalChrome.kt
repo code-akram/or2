@@ -84,15 +84,15 @@ class TerminalChromeState(padOpen: Boolean = false, composerOpen: Boolean = fals
 
 /**
  * One key of the floating toolbar: a 30 dp tall rounded pill in `surface` (in a 40 dp touch box)
- * holding mono text or an outline icon. [framed] false draws the bare icon (the composer and keyboard toggles). A latched
- * modifier ([latched]) draws in `accent`.
+ * holding mono text or an outline icon in [tint]. [framed] false draws the bare icon (the composer and keyboard toggles). A
+ * latched modifier ([latched]) draws in `accent`.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ToolKey(
     description: String, onClick: () -> Unit, modifier: Modifier = Modifier, label: String? = null,
     icon: ImageVector? = null, latched: Boolean? = null, framed: Boolean = true, active: Boolean = false,
-    onLongClick: (() -> Unit)? = null, compact: Boolean = false,
+    onLongClick: (() -> Unit)? = null, compact: Boolean = false, tint: Color = Or2Colors.Text,
 ) {
     val on = latched == true || active
     // The touch target is larger than the key drawn in it: 5 dp more above and below, 2 dp at the sides.
@@ -106,7 +106,7 @@ fun ToolKey(
             .padding(2.dp),
         contentAlignment = Alignment.Center,
     ) {
-        val tint = if (on) Or2Colors.Accent else Or2Colors.Text
+        val color = if (on) Or2Colors.Accent else tint
         Box(
             Modifier.heightIn(min = if (compact) Or2Dimens.PadExtrasHeight - 4.dp else Or2Dimens.Key).widthIn(min = Or2Dimens.KeyWidth).clip(Or2Shapes.Key)
                 .background(
@@ -119,9 +119,9 @@ fun ToolKey(
             contentAlignment = Alignment.Center,
         ) {
             if (label != null) {
-                Text(label, style = Or2Type.Key, color = tint, maxLines = 1, softWrap = false, modifier = Modifier.padding(horizontal = 6.dp))
+                Text(label, style = Or2Type.Key, color = color, maxLines = 1, softWrap = false, modifier = Modifier.padding(horizontal = 6.dp))
             } else if (icon != null) {
-                Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = tint)
+                Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = color)
             }
         }
     }
@@ -191,12 +191,12 @@ private fun HapticFeedback.tick(on: Boolean) =
 @Composable
 private fun RepeatKey(
     description: String, onKey: () -> Unit, modifier: Modifier = Modifier, icon: ImageVector? = null, label: String? = null,
-    container: Color = Or2Colors.Surface, width: Dp = Or2Dimens.PadKey, height: Dp = Or2Dimens.PadKey,
+    container: Color = Or2Colors.PadKey, tint: Color = Or2Colors.Accent, width: Dp = Or2Dimens.PadKey, height: Dp = Or2Dimens.PadKey,
 ) {
     val scope = rememberCoroutineScope()
     val current by rememberUpdatedState(onKey)
-    // A filled key floats on the terminal by itself, so it carries its own hairline edge.
-    val edge = if (container.alpha > 0f) Modifier.border(Dp.Hairline, Or2Colors.Divider, Or2Shapes.Key) else Modifier
+    // A filled key floats on the terminal by itself, so it carries its own blue hairline edge.
+    val edge = if (container.alpha > 0f) Modifier.border(Dp.Hairline, Or2Colors.PadKeyEdge, Or2Shapes.Key) else Modifier
     Box(
         modifier.size(width, height).clip(Or2Shapes.Key).background(container).then(edge)
             .pointerInput(Unit) {
@@ -224,8 +224,8 @@ private fun RepeatKey(
             },
         contentAlignment = Alignment.Center,
     ) {
-        if (icon != null) Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Text)
-        else if (label != null) Text(label, style = Or2Type.Key, color = Or2Colors.Text, maxLines = 1)
+        if (icon != null) Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = tint)
+        else if (label != null) Text(label, style = Or2Type.Key, color = tint, maxLines = 1)
     }
 }
 
@@ -242,10 +242,13 @@ val ExtraKeys = NavigationKeys + SymbolKeys
 
 /**
  * The floating 3x3 cluster above the toolbar: Backspace, Up, Clear-line / Left, Enter, Right /
- * Down; 40 dp `surface` squares with 12 dp radius and a `divider` hairline that auto-repeat on hold.
- * Nothing is drawn behind the cluster: the keys float over the terminal, each opaque on its own. The
- * toolbar's arrow-pad key opens and closes it. A scrolling row below keeps the navigation and symbol
- * keys one tap away.
+ * Down; 40 dp squares with 12 dp radius that auto-repeat on hold, in the accent blue family so they never
+ * blend into the terminal: a `padKey` fill (accent over the terminal background, opaque), an `accent`
+ * glyph and a `padKeyEdge` hairline; Enter, the primary key, is filled `accent` with a `background`
+ * glyph (the composer's send button). Nothing is drawn behind the cluster: the keys float over the
+ * terminal, each opaque on its own. The toolbar's arrow-pad key opens and closes it. A scrolling row
+ * below keeps the navigation and symbol keys one tap away: `accent` labels in a `background` pill with
+ * the same blue hairline.
  */
 @Composable
 fun ArrowPad(actions: PadActions, alt: Boolean, toggleAlt: () -> Unit, modifier: Modifier = Modifier) {
@@ -262,7 +265,8 @@ fun ArrowPad(actions: PadActions, alt: Boolean, toggleAlt: () -> Unit, modifier:
             }
             Row(horizontalArrangement = Arrangement.spacedBy(Or2Dimens.PadGap)) {
                 RepeatKey("Left", actions.left, Modifier.testTag("pad:Left"), icon = Or2Icons.ArrowLeft)
-                RepeatKey("Enter", actions.enter, Modifier.testTag("pad:Enter"), icon = Or2Icons.Enter, container = Or2Colors.SurfaceTrack)
+                RepeatKey("Enter", actions.enter, Modifier.testTag("pad:Enter"), icon = Or2Icons.Enter,
+                    container = Or2Colors.Accent, tint = Or2Colors.Background)
                 RepeatKey("Right", actions.right, Modifier.testTag("pad:Right"), icon = Or2Icons.ArrowRight)
             }
             RepeatKey("Down", actions.down, Modifier.testTag("pad:Down"), icon = Or2Icons.ArrowDown)
@@ -270,7 +274,7 @@ fun ArrowPad(actions: PadActions, alt: Boolean, toggleAlt: () -> Unit, modifier:
         val scroll = rememberScrollState()
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp).height(Or2Dimens.PadExtrasHeight).clip(Or2Shapes.Pill)
-                .background(Or2Colors.Background).border(Dp.Hairline, Or2Colors.Divider, Or2Shapes.Pill)
+                .background(Or2Colors.Background).border(Dp.Hairline, Or2Colors.PadKeyEdge, Or2Shapes.Pill)
                 // An edge fade on each side that has more keys behind it: the row scrolls.
                 .drawWithContent {
                     drawContent()
@@ -291,7 +295,8 @@ fun ArrowPad(actions: PadActions, alt: Boolean, toggleAlt: () -> Unit, modifier:
                 .horizontalScroll(scroll).padding(horizontal = 6.dp).testTag("pad-extras"),
             horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically,
         ) {
-            ToolKey("Alt", { haptics.tick(!alt); toggleAlt() }, Modifier.testTag("key:Alt"), label = "Alt", latched = alt, framed = false, compact = true)
+            ToolKey("Alt", { haptics.tick(!alt); toggleAlt() }, Modifier.testTag("key:Alt"), label = "Alt", latched = alt, framed = false, compact = true,
+                tint = Or2Colors.Accent)
             NavigationKeys.forEach { key ->
                 RepeatKey(key, { actions.extra(key) }, Modifier.testTag("extra:$key"), label = key,
                     width = Or2Dimens.PadExtraNavKeyWidth, height = Or2Dimens.PadExtrasHeight, container = Color.Transparent)

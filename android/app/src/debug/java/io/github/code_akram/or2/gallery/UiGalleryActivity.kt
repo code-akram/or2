@@ -22,6 +22,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -50,6 +51,7 @@ import io.github.code_akram.or2.ffi.Session
 import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.SessionListener
 import io.github.code_akram.or2.ffi.SessionState
+import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TmuxSession
 import io.github.code_akram.or2.ffi.contractProbeSession
 import io.github.code_akram.or2.ffi.generateEd25519Key
@@ -84,6 +86,7 @@ import io.github.code_akram.or2.inbox.buildInbox
 import io.github.code_akram.or2.inbox.linkStatus
 import io.github.code_akram.or2.keys.KeysScreen
 import io.github.code_akram.or2.session.TerminalCard
+import io.github.code_akram.or2.terminal.TargetScroller
 import io.github.code_akram.or2.terminal.TerminalChromeState
 import io.github.code_akram.or2.terminal.TerminalGrid
 import io.github.code_akram.or2.terminal.TerminalGridPreview
@@ -181,6 +184,8 @@ class UiGalleryActivity : ComponentActivity() {
             "terminal-connecting" -> Terminal(cardState = SessionState.Connecting)
             "terminal-closed" -> Terminal(target = "tmux main", cardState = SessionState.Closed(CloseReason.Disconnected))
             "terminal-arrowpad" -> Terminal(pad = true)
+            "terminal-arrowpad-text" -> Terminal(pad = true, dense = true)
+            "terminal-herdr-wheel" -> Terminal(target = "herdr personal w1:p2", herdrWheelAway = true)
             "terminal-composer" -> Terminal(composer = true)
             else -> Text("Unknown screen: $name", color = Or2Colors.Danger)
         }
@@ -342,14 +347,23 @@ class UiGalleryActivity : ComponentActivity() {
 
     /**
      * The terminal screen over the probe's session; the card's own [cardState] and [health] are the
-     * gallery's (the probe stays connected underneath, so the demo frame still shows).
+     * gallery's (the probe stays connected underneath, so the demo frame still shows). [dense] fills
+     * every cell with text (the arrow pad over text); [herdrWheelAway] is a herdr target that tracks
+     * the mouse after a swipe up went to herdr as wheel events (route 1): the scroll-to-bottom button
+     * shows, and tapping it sends nothing anywhere here.
      */
     @Composable
     private fun Terminal(
         host: String = "workstation", target: String = "shell", transport: Transport = Transport.SSH,
         cardState: SessionState = SessionState.Connected, health: LinkHealth? = null, pad: Boolean = false, composer: Boolean = false,
+        dense: Boolean = false, herdrWheelAway: Boolean = false,
     ) {
         val session = remember { startProbe() }
+        val scope = rememberCoroutineScope()
+        val herdr = remember { TerminalTarget.Herdr("personal", "w1:p2") }
+        val scroller = remember(herdrWheelAway) {
+            if (herdrWheelAway) TargetScroller(scope, { _ -> }).apply { wheeled(-6) } else null
+        }
         val state by probeState.collectAsStateWithLifecycle()
         // The composer opens with a message typed, so the caret, the focus ring and the lit send button show.
         val chrome = remember { TerminalChromeState(padOpen = pad, composerOpen = composer, composerText = if (composer) "yes, go ahead" else "") }
@@ -365,7 +379,7 @@ class UiGalleryActivity : ComponentActivity() {
                     val probeText = view.grid.rows.firstOrNull()?.cells?.joinToString("") { it.text }.orEmpty()
                     if (size != shown || probeText.startsWith("or2 contract probe")) {
                         view.clearSelection()
-                        view.grid.apply(terminalDemoFrame(size.first, size.second, view.grid.sequence + 1u))
+                        view.grid.apply(terminalDemoFrame(size.first, size.second, view.grid.sequence + 1u, dense, mouseTracking = herdrWheelAway))
                         view.invalidate()
                         shown = size
                     }
@@ -374,7 +388,8 @@ class UiGalleryActivity : ComponentActivity() {
         }
         TerminalCard(host, target, transport, cardState, minimise = {}, openSwitcher = {}, endSession = {}, linkHealth = health) {
             TerminalScreen(session, probeState, probeFrames.receiveAsFlow(), Modifier.weight(1f),
-                composerHint = "Message $host…", chrome = chrome)
+                composerHint = "Message $host…", chrome = chrome,
+                target = if (scroller != null) herdr else TerminalTarget.Shell, targetScroller = scroller)
         }
     }
 
@@ -421,7 +436,7 @@ class UiGalleryActivity : ComponentActivity() {
             "host-form", "host-form-new-key", "host-form-edit", "keys", "keys-empty", "about", "licenses", "hostkey-first", "hostkey-changed",
             "add-host", "pair-scan", "pair-scan-denied", "pair-review", "pair-review-new", "pair-progress", "pair-install", "keepalive", "keepalive-waiting",
             "terminal", "terminal-tmux", "terminal-long", "terminal-stale", "terminal-connecting", "terminal-closed",
-            "terminal-arrowpad", "terminal-composer",
+            "terminal-arrowpad", "terminal-arrowpad-text", "terminal-herdr-wheel", "terminal-composer",
         )
     }
 }

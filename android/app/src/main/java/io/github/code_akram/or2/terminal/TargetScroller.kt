@@ -90,6 +90,8 @@ fun utf8Length(text: CharSequence): Int {
  *   [RETRY_DELAYS_MS] (the last one repeating) while the host connection is [live]; while it is not,
  *   the input waits and the next try goes as soon as it is live again. Nothing gives up but [close]
  *   (the terminal closed), which drops what is held. [bottom] (the button) tries at once.
+ * - A swipe up that went to tmux or herdr as wheel events (route 1, [wheeled]) leaves the target
+ *   [unconfirmed] too: it scrolled itself, how far is unknown.
  * - At most [MAX_HELD_BYTES] are held: an input that would pass the cap is dropped (the newest, so
  *   what was typed first still goes out whole and in order) and [input] returns false.
  *
@@ -111,6 +113,12 @@ class TargetScroller(
     private var pendingRows = 0
     private var pendingBottom = false
     private var inFlight = false
+
+    /** The call in flight (meaningful while [inFlight]). */
+    private var inFlightCall: TargetScroll? = null
+
+    /** The call in flight is a `Bottom`. */
+    private val bottomInFlight get() = inFlight && inFlightCall == TargetScroll.Bottom
     private val held = ArrayDeque<Held>()
     private var heldBytes = 0
 
@@ -128,6 +136,9 @@ class TargetScroller(
     /** A call failed or was cancelled: the target may be in its history, how far unknown, until a `Bottom` succeeds. */
     var unconfirmed = false
         private set
+
+    /** Wheel swipes up so far ([wheeled]): a `Bottom` sent before the newest one does not confirm the bottom. */
+    private var wheelsUp = 0L
 
     /** The terminal has closed: nothing is held or sent any more. */
     var closed = false
@@ -152,6 +163,19 @@ class TargetScroller(
         changeAway { awayLines = (awayLines - rows).coerceAtLeast(0) }
         pendingRows += rows
         pump()
+    }
+
+    /**
+     * A swipe of [rows] went to the program as wheel events (route 1: tmux with `mouse on`, herdr), so
+     * tmux or herdr may have scrolled its own history by an amount this terminal cannot know. Up marks
+     * the target [unconfirmed] (away, how far unknown): the button shows and the next input sends
+     * `Bottom` first. Down changes nothing, even if it may have reached the bottom: only a `Bottom`
+     * that succeeds clears it. Nothing is sent here; the wheel events already went out.
+     */
+    fun wheeled(rows: Int) {
+        if (closed || rows >= 0) return
+        wheelsUp++
+        changeAway { unconfirmed = true }
     }
 
     /**
@@ -191,7 +215,8 @@ class TargetScroller(
         heldBytes += bytes
         when {
             retrying -> Unit // A Bottom failed: its retry (or the button) sends the next.
-            away || pendingRows != 0 -> bottom()
+            // Unconfirmed stays away while its Bottom is out: that Bottom (or what follows it) decides.
+            (away || pendingRows != 0) && !(bottomInFlight && pendingRows == 0) -> bottom()
             else -> pump()
         }
         return true
@@ -230,6 +255,8 @@ class TargetScroller(
         pendingBottom = false
         pendingRows = 0
         inFlight = true
+        inFlightCall = next
+        val wheelsBefore = wheelsUp
         scope.launch {
             var succeeded = false
             try {
@@ -245,7 +272,8 @@ class TargetScroller(
                 inFlight = false
             }
             if (succeeded) {
-                if (next == TargetScroll.Bottom) {
+                // A wheel swipe up while this Bottom was out may have scrolled the target again.
+                if (next == TargetScroll.Bottom && wheelsUp == wheelsBefore) {
                     failures = 0
                     changeAway { unconfirmed = false }
                 }

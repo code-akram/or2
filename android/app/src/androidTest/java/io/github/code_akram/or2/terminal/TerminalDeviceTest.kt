@@ -83,6 +83,7 @@ class TerminalDeviceTest {
         val keys = mutableListOf<KeyInput>()
         val sizes = mutableListOf<GridSize>()
         val scrolls = mutableListOf<ViewportScroll>()
+        val clicks = mutableListOf<Pair<Int, Int>>()
         var error: SessionException? = null
         var snapshots = 0
         var fullSnapshot: TerminalFrame? = null
@@ -96,6 +97,7 @@ class TerminalDeviceTest {
         // Deliberately no resize output: remount must recover via requestFullFrame, not resize.
         override fun resize(columns: UShort, rows: UShort) { sizes += GridSize(columns, rows) }
         override fun scroll(scroll: ViewportScroll) { error?.let { throw it }; scrolls += scroll }
+        override fun mouseClick(column: UShort, row: UShort) { error?.let { throw it }; clicks += column.toInt() to row.toInt() }
         override fun requestFullFrame() {
             snapshots++
             if (!deferSnapshot) fullSnapshot?.let { publish(it.copy(sequence = ++sequence)) }

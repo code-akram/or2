@@ -157,6 +157,10 @@ class SessionContractTest {
                 session.sendKey(KeyInput(TerminalKey.Character("\n"), ctrl))
             }
 
+            // API 15: a tap's click crosses the FFI with its cell (the probe echoes it).
+            session.mouseClick(7u, 3u)
+            assertEquals("click 7 3", listener.awaitFrame(session).rowText(3))
+
             session.scroll(ViewportScroll.Delta(-10))
             val scrolled = listener.awaitFrame(session)
             assertTrue(scrolled.changedRows.isEmpty())

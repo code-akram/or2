@@ -84,6 +84,7 @@ class FakeSession(val events: MutableList<String> = mutableListOf(), val transpo
         inputs += input
     }
     override fun scroll(scroll: ViewportScroll) = take("scroll:$scroll")
+    override fun mouseClick(column: UShort, row: UShort) = take("click:$column,$row")
     override fun sendKey(input: KeyInput) = take("key:${input.key}")
     override fun sendText(text: String) = take("text:$text")
     override fun submitText(text: String) = take("submit:$text")

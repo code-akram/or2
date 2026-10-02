@@ -475,7 +475,9 @@ spinner and progress line), `home-picker-failed` (the failure and **Retry**), `i
 host), `keepalive-waiting` (Android's dialog up), `terminal` (a shell over SSH), `terminal-tmux` (a tmux
 target over Mosh), `terminal-long` (a title long enough to ellipsize), `terminal-stale` (Mosh, `Last heard
 12 s ago`), `terminal-connecting` and `terminal-closed` (the notice strip under the header, the latter with
-**Close**), `terminal-arrowpad`, `terminal-composer` (opens with a message typed and the keyboard up, to show
+**Close**), `terminal-arrowpad`, `terminal-arrowpad-text` (the pad open over a terminal full of text, to
+judge its blue keys against it), `terminal-herdr-wheel` (a herdr target tracking the mouse after a swipe up
+went to herdr as wheel events: the scroll-to-bottom button shows), `terminal-composer` (opens with a message typed and the keyboard up, to show
 the caret and the lit send button). The terminal screens run the native contract probe and replace its first
 frame with a Catppuccin demo session (`gallery/DemoFrames.kt`). Use it to screenshot the phone
 without touching real hosts or the biometric prompt.

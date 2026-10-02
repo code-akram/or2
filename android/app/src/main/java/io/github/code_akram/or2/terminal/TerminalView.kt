@@ -148,14 +148,20 @@ class TerminalView(context: Context) : View(context) {
         }
         override fun onSingleTapUp(e: MotionEvent): Boolean {
             // A selection is cleared by a tap, never followed through a link under it.
-            val link = if (selection == null) position(e.x, e.y)?.let { TerminalLinks.at(grid.rows, it) } else null
+            val cell = position(e.x, e.y)
+            val link = if (selection == null) cell?.let { TerminalLinks.at(grid.rows, it) } else null
             performClick()
-            if (link != null) {
-                openLink(link)
-                return true
+            when (tapAction(selection != null, link != null, grid.modes.mouseTracking)) {
+                TapAction.CLEAR_SELECTION -> {
+                    clearSelection()
+                    // Without mouse tracking a tap also opens the keyboard, as it always has.
+                    if (!grid.modes.mouseTracking) showKeyboard()
+                }
+                TapAction.OPEN_LINK -> openLink(link ?: return true)
+                // Pointer input acts on what is shown, like the wheel: it is never held behind a Bottom.
+                TapAction.CLICK -> cell?.let { sessionCall { mouseClick(it.column.toUShort(), it.row.toUShort()) } }
+                TapAction.SHOW_KEYBOARD -> showKeyboard()
             }
-            clearSelection()
-            showKeyboard()
             return true
         }
         override fun onLongPress(e: MotionEvent) {
@@ -539,8 +545,10 @@ class TerminalView(context: Context) : View(context) {
     private fun scrollRows(rows: Int) {
         val targets = targetScroller
         when (scrollRoute(grid.modes, target)) {
-            ScrollRoute.WHEEL -> sessionCall {
-                scroll(ViewportScroll.Wheel(rows, scrollCell.column.toUShort(), scrollCell.row.toUShort()))
+            ScrollRoute.WHEEL -> {
+                sessionCall { scroll(ViewportScroll.Wheel(rows, scrollCell.column.toUShort(), scrollCell.row.toUShort())) }
+                // tmux (mouse on) or herdr may now be in its own history, how far unknown: the button shows.
+                targets?.wheeled(rows)
             }
             ScrollRoute.TMUX, ScrollRoute.HERDR ->
                 if (targets != null) targets.scroll(rows) else sessionCall { scroll(ViewportScroll.Delta(rows)) }

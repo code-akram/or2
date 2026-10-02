@@ -4315,3 +4315,116 @@ action), `HomeUiDeviceTest.theCardBodyOpensTheHostAndItsSessionButtonOpensThePic
 host screen with no picker; button to the picker over Home, a choice opening the terminal; a host that
 is not connected connects and shows progress, then the lists; a failure with **Retry**; dismissing
 leaves Home), `EntryUiDeviceTest.closeSessionInThePanesSheetEndsAnOpenTerminalInOneTapAndReturnsHome`.
+
+# v0.1.2: blue arrow pad, route-1 scroll-to-bottom, tap to click (API 15)
+
+Owner feedback on the phone, v0.1.1 (branch `v012/pad-scroll-click`):
+
+1. *"The arrow pad keys need to be blue, similar to its icon: the background and the arrow keys are
+   the same colour."* Sizes, shapes, positions and the panel-less cluster stay.
+2. *"When I scroll up in the terminal to read the agent output and then want to come back to the
+   composer, the down arrow popup does nothing on click."* That was a herdr target. herdr tracks the
+   mouse, so the swipe took route 1 (wheel events) and herdr scrolled itself and drew its own "Jump to
+   bottom" banner; taps were not forwarded as clicks, so the banner did nothing, and or2's own
+   scroll-to-bottom button never showed, because route 1 tracked no position.
+
+## FFI (API 15)
+
+| Export | Change |
+|---|---|
+| `Session.mouse_click(column: u16, row: u16) -> Result<(), SessionError>` | New. A left-button press and release at the viewport cell (clamped to the grid), encoded by libghostty-vt's mouse encoder in the terminal's own tracking mode and format (SGR, UTF-8, urxvt, X10; X10 tracking, DECSET 9, gets the press alone). Nothing is sent when the program does not track the mouse. `NotConnected`/`Closed` like `scroll`. Core: `SessionHandle::mouse_click`, `Command::MouseClick { column, row }`, `TerminalEngine::mouse_click`. |
+
+`API_VERSION` = 15. Both transports handle the command the same: the SSH pump writes the bytes to the
+channel, the mosh driver to its user stream (`Session::send_input`); a click waiting behind a submit's
+Enter keeps its place like any input (`SubmitSequencer` orders it). The contract probe echoes it on row 3
+(`click <column> <row>`).
+
+## Arrow pad colours
+
+- Two tokens (`Or2Colors`, docs/ui.md): **`padKey`** `#38425F`, `accent` at 24 % composited over the
+  terminal's default background `#1E1E2E`, stored opaque so terminal text never shows through a key;
+  **`padKeyEdge`**, `accent` at 55 %.
+- Each pad key: `padKey` fill, `accent` glyph, `padKeyEdge` hairline (was `surface` with a `divider`
+  hairline and a `text` glyph). **Enter**, the primary key: `accent` fill, `background` glyph (was
+  `surfaceTrack`), as the composer's send button.
+- The extras pill: `background` with the `padKeyEdge` hairline (was `divider`); its keys' labels, `Alt`'s
+  included, are `accent` (were `text`); a latched `Alt` keeps its `accentMuted` fill.
+- Contrast (`ThemeTest.arrowPadKeysAreBlueAndStandOutFromTheTerminal`): `padKey` against the terminal
+  1.65:1 (`surface` was 1.1:1) and visibly blue (its blue channel 0.15 above red); the hairline 3.3:1 on
+  the terminal; `accent` on `padKey` 4.7:1; `background` on `accent` above 7:1; `accent` labels on
+  `background` above 7:1; `accent` on `accentMuted` above 4.5:1.
+
+## Route 1 on a tmux or herdr target marks it away
+
+- `TargetScroller.wheeled(rows)`: `TerminalView.scrollRows` calls it after a route-1 swipe (wheel events
+  through `ViewportScroll::Wheel`) when the terminal has a target scroller (tmux and herdr terminals only;
+  a shell has none, so a shell with vim or any mouse-tracking program keeps route 1 exactly as before, no
+  button). A swipe **up** sets `unconfirmed` (away, how far unknown): the button shows and nothing is sent
+  (the wheel events already went). A swipe **down** changes nothing, even if it may have reached the
+  bottom: only a `Bottom` that succeeds clears it.
+- From there the existing rules apply unchanged: the button sends `TargetScroll::Bottom` through
+  `scroll_target` (herdr: `pane.scroll` to offset 0 on the focused pane; tmux: `send-keys -X cancel`,
+  where tmux's "not in a mode" is success); any key, text, paste or composer submit first sends `Bottom`
+  and goes out once it has succeeded; hiding the terminal sends `Bottom` (`leave`). The button stays
+  visible while that `Bottom` is out and disappears when it succeeds.
+- A wheel swipe up while a `Bottom` is in flight: that `Bottom`'s success no longer clears `unconfirmed`
+  (`wheelsUp` counts wheel swipes up; a `Bottom` confirms only when none came after it was sent).
+- Input typed while a `Bottom` is already out (and nothing else is queued) waits for that `Bottom` instead
+  of queueing a second one: an unconfirmed target stays `away` until its `Bottom` returns, which used to
+  send one more `Bottom` per input typed meanwhile.
+- **herdr finding** (herdr 0.9.3, live test
+  `herdr_live::bottom_returns_a_pane_herdr_scrolled_by_wheel_events_to_live`): an isolated herdr session
+  with a real herdr client attached (inside a private tmux server, so the test can type into it), `seq 1
+  500` in the pane, SGR wheel-up events typed into the client (`\e[<64;60;10M`, three lines per event)
+  scroll the pane: `pane.get` reports the same `scroll.offset_from_bottom` as `pane.scroll` sets (wheel
+  scrolling and the API share one per-pane offset, not a per-client view). `scroll_pane_in(…, None,
+  Bottom)` (the app's call: the focused pane, no kept offset) then returns it to `offset_from_bottom`
+  0 and the client shows the live screen again. Nothing else is needed.
+- *Decision:* clicks (below) are pointer input like the wheel: they act on what is shown, so they are
+  never held behind a `Bottom` (a tap on herdr's own "Jump to bottom" banner works as herdr means it).
+  A target returned to its bottom that way still shows or2's button until a `Bottom` succeeds (the
+  next key or a tap on it): or2 cannot see herdr's banner.
+
+## Taps become mouse clicks
+
+`TerminalView.onSingleTapUp` follows `tapAction(selecting, link, mouseTracking)` (`terminal/TerminalTap.kt`),
+in this order:
+
+1. A selection is shown: the tap clears it (a link under it is never followed, no click is sent); without
+   mouse tracking the keyboard also opens, as before.
+2. A link under the tap opens (as in v0.1.1, also while the program tracks the mouse).
+3. `TerminalModes.mouse_tracking` is on: `Session.mouse_click` at the tapped cell; the keyboard does not
+   open (the toolbar's keyboard key does).
+4. Otherwise the keyboard opens, as before.
+
+A long press still selects; swipes, flings and pinches are unchanged.
+
+## Tests
+
+- Rust: `terminal::tests::a_click_is_a_left_press_and_release_at_the_tapped_cell_in_sgr` (press `M`,
+  release `m`, 1-based cell, clamping, normal/button/any-event tracking),
+  `a_click_uses_the_x10_format_when_no_extended_format_is_on` (release as button 3; DECSET 9 sends the
+  press alone), `a_click_without_mouse_tracking_sends_nothing`;
+  `ssh::pump::tests::a_click_is_written_only_while_the_program_tracks_the_mouse` (SGR and X10 bytes on the
+  channel, nothing without tracking); `mosh::driver::tests::a_click_reaches_the_server_only_while_the_program_tracks_the_mouse`
+  (fake server, paused clock); `mosh::ghostty::tests::mouse_modes_from_the_server_reach_frames_and_wheel_scrolls`
+  (a click through mosh-relayed modes, nothing once they are off); FFI
+  `session::tests::a_mouse_click_reaches_the_driver_as_its_cell`; the herdr live test above.
+- JVM: `TerminalTapTest` (precedence), `TargetScrollerTest` (a wheel swipe up marks away and sends
+  nothing; down keeps it; the button's `Bottom` and only its success clears it; a failed one keeps the
+  button; input held behind `Bottom`; a wheel during an in-flight `Bottom`; hiding sends `Bottom`; a
+  closed scroller ignores the wheel), `ThemeTest.arrowPadKeysAreBlueAndStandOutFromTheTerminal`,
+  `SessionContractTest` (the click crosses the real FFI to the probe), `NativeContractTest` (API 15).
+- Device (compiled in the gate, not run here): `TerminalChromeDeviceTest.thePadKeysAreBlueAndNotTheTerminalBackground`
+  (pixels of the keys are `padKey`, not the terminal background or `surface`; Enter is `accent`),
+  `aWheelSwipeOnAHerdrTargetShowsTheButtonAndTheButtonSendsBottom`, `aTapIsAClickWhileTheProgramTracksTheMouse`;
+  `NativeDeviceTest` (API 15).
+- Gallery: `terminal-arrowpad-text` (the pad over a terminal full of text) and `terminal-herdr-wheel` (a
+  herdr target after a route-1 swipe up, the button showing); `am start -n
+  io.github.code_akram.or2/.gallery.UiGalleryActivity --es screen terminal-arrowpad-text` (or
+  `terminal-herdr-wheel`).
+
+**Open.** A wheel swipe goes to the pane under the finger, `Bottom` to the focused pane (herdr) or the
+session's active pane (tmux): with several panes, scrolling one that is not focused leaves it scrolled
+after `Bottom`. tmux with `mouse on` running a mouse-tracking program in the pane passes the wheel to
+that program; the `Bottom` sent afterwards is then a harmless `-X cancel` ("not in a mode").
