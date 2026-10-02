@@ -9,8 +9,9 @@ license.workspace = true
 name = "or2-pair"
 path = "src/main.rs"
 
-# A test-only host with an automatic "yes" for the Kotlin end-to-end test. Never built by
-# `cargo install` or a plain `cargo build`: it needs the feature.
+# A test-only host that reads the pairing code from standard input instead of a terminal, for
+# the end-to-end tests (Rust and Kotlin). Never built by `cargo install` or a plain
+# `cargo build`: it needs the feature.
 [[bin]]
 name = "or2-pair-testhost"
 path = "src/bin/or2-pair-testhost.rs"
@@ -22,22 +23,24 @@ test-support = []
 [dependencies]
 base64.workspace = true
 data-encoding.workspace = true
-hmac.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
+ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["zeroize"] }
 gethostname = "=1.1.0"
+hkdf = "=0.13.0"
 if-addrs = "=0.15.0"
 qrcode = { version = "=0.14.1", default-features = false }
 
-# The account database and no-follow file operations (Unix only).
+# The account database, no-follow file operations and signals (Unix only).
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.189"
 
 [dev-dependencies]
-or2-core = { workspace = true }
+russh.workspace = true
 rqrr = { version = "=0.11.0", default-features = false }
 tempfile = "=3.27.0"
 tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }

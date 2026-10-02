@@ -1,23 +1,19 @@
 //! The pairing code: the URI the QR carries and the same text for pasting.
 //!
-//! `or2-pair:1?name=<label>&user=<u>&port=<p>&a=<addr>…&hk=<algo> <base64>&pair=<ip>:<port>…&otp=<base32>`
+//! `or2-pair:2?name=<label>&user=<u>&port=<p>&a=<addr>…&hk=<algo> <base64>&id=<pairing id>`
 //!
 //! Values are percent-encoded; `:` and the RFC 3986 unreserved characters stay as they are.
-//! The strict parser is `or2_core::pair::PairOffer::parse`; the integration tests round-trip
-//! every code this module makes through it.
+//! Nothing in it is secret (the secret is the code `K` the phone shows). `--manual` omits `id`.
+//! The strict parser is the phone's, in `or2_core::pair`; [`Payload::validate`] applies the same
+//! rules here so a code the phone would refuse is never drawn.
 
-use std::net::SocketAddr;
-
-use data_encoding::BASE32_NOPAD;
-
+use crate::bootstrap::PairingId;
 use crate::keyline::KeyLine;
 
 /// At most this many bytes (the QR stays small enough to scan from a terminal).
 pub const MAX_BYTES: usize = 1024;
 /// The phone accepts one to this many `a` addresses...
 pub const MAX_ADDRESSES: usize = 8;
-/// ...and this many `pair` addresses...
-pub const MAX_PAIR_ADDRESSES: usize = 4;
 /// ...and a name or user of at most this many characters.
 pub const MAX_LABEL_CHARS: usize = 64;
 
@@ -30,10 +26,8 @@ pub struct Payload {
     pub addresses: Vec<String>,
     /// `<algorithm> <base64>`.
     pub host_key: String,
-    /// Where the listener is; empty for `--no-listen`.
-    pub pair: Vec<SocketAddr>,
-    /// The one-time password; `None` for `--no-listen`.
-    pub otp: Option<[u8; 16]>,
+    /// The pairing id; `None` for `--manual`.
+    pub id: Option<PairingId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -54,11 +48,6 @@ fn encode_value(value: &str) -> String {
     out
 }
 
-/// The OTP in the payload's form: 26 base32 characters.
-pub fn otp_text(otp: &[u8; 16]) -> String {
-    BASE32_NOPAD.encode(otp)
-}
-
 impl Payload {
     pub fn encode(&self) -> String {
         let mut parts = vec![
@@ -72,15 +61,10 @@ impl Payload {
                 .map(|address| format!("a={}", encode_value(address))),
         );
         parts.push(format!("hk={}", encode_value(&self.host_key)));
-        parts.extend(
-            self.pair
-                .iter()
-                .map(|pair| format!("pair={}", encode_value(&pair.to_string()))),
-        );
-        if let Some(otp) = &self.otp {
-            parts.push(format!("otp={}", otp_text(otp)));
+        if let Some(id) = &self.id {
+            parts.push(format!("id={id}"));
         }
-        format!("or2-pair:1?{}", parts.join("&"))
+        format!("or2-pair:2?{}", parts.join("&"))
     }
 
     /// Drops the lowest-priority addresses (the last ones) until the code is within both of the
@@ -98,8 +82,8 @@ impl Payload {
     }
 
     /// Checks everything the phone's strict parser would, so a code that would be refused is
-    /// never printed: the same rules as `or2_core::pair::PairOffer::parse` (that crate is not a
-    /// dependency of this tool; the tests hold the two in step against the real parser).
+    /// never printed: the same rules as `or2_core::pair` (that crate is not a dependency of this
+    /// tool; the tests hold the two in step).
     pub fn validate(&self) -> Result<(), Invalid> {
         let bad = |field: &'static str, why: &str| Err(Invalid(field, why.to_owned()));
         for (field, text) in [("name", &self.name), ("user", &self.user)] {
@@ -135,29 +119,10 @@ impl Payload {
             Ok(key) if key.openssh() == self.host_key => {}
             _ => return bad("hk", "must be one plain public key without a comment"),
         }
-        if self.pair.is_empty() != self.otp.is_none() {
-            return bad(
-                "pair",
-                "the listener address and the password come together",
-            );
-        }
-        if self.pair.len() > MAX_PAIR_ADDRESSES {
-            return bad("pair", "at most four listener addresses");
-        }
-        for (index, pair) in self.pair.iter().enumerate() {
-            let ip = pair.ip();
-            let unusable = ip.is_unspecified()
-                || ip.is_multicast()
-                || matches!(ip, std::net::IpAddr::V4(v4) if v4.is_broadcast());
-            if unusable || pair.port() == 0 {
-                return bad(
-                    "pair",
-                    &format!("{pair} is not an address a phone can dial"),
-                );
-            }
-            if self.pair[..index].contains(pair) {
-                return bad("pair", &format!("{pair} is listed twice"));
-            }
+        if let Some(id) = &self.id
+            && PairingId::parse(id.as_str()).is_err()
+        {
+            return bad("id", "must be 13 lowercase base32 characters");
         }
         let size = self.encode().len();
         if size > MAX_BYTES {
@@ -171,6 +136,100 @@ impl Payload {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("the pairing code would not be accepted by the phone: `{0}` {1}")]
 pub struct Invalid(pub &'static str, pub String);
+
+/// A strict reader of the code, as the contract describes the phone's: only for the tests of
+/// this crate (and shared with its integration tests), to hold `validate` and the encoder in
+/// step with it.
+#[doc(hidden)]
+pub mod reference {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Error {
+        UnsupportedVersion(u32),
+        Malformed(&'static str),
+    }
+
+    fn unescape(value: &str) -> Result<String, Error> {
+        let bytes = value.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' {
+                let hex = bytes
+                    .get(i + 1..i + 3)
+                    .and_then(|h| std::str::from_utf8(h).ok())
+                    .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
+                    .and_then(|h| u8::from_str_radix(h, 16).ok())
+                    .ok_or(Error::Malformed("a bad escape"))?;
+                out.push(hex);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).map_err(|_| Error::Malformed("not UTF-8"))
+    }
+
+    /// Parses a version 2 code. `Err(UnsupportedVersion)` for any other version.
+    pub fn parse(text: &str) -> Result<Payload, Error> {
+        let rest = text
+            .strip_prefix("or2-pair:")
+            .ok_or(Error::Malformed("not a pairing code"))?;
+        let (version, query) = rest.split_once('?').ok_or(Error::Malformed("no fields"))?;
+        let version: u32 = version
+            .parse()
+            .map_err(|_| Error::Malformed("no version"))?;
+        if version != 2 {
+            return Err(Error::UnsupportedVersion(version));
+        }
+        if text.len() > MAX_BYTES {
+            return Err(Error::Malformed("too long"));
+        }
+        let (mut name, mut user, mut port, mut hk, mut id) = (None, None, None, None, None);
+        let mut addresses = Vec::new();
+        let once = |slot: &mut Option<String>, value: String| {
+            if slot.replace(value).is_some() {
+                Err(Error::Malformed("a repeated field"))
+            } else {
+                Ok(())
+            }
+        };
+        for part in query.split('&') {
+            let (key, value) = part.split_once('=').ok_or(Error::Malformed("no ="))?;
+            let value = unescape(value)?;
+            match key {
+                "name" => once(&mut name, value)?,
+                "user" => once(&mut user, value)?,
+                "port" => once(&mut port, value)?,
+                "hk" => once(&mut hk, value)?,
+                "id" => once(&mut id, value)?,
+                "a" => addresses.push(value),
+                _ => return Err(Error::Malformed("an unknown field")),
+            }
+        }
+        let missing = || Error::Malformed("a missing field");
+        let payload = Payload {
+            name: name.ok_or_else(missing)?,
+            user: user.ok_or_else(missing)?,
+            port: port
+                .ok_or_else(missing)?
+                .parse()
+                .map_err(|_| Error::Malformed("a bad port"))?,
+            addresses,
+            host_key: hk.ok_or_else(missing)?,
+            id: id
+                .map(|id| PairingId::parse(&id).map_err(|_| Error::Malformed("a bad id")))
+                .transpose()?,
+        };
+        // The same field rules the CLI applies before drawing (kept in one place).
+        payload
+            .validate()
+            .map_err(|_| Error::Malformed("a field out of range"))?;
+        Ok(payload)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -186,8 +245,7 @@ mod tests {
             port: 22,
             addresses: vec!["100.101.102.103".into(), "work-mac.local".into()],
             host_key: HK.into(),
-            pair: vec!["192.168.1.20:41234".parse().unwrap()],
-            otp: Some(core::array::from_fn(|i| i as u8)),
+            id: Some(PairingId::parse("abcdefghijklm").unwrap()),
         }
     }
 
@@ -195,30 +253,31 @@ mod tests {
     fn encodes_the_documented_shape() {
         assert_eq!(
             payload().encode(),
-            "or2-pair:1?name=Work%20Mac&user=alice&port=22&a=100.101.102.103&a=work-mac.local\
+            "or2-pair:2?name=Work%20Mac&user=alice&port=22&a=100.101.102.103&a=work-mac.local\
              &hk=ssh-ed25519%20AAAAC3NzaC1lZDI1NTE5AAAAIAc39XUWT33SvSLy6vA7I83%2BXgmwnHmYtMQRjLeaZ2U7\
-             &pair=192.168.1.20:41234&otp=AAAQEAYEAUDAOCAJBIFQYDIOB4"
+             &id=abcdefghijklm"
         );
     }
 
     #[test]
-    fn ipv6_pair_addresses_are_bracketed_and_values_are_escaped() {
+    fn ipv6_addresses_are_not_bracketed_and_values_are_escaped() {
         let mut p = payload();
         p.name = "a&b=c#d é".into();
-        p.pair = vec!["[fd00::1]:5000".parse().unwrap()];
+        p.addresses = vec!["2001:db8::9".into(), "fd00::1".into()];
         let code = p.encode();
         assert!(code.contains("name=a%26b%3Dc%23d%20%C3%A9&"), "{code}");
-        assert!(code.contains("&pair=%5Bfd00::1%5D:5000&"), "{code}");
+        assert!(code.contains("&a=2001:db8::9&a=fd00::1&"), "{code}");
         assert!(!code.contains(' '));
+        assert_eq!(reference::parse(&code).unwrap(), p);
     }
 
     #[test]
-    fn no_listen_has_neither_pair_nor_otp() {
+    fn manual_has_no_id() {
         let mut p = payload();
-        p.pair.clear();
-        p.otp = None;
+        p.id = None;
         let code = p.encode();
-        assert!(!code.contains("pair=") && !code.contains("otp="), "{code}");
+        assert!(!code.contains("id="), "{code}");
+        assert_eq!(reference::parse(&code).unwrap(), p);
     }
 
     #[test]
@@ -226,7 +285,12 @@ mod tests {
         assert!(payload().encode().len() < 400);
     }
 
-    // --- Finding 9: never a code the phone rejects ---------------------------------------------
+    #[test]
+    fn the_code_round_trips_through_the_strict_reader() {
+        let p = payload();
+        assert_eq!(p.validate(), Ok(()));
+        assert_eq!(reference::parse(&p.encode()).unwrap(), p);
+    }
 
     #[test]
     fn more_than_eight_short_addresses_are_trimmed_to_the_phones_limit() {
@@ -240,13 +304,11 @@ mod tests {
         assert_eq!(p.addresses.len(), MAX_ADDRESSES);
         assert_eq!(dropped, ["10.0.0.9", "10.0.0.10", "10.0.0.11", "10.0.0.12"]);
         assert_eq!(p.validate(), Ok(()));
-        // And the real, strict parser agrees.
-        let offer = or2_core::pair::PairOffer::parse(&p.encode()).unwrap();
-        assert_eq!(offer.addresses.len(), 8);
+        assert_eq!(reference::parse(&p.encode()).unwrap().addresses.len(), 8);
     }
 
     #[test]
-    fn validate_refuses_what_the_phones_parser_refuses() {
+    fn validate_refuses_what_the_strict_reader_refuses() {
         let long = "x".repeat(65);
         type Change = Box<dyn Fn(&mut Payload)>;
         let cases: Vec<(&str, Change)> = vec![
@@ -284,6 +346,10 @@ mod tests {
                 Box::new(|p| p.addresses = vec!["my host".into()]),
             ),
             (
+                "brackets around an ipv6 address",
+                Box::new(|p| p.addresses = vec!["[2001:db8::9]".into()]),
+            ),
+            (
                 "a slash in an address",
                 Box::new(|p| p.addresses = vec!["a/b".into()]),
             ),
@@ -305,49 +371,47 @@ mod tests {
                 "an unsupported host key",
                 Box::new(|p| p.host_key = "ssh-dss AAAA".into()),
             ),
-            (
-                "five listener addresses",
-                Box::new(|p| {
-                    p.pair = (1..=5)
-                        .map(|i| format!("10.0.0.{i}:9").parse().unwrap())
-                        .collect();
-                }),
-            ),
-            (
-                "a wildcard listener",
-                Box::new(|p| p.pair = vec!["0.0.0.0:9".parse().unwrap()]),
-            ),
-            (
-                "a multicast listener",
-                Box::new(|p| p.pair = vec!["224.0.0.1:9".parse().unwrap()]),
-            ),
-            (
-                "a broadcast listener",
-                Box::new(|p| p.pair = vec!["255.255.255.255:9".parse().unwrap()]),
-            ),
-            (
-                "a duplicate listener",
-                Box::new(|p| {
-                    p.pair = vec!["10.0.0.1:9".parse().unwrap(), "10.0.0.1:9".parse().unwrap()];
-                }),
-            ),
-            ("a listener without a password", Box::new(|p| p.otp = None)),
-            (
-                "a password without a listener",
-                Box::new(|p| p.pair.clear()),
-            ),
         ];
         for (what, change) in cases {
             let mut p = payload();
             change(&mut p);
             assert!(p.validate().is_err(), "{what} was let through");
-            // Whatever `validate` refuses, the phone refuses (the converse is not required).
+            // Whatever `validate` refuses, the strict reader refuses (the converse is not required).
             assert!(
-                or2_core::pair::PairOffer::parse(&p.encode()).is_err(),
-                "{what}: the phone takes it"
+                reference::parse(&p.encode()).is_err(),
+                "{what}: the reader takes it"
             );
         }
         assert_eq!(payload().validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_strict_reader_is_strict() {
+        let good = payload().encode();
+        assert!(reference::parse(&good).is_ok());
+        assert_eq!(
+            reference::parse(&good.replacen("or2-pair:2", "or2-pair:1", 1)),
+            Err(reference::Error::UnsupportedVersion(1))
+        );
+        assert_eq!(
+            reference::parse(&good.replacen("or2-pair:2", "or2-pair:3", 1)),
+            Err(reference::Error::UnsupportedVersion(3))
+        );
+        for bad in [
+            format!("{good}&extra=1"),
+            format!("{good}&port=23"),
+            format!("{good}&id=abcdefghijklm"),
+            good.replace("id=abcdefghijklm", "id=ABCDEFGHIJKLM"),
+            good.replace("id=abcdefghijklm", "id=abcdefghijkl"),
+            good.replace("name=Work%20Mac", "name=Work%2"),
+            good.replace("name=Work%20Mac", "name=Work%ZZ"),
+            good.replace("&user=alice", ""),
+        ] {
+            assert!(reference::parse(&bad).is_err(), "{bad}");
+        }
+        // A plus is a plus, not a space.
+        let plus = good.replace("Work%20Mac", "Work+Mac");
+        assert_eq!(reference::parse(&plus).unwrap().name, "Work+Mac");
     }
 
     #[test]
@@ -357,7 +421,7 @@ mod tests {
         p.name = "n".repeat(64);
         assert!(p.fit().unwrap().is_empty());
         // A huge host key (RSA 8192) leaves room for few addresses.
-        p.host_key = format!("ssh-rsa {}", "A".repeat(780));
+        p.host_key = format!("ssh-rsa {}", "A".repeat(830));
         let dropped = p.fit().unwrap();
         assert!(!dropped.is_empty());
         assert_eq!(p.addresses.len() + dropped.len(), 8);

@@ -1,6 +1,6 @@
 //! Command-line arguments, parsed by hand: a handful of flags do not need a framework.
 
-use std::net::IpAddr;
+use crate::bootstrap::PairingId;
 
 pub const HELP: &str = "\
 or2-pair - pair a phone with this host: one command, one QR scan
@@ -8,10 +8,12 @@ or2-pair - pair a phone with this host: one command, one QR scan
 USAGE:
     or2-pair [OPTIONS]
 
-Prints a QR code (and the same pairing code as text). Scan it with or2 on your phone
-(Add host > Easy pair with QR). The phone sends its SSH public key to a one-shot listener on
-this machine; you confirm the key's fingerprint here, and it is appended to
-~/.ssh/authorized_keys. Nothing is changed before you answer y.
+Run it in a terminal. It checks this host, asks for the code shown on your phone (Add host >
+Easy pair), then prints a QR code (and the same pairing code as text) for you to scan with that
+phone. Pairing runs over this host's own sshd, on the port you connect to anyway: no other port
+is opened. The phone's SSH public key lands in ~/.ssh/authorized_keys and a temporary key that
+or2-pair added is removed again; if anything goes wrong or you press Ctrl-C the temporary key is
+removed too. Nothing is changed before you type the code.
 
 OPTIONS:
     --name <label>        Name shown on the phone (default: this machine's host name)
@@ -22,13 +24,9 @@ OPTIONS:
     --ssh-port <port>     Port sshd listens on (default: Port in /etc/ssh/sshd_config, else 22)
     --address <host>      Add an address to the code, ahead of the detected ones (repeatable),
                           e.g. a DNS name that works from anywhere
-    --bind <ip>           Listen only on this address (repeatable). By default the listener
-                          binds the LAN and overlay (ZeroTier, Tailscale) addresses it lists,
-                          never a public one. A public address or 0.0.0.0 is allowed here,
-                          with a warning
-    --pair-port <port>    Port for the listener (default: a random free one)
-    --no-listen           Print the code without a listener. The phone then shows its public
-                          key for you to add to authorized_keys by hand
+    --manual              Print the code without pairing: asks for no code and changes nothing.
+                          The phone then shows its public key for you to add to authorized_keys
+                          by hand (alias: --no-listen)
     --check               Run the checks and exit; nothing else is done
     --ascii               Draw the QR with ASCII only (two characters per module; wider)
     --invert              Draw the QR for a light terminal (only without colour)
@@ -36,8 +34,12 @@ OPTIONS:
     -h, --help            Show this help
     -V, --version         Show the version
 
-The listener waits at most 120 seconds, serves one attempt, and then exits.
+Internal:
+    or2-pair enroll <id>  What sshd runs for the temporary key during a pairing. Not for typing.
 ";
+
+/// What `--bind` and `--pair-port` (version 1's listener options) now say.
+pub const REMOVED_OPTIONS: &str = "pairing uses the SSH port now; these options are gone";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Options {
@@ -45,9 +47,7 @@ pub struct Options {
     pub user: Option<String>,
     pub ssh_port: Option<u16>,
     pub addresses: Vec<String>,
-    pub bind: Vec<IpAddr>,
-    pub pair_port: u16,
-    pub no_listen: bool,
+    pub manual: bool,
     pub check_only: bool,
     pub ascii: bool,
     pub invert: bool,
@@ -57,6 +57,8 @@ pub struct Options {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Parsed {
     Run(Options),
+    /// The forced command: `or2-pair enroll <id>`.
+    Enroll(PairingId),
     Help,
     Version,
 }
@@ -79,6 +81,16 @@ fn port(flag: &str, value: &str) -> Result<u16, UsageError> {
 }
 
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed, UsageError> {
+    let args: Vec<String> = args.into_iter().collect();
+    if args.first().map(String::as_str) == Some("enroll") {
+        // Exactly `enroll <id>`, with the id validated: it comes from sshd's forced command.
+        return match &args[1..] {
+            [id] => PairingId::parse(id)
+                .map(Parsed::Enroll)
+                .map_err(|error| usage(format!("enroll: {error}"))),
+            _ => Err(usage("enroll takes exactly one argument, the pairing id")),
+        };
+    }
     let mut options = Options::default();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -101,16 +113,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed, UsageErro
             "--name" => options.name = Some(value(&mut args)?),
             "--user" => options.user = Some(value(&mut args)?),
             "--ssh-port" => options.ssh_port = Some(port(&flag, &value(&mut args)?)?),
-            "--pair-port" => options.pair_port = port(&flag, &value(&mut args)?)?,
             "--address" => options.addresses.push(value(&mut args)?),
-            "--bind" => {
-                let text = value(&mut args)?;
-                let ip = text
-                    .parse()
-                    .map_err(|_| usage(format!("--bind needs an IP address, not {text:?}")))?;
-                options.bind.push(ip);
-            }
-            "--no-listen" => options.no_listen = true,
+            "--bind" | "--pair-port" => return Err(usage(format!("{flag}: {REMOVED_OPTIONS}"))),
+            "--manual" | "--no-listen" => options.manual = true,
             "--check" => options.check_only = true,
             "--ascii" => options.ascii = true,
             "--invert" => options.invert = true,
@@ -120,16 +125,11 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed, UsageErro
         if inline.is_some()
             && matches!(
                 flag.as_str(),
-                "--no-listen" | "--check" | "--ascii" | "--invert" | "--no-color"
+                "--manual" | "--no-listen" | "--check" | "--ascii" | "--invert" | "--no-color"
             )
         {
             return Err(usage(format!("{flag} takes no value")));
         }
-    }
-    if options.no_listen && (!options.bind.is_empty() || options.pair_port != 0) {
-        return Err(usage(
-            "--bind and --pair-port have no meaning with --no-listen",
-        ));
     }
     Ok(Parsed::Run(options))
 }
@@ -162,13 +162,9 @@ mod tests {
             "--user=alice",
             "--ssh-port",
             "2222",
-            "--pair-port=5000",
             "--address",
             "a.example.org",
             "--address=b.example.org",
-            "--bind",
-            "10.0.0.5",
-            "--bind=fd00::1",
             "--ascii",
             "--invert",
             "--no-color",
@@ -176,10 +172,32 @@ mod tests {
         assert_eq!(o.name.as_deref(), Some("Work Mac"));
         assert_eq!(o.user.as_deref(), Some("alice"));
         assert_eq!(o.ssh_port, Some(2222));
-        assert_eq!(o.pair_port, 5000);
         assert_eq!(o.addresses, ["a.example.org", "b.example.org"]);
-        assert_eq!(o.bind.len(), 2);
-        assert!(o.ascii && o.invert && o.no_color && !o.no_listen);
+        assert!(o.ascii && o.invert && o.no_color && !o.manual);
+    }
+
+    #[test]
+    fn manual_and_its_old_alias() {
+        assert!(options(&["--manual"]).manual);
+        assert!(options(&["--no-listen"]).manual);
+        assert!(run(&["--manual=1"]).is_err());
+    }
+
+    #[test]
+    fn the_listener_options_are_gone_with_a_message() {
+        for args in [
+            &["--bind", "10.0.0.5"][..],
+            &["--bind=10.0.0.5"],
+            &["--pair-port", "5000"],
+            &["--pair-port=5000"],
+            &["--manual", "--bind", "10.0.0.5"],
+        ] {
+            let error = run(args).unwrap_err().to_string();
+            assert!(
+                error.contains("pairing uses the SSH port now; these options are gone"),
+                "{args:?}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -191,6 +209,26 @@ mod tests {
     }
 
     #[test]
+    fn enroll_takes_exactly_a_valid_id() {
+        assert_eq!(
+            run(&["enroll", "abcdefghijklm"]).unwrap(),
+            Parsed::Enroll(PairingId::parse("abcdefghijklm").unwrap())
+        );
+        for args in [
+            &["enroll"][..],
+            &["enroll", "abcdefghijklm", "extra"],
+            &["enroll", "../../x"],
+            &["enroll", "ABCDEFGHIJKLM"],
+            &["enroll", ""],
+            &["enroll=abcdefghijklm"],
+        ] {
+            assert!(run(args).is_err(), "{args:?}");
+        }
+        // Only as the first argument.
+        assert!(run(&["--check", "enroll", "abcdefghijklm"]).is_err());
+    }
+
+    #[test]
     fn bad_input_is_a_usage_error() {
         for args in [
             &["--nope"][..],
@@ -199,11 +237,8 @@ mod tests {
             &["--ssh-port", "0"],
             &["--ssh-port", "70000"],
             &["--ssh-port", "x"],
-            &["--bind", "host.example.org"],
-            &["--no-listen=1"],
+            &["--check=1"],
             &["stray"],
-            &["--no-listen", "--bind", "10.0.0.1"],
-            &["--no-listen", "--pair-port", "5000"],
         ] {
             assert!(run(args).is_err(), "{args:?}");
         }
@@ -216,8 +251,7 @@ mod tests {
             "--user",
             "--ssh-port",
             "--address",
-            "--bind",
-            "--pair-port",
+            "--manual",
             "--no-listen",
             "--check",
             "--ascii",
@@ -225,8 +259,11 @@ mod tests {
             "--no-color",
             "--help",
             "--version",
+            "Internal:",
+            "or2-pair enroll <id>",
         ] {
             assert!(HELP.contains(flag), "{flag}");
         }
+        assert!(!HELP.contains("--bind") && !HELP.contains("--pair-port"));
     }
 }

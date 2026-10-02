@@ -1,42 +1,28 @@
 //! Where `or2-pair` does not install keys (every target that is not Unix, until a fully
-//! implemented and tested path exists there): it behaves like `--no-listen`, binds no socket,
+//! implemented and tested path exists there): it behaves like `--manual`, asks for no code,
 //! touches no file and prints exact manual instructions. Run here on Linux with
 //! `Env::install_keys` off, which is what a Windows build sets.
+#![cfg(unix)]
 
 mod common;
 
-use std::io;
-use std::net::IpAddr;
-use std::time::Duration;
+use std::sync::atomic::Ordering;
 
 use common::*;
 use or2_pair::account::Account;
 use or2_pair::checks::Platform;
-use or2_pair::date::DateTime;
-use or2_pair::net::{Net, PairListener};
 use or2_pair::run::{Env, Exit, RunError, run};
-
-/// A network that must not be asked to listen; probing sshd finds nothing.
-struct NoListening;
-
-impl Net for NoListening {
-    fn probe_ssh(&self, _: u16) -> io::Result<String> {
-        Err(io::ErrorKind::ConnectionRefused.into())
-    }
-    fn listen(&self, _: &[IpAddr], _: u16) -> io::Result<Box<dyn PairListener>> {
-        panic!("a host that installs no keys must not listen");
-    }
-}
 
 fn manual(
     world: &World,
     platform: Platform,
     account: Account,
     options: &or2_pair::args::Options,
-) -> (Result<Exit, RunError>, String) {
-    let confirm = Auto::new(or2_pair::confirm::Answer::Yes);
+) -> (Result<Exit, RunError>, String, u32) {
+    let script = Script::new(&["7KQ4-M2XD-9PTM"]);
     let random = |buf: &mut [u8]| buf.fill(9);
-    let now = || DateTime::from_unix(1_782_867_661);
+    let net = FakeNet(Err(std::io::ErrorKind::ConnectionRefused));
+    let signals = FakeSignals::default();
     let env = Env {
         version: "test",
         account,
@@ -45,37 +31,46 @@ fn manual(
         program_dirs: Vec::new(),
         interfaces: interfaces(),
         platform,
-        net: &NoListening,
+        net: &net,
         keyscan: &NoKeyscan,
-        confirm: &confirm,
+        exe: Ok(EXE.into()),
+        prompt: &script,
         can_ask: true,
         color: false,
         random: &random,
-        now: &now,
-        window: Duration::from_secs(120),
+        now: &|| or2_pair::date::DateTime::from_unix(1_782_867_661),
+        signals: &signals,
+        window: or2_pair::bootstrap::WINDOW,
+        poll: or2_pair::run::POLL,
         on_ready: None,
         install_keys: false,
     };
     let mut out = Vec::new();
     let exit = run(options, &env, &mut out);
-    assert!(confirm.asked.lock().unwrap().is_empty());
-    (exit, String::from_utf8(out).unwrap())
+    assert_eq!(
+        signals.armed.load(Ordering::SeqCst),
+        0,
+        "no signal handler either"
+    );
+    (
+        exit,
+        String::from_utf8(out).unwrap(),
+        script.asked.load(Ordering::SeqCst),
+    )
 }
 
 #[test]
-fn without_key_installation_a_listening_request_prints_the_code_and_instructions_only() {
+fn without_key_installation_a_pairing_request_prints_the_code_and_instructions_only() {
     let world = World::new();
     // The home the account carries is not even looked at; nothing may appear in it.
     let account = Account::login_only("alice");
-    let (exit, output) = manual(&world, Platform::Windows, account, &options());
+    let (exit, output, asked) = manual(&world, Platform::Windows, account, &options());
     assert_eq!(exit.unwrap(), Exit::CodeOnly, "{output}");
-    assert!(output.contains("or2-pair:1?"), "{output}");
+    assert_eq!(asked, 0, "no code is asked for");
+    let code = parse_code(&printed_code(&output));
+    assert!(code.id.is_none(), "no pairing id: nothing can pair");
     assert!(
-        !output.contains("&otp=") && !output.contains("&pair="),
-        "{output}"
-    );
-    assert!(
-        output.contains("does not listen") && output.contains("authorized_keys"),
+        output.contains("does not pair automatically") && output.contains("authorized_keys"),
         "{output}"
     );
     // Both Windows OpenSSH cases, spelled out.
@@ -89,19 +84,21 @@ fn without_key_installation_a_listening_request_prints_the_code_and_instructions
         "{output}"
     );
     assert!(world.authorized_keys().is_none());
-    assert!(!world.home.path().join(".ssh").exists());
+    assert!(!world.ssh_dir().exists());
 }
 
 #[test]
-fn no_listen_gives_the_same_instructions() {
+fn manual_gives_the_same_instructions() {
     let world = World::new();
     let mut options = options();
-    options.no_listen = true;
+    options.manual = true;
     let account = Account::login_only("alice");
-    let (exit, output) = manual(&world, Platform::Windows, account, &options);
+    let (exit, output, asked) = manual(&world, Platform::Windows, account, &options);
     assert_eq!(exit.unwrap(), Exit::CodeOnly, "{output}");
+    assert_eq!(asked, 0);
     assert!(
-        output.contains(r"C:\ProgramData\ssh\administrators_authorized_keys"),
+        output.contains(r"C:\ProgramData\ssh\administrators_authorized_keys")
+            && output.contains("--manual"),
         "{output}"
     );
 }
@@ -110,9 +107,9 @@ fn no_listen_gives_the_same_instructions() {
 fn another_platform_gets_generic_instructions() {
     let world = World::new();
     let account = Account::login_only("alice");
-    let (exit, output) = manual(&world, Platform::Other, account, &options());
+    let (exit, output, _) = manual(&world, Platform::Other, account, &options());
     assert_eq!(exit.unwrap(), Exit::CodeOnly, "{output}");
-    assert!(output.contains("does not listen"), "{output}");
+    assert!(output.contains("does not pair automatically"), "{output}");
     assert!(
         !output.contains("administrators_authorized_keys"),
         "{output}"
@@ -125,13 +122,13 @@ fn the_check_does_not_inspect_or_open_any_key_file() {
     let mut options = options();
     options.check_only = true;
     let account = Account::login_only("alice");
-    let (exit, output) = manual(&world, Platform::Windows, account, &options);
+    let (exit, output, _) = manual(&world, Platform::Windows, account, &options);
     assert_eq!(exit.unwrap(), Exit::Checked, "{output}");
     assert!(
         output.contains("not checked") && output.contains("by hand"),
         "{output}"
     );
-    assert!(!world.home.path().join(".ssh").exists());
+    assert!(!world.ssh_dir().exists());
 }
 
 #[test]
@@ -140,12 +137,11 @@ fn a_login_only_account_has_no_home_to_write_to() {
     assert_eq!(account.name, "alice");
     assert!(account.home.as_os_str().is_empty());
     // Whatever the platform, nothing can be installed for it.
-    let key = or2_pair::keyline::KeyLine::parse(
-        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBCJz8goXA2qGjRTNHhOwsljhOuCXG/+2B/zTJH/brc5",
-    )
-    .unwrap();
+    let backup = or2_pair::authorized_keys::Backup::new(or2_pair::date::DateTime::from_unix(0));
+    assert!(or2_pair::authorized_keys::append(&account, &backup, "x").is_err());
     assert!(
-        or2_pair::authorized_keys::add(&account, &key, "phone", DateTime::from_unix(0)).is_err()
+        or2_pair::authorized_keys::remove(&account, "SHA256:x", None).is_err(),
+        "even a removal needs a home"
     );
 }
 

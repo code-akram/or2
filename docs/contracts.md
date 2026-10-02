@@ -2315,7 +2315,7 @@ version 2.
 ## The flow
 
 1. **Phone:** Add host → **Easy pair**. The screen shows a **pairing code** `K` such as
-   `7KQ4-M2XD-9PTA`, with the camera below it.
+   `7KQ4-M2XD-9PTM`, with the camera below it.
 2. **Host:** `or2-pair` runs its checks, then asks `Code shown on your phone:`. The person types `K`.
 3. **Host:** derives a throwaway Ed25519 **bootstrap key** from `K` and a fresh pairing id, adds it to
    `~/.ssh/authorized_keys` restricted to one forced command (`or2-pair enroll <id>`) with an expiry,
@@ -2339,9 +2339,17 @@ gone.
 ## The pairing code `K` (phone)
 
 - 12 characters of Crockford base32 (`0-9`, `A-Z` without `I`, `L`, `O`, `U`), shown as three groups of
-  four (`7KQ4-M2XD-9PTA`): 11 random characters from the OS CSPRNG (55 bits) and a check character,
-  `c = (Σ i·vᵢ for i = 1..11) mod 31`, where `vᵢ` is the value of the i-th character. Weights 1 to 11
-  modulo the prime 31 catch every single wrong character and every swap of two neighbours.
+  four (`7KQ4-M2XD-9PTM`): 11 random characters from the OS CSPRNG (55 bits) and a check character,
+  `c = (Σ i·vᵢ for i = 1..11) mod 31`, where `vᵢ` is the value of the i-th character (its index in
+  `0123456789ABCDEFGHJKMNPQRSTVWXYZ`: `0`-`9` are 0-9, `A` is 10, `B` 11, `C` 12, `D` 13, `E` 14, `F` 15,
+  `G` 16, `H` 17, `J` 18, `K` 19, `M` 20, `N` 21, `P` 22, `Q` 23, `R` 24, `S` 25, `T` 26, `V` 27, `W` 28,
+  `X` 29, `Y` 30, `Z` 31), and `c` is the character with value `c` (never `Z`). Weights 1 to 11 modulo
+  the prime 31 catch every single wrong character and every swap of two neighbours, with one
+  exception that is accepted: `Z` has value 31, which is 0 modulo 31, so a `0` typed for a `Z` (or the
+  reverse) passes the check. The derived key is then wrong and the host refuses the phone
+  (`BootstrapRefused`) with nothing spent. Both crates test these vectors (data characters → check
+  character): `7KQ4M2XD9PT` → `M` (1136 = 36·31 + 20; so the code is `7KQ4-M2XD-9PTM`), `00000000000` →
+  `0`, `ZZZZZZZZZZZ` → `0`, `11111111111` → `4`, `0123456789A` → `6`.
 - Typed input is read leniently: case-insensitive, hyphens and spaces ignored, `I`/`L` read as `1`, `O`
   as `0`. A failed check re-prompts on the host ("That code has a typo") without spending anything.
 - Generated in Rust (`PairCode`, zeroized on drop). A new `K` is drawn each time the Easy pair screen
@@ -2374,9 +2382,32 @@ gone.
 `seed = HKDF-SHA256(ikm = the 11 data characters of K as ASCII uppercase, salt = id as its 13 ASCII
 characters, info = "or2-pair/2 bootstrap ed25519")`, 32 bytes, is the Ed25519 secret key (RFC 8032
 seed). The host needs only its public half; the phone uses it for one login and zeroizes it. Both crates
-test one fixed vector (`K`, `id` → seed → public key) computed with an independent implementation (for
-example `openssl kdf … HKDF` and `openssl pkey`), not with or2's own code. Salting with the id binds the
-bootstrap key to one run: a `K` typed into two runs yields two unrelated keys.
+test one fixed vector (`K`, `id` → seed → public key) computed with an independent implementation, not
+with or2's own code. Salting with the id binds the bootstrap key to one run: a `K` typed into two runs
+yields two unrelated keys.
+
+**The vector** (computed with the OpenSSL CLI; the host crate's `bootstrap` tests and the phone's
+`or2_core::pair` tests hold exactly these constants):
+
+```text
+K data characters   7KQ4M2XD9PT          (the code 7KQ4-M2XD-9PTM)
+pairing id          abcdefghijklm
+seed                734c24be4849a8de10227c52bd2530221cd6d2e62062c650886f0db0b99aeed0
+public key          02d8bd7aee56213d1bcdd3f38649a9b749904226955d0d460f400ba630e0d628
+OpenSSH line        ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIALYvXruViE9G83T84ZJqbdJkEImlV0NRg9AC6Yw4NYo
+fingerprint         SHA256:SQBrFEwlegpfzBKzGHE7T/RYggIFZfhD6+32GxJok20   (ssh-keygen -l)
+```
+
+```sh
+openssl kdf -keylen 32 -kdfopt digest:SHA256 -kdfopt key:7KQ4M2XD9PT -kdfopt salt:abcdefghijklm \
+    -kdfopt "info:or2-pair/2 bootstrap ed25519" -kdfopt mode:EXTRACT_AND_EXPAND -binary HKDF | xxd -p -c64
+# the public key of that seed: PKCS#8 DER = 302e020100300506032b657004220420 || seed
+openssl pkey -inform DER -in seed.der -pubout -outform DER | tail -c 32 | xxd -p -c64
+```
+
+The OpenSSH line is the key's wire form (`0000000b "ssh-ed25519" 00000020 <public key>`) in base64. A phone's
+test client that derives the same bytes by an independent route (its own HKDF and Ed25519 library)
+confirms both ends; the host crate also checks them against a real `sshd` (`tests/sshd.rs`).
 
 **Why 55 bits is enough.** Recovering `K` offline needs the bootstrap public key, a signature made with
 it, or the fingerprint sshd logs. The phone authenticates only after the handshake presented the pinned
@@ -2393,10 +2424,16 @@ restrict,command="<exe> enroll <id>",expiry-time="<YYYYMMDDHHMM>"
 ```
 
 - **Options by sshd version**, read from the banner the checks already fetch:
-  - OpenSSH with `expiry-time` (7.7 or newer per the OpenSSH release notes; the implementer confirms
-    the version from the release notes and the test sshd): `restrict,command="…",expiry-time="…"`.
-  - OpenSSH 7.2 up to that version: `restrict,command="…"`, and a printed note that the key is removed
-    when `or2-pair` ends, without an expiry in the file.
+  - OpenSSH 7.7 or newer: `restrict,command="…",expiry-time="…"`. **Verified** against the OpenSSH
+    release notes: 7.7 (2018-04-02) is the release that added the `expiry-time` option for
+    authorized_keys ("Add \"expiry-time\" option for authorized_keys files to allow for expiring
+    keys"); 9.1 later added an optional UTC (`Z`) suffix to its value and the default stays local time.
+    `restrict` is from 7.2 (2016-02-29). The disposable test sshd here (OpenSSH 10.5) honours both: a
+    key with a past `expiry-time` is refused and one with a future time is accepted
+    (`tests/sshd.rs`).
+  - OpenSSH 7.2 up to 7.7: `restrict,command="…"`, and a printed note that the key is removed
+    when `or2-pair` ends, without an expiry in the file (the forced command still stops answering at
+    the deadline).
   - Older OpenSSH: `command="…",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-user-rc`,
     same note.
   - Not OpenSSH, or no readable banner: refuse automatic pairing and point to `--manual`. An option
@@ -2409,17 +2446,24 @@ restrict,command="<exe> enroll <id>",expiry-time="<YYYYMMDDHHMM>"
   written, naming the character and suggesting an install location (`~/.local/bin`, `~/.cargo/bin`).
   That set and the id's need no quoting in sh, bash, zsh or fish.
 - A login shell that cannot run a command (`nologin`, `false`, from the account database) is refused.
-- **Writing.** Through the checked handles (below), under the `flock`: one backup per run before the
-  first change, then the append.
+- **Writing.** Through the checked handles (below), under the `flock`: the state file first (a state
+  file without a key is harmless), then one backup per run before the first change of
+  `authorized_keys`, then the append. If the append fails the state file is removed again.
 - **Removing.** One locked operation on the same handles re-reads the file and drops every entry whose
   key type and key data equal the bootstrap key's (any options, any comment), then rewrites the file in
   place (`ftruncate` and write on the same descriptor: inode, mode, owner and SELinux label stay).
 - **Every ending removes it** (if the forced command has not already replaced it): the timeout, an
-  error, Ctrl-C, SIGTERM, SIGHUP (a handler sets a flag the main loop acts on; a second Ctrl-C exits
-  after one more attempt) and a panic (a drop guard). If the removal itself fails, `or2-pair` prints the
-  exact line to delete and says that the next run removes it.
+  error, Ctrl-C, SIGTERM, SIGHUP (a handler only counts; the wait loop acts on the count within 250 ms) and
+  a panic (a drop guard on the live run). The handlers are installed after the code is typed and before
+  anything is written, without `SA_RESTART`. A removal that finds the file locked (an `enroll` is
+  writing) retries every 50 ms for up to 3 s; a second signal during that ends the retrying after one
+  more attempt. If the removal itself fails, `or2-pair` prints the exact line to delete and says that
+  the next run removes it.
 - **Sweep.** Every run (not `--check`, which only reports them) first removes `or2-pair-bootstrap-*`
-  entries whose state file is missing or past its deadline, and those state files.
+  entries whose state file is missing or past its deadline, and those state files (and any state file
+  past its deadline, or a `.done` without its `.json`). A live run of another terminal (state file present,
+  deadline not passed) is left alone. The sweep happens after the code is typed (so an empty line
+  still changes nothing) and shares the run's one backup.
 - **The security boundary is the forced command and its deadline, not the cleanup.** The bootstrap key
   can only start `or2-pair enroll <id>`, which refuses when the state file is missing or past its
   deadline. Expiry, removal and the sweep are hygiene.
@@ -2432,17 +2476,33 @@ restrict,command="<exe> enroll <id>",expiry-time="<YYYYMMDDHHMM>"
 - `or2-pair enroll <id>` is an internal subcommand (listed in `--help` under "Internal"; exactly that
   argument, the id validated before use). It runs under sshd with the phone's exec channel as stdin and
   stdout and no terminal:
-  1. Reads `<id>.json`; refuses (`expired`) if it is missing, past the deadline, or names another uid.
-  2. Writes the hello; reads one bounded request line (10 s); validates the key with `keyline.rs`.
-  3. Under the `flock`, on the checked handles: if the bootstrap entry is gone, answers `gone`;
-     otherwise, in **one** write, removes the bootstrap entry and appends the phone's line
+  1. Writes the hello (it needs only the id, which is its argument) and reads one bounded request line
+     (10 s). **Order, decided in implementation:** every refusal below, `expired` included, comes after
+     the request has been read, so the phone always receives a verdict; a phone that has sent its
+     request and finds the channel closed could not tell `expired` from a lost connection. A request
+     that is not one line of at most 2048 bytes, not JSON, or not `"v":2` is `request`.
+  2. Reads `<id>.json`; refuses (`expired`) if it is missing or unreadable, past the deadline (checked
+     with `now <= deadline`), names another uid or another id.
+  3. Validates the key with `keyline.rs`; `key` when it is not a key this tool authorizes, **or when it
+     is the bootstrap key itself** (that would make the temporary key permanent). The device label is
+     reduced to ASCII as in version 1 (`phone` when nothing is left).
+  4. Under the `flock`, on the checked handles: the bootstrap entry is found by the **fingerprint in
+     the state file** (every entry whose parsed key has that fingerprint, any options, any comment); if
+     it is gone, answers `gone`; otherwise, in **one** write, removes it and appends the phone's line
      (`no-agent-forwarding,no-X11-forwarding <key> or2-<device>-<UTC date>`, as in version 1; a key
-     already present only removes the bootstrap entry).
-  4. Writes the result to `<id>.done` (`O_CREAT|O_EXCL`, 0600: device label, key fingerprint) and
+     already present only removes the bootstrap entry). A second `enroll` that finds the lock held
+     waits for it up to 2 s (then `failed`), so a second phone sees `gone` rather than a lock error.
+     A write that fails puts the old contents back.
+  5. Writes the result to `<id>.done` (`O_CREAT|O_EXCL`, 0600: device label, key fingerprint) and
      answers the phone; exits 0, or 1 on a refusal.
 - The foreground run waits for `<id>.done` (checking every 250 ms; a local file, no network), then
   prints the result, removes `<id>.json` and `<id>.done`, and exits. On the timeout or Ctrl-C it removes
-  the bootstrap entry and the state file; an `enroll` that starts afterwards finds no state and refuses.
+  the state file **first** (that closes the boundary), then the bootstrap entry, then looks once more for
+  `<id>.done` (an `enroll` that took the lock just before is reported as a pairing, not a timeout) and
+  removes what is left; an `enroll` that starts afterwards finds no state and refuses.
+- The state file's `id`, `deadline` (Unix seconds, the start plus 5 minutes), `uid` and `fingerprint`
+  (`SHA256:…` of the bootstrap key) are JSON; `<id>.done` is `{"device":…,"fingerprint":…}`. Both
+  are read with a 4 KiB limit.
 
 ## The exchange
 
@@ -2494,19 +2554,36 @@ refused with "pairing uses the SSH port now; these options are gone".
 
 **The code prompt** is asked only when standard input is a terminal; otherwise the CLI refuses to start
 (scripts and pipes cannot pair), except `--manual` and `--check`. It reads one line, checks the check
-character (re-prompting on a typo), and an empty line or Ctrl-C ends the run with nothing changed. `K`
-is not echoed back, written to a file or logged; the input buffer is zeroized.
+character (re-prompting on a typo, a wrong length or a character codes never use; after 10 mistakes the
+run ends with nothing changed), and an empty line, the end of input or Ctrl-C ends the run with nothing
+changed. It is asked **after** every check that can refuse (so nobody types a code for a run that cannot
+start) and **before** anything is written. `K` is not echoed back by the tool, written to a file or
+logged (the terminal's own echo of what is typed is left on, so the person can see it); it is read from
+descriptor 0 a byte at a time into a zeroizing buffer, and `PairCode` is zeroized on drop.
 
 **Addresses.** Every non-virtual unicast address is listed, now including global IPv6 (not link-local),
 plus the mDNS name: overlay (`zt*`, `tailscale*`, `ZeroTier*`, `utun*` in 100.64/10, `feth*`), then LAN,
 then public IPv4, then public IPv6, then `<name>.local`; `--address` entries first. Container and VM
 bridges are left out as before. Nothing is bound, so a misclassified interface only changes the order.
+Unique-local IPv6 (`fc00::/7`) counts as LAN; loopback, link-local, site-local, multicast, wildcard and
+IPv4-mapped addresses are skipped; an IPv6 address on an overlay-named interface is an overlay address.
 
 **Checks** add: the sshd version from the banner; a best-effort read of `/etc/ssh/sshd_config` and the
 files it `Include`s when readable (`PubkeyAuthentication no` refuses; an `AuthorizedKeysFile` that does
 not include `.ssh/authorized_keys`, an `AuthorizedKeysCommand`, a `ForceCommand` or an
 `AuthenticationMethods` that needs more than a key warn that pairing will likely fail and suggest
-`--manual`); the login shell; the executable path's characters.
+`--manual`); the login shell; the executable path's characters; leftover bootstrap entries (reported by
+`--check`, removed by a run). Each line is `ok`, `info`, `warn` or `fail`. A **`fail`** is something that
+makes automatic pairing impossible here (sshd not answering or not OpenSSH, `authorized_keys` unwritable or
+refused by StrictModes, `PubkeyAuthentication no`, a login shell that cannot run commands, a program path
+sshd's shell would mangle): the run prints the checks and ends with "automatic pairing is not possible here
+(the lines marked fail above say why); fix them, or run or2-pair --manual", before asking for the code and
+before changing anything. With `--manual` (or where no keys are installed) the same findings are
+`warn`. `--check` prints them either way and exits 0. The `sshd_config` reading: `Include` patterns are
+relative to `/etc/ssh` (a `*`/`?` in the file name, at most four levels deep, each file once);
+`Match` blocks are ignored (their settings are for other users); the first value of a keyword wins, as
+in sshd; `Port` there is the default for `--ssh-port`. An old sshd (before 7.7) is a `warn` that says the
+key cannot expire in the file.
 
 **Kept from version 1 unchanged:** the account (`getpwuid_r(geteuid())`, `$HOME`/`$USER` ignored,
 `--user` only repeating it); the phone's `authorized_keys` line, rebuilt from the validated key, with the
@@ -2519,7 +2596,14 @@ nothing (they print a `--manual` code and the manual instructions).
 **`or2-pair-testhost`** (only with `test-support`, never built by `cargo install`) reads `K` from
 standard input without a terminal so tests can feed it, and honours `OR2_PAIR_TEST_HOME`,
 `OR2_PAIR_TEST_USER` and `OR2_PAIR_TEST_AUTHORIZED_KEYS`, which tests point a disposable sshd's
-`AuthorizedKeysFile` at. Its forced command line names the testhost binary.
+`AuthorizedKeysFile` at (the state directory `or2-pair/` then lives beside that file). Its forced command
+line names the testhost binary, which also runs `enroll <id>`; the disposable sshd therefore passes the same
+variables to its sessions (`SetEnv`). Two more, added in implementation because the host key and the window
+cannot be injected otherwise: `OR2_PAIR_TEST_ETC_SSH` (the directory holding `ssh_host_ed25519_key.pub` and
+`sshd_config`, instead of `/etc/ssh`) and `OR2_PAIR_TEST_WINDOW_SECS` (the pairing window, instead of 300).
+Its human output is the normal output on standard output; the line that starts `or2-pair:2?` is the
+pairing code, and `Waiting for the phone` marks the moment the temporary key is in place. The installed
+`or2-pair` reads none of these variables; a `test-support` build of it reads them too.
 
 Output, for a host reached over its public address:
 
@@ -2532,7 +2616,7 @@ Checks
   ok    tmux, herdr, mosh-server found
 
 Open or2 on your phone: Add host > Easy pair.
-Code shown on your phone: 7KQ4-M2XD-9PTA
+Code shown on your phone: 7KQ4-M2XD-9PTM
 
 This host
   name       workstation      user  dev      ssh port  22
@@ -2541,9 +2625,11 @@ This host
 
 A temporary pairing key was added for dev until 12:35. Scan this with the same phone:
   [QR]
+
+Or paste this code into the app (Easy pair > Paste pairing code):
 or2-pair:2?…
 
-Waiting for the phone. Ctrl-C removes the temporary key.
+Waiting for the phone (until 12:35). Ctrl-C removes the temporary key.
 Paired "OnePlus" (SHA256:7xKc…) as dev. The temporary key was replaced by the phone's key.
 To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys.
 ```
@@ -2551,7 +2637,7 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
 ## FFI (API 13)
 
 - `pair_new_code() -> Arc<PairCode>`; `PairCode` is an opaque object with `display() -> String`
-  (`7KQ4-M2XD-9PTA`, for the screen) and a redacted `Debug`.
+  (`7KQ4-M2XD-9PTM`, for the screen) and a redacted `Debug`.
 - `parse_pair_payload(text) -> PairOffer` (`PairParseError` as in API 12; `UnsupportedVersion` now
   carries `version: u32`).
 - `PairOffer { name, username, port, addresses, host_key: PublicKeyInfo, pairing_id: Option<String> }`;
@@ -2568,7 +2654,7 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
 
 - **Add host** sheet unchanged (Easy pair, Set up manually).
 - **Easy pair screen**: the code `K` at the top ("Type this code into or2-pair on the host", the code in
-  monospace as `7KQ4-M2XD-9PTA`, the one large element at about 24 sp; everything else at the compact
+  monospace as `7KQ4-M2XD-9PTM`, the one large element at about 24 sp; everything else at the compact
   scale of `docs/ui.md`), a one-line hint with the command (`or2-pair`, copyable), then the camera and
   **Paste pairing code** as in version 1 (permission handling unchanged).
 - **Review** after the scan: name and user (user read-only when `pairing_id` is present), addresses, the

@@ -1,28 +1,16 @@
-//! The addresses a phone can reach this host on, and which of them the pairing listener may
-//! bind.
+//! The addresses a phone can reach this host on, in the order it should try them.
 //!
-//! Order (what the phone tries first): overlay networks (ZeroTier `zt*`, Tailscale
-//! `tailscale*`, anything in 100.64.0.0/10) work on every network the phone is on, so they come
-//! first; then public addresses, which also work everywhere; then LAN addresses; the mDNS name
-//! `<hostname>.local` last, because it only resolves on the same link. An address the user asked
-//! for with `--address` goes before all of them.
+//! Every non-virtual unicast address is listed, global IPv6 included (link-local is not), plus
+//! the mDNS name. Order (what the phone tries first): an address the user asked for with
+//! `--address`; overlay networks (ZeroTier `zt*` and macOS `feth*`, Tailscale `tailscale*`,
+//! anything in 100.64.0.0/10 such as a `utun*`), which work on every network the phone is on;
+//! then LAN addresses (private IPv4, unique-local IPv6); then public IPv4; then public IPv6; the
+//! mDNS name `<hostname>.local` last, because it only resolves on the same link.
 //!
-//! # Which addresses are "non-public"
-//!
-//! The pairing listener carries a one-time password exchange and an on-host confirmation. It
-//! must never be reachable from the internet, so it binds only to addresses that are not public:
-//!
-//! - IPv4 private ranges 10/8, 172.16/12, 192.168/16 and carrier-grade NAT 100.64/10
-//!   (Tailscale, and the usual ZeroTier-adjacent overlays),
-//! - IPv6 unique-local fc00::/7 and link-local fe80::/10,
-//! - any address that lives on an interface named like an overlay (`zt*`, `tailscale*`,
-//!   `ZeroTier*`): the overlay's own network is private to its members whatever range it uses.
-//!
-//! Loopback is not public either, but it is not listed or bound unless `--bind` names it. A
-//! public address or a wildcard (`0.0.0.0`, `::`) is never bound by default; `--bind` can choose
-//! one explicitly and prints a warning.
+//! Nothing is bound or dialled here, so a misclassified interface only changes the order: the
+//! phone connects to the SSH port like any SSH client does.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// An interface address as the operating system lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,8 +24,9 @@ pub enum Kind {
     /// An address the user named with `--address`.
     Requested,
     Overlay,
-    Public,
     Lan,
+    Public,
+    PublicV6,
     Mdns,
 }
 
@@ -46,7 +35,7 @@ impl Kind {
         match self {
             Self::Requested => "requested",
             Self::Overlay => "overlay",
-            Self::Public => "public",
+            Self::Public | Self::PublicV6 => "public",
             Self::Lan => "LAN",
             Self::Mdns => "mDNS",
         }
@@ -61,17 +50,6 @@ pub struct Address {
     /// The interface it lives on, when it is an interface address (also when the user named it
     /// with `--address`).
     pub interface: Option<String>,
-    /// Whether the pairing listener may bind it by default: an overlay or LAN interface address.
-    /// This is about what the address *is*, not about where `--address` put it in the list, so
-    /// naming a detected address to put it first does not take its listener away.
-    pub bindable: bool,
-}
-
-impl Address {
-    /// The IP, when this is an interface address (a name has none).
-    pub fn ip(&self) -> Option<IpAddr> {
-        self.text.parse().ok()
-    }
 }
 
 /// Interface names of things that are not a network the phone can be on: container bridges, VM
@@ -95,7 +73,11 @@ const VIRTUAL_PREFIXES: [&str; 14] = [
 
 fn overlay_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.starts_with("zt") || lower.starts_with("tailscale") || lower.starts_with("zerotier")
+    lower.starts_with("zt")
+        || lower.starts_with("tailscale")
+        || lower.starts_with("zerotier")
+        // ZeroTier's fake ethernet interfaces on macOS.
+        || lower.starts_with("feth")
 }
 
 fn virtual_name(name: &str) -> bool {
@@ -110,39 +92,60 @@ pub fn is_cgnat(ip: Ipv4Addr) -> bool {
     ip.octets()[0] == 100 && (ip.octets()[1] & 0xC0) == 0x40
 }
 
-/// See the module docs: private, carrier-grade NAT, unique-local, link-local or loopback.
-pub fn is_non_public(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => v4.is_private() || is_cgnat(v4) || v4.is_link_local() || v4.is_loopback(),
-        IpAddr::V6(v6) => {
-            let first = v6.segments()[0];
-            (first & 0xFE00) == 0xFC00 || (first & 0xFFC0) == 0xFE80 || v6.is_loopback()
-        }
-    }
+/// fe80::/10.
+fn is_link_local_v6(ip: Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xFFC0) == 0xFE80
+}
+
+/// fc00::/7.
+fn is_unique_local(ip: Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xFE00) == 0xFC00
 }
 
 /// What to do with one interface address; `None` skips it (loopback, link-local, wildcard,
-/// IPv6, virtual interfaces).
+/// multicast, virtual interfaces).
 pub fn classify(iface: &Iface) -> Option<Kind> {
-    let IpAddr::V4(v4) = iface.ip else {
-        // IPv6 needs scopes and has no overlay-free story on a phone's Wi-Fi yet.
-        return None;
-    };
-    if v4.is_loopback()
-        || v4.is_link_local()
-        || v4.is_unspecified()
-        || v4.is_multicast()
-        || v4.is_broadcast()
-        || virtual_name(&iface.name)
-    {
+    if virtual_name(&iface.name) {
         return None;
     }
-    if overlay_name(&iface.name) || is_cgnat(v4) {
-        Some(Kind::Overlay)
-    } else if v4.is_private() {
-        Some(Kind::Lan)
-    } else {
-        Some(Kind::Public)
+    match iface.ip {
+        IpAddr::V4(v4) => {
+            if v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+            {
+                return None;
+            }
+            if overlay_name(&iface.name) || is_cgnat(v4) {
+                Some(Kind::Overlay)
+            } else if v4.is_private() {
+                Some(Kind::Lan)
+            } else {
+                Some(Kind::Public)
+            }
+        }
+        IpAddr::V6(v6) => {
+            // Deprecated site-local (fec0::/10) and IPv4-mapped addresses are not addresses a
+            // phone would dial.
+            if v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || is_link_local_v6(v6)
+                || (v6.segments()[0] & 0xFFC0) == 0xFEC0
+                || v6.to_ipv4_mapped().is_some()
+            {
+                return None;
+            }
+            if overlay_name(&iface.name) {
+                Some(Kind::Overlay)
+            } else if is_unique_local(v6) {
+                Some(Kind::Lan)
+            } else {
+                Some(Kind::PublicV6)
+            }
+        }
     }
 }
 
@@ -167,18 +170,16 @@ pub fn gather(interfaces: &[Iface], hostname: Option<&str>, requested: &[String]
     };
     for text in requested {
         // An address the user names that is one of this host's own keeps what the interface
-        // says it is (its name and whether the listener may bind it); only its place in the
-        // list is the user's choice.
+        // says it is (its name); only its place in the list is the user's choice.
         let own = text
             .parse::<IpAddr>()
             .ok()
             .and_then(|ip| interfaces.iter().find(|iface| iface.ip == ip))
-            .and_then(|iface| classify(iface).map(|kind| (iface, kind)));
+            .filter(|iface| classify(iface).is_some());
         push(Address {
             text: text.clone(),
             kind: Kind::Requested,
-            interface: own.map(|(iface, _)| iface.name.clone()),
-            bindable: own.is_some_and(|(_, kind)| matches!(kind, Kind::Overlay | Kind::Lan)),
+            interface: own.map(|iface| iface.name.clone()),
         });
     }
     for iface in interfaces {
@@ -187,7 +188,6 @@ pub fn gather(interfaces: &[Iface], hostname: Option<&str>, requested: &[String]
                 text: iface.ip.to_string(),
                 kind,
                 interface: Some(iface.name.clone()),
-                bindable: matches!(kind, Kind::Overlay | Kind::Lan),
             });
         }
     }
@@ -196,41 +196,11 @@ pub fn gather(interfaces: &[Iface], hostname: Option<&str>, requested: &[String]
             text: name,
             kind: Kind::Mdns,
             interface: None,
-            bindable: false,
         });
     }
     // Stable: addresses of one kind keep the order the system listed them in.
     out.sort_by_key(|address| address.kind);
     out
-}
-
-/// The addresses the listener binds by default: the overlay and LAN interface addresses, never
-/// a public address, a name or a wildcard.
-pub fn bindable(addresses: &[Address]) -> Vec<IpAddr> {
-    addresses
-        .iter()
-        .filter(|address| address.bindable)
-        .filter_map(Address::ip)
-        .collect()
-}
-
-/// What an explicit `--bind` address deserves a warning about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BindWarning {
-    /// `0.0.0.0` or `::`: every interface, public ones included.
-    Wildcard,
-    /// A public address.
-    Public,
-}
-
-pub fn bind_warning(ip: IpAddr) -> Option<BindWarning> {
-    if ip.is_unspecified() {
-        Some(BindWarning::Wildcard)
-    } else if !is_non_public(ip) {
-        Some(BindWarning::Public)
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -254,6 +224,7 @@ mod tests {
             ("wlan0", "172.32.0.1", Some(Kind::Public)),
             ("zt7nnig26", "10.147.17.5", Some(Kind::Overlay)),
             ("ztabcdef", "172.27.1.1", Some(Kind::Overlay)),
+            ("feth1234", "192.168.192.5", Some(Kind::Overlay)),
             ("tailscale0", "100.101.102.103", Some(Kind::Overlay)),
             ("utun4", "100.88.1.2", Some(Kind::Overlay)),
             ("eth0", "100.64.0.1", Some(Kind::Overlay)),
@@ -269,22 +240,38 @@ mod tests {
             ("veth123", "10.0.0.2", None),
             ("virbr0", "192.168.122.1", None),
             ("bridge100", "192.168.64.1", None),
-            ("eth0", "fd00::1", None),
+            // IPv6: global addresses are listed; link-local, loopback and the like are not.
+            ("eth0", "2001:db8::9", Some(Kind::PublicV6)),
+            ("eth0", "2606:4700::1", Some(Kind::PublicV6)),
+            ("eth0", "fd00::1", Some(Kind::Lan)),
+            ("eth0", "fc00::1", Some(Kind::Lan)),
+            ("zt0", "fd12:3456::1", Some(Kind::Overlay)),
+            ("zt0", "2001:db8::5", Some(Kind::Overlay)),
+            ("eth0", "fe80::1", None),
+            ("eth0", "::1", None),
+            ("eth0", "::", None),
+            ("eth0", "ff02::1", None),
+            ("eth0", "fec0::1", None),
+            ("eth0", "::ffff:192.0.2.1", None),
+            ("docker0", "2001:db8::2", None),
+            ("lo", "::1", None),
         ] {
             assert_eq!(classify(&iface(name, ip)), kind, "{name} {ip}");
         }
     }
 
     #[test]
-    fn orders_overlay_then_public_then_lan_then_mdns() {
+    fn orders_overlay_then_lan_then_public_then_public_v6_then_mdns() {
         let interfaces = [
             iface("lo", "127.0.0.1"),
+            iface("eth0", "2001:db8::9"),
             iface("eth0", "192.168.1.20"),
             iface("docker0", "172.17.0.1"),
             iface("zt0", "10.147.17.5"),
             iface("eth1", "203.0.113.9"),
             iface("tailscale0", "100.101.102.103"),
             iface("wlan0", "10.0.0.7"),
+            iface("wlan0", "fe80::1"),
         ];
         let addresses = gather(&interfaces, Some("work-mac.example.net"), &[]);
         let order: Vec<_> = addresses.iter().map(|a| a.text.as_str()).collect();
@@ -293,9 +280,10 @@ mod tests {
             [
                 "10.147.17.5",
                 "100.101.102.103",
-                "203.0.113.9",
                 "192.168.1.20",
                 "10.0.0.7",
+                "203.0.113.9",
+                "2001:db8::9",
                 "work-mac.local"
             ]
         );
@@ -314,60 +302,10 @@ mod tests {
         let order: Vec<_> = addresses.iter().map(|a| a.text.as_str()).collect();
         assert_eq!(order, ["dev.example.org", "192.168.1.20", "box.local"]);
         assert_eq!(addresses[1].kind, Kind::Requested);
-    }
-
-    fn bound(addresses: &[Address]) -> Vec<String> {
-        bindable(addresses)
-            .iter()
-            .map(ToString::to_string)
-            .collect()
-    }
-
-    #[test]
-    fn naming_a_detected_address_moves_it_first_without_losing_its_listener() {
-        // Finding 8: `--address 192.168.1.20` on a host whose only usable interface is that one
-        // used to leave nothing to bind.
-        let lan = [iface("eth0", "192.168.1.20")];
-        let addresses = gather(&lan, None, &["192.168.1.20".into()]);
-        assert_eq!(bound(&addresses), ["192.168.1.20"]);
-        assert_eq!(addresses[0].kind, Kind::Requested, "still listed first");
-        assert_eq!(addresses[0].interface.as_deref(), Some("eth0"));
-
-        // Several interfaces: naming the LAN one puts it ahead of the overlay one, and both
-        // keep their listener.
-        let both = [iface("zt0", "10.147.17.5"), iface("eth0", "192.168.1.20")];
-        let addresses = gather(&both, Some("box"), &["192.168.1.20".into()]);
-        let order: Vec<_> = addresses.iter().map(|a| a.text.as_str()).collect();
-        assert_eq!(order, ["192.168.1.20", "10.147.17.5", "box.local"]);
-        assert_eq!(bound(&addresses), ["192.168.1.20", "10.147.17.5"]);
-
-        // The same for an overlay address named ahead of a LAN one.
-        let addresses = gather(&both, None, &["10.147.17.5".into()]);
-        assert_eq!(bound(&addresses), ["10.147.17.5", "192.168.1.20"]);
-    }
-
-    #[test]
-    fn naming_what_is_not_bindable_does_not_make_it_bindable() {
-        // A public interface address, a container bridge and a name stay unbound by default,
-        // however they are named.
-        let interfaces = [
-            iface("eth1", "203.0.113.9"),
-            iface("docker0", "172.17.0.1"),
-            iface("lo", "127.0.0.1"),
-        ];
-        let addresses = gather(
-            &interfaces,
-            None,
-            &[
-                "203.0.113.9".into(),
-                "172.17.0.1".into(),
-                "127.0.0.1".into(),
-                "dev.example.org".into(),
-                "10.9.9.9".into(),
-            ],
-        );
-        assert!(bound(&addresses).is_empty(), "{:?}", bound(&addresses));
-        assert_eq!(addresses.len(), 5, "all five are still advertised");
+        assert_eq!(addresses[1].interface.as_deref(), Some("eth0"));
+        // Naming an address that is not a listed interface address keeps no interface.
+        let named = gather(&interfaces, None, &["172.17.0.1".into(), "10.9.9.9".into()]);
+        assert!(named.iter().take(2).all(|a| a.interface.is_none()));
     }
 
     #[test]
@@ -385,63 +323,11 @@ mod tests {
 
     #[test]
     fn nothing_is_listed_without_a_usable_interface_or_name() {
-        let interfaces = [iface("lo", "127.0.0.1"), iface("eth0", "169.254.1.1")];
-        assert!(gather(&interfaces, None, &[]).is_empty());
-    }
-
-    #[test]
-    fn the_listener_binds_overlay_and_lan_addresses_only() {
         let interfaces = [
-            iface("eth0", "192.168.1.20"),
-            iface("eth1", "203.0.113.9"),
-            iface("zt0", "10.147.17.5"),
+            iface("lo", "127.0.0.1"),
+            iface("eth0", "169.254.1.1"),
+            iface("eth0", "fe80::1"),
         ];
-        let addresses = gather(&interfaces, Some("box"), &["dev.example.org".into()]);
-        let bind: Vec<String> = bindable(&addresses)
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        assert_eq!(bind, ["10.147.17.5", "192.168.1.20"]);
-        assert!(bindable(&gather(&[iface("eth1", "203.0.113.9")], None, &[])).is_empty());
-    }
-
-    #[test]
-    fn non_public_means_private_overlay_unique_local_link_local_or_loopback() {
-        for (ip, non_public) in [
-            ("10.0.0.1", true),
-            ("172.16.0.1", true),
-            ("172.31.255.255", true),
-            ("172.15.255.255", false),
-            ("192.168.255.255", true),
-            ("100.64.0.0", true),
-            ("100.127.255.255", true),
-            ("100.128.0.0", false),
-            ("169.254.1.1", true),
-            ("127.0.0.1", true),
-            ("8.8.8.8", false),
-            ("203.0.113.9", false),
-            ("fd12::1", true),
-            ("fc00::1", true),
-            ("fe80::1", true),
-            ("::1", true),
-            ("2001:db8::1", false),
-            ("2606:4700::1", false),
-        ] {
-            assert_eq!(is_non_public(ip.parse().unwrap()), non_public, "{ip}");
-        }
-    }
-
-    #[test]
-    fn an_explicit_bind_warns_about_wildcards_and_public_addresses() {
-        for (ip, warning) in [
-            ("0.0.0.0", Some(BindWarning::Wildcard)),
-            ("::", Some(BindWarning::Wildcard)),
-            ("203.0.113.9", Some(BindWarning::Public)),
-            ("192.168.1.2", None),
-            ("127.0.0.1", None),
-            ("100.101.1.1", None),
-        ] {
-            assert_eq!(bind_warning(ip.parse().unwrap()), warning, "{ip}");
-        }
+        assert!(gather(&interfaces, None, &[]).is_empty());
     }
 }

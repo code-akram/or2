@@ -50,6 +50,64 @@ impl DateTime {
         }
     }
 
+    /// Seconds since the Unix epoch of this civil date and time, read as UTC.
+    pub fn to_unix(&self) -> i64 {
+        // Days from civil (Howard Hinnant's algorithm), the inverse of `from_unix`.
+        let year = self.year - i64::from(self.month <= 2);
+        let era = year.div_euclid(400);
+        let year_of_era = year.rem_euclid(400);
+        let shifted_month = i64::from(if self.month > 2 {
+            self.month - 3
+        } else {
+            self.month + 9
+        });
+        let day_of_year = (153 * shifted_month + 2) / 5 + i64::from(self.day) - 1;
+        let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+        let days = era * 146_097 + day_of_era - 719_468;
+        days * 86_400
+            + i64::from(self.hour) * 3_600
+            + i64::from(self.minute) * 60
+            + i64::from(self.second)
+    }
+
+    /// The wall clock of this host (its time zone) at the Unix time `seconds`. Where there is
+    /// no time zone lookup (not Unix) this is UTC.
+    pub fn local_from_unix(seconds: i64) -> Self {
+        #[cfg(unix)]
+        {
+            #[allow(irrefutable_let_patterns)] // `time_t` is narrower than `i64` on 32-bit targets
+            if let Ok(time) = libc::time_t::try_from(seconds) {
+                // SAFETY: `tm` is plain old data that `localtime_r` fills in; both pointers are
+                // valid for the call.
+                let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+                if !unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
+                    return Self {
+                        year: i64::from(tm.tm_year) + 1900,
+                        month: (tm.tm_mon + 1) as u32,
+                        day: tm.tm_mday as u32,
+                        hour: tm.tm_hour as u32,
+                        minute: tm.tm_min as u32,
+                        second: tm.tm_sec as u32,
+                    };
+                }
+            }
+        }
+        Self::from_unix(seconds)
+    }
+
+    /// `202610011345`: sshd's `expiry-time` (local time, no zone suffix).
+    pub fn compact_minutes(&self) -> String {
+        format!(
+            "{:04}{:02}{:02}{:02}{:02}",
+            self.year, self.month, self.day, self.hour, self.minute
+        )
+    }
+
+    /// `13:45`.
+    pub fn clock(&self) -> String {
+        format!("{:02}:{:02}", self.hour, self.minute)
+    }
+
     /// `2026-10-01`.
     pub fn date(&self) -> String {
         format!("{:04}-{:02}-{:02}", self.year, self.month, self.day)
@@ -81,6 +139,32 @@ mod tests {
             assert_eq!(time.date(), date, "{seconds}");
             assert_eq!(time.stamp(), stamp, "{seconds}");
         }
+    }
+
+    #[test]
+    fn to_unix_inverts_from_unix() {
+        for seconds in [
+            0,
+            -1,
+            951_782_400,
+            1_709_164_800,
+            1_782_867_661,
+            4_107_456_000,
+            4_107_456_000 + 86_399,
+            -86_400 * 800,
+        ] {
+            assert_eq!(DateTime::from_unix(seconds).to_unix(), seconds, "{seconds}");
+        }
+    }
+
+    #[test]
+    fn the_sshd_expiry_form_and_the_clock() {
+        let time = DateTime::from_unix(1_782_867_661);
+        assert_eq!(time.compact_minutes(), "202607010101");
+        assert_eq!(time.clock(), "01:01");
+        // Local time is some wall clock within a day of UTC.
+        let local = DateTime::local_from_unix(1_782_867_661);
+        assert!((local.to_unix() - 1_782_867_661).abs() <= 14 * 3_600);
     }
 
     #[test]
