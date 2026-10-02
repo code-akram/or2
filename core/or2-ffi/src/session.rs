@@ -563,6 +563,15 @@ mod tests {
         (Session::new(handle, transport), driver)
     }
 
+    /// Held by every test that opens mosh sessions or calls `network_changed`: the registry is
+    /// process-wide, and `live_mosh_sessions` briefly holds every live session, so a parallel
+    /// test could keep a session alive past the drop another test checks.
+    static REGISTRY: Mutex<()> = Mutex::new(());
+
+    fn registry() -> std::sync::MutexGuard<'static, ()> {
+        REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn registered(session: &Arc<Session>) -> bool {
         let weak = Arc::downgrade(session);
         MOSH_SESSIONS
@@ -574,6 +583,7 @@ mod tests {
 
     #[test]
     fn network_changed_roams_live_mosh_sessions_only() {
+        let _registry = registry();
         let (mosh, mut mosh_driver) = open(TerminalTransport::Mosh);
         let (ssh, mut ssh_driver) = open(TerminalTransport::Ssh);
         assert!(registered(&mosh));
@@ -632,6 +642,7 @@ mod tests {
 
     #[test]
     fn closed_and_released_mosh_sessions_leave_the_registry() {
+        let _registry = registry();
         let (closed, mut closed_driver) = open(TerminalTransport::Mosh);
         let (released, _released_driver) = open(TerminalTransport::Mosh);
         let (kept, _kept_driver) = open(TerminalTransport::Mosh);

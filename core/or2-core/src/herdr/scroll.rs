@@ -1,12 +1,14 @@
 //! Scrolling a herdr pane's history without the mouse (contracts.md, "Wheel-aware
-//! scrolling"): one `pane.scroll` with an absolute `offset_from_bottom`, which this connection
-//! keeps per pane ([`ScrollOffsets`]) so a swipe can be relative.
+//! scrolling"): herdr is asked where the pane is (`pane.get`, or `pane.current` for the focused
+//! pane), then one `pane.scroll` sets the absolute `offset_from_bottom` a relative swipe gives.
+//! New output while a pane is scrolled up moves its offset (herdr keeps the view anchored), so
+//! the offset is read fresh each time; [`ScrollOffsets`] keeps the last answer, used only when
+//! herdr's reply carries no scroll.
 //!
 //! herdr answers a `pane.scroll` with the pane's info, whose `scroll.offset_from_bottom` is
 //! where the pane really is (herdr clamps an offset past the top of its history): that answer,
 //! not the requested offset, becomes the kept one, so a swipe down after an overshoot starts
-//! from the top of the history rather than from beyond it. A request without a pane asks herdr
-//! for the focused one first (`pane.current`), whose answer carries its current offset too.
+//! from the top of the history rather than from beyond it.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
@@ -16,7 +18,7 @@ use serde_json::Value;
 use super::HerdrError;
 use super::discovery::Directory;
 use super::focus::{discovery_error, wire_error};
-use super::generated::request::{PaneCurrentParams, PaneScrollParams, RequestBody};
+use super::generated::request::{PaneCurrentParams, PaneScrollParams, PaneTarget, RequestBody};
 use super::generated::success_response::PaneScrollInfo;
 use super::watch::Timing;
 use super::wire::{self, WireError};
@@ -79,22 +81,40 @@ pub async fn scroll_pane_in<H: RemoteHost>(
     pane_id: Option<&str>,
     scroll: TargetScroll,
 ) -> Result<(), HerdrError> {
-    let (pane_id, offset) = match pane_id {
-        Some(pane_id) => (pane_id.to_owned(), offsets.get(session, pane_id)),
+    // Where the pane is now, asked of herdr: new output while a pane is scrolled up moves its
+    // offset (herdr keeps the view anchored), so the kept one may be stale.
+    let current = match pane_id {
+        Some(pane_id) => {
+            let body = RequestBody::PaneGet(PaneTarget {
+                pane_id: pane_id.to_owned(),
+            });
+            call(host, herdr, directory, session, "or2_pane", &body).await
+        }
         None => {
             let body = RequestBody::PaneCurrent(PaneCurrentParams::default());
-            let current = call(host, herdr, directory, session, "or2_pane", &body).await?;
-            let pane_id = current
-                .pointer("/pane/pane_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| HerdrError::Failed("herdr named no focused pane".into()))?
-                .to_owned();
-            let offset = scroll_info(&current)
-                .map(|info| info.offset_from_bottom)
-                .unwrap_or_else(|| offsets.get(session, &pane_id));
-            (pane_id, offset)
+            call(host, herdr, directory, session, "or2_pane", &body).await
         }
     };
+    let current = match current {
+        Ok(current) => current,
+        Err(error) => {
+            if let (Some(pane_id), HerdrError::PaneNotFound) = (pane_id, &error) {
+                offsets.set(session, pane_id, 0);
+            }
+            return Err(error);
+        }
+    };
+    let pane_id = match pane_id {
+        Some(pane_id) => pane_id.to_owned(),
+        None => current
+            .pointer("/pane/pane_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| HerdrError::Failed("herdr named no focused pane".into()))?
+            .to_owned(),
+    };
+    let offset = scroll_info(&current)
+        .map(|info| info.offset_from_bottom)
+        .unwrap_or_else(|| offsets.get(session, &pane_id));
     let wanted = next_offset(offset, scroll);
     let body = RequestBody::PaneScroll(PaneScrollParams {
         offset_from_bottom: wanted,
@@ -194,7 +214,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_named_pane_is_scrolled_from_its_kept_offset_and_keeps_herdrs_answer() {
+    async fn a_named_pane_is_scrolled_from_where_herdr_says_it_is() {
         let host = host();
         host.set_scroll_max(10);
         let (directory, offsets) = (Directory::new(), ScrollOffsets::new());
@@ -212,7 +232,7 @@ mod tests {
         run(TargetScroll::Up { lines: 4 }).await.unwrap();
         run(TargetScroll::Up { lines: 4 }).await.unwrap();
         assert_eq!(offsets.get(None, "w1:p1"), 8);
-        // Past the top herdr stops at its history; the kept offset is where it stopped.
+        // Past the top herdr stops at its history; the next swipe starts where it stopped.
         run(TargetScroll::Up { lines: 50 }).await.unwrap();
         assert_eq!(offsets.get(None, "w1:p1"), 10);
         run(TargetScroll::Down { lines: 3 }).await.unwrap();
@@ -221,14 +241,43 @@ mod tests {
         assert_eq!(offsets.get(None, "w1:p1"), 0);
         assert_eq!(
             scrolls(&host),
-            ["w1:p1@4", "w1:p1@8", "w1:p1@58", "w1:p1@7", "w1:p1@0"]
+            [
+                "pane.get", "w1:p1@4", "pane.get", "w1:p1@8", "pane.get", "w1:p1@58", "pane.get",
+                "w1:p1@7", "pane.get", "w1:p1@0"
+            ]
         );
         // Offsets are per pane and per session.
         assert_eq!(offsets.get(Some("other"), "w1:p1"), 0);
         assert_eq!(offsets.get(None, "w1:p2"), 0);
         // The socket came from the listing once, then from the directory.
-        assert_eq!(host.opened(), vec![SOCKET; 5]);
+        assert_eq!(host.opened(), vec![SOCKET; 10]);
         assert_eq!(host.exec_log().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn output_that_moved_a_scrolled_pane_is_taken_into_account() {
+        let host = host();
+        let (directory, offsets) = (Directory::new(), ScrollOffsets::new());
+        let run = |scroll| {
+            scroll_pane_in(
+                &host,
+                "/h",
+                &directory,
+                &offsets,
+                None,
+                Some("w1:p1"),
+                scroll,
+            )
+        };
+        run(TargetScroll::Up { lines: 7 }).await.unwrap();
+        // Three new lines arrive: herdr keeps the view anchored, three rows further up.
+        host.set_pane_offset("w1:p1", 10);
+        run(TargetScroll::Down { lines: 2 }).await.unwrap();
+        assert_eq!(offsets.get(None, "w1:p1"), 8);
+        assert_eq!(
+            scrolls(&host),
+            ["pane.get", "w1:p1@7", "pane.get", "w1:p1@8"]
+        );
     }
 
     #[tokio::test]

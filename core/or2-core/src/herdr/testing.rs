@@ -1,7 +1,7 @@
 //! Test doubles for the herdr client: sanitized fixtures and a scripted [`FakeHost`] that plays
 //! a herdr server over in-memory streams. Deterministic under tokio's paused clock.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde_json::Value;
@@ -81,6 +81,8 @@ struct State {
     scroll_error: Option<(String, String)>,
     /// The `pane.current` answer: the focused pane and its offset.
     current: (String, u64),
+    /// Where each pane is, as `pane.get` reports it: set by `pane.scroll` (clamped) or by a test.
+    pane_offsets: HashMap<String, u64>,
     streams: Vec<mpsc::UnboundedSender<Command>>,
     served: Vec<Served>,
 }
@@ -112,6 +114,7 @@ impl FakeHost {
                 scroll_max: 1000,
                 scroll_error: None,
                 current: ("w1:p1".into(), 0),
+                pane_offsets: HashMap::new(),
                 streams: Vec::new(),
                 served: Vec::new(),
             })),
@@ -204,6 +207,13 @@ impl FakeHost {
     /// `pane.scroll` answers with this error from now on.
     pub fn fail_scroll(&self, code: &str, message: &str) {
         lock(&self.state).scroll_error = Some((code.to_owned(), message.to_owned()));
+    }
+
+    /// `pane_id` is now `offset` rows above its bottom, as new output moves a scrolled pane.
+    pub fn set_pane_offset(&self, pane_id: &str, offset: u64) {
+        lock(&self.state)
+            .pane_offsets
+            .insert(pane_id.to_owned(), offset);
     }
 
     /// `pane.current` names `pane_id`, scrolled `offset` rows above its bottom.
@@ -379,7 +389,7 @@ async fn serve(state: Arc<Mutex<State>>, stream: DuplexStream) {
         }
         // A `pane_info`/`pane_current` answer shaped like herdr 0.9.3's (captured from an
         // isolated session), trimmed to the fields a scroll reads.
-        "pane.scroll" | "pane.current" => {
+        "pane.scroll" | "pane.current" | "pane.get" => {
             let pane_info = |pane_id: &str, offset: u64, max: u64, kind: &str| {
                 serde_json::json!({"id": id, "result": {"type": kind, "pane": {
                     "agent_status": "unknown", "focused": true, "pane_id": pane_id,
@@ -397,6 +407,19 @@ async fn serve(state: Arc<Mutex<State>>, stream: DuplexStream) {
                     state.served.push(Served::Other(method.clone()));
                     let (pane, offset) = state.current.clone();
                     pane_info(&pane, offset, state.scroll_max, "pane_current")
+                } else if method == "pane.get" {
+                    state.served.push(Served::Other(method.clone()));
+                    let pane = request["params"]["pane_id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_owned();
+                    match state.scroll_error.clone() {
+                        Some((code, message)) if code == "pane_not_found" => error(&code, &message),
+                        _ => {
+                            let offset = state.pane_offsets.get(&pane).copied().unwrap_or(0);
+                            pane_info(&pane, offset, state.scroll_max, "pane_info")
+                        }
+                    }
                 } else {
                     let pane = request["params"]["pane_id"].as_str().unwrap_or("");
                     let offset = request["params"]["offset_from_bottom"]
@@ -406,9 +429,13 @@ async fn serve(state: Arc<Mutex<State>>, stream: DuplexStream) {
                         pane_id: pane.to_owned(),
                         offset,
                     });
-                    match &state.scroll_error {
-                        Some((code, message)) => error(code, message),
-                        None => pane_info(pane, offset, state.scroll_max, "pane_info"),
+                    match state.scroll_error.clone() {
+                        Some((code, message)) => error(&code, &message),
+                        None => {
+                            let clamped = offset.min(state.scroll_max);
+                            state.pane_offsets.insert(pane.to_owned(), clamped);
+                            pane_info(pane, offset, state.scroll_max, "pane_info")
+                        }
                     }
                 }
             };

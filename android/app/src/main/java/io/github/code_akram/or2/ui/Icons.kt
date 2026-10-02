@@ -96,9 +96,6 @@ object Or2Icons {
         "M7 7h.01", "M17 7h.01", "M7 17h.01",
         "M14.5 14.5h.01", "M19.5 14.5h.01", "M17 17h.01", "M14.5 19.5h.01", "M19.5 19.5h.01",
     )
-    val Settings = icon(
-        "settings", "M4 7h9", "M17 7h3", "M15 5a2 2 0 1 1 0 4 2 2 0 0 1 0-4z", "M4 17h3", "M11 17h9", "M9 15a2 2 0 1 1 0 4 2 2 0 0 1 0-4z",
-    )
     val Info = icon("info", "M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17z", "M12 11v5", "M12 7.8h.01")
     val External = icon("external", "M14 4h6v6", "M20 4l-9 9", "M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5")
     val Document = icon("document", "M7 3.5h7l4 4V20a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z", "M14 3.5V8h4", "M9 12.5h6", "M9 16h6")

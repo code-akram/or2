@@ -756,8 +756,10 @@ async fn scroll_pane_moves_a_panes_history_by_lines_and_back_to_the_bottom() {
             text: "seq 1 500\n".into(),
         }))
         .await;
-    // Wait for the output to reach the pane's history.
+    // Wait for the output (and the prompt after it) to reach the pane's history and stop
+    // growing: new lines would move a scrolled pane's offset under the assertions.
     let deadline = Instant::now() + Duration::from_secs(30);
+    let (mut last, mut steady_since) = (0, Instant::now());
     loop {
         let info = herdr
             .call(RequestBody::PaneGet(PaneTarget {
@@ -768,10 +770,12 @@ async fn scroll_pane_moves_a_panes_history_by_lines_and_back_to_the_bottom() {
             .pointer("/pane/scroll/max_offset_from_bottom")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        if max > 100 {
+        if max != last {
+            (last, steady_since) = (max, Instant::now());
+        } else if max > 100 && steady_since.elapsed() >= Duration::from_millis(500) {
             break;
         }
-        assert!(Instant::now() < deadline, "no history: {info}");
+        assert!(Instant::now() < deadline, "no steady history: {info}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let (host, directory, offsets) = (LocalHost::new(), Directory::new(), ScrollOffsets::new());
