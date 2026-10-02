@@ -48,14 +48,26 @@ pub struct HerdrPane {
     pub focused: bool,
 }
 
-/// The agent a notification's reply is for (API 16; `HostConnection.reply_to_pane`), from the
-/// [`HerdrAgent`] that raised the notification: its `terminal_id` and its kind (`agent`). herdr
-/// must still report that agent in the pane, else the reply is `PaneNotFound` and nothing is
-/// sent. A `None` kind matches any.
+/// The agent instance a notification's reply is for (API 16; `HostConnection.reply_to_pane`):
+/// the [`HerdrAgent::reply_identity`] that raised the notification, passed back as it came.
+/// herdr must still report that instance in the pane (the same terminal and kind, and the same
+/// `session`, or without one the same `name` of an agent herdr started), else the reply is
+/// `PaneNotFound` and nothing is sent. Nothing absent matches anything: one with no kind, or with
+/// neither a session nor a name, is `CommandFailed` ("open the pane to reply").
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct AgentIdentity {
     pub terminal_id: String,
     pub agent: Option<String>,
+    pub name: Option<String>,
+    pub session: Option<AgentSession>,
+}
+
+/// herdr's `agent_session` of one agent instance (API 16): its `kind` (`id` or `path`) and
+/// `value` (Claude Code's session id, reported by its hooks).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AgentSession {
+    pub kind: String,
+    pub value: String,
 }
 
 impl From<AgentIdentity> for core::AgentIdentity {
@@ -63,6 +75,25 @@ impl From<AgentIdentity> for core::AgentIdentity {
         Self {
             terminal_id: identity.terminal_id,
             agent: identity.agent,
+            name: identity.name,
+            session: identity.session.map(|session| core::AgentSession {
+                kind: session.kind,
+                value: session.value,
+            }),
+        }
+    }
+}
+
+impl From<core::AgentIdentity> for AgentIdentity {
+    fn from(identity: core::AgentIdentity) -> Self {
+        Self {
+            terminal_id: identity.terminal_id,
+            agent: identity.agent,
+            name: identity.name,
+            session: identity.session.map(|session| AgentSession {
+                kind: session.kind,
+                value: session.value,
+            }),
         }
     }
 }
@@ -84,6 +115,12 @@ pub struct HerdrAgent {
     /// herdr's id of the pane's terminal (API 16): a pane id reused for a new terminal (herdr
     /// restarted) is a new pane. A reply names it ([`AgentIdentity`]).
     pub terminal_id: String,
+    /// What a notification's reply to this agent names (API 16): its terminal, kind, name and
+    /// herdr's `agent_session`. `None` when herdr reports nothing that tells this instance from
+    /// the next one in the same terminal (no kind, or neither a session nor the name of an agent
+    /// herdr started): such an agent's notification offers no Reply.
+    #[uniffi(default)]
+    pub reply_identity: Option<AgentIdentity>,
 }
 
 /// or2's projection of one herdr session, delivered whole.
@@ -178,7 +215,9 @@ impl From<core::Pane> for HerdrPane {
 
 impl From<core::Agent> for HerdrAgent {
     fn from(a: core::Agent) -> Self {
+        let reply_identity = core::AgentIdentity::of(&a).map(AgentIdentity::from);
         Self {
+            reply_identity,
             pane_id: a.pane_id,
             tab_id: a.tab_id,
             workspace_id: a.workspace_id,
@@ -326,6 +365,11 @@ mod tests {
                 focused: true,
                 state_change_seq: u64::MAX,
                 terminal_id: "term_1".into(),
+                agent_session: Some(core::AgentSession {
+                    kind: "id".into(),
+                    value: "s1".into(),
+                }),
+                interactive_ready: false,
             }],
         };
         let HerdrState::Live { view: mapped } = core::HerdrState::Live { view }.into() else {
@@ -342,6 +386,18 @@ mod tests {
         assert_eq!(mapped.agents[0].display_agent.as_deref(), Some("Claude"));
         assert_eq!(mapped.agents[0].status, AgentStatus::Unknown);
         assert_eq!(mapped.agents[0].state_change_seq, u64::MAX);
+        assert_eq!(
+            mapped.agents[0].reply_identity,
+            Some(AgentIdentity {
+                terminal_id: "term_1".into(),
+                agent: Some("claude".into()),
+                name: Some("n".into()),
+                session: Some(AgentSession {
+                    kind: "id".into(),
+                    value: "s1".into(),
+                }),
+            })
+        );
 
         assert_eq!(
             HerdrState::from(core::HerdrState::Starting),

@@ -583,9 +583,11 @@ impl HostConnection {
     /// not its shell) and the text is typed with its Enter in one `pane.send_input` (`Typed`).
     /// Several lines are sent as they are. Runs on this connection, bounded by the query timeout.
     /// `InvalidName` for a malformed session, pane id or agent, or an empty text, `TooLarge` above
-    /// 4 KiB of UTF-8, `NotInstalled` without herdr, `PaneNotFound` when the pane, or that agent in
-    /// its foreground, is gone (nothing is typed), `NotConnected` / `Closed` without a live
-    /// connection, `CommandFailed` otherwise. The text is never logged. Cancelling the coroutine
+    /// 4 KiB of UTF-8, `CommandFailed` ("open the pane to reply") for an agent that names no
+    /// instance (no kind, or neither a session nor a name), `NotInstalled` without herdr,
+    /// `PaneNotFound` when the pane, or that agent instance in its foreground, is gone (nothing is
+    /// typed), `NotConnected` / `Closed` without a live connection, `CommandFailed` otherwise. The
+    /// text is never logged. Cancelling the coroutine
     /// (or the timeout) stops the reply before anything more is sent: a request that sends is never
     /// cut short, and one starts only while it can end before the timeout.
     pub async fn reply_to_pane(

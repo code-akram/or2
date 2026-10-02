@@ -64,6 +64,10 @@ pub(super) enum Served {
 pub(super) struct FakeAgent {
     /// The agent's terminal and kind; `None`: no agent in the pane (`agent_not_found`).
     pub agent: Option<(String, Option<String>)>,
+    /// The agent's `agent_session`, as `(kind, value)`.
+    pub session: Option<(String, String)>,
+    /// herdr's name for an agent it started.
+    pub name: Option<String>,
     pub shell_pid: Option<u32>,
     pub foreground_group: Option<u32>,
     /// The foreground group's processes, as `(pid, name)`.
@@ -74,15 +78,22 @@ impl FakeAgent {
     /// The shell's pid, and its own process group.
     pub const SHELL: u32 = 100;
 
-    /// A `claude` agent in the foreground, on terminal `term_<pane>`.
+    /// A `claude` agent in the foreground, on terminal `term_<pane>`, with the session
+    /// `sess_<pane>` (its hooks reported it, as Claude Code's do).
     pub fn default_for(pane: &str) -> Self {
-        Self::running(&format!("term_{pane}"), Some("claude"), "claude")
+        Self {
+            session: Some(("id".to_owned(), format!("sess_{pane}"))),
+            ..Self::running(&format!("term_{pane}"), Some("claude"), "claude")
+        }
     }
 
-    /// An agent of `kind` on `terminal`, its process `process` leading the foreground group.
+    /// An agent of `kind` on `terminal`, its process `process` leading the foreground group, with
+    /// no session and no name.
     pub fn running(terminal: &str, kind: Option<&str>, process: &str) -> Self {
         Self {
             agent: Some((terminal.to_owned(), kind.map(str::to_owned))),
+            session: None,
+            name: None,
             shell_pid: Some(Self::SHELL),
             foreground_group: Some(200),
             foreground: vec![(200, process.to_owned())],
@@ -101,11 +112,24 @@ impl FakeAgent {
     /// `agent.get`'s agent, trimmed to what this build reads plus herdr's required fields.
     fn info(&self, pane: &str) -> Value {
         let (terminal, kind) = self.agent.clone().unwrap_or_default();
-        serde_json::json!({
+        let mut info = serde_json::json!({
             "agent": kind, "agent_status": "blocked", "focused": false, "pane_id": pane,
             "revision": 0, "state_change_seq": 1, "tab_id": "w1:t1", "terminal_id": terminal,
             "workspace_id": "w1",
-        })
+        });
+        // Shaped like herdr 0.9.3's (an isolated session, a hook's report).
+        if let Some((session_kind, value)) = &self.session {
+            let session_agent = kind.clone().unwrap_or_default();
+            let source = format!("herdr:{session_agent}");
+            info["agent_session"] = serde_json::json!({
+                "agent": session_agent, "kind": session_kind, "source": source, "value": value,
+            });
+        }
+        if let Some(name) = &self.name {
+            info["name"] = name.as_str().into();
+            info["interactive_ready"] = true.into();
+        }
+        info
     }
 
     fn process_info(&self, pane: &str) -> Value {

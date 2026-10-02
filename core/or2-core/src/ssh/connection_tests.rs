@@ -488,7 +488,7 @@ impl server::Handler for Server {
                 )
             };
             // `w1:p1` holds a blocked agent, `w1:p2` an idle one, each `claude` on terminal
-            // `term_<pane>` in the foreground; `w9:p9` has none.
+            // `term_<pane>` with the session `sess_<pane>` in the foreground; `w9:p9` has none.
             let result = |result: serde_json::Value| {
                 serde_json::json!({"id": id, "result": result}).to_string() + "\n"
             };
@@ -499,6 +499,8 @@ impl server::Handler for Server {
                     "agent": "claude", "agent_status": "blocked", "focused": false,
                     "pane_id": pane, "revision": 0, "tab_id": "w1:t1",
                     "terminal_id": format!("term_{pane}"), "workspace_id": "w1",
+                    "agent_session": {"agent": "claude", "kind": "id", "source": "herdr:claude",
+                        "value": format!("sess_{pane}")},
                 }})),
                 ("pane.process_info", _) => result(serde_json::json!({
                     "type": "pane_process_info", "process_info": {
@@ -1952,6 +1954,11 @@ fn a_reply_goes_through_the_probed_herdr_prompted_or_typed_with_its_enter() {
             herdr::AgentIdentity {
                 terminal_id: format!("term_{pane}"),
                 agent: Some("claude".into()),
+                name: None,
+                session: Some(herdr::AgentSession {
+                    kind: "id".into(),
+                    value: format!("sess_{pane}"),
+                }),
             },
             text.to_owned(),
         ))
@@ -2000,7 +2007,12 @@ fn a_reply_needs_herdr() {
             "w1:p1".into(),
             herdr::AgentIdentity {
                 terminal_id: "term_w1:p1".into(),
-                agent: None,
+                agent: Some("claude".into()),
+                name: None,
+                session: Some(herdr::AgentSession {
+                    kind: "id".into(),
+                    value: "sess_w1:p1".into(),
+                }),
             },
             "hi".into()
         )),

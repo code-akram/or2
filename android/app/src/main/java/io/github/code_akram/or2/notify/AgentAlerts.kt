@@ -73,8 +73,9 @@ data class AgentPaneKey(val hostId: Long, val session: String?, val paneId: Stri
 }
 
 /**
- * What one notification says. Nothing from the pane's output. Every agent notification carries a Reply action
- * ([AgentReplies]); after a reply it is posted again with [outcome] (and, once sent, [reply]), which never alerts.
+ * What one notification says. Nothing from the pane's output. A notification about an agent instance herdr identifies
+ * ([agent]) carries a Reply action ([AgentReplies]); after a reply it is posted again with [outcome] (and, once sent,
+ * [reply]), which never alerts.
  */
 data class AgentAlert(
     val key: AgentPaneKey,
@@ -88,9 +89,10 @@ data class AgentAlert(
     /** The reply that was sent, quoted as the notification's reply history (MessagingStyle); null when none was. */
     val reply: String? = null,
     /**
-     * The agent the alert is about (its pane's terminal and its kind, from the view that raised it): a reply names it,
-     * and Rust refuses one that would reach another agent in the same pane id. Null when unknown: such a reply is not
-     * sent.
+     * The agent instance the alert is about (`HerdrAgent.reply_identity` of the view that raised it: its terminal, kind,
+     * name and herdr's `agent_session`): a reply names it, and Rust refuses one that would reach another agent, or
+     * another instance of the same kind in the same terminal. Null when herdr reports nothing that tells this instance
+     * from the next: the notification then has no Reply action, and a reply is not sent.
      */
     val agent: AgentIdentity? = null,
     /**
@@ -173,9 +175,10 @@ fun alertText(status: AgentStatus): String? = when (status) {
  * - A pane's notification is cancelled when the pane goes back to `Working`, disappears from its session's view, is
  *   shown on screen ([screenChanged]) or opened from the notification ([opened]); all are cancelled when the alerts
  *   are switched off ([enabledChanged]).
- * - A notification this process posted is cancelled too when its pane now holds another agent: another terminal
- *   under the same pane id (herdr restarted and numbered its panes again) or another kind of agent. Its Reply would
- *   be refused anyway (Rust checks the agent); this takes the stale notification away.
+ * - A notification this process posted is cancelled too when its pane now holds another agent instance: another
+ *   terminal under the same pane id (herdr restarted and numbered its panes again), another kind of agent, or another
+ *   session or name ([sameAgent]). Its Reply would be refused anyway (Rust checks the instance); this takes the stale
+ *   notification away.
  * - What is up survives the process (Android keeps notifications), so a new process starts from the system's list
  *   ([AgentAlertSink.shown]): its first views cancel what went back to `Working` or disappeared meanwhile, and the
  *   switch takes those away too. A pane seen `Working` for the first time by a watch (its baseline, or a new
@@ -226,7 +229,7 @@ class AgentAlerts(
         for (agent in view.agents) {
             val key = AgentPaneKey(hostId, session, agent.paneId)
             // Another agent in this pane id now: the notification was about one that is gone.
-            if (agents[key]?.let { !sameAgent(it, identity(agent)) } == true) cancel(key)
+            if (agents[key]?.let { !sameAgent(it, agent) } == true) cancel(key)
             if (agent.status == AgentStatus.WORKING) {
                 if (previous?.get(agent.paneId) == agent.stateChangeSeq) {
                     cancel(key)
@@ -323,15 +326,21 @@ class AgentAlerts(
     }
 }
 
-/** The agent a view reports in a pane, as a reply names it. */
-fun identity(agent: HerdrAgent) = AgentIdentity(agent.terminalId, agent.agent)
+/** The agent instance a view reports in a pane, as a reply names it; null when herdr reports none (no Reply). */
+fun identity(agent: HerdrAgent): AgentIdentity? = agent.replyIdentity
 
 /**
- * Whether [now] is still the agent [was] names, as Rust decides for a reply: the same terminal, and the same kind
- * when [was] knew one.
+ * Whether [now] is still the agent instance [was] names, as Rust decides for a reply: the same terminal and kind, and
+ * the same session, or without one the same name. Nothing absent matches.
  */
-fun sameAgent(was: AgentIdentity, now: AgentIdentity) =
-    was.terminalId == now.terminalId && (was.agent == null || was.agent == now.agent)
+fun sameAgent(was: AgentIdentity, now: HerdrAgent): Boolean {
+    val instance = when {
+        was.session != null -> now.replyIdentity?.session == was.session
+        was.name != null -> now.name == was.name
+        else -> false
+    }
+    return instance && was.agent != null && was.agent == now.agent && was.terminalId == now.terminalId
+}
 
 
 /**

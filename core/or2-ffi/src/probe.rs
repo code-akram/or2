@@ -17,7 +17,8 @@ use or2_core::frame::{
     Cell, CellStyle, CellWidth, Cursor, CursorShape, Frame, Rgb, Row, Scrollback, Underline,
 };
 use or2_core::herdr::{
-    Agent, AgentStatus, HerdrState, HerdrView, HerdrWatchDriver, Pane, ReplyRoute, Tab, Workspace,
+    Agent, AgentIdentity, AgentSession, AgentStatus, HerdrState, HerdrView, HerdrWatchDriver, Pane,
+    ReplyRoute, Tab, Workspace,
 };
 use or2_core::host::TerminalTransport as CoreTransport;
 use or2_core::host::{
@@ -445,9 +446,14 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                 ..
             } => {
                 // As herdr would: the blocked agent's reply is typed, the others' prompted. A
-                // reply for another agent than the view's (its terminal `term_<pane>`) finds none.
-                // The text is not echoed anywhere.
-                let theirs = agent.terminal_id == format!("term_{pane_id}");
+                // reply for another agent instance than the view's (its `reply_identity`) finds
+                // none. The text is not echoed anywhere.
+                let theirs = probe_view("", 1, false, PROBE_PANES[0])
+                    .agents
+                    .iter()
+                    .find(|probed| probed.pane_id == pane_id)
+                    .and_then(AgentIdentity::of)
+                    .is_some_and(|probed| probed == agent);
                 let _ = reply.send(match pane_id.as_str() {
                     _ if !theirs => Err(core_host::HostError::PaneNotFound),
                     PROBE_BLOCKED_PANE => Ok(ReplyRoute::Typed),
@@ -544,6 +550,8 @@ fn probe_view(label: &str, version: u64, resolved: bool, focus: &str) -> HerdrVi
             focused: pane == focus,
             state_change_seq: seq,
             terminal_id: format!("term_{pane}"),
+            agent_session: None,
+            interactive_ready: false,
         }
     };
     let pane = |a: &Agent| Pane {
@@ -557,9 +565,20 @@ fn probe_view(label: &str, version: u64, resolved: bool, focus: &str) -> HerdrVi
         title: None,
         focused: a.focused,
     };
+    // The blocked agent has a session (its hooks reported one), the working one was started by
+    // herdr (named, ready), and the idle one has neither: it gets no `reply_identity`.
     let agents = vec![
-        agent("w1:p1", "claude", first, if resolved { 5 } else { 4 }),
-        agent("w1:p2", "codex", AgentStatus::Working, 2),
+        Agent {
+            agent_session: Some(AgentSession {
+                kind: "id".into(),
+                value: "sess_w1:p1".into(),
+            }),
+            ..agent("w1:p1", "claude", first, if resolved { 5 } else { 4 })
+        },
+        Agent {
+            interactive_ready: true,
+            ..agent("w1:p2", "codex", AgentStatus::Working, 2)
+        },
         agent("w2:p1", "pi", AgentStatus::Idle, 1),
     ];
     HerdrView {

@@ -1193,11 +1193,34 @@ async fn reply_to(
     .await
 }
 
+/// Gives the reported agent of `pane` the name `name`, as `herdr agent rename` does: a name names
+/// one agent instance (herdr clears it when the agent exits, is released or is replaced).
+async fn rename(herdr: &Isolated, pane: &str, name: &str) {
+    use or2_core::herdr::generated::request::AgentRenameParams;
+    herdr
+        .call(RequestBody::AgentRename(AgentRenameParams {
+            name: Some(name.into()),
+            target: pane.to_owned(),
+        }))
+        .await;
+}
+
+/// The identity of the reported agent `or2-test-agent` of `pane` once [`rename`]d to `name`.
+fn named(terminal: &str, name: &str) -> or2_core::herdr::AgentIdentity {
+    or2_core::herdr::AgentIdentity {
+        terminal_id: terminal.to_owned(),
+        agent: Some("or2-test-agent".into()),
+        name: Some(name.into()),
+        session: None,
+    }
+}
+
 /// A reply from a notification reaches the agent pane's input and is submitted: herdr refuses
 /// `agent.prompt` for a blocked agent (and for one it does not drive, as every reported agent),
 /// so the text and Enter are typed in one request. `cat` in the pane echoes the typed line and
-/// prints it again once Enter arrives. A pane without an agent, one that is gone, and a reply
-/// meant for another agent or terminal get nothing.
+/// prints it again once Enter arrives. The reported agent is named here ([`rename`]) so the reply
+/// names its instance. A pane without an agent, one that is gone, and a reply meant for another
+/// agent or terminal get nothing.
 #[tokio::test]
 async fn a_reply_reaches_an_agent_panes_input_and_is_submitted() {
     use or2_core::herdr::{AgentIdentity, ReplyRoute};
@@ -1207,12 +1230,10 @@ async fn a_reply_reaches_an_agent_panes_input_and_is_submitted() {
     herdr.start();
     let (pane, terminal) = cat_pane(&herdr, "or2-reply").await;
     let directory = Directory::new();
-    let agent = AgentIdentity {
-        terminal_id: terminal.clone(),
-        agent: Some("or2-test-agent".into()),
-    };
+    let agent = named(&terminal, "or2-reply");
 
     herdr.call(report(&pane, 1, PaneAgentState::Blocked)).await;
+    rename(&herdr, &pane, "or2-reply").await;
     assert_eq!(
         reply_to(&herdr, &directory, &pane, &agent, "or2-reply-blocked").await,
         Ok(ReplyRoute::Typed)
@@ -1228,20 +1249,23 @@ async fn a_reply_reaches_an_agent_panes_input_and_is_submitted() {
     );
     shows(&herdr, &pane, "or2-reply-working", 2).await;
 
-    // A stale notification: another terminal under the same pane id, or another kind of agent.
+    // A stale notification: another terminal under the same pane id, another kind of agent, or
+    // another instance (another name).
     for stale in [
         AgentIdentity {
             terminal_id: "term_0".into(),
-            agent: agent.agent.clone(),
+            ..agent.clone()
         },
         AgentIdentity {
-            terminal_id: terminal.clone(),
             agent: Some("codex".into()),
+            ..agent.clone()
         },
+        named(&terminal, "or2-other"),
     ] {
         assert_eq!(
             reply_to(&herdr, &directory, &pane, &stale, "or2-reply-stale").await,
-            Err(HerdrError::PaneNotFound)
+            Err(HerdrError::PaneNotFound),
+            "{stale:?}"
         );
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1261,10 +1285,7 @@ async fn a_reply_reaches_an_agent_panes_input_and_is_submitted() {
         }))
         .await;
     let shell = str_at(&split, "/pane/pane_id").to_owned();
-    let shell_agent = AgentIdentity {
-        terminal_id: str_at(&split, "/pane/terminal_id").to_owned(),
-        agent: None,
-    };
+    let shell_agent = named(str_at(&split, "/pane/terminal_id"), "or2-reply");
     assert_eq!(
         reply_to(&herdr, &directory, &shell, &shell_agent, "or2-reply-shell").await,
         Err(HerdrError::PaneNotFound)
@@ -1278,12 +1299,225 @@ async fn a_reply_reaches_an_agent_panes_input_and_is_submitted() {
     );
 }
 
+/// A fake agent: a copy of `cat` named `claude`, in a directory of its own (removed on drop).
+/// herdr's process detection takes it for Claude Code, so a report from herdr's own claude
+/// integration (`source: "herdr:claude"`, as Claude Code's hooks send) gives it an
+/// `agent_session`, as herdr 0.9.3 does for the real program. The real program never runs.
+struct FakeClaude {
+    dir: PathBuf,
+}
+
+impl FakeClaude {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "or2-test-fake-agent-{}-{}",
+            std::process::id(),
+            SESSIONS.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("the fake agent's directory");
+        let cat = ["/usr/bin/cat", "/bin/cat"]
+            .into_iter()
+            .find(|path| std::path::Path::new(path).is_file())
+            .expect("cat is installed");
+        std::fs::copy(cat, dir.join("claude")).expect("copy cat as the fake agent");
+        Self { dir }
+    }
+
+    /// The shell line that runs it (the path single-quoted).
+    fn command(&self) -> String {
+        let path = self.dir.join("claude");
+        let path = path.to_str().expect("a UTF-8 temporary directory");
+        assert!(!path.contains('\''));
+        format!("'{path}'\n")
+    }
+}
+
+impl Drop for FakeClaude {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Starts `fake` in `pane` and waits until herdr reports it as a `claude` agent.
+async fn start_fake_claude(herdr: &Isolated, pane: &str, fake: &FakeClaude) {
+    herdr
+        .call(RequestBody::PaneSendText(PaneSendTextParams {
+            pane_id: pane.to_owned(),
+            text: fake.command(),
+        }))
+        .await;
+    agent_where(herdr, pane, |agent| agent["agent"] == "claude").await;
+}
+
+/// Waits until `agent.get` of `pane` answers with an agent that passes `check`, or with none
+/// when `check` takes `Value::Null`.
+async fn agent_where(herdr: &Isolated, pane: &str, check: impl Fn(&Value) -> bool) -> Value {
+    use or2_core::herdr::generated::request::AgentTarget;
+    let socket = herdr.socket().expect("running");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let agent = wire::call(
+            &LocalHost::new(),
+            &socket,
+            "test",
+            &RequestBody::AgentGet(AgentTarget {
+                target: pane.to_owned(),
+            }),
+            Duration::from_secs(10),
+        )
+        .await
+        .map_or(Value::Null, |result| result["agent"].clone());
+        if check(&agent) {
+            return agent;
+        }
+        assert!(Instant::now() < deadline, "herdr reports {agent}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// herdr's claude integration reports `session` for the fake Claude Code in `pane`.
+fn report_session(pane: &str, seq: u64, session: &str) -> RequestBody {
+    use or2_core::herdr::generated::request::PaneReportAgentSessionParams;
+    RequestBody::PaneReportAgentSession(PaneReportAgentSessionParams {
+        agent: "claude".into(),
+        agent_session_id: Some(session.into()),
+        agent_session_path: None,
+        pane_id: pane.to_owned(),
+        resume_argv: None,
+        seq: Some(seq),
+        session_start_source: None,
+        source: "herdr:claude".into(),
+    })
+}
+
+/// A notification's reply reaches only the agent instance it was raised for. The fake Claude
+/// Code has herdr's `agent_session` (reported as its hooks do), and a reply naming it is typed.
+/// Then it exits and another starts in the same terminal, with no session yet and then with its
+/// own: a reply naming the first one gets nothing, while the same terminal and kind would have
+/// matched before. An identity with no kind or no instance is refused before anything is sent.
+#[tokio::test]
+async fn a_reply_reaches_only_the_agent_instance_it_names() {
+    use or2_core::herdr::generated::request::PaneSendKeysParams;
+    use or2_core::herdr::{AgentIdentity, AgentSession, OPEN_THE_PANE, ReplyRoute};
+    let Some(mut herdr) = Isolated::new() else {
+        return;
+    };
+    herdr.start();
+    let fake = FakeClaude::new();
+    let created = herdr
+        .call(RequestBody::WorkspaceCreate(WorkspaceCreateParams {
+            cwd: Some("/tmp".into()),
+            label: Some("or2-reply-instance".into()),
+            focus: true,
+            ..WorkspaceCreateParams::default()
+        }))
+        .await;
+    let pane = str_at(&created, "/root_pane/pane_id").to_owned();
+    let terminal = str_at(&created, "/root_pane/terminal_id").to_owned();
+    let directory = Directory::new();
+    let first_session = "0b1f6c1e-1111-4a8e-9a55-2a0c6a3b9d01";
+    let second_session = "0b1f6c1e-2222-4a8e-9a55-2a0c6a3b9d02";
+    let identity = |session: &str| AgentIdentity {
+        terminal_id: terminal.clone(),
+        agent: Some("claude".into()),
+        name: None,
+        session: Some(AgentSession {
+            kind: "id".into(),
+            value: session.into(),
+        }),
+    };
+    let has_session =
+        |session: &'static str| move |agent: &Value| agent["agent_session"]["value"] == session;
+
+    start_fake_claude(&herdr, &pane, &fake).await;
+    herdr.call(report_session(&pane, 1, first_session)).await;
+    let reported = agent_where(&herdr, &pane, has_session(first_session)).await;
+    assert_eq!(reported["agent_session"]["kind"], "id", "{reported}");
+    let first = identity(first_session);
+    // herdr prompts an agent its own integration reports when it is not blocked (Prompted);
+    // either way the text and its Enter arrive.
+    let sent = reply_to(&herdr, &directory, &pane, &first, "or2-reply-first").await;
+    assert!(
+        matches!(sent, Ok(ReplyRoute::Prompted | ReplyRoute::Typed)),
+        "{sent:?}"
+    );
+    shows(&herdr, &pane, "or2-reply-first", 2).await;
+    // Another session, no kind, no instance at all: nothing.
+    assert_eq!(
+        reply_to(
+            &herdr,
+            &directory,
+            &pane,
+            &identity(second_session),
+            "or2-reply-stale"
+        )
+        .await,
+        Err(HerdrError::PaneNotFound)
+    );
+    for unknown in [
+        AgentIdentity {
+            agent: None,
+            ..first.clone()
+        },
+        AgentIdentity {
+            session: None,
+            ..first.clone()
+        },
+    ] {
+        assert_eq!(
+            reply_to(&herdr, &directory, &pane, &unknown, "or2-reply-stale").await,
+            Err(HerdrError::Failed(OPEN_THE_PANE.into())),
+            "{unknown:?}"
+        );
+    }
+
+    // The first instance exits, and another starts in the same terminal.
+    herdr
+        .call(RequestBody::PaneSendKeys(PaneSendKeysParams {
+            keys: vec!["ctrl+c".into()],
+            pane_id: pane.clone(),
+        }))
+        .await;
+    agent_where(&herdr, &pane, Value::is_null).await;
+    start_fake_claude(&herdr, &pane, &fake).await;
+    // Its hooks have not reported a session yet: the first one's reply finds no instance.
+    let replacement = agent_where(&herdr, &pane, |agent| agent["agent"] == "claude").await;
+    assert_eq!(replacement["terminal_id"], terminal.as_str());
+    assert!(replacement["agent_session"].is_null(), "{replacement}");
+    assert_eq!(
+        reply_to(&herdr, &directory, &pane, &first, "or2-reply-stale").await,
+        Err(HerdrError::PaneNotFound)
+    );
+    // Then they report its own: still not the first one's.
+    herdr.call(report_session(&pane, 2, second_session)).await;
+    agent_where(&herdr, &pane, has_session(second_session)).await;
+    assert_eq!(
+        reply_to(&herdr, &directory, &pane, &first, "or2-reply-stale").await,
+        Err(HerdrError::PaneNotFound)
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!screen_of(&herdr, &pane).await.contains("or2-reply-stale"));
+    // The replacement's own notification reaches it.
+    let sent = reply_to(
+        &herdr,
+        &directory,
+        &pane,
+        &identity(second_session),
+        "or2-reply-second",
+    )
+    .await;
+    assert!(
+        matches!(sent, Ok(ReplyRoute::Prompted | ReplyRoute::Typed)),
+        "{sent:?}"
+    );
+    shows(&herdr, &pane, "or2-reply-second", 2).await;
+}
+
 /// The agent exits and its pane's shell has the foreground again, while herdr still reports the
-/// agent (herdr 0.9.3 does for about half a second): a reply must not run as a shell command. Its
-/// prompt is refused (`agent_not_ready`), and the typed path's foreground check refuses the rest.
+/// agent (herdr 0.9.3 does for a moment): a reply must not run as a shell command. Its prompt is
+/// refused (`agent_not_ready`), and the typed path's foreground check refuses the rest.
 #[tokio::test]
 async fn a_reply_never_runs_in_the_shell_after_the_agent_exits() {
-    use or2_core::herdr::AgentIdentity;
     use or2_core::herdr::generated::request::{
         AgentTarget, PaneProcessInfoParams, PaneSendKeysParams,
     };
@@ -1307,16 +1541,15 @@ async fn a_reply_never_runs_in_the_shell_after_the_agent_exits() {
     for attempt in 0..8 {
         let (pane, terminal) = cat_pane(&herdr, &format!("or2-reply-exit-{attempt}")).await;
         herdr.call(report(&pane, 1, PaneAgentState::Blocked)).await;
-        let agent = AgentIdentity {
-            terminal_id: terminal,
-            agent: Some("or2-test-agent".into()),
-        };
+        let name = format!("or2-exit-{attempt}");
+        rename(&herdr, &pane, &name).await;
+        let agent = named(&terminal, &name);
         // The reply's directory knows the socket already (a reply for another agent: nothing
         // sent), and every request below goes straight to it: the window is short.
         let directory = Directory::new();
-        let stale = AgentIdentity {
+        let stale = or2_core::herdr::AgentIdentity {
             terminal_id: "term_0".into(),
-            agent: None,
+            ..agent.clone()
         };
         assert_eq!(
             reply_to(&herdr, &directory, &pane, &stale, "or2-reply-stale").await,

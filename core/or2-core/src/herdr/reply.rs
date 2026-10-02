@@ -1,11 +1,14 @@
 //! Replying to an agent from its notification (contracts.md, "Reply from a notification"): text
 //! sent to a herdr pane and submitted, with no terminal open.
 //!
-//! The reply names the agent it is for ([`AgentIdentity`]: the pane's terminal and the agent's
-//! kind, from the view that raised the notification). herdr must still report that agent in the
-//! pane (`agent.get`), else it is [`HerdrError::PaneNotFound`] and nothing is sent: a pane id that
-//! now holds another agent, or another terminal (herdr restarted and numbered its panes again),
-//! never gets a stale notification's reply.
+//! The reply names the agent instance it is for ([`AgentIdentity`], from the view that raised the
+//! notification: the pane's terminal, the agent's kind, and herdr's `agent_session` of it or, for
+//! an agent herdr started, its name). herdr must still report exactly that instance in the pane
+//! (`agent.get`, before every request that sends), else it is [`HerdrError::PaneNotFound`] and
+//! nothing is sent: a pane id that now holds another agent, another terminal (herdr restarted and
+//! numbered its panes again), or another agent of the same kind in the same terminal never gets a
+//! stale notification's reply. An identity that names no instance is refused before anything is
+//! sent ([`OPEN_THE_PANE`]).
 //!
 //! herdr's `agent.prompt` submits like the agent's own input (the text, then Enter, honouring the
 //! pane's bracketed-paste mode, in one request) and checks on herdr's side that the agent herdr
@@ -34,7 +37,9 @@
 //! it (`agent.send_keys` takes key names, writes them as one unbracketed burst, has no way to say
 //! a newline, and, like `agent.prompt`, refuses every agent herdr did not start). An agent that
 //! exits within that one round trip, after the checks and before herdr receives the send, still
-//! gets the reply typed into its shell.
+//! gets the reply typed into its shell. The owner kept this typed reply for agents herdr did not
+//! start (Claude Code panes) with that risk stated (contracts.md, owner decision of 2026-10-02);
+//! closing it needs an atomic agent-bound request from herdr.
 //!
 //! **Cancellation.** A caller that stops waiting (its future dropped, or its timeout) stops the
 //! reply before any request that sends: the checks give way at once, but a request that sends
@@ -58,6 +63,7 @@ use super::generated::request::{
 };
 use super::generated::success_response::{AgentInfo, PaneProcessInfo};
 use super::scroll::call_raw;
+use super::view::{Agent, AgentSession};
 use super::watch::{PANE_NOT_FOUND, Timing};
 use super::wire::{self, WireError};
 use crate::remote::RemoteHost;
@@ -87,6 +93,9 @@ const SHELLS: &[&str] = &[
 const CANCELLED: &str = "the reply was cancelled";
 /// Why a reply stopped because a request that sends could no longer end before the deadline.
 const NO_TIME: &str = "no time was left to send the reply";
+/// Why a reply to an agent herdr reports no instance of ([`AgentIdentity::is_instance`]) is
+/// refused: only the pane itself can be answered.
+pub const OPEN_THE_PANE: &str = "open the pane to reply";
 
 /// Which herdr path carried a reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,15 +107,53 @@ pub enum ReplyRoute {
     Typed,
 }
 
-/// The agent a reply is for, as the view that raised its notification saw it.
+/// The agent instance a reply is for, as the view that raised its notification saw it
+/// ([`AgentIdentity::of`]).
+///
+/// A pane id and a terminal outlive the agents that run in them (a Codex exits and another
+/// starts in the same terminal), so a reply names the instance too:
+///
+/// - with herdr's `agent_session` ([`Self::session`]), herdr must still report exactly that
+///   session in the pane;
+/// - without one, for an agent herdr started (it has a [`Self::name`], which herdr clears when
+///   that agent exits, is released or is replaced), herdr must still report that name.
+///
+/// The terminal and the kind must match as well. Nothing absent ever matches anything: an
+/// identity with no kind, or with neither a session nor a name, is refused before anything is
+/// sent ([`OPEN_THE_PANE`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentIdentity {
     /// herdr's id of the pane's terminal (`terminal_id`): a pane id reused for a new terminal is
     /// a new pane.
     pub terminal_id: String,
-    /// The agent's kind (`agent`, e.g. `claude`); `None` when herdr named none. A known kind must
-    /// match; an unknown one matches any.
+    /// The agent's kind (`agent`, e.g. `claude`); required.
     pub agent: Option<String>,
+    /// herdr's name for an agent it started (`name`).
+    pub name: Option<String>,
+    /// herdr's `agent_session` of the agent instance.
+    pub session: Option<AgentSession>,
+}
+
+impl AgentIdentity {
+    /// The identity a reply to `agent` names, or `None` when herdr reports nothing that tells
+    /// this instance from the next one in the same terminal: no kind, or neither an
+    /// `agent_session` nor the name of an agent herdr started (`interactive_ready`). Such an
+    /// agent gets no reply from a notification.
+    pub fn of(agent: &Agent) -> Option<Self> {
+        agent.agent.as_ref()?;
+        let started = agent.name.is_some() && agent.interactive_ready;
+        (agent.agent_session.is_some() || started).then(|| Self {
+            terminal_id: agent.terminal_id.clone(),
+            agent: agent.agent.clone(),
+            name: agent.name.clone(),
+            session: agent.agent_session.clone(),
+        })
+    }
+
+    /// Whether this names one agent instance: a kind, and a session or a name.
+    pub fn is_instance(&self) -> bool {
+        self.agent.is_some() && (self.session.is_some() || self.name.is_some())
+    }
 }
 
 /// One reply: where it goes, which agent it is for, and what it says.
@@ -133,11 +180,15 @@ pub async fn reply_in<H: RemoteHost>(
     deadline: Instant,
     cancelled: impl Future<Output = ()>,
 ) -> Result<ReplyRoute, HerdrError> {
+    // Only one agent instance can be answered: never "any agent in the pane".
+    if !reply.agent.is_instance() {
+        return Err(HerdrError::Failed(OPEN_THE_PANE.into()));
+    }
     let mut window = Window {
         cancelled: Box::pin(cancelled),
         deadline,
     };
-    // The agent the notification was about must still be in the pane.
+    // The agent instance the notification was about must still be in the pane.
     let get = agent_get(reply.pane_id);
     let answer = window
         .check(async {
@@ -236,18 +287,25 @@ fn gone(error: WireError) -> HerdrError {
     }
 }
 
-/// `agent.get`'s answer names the agent the reply is for: the pane, its terminal, and (when the
-/// reply names one) its kind.
+/// `agent.get`'s answer names the agent instance the reply is for: the pane, its terminal, its
+/// kind, and its session (the reply names one) or else its name. Nothing absent matches.
 fn same_agent(answer: &Value, reply: &Reply<'_>) -> Result<(), HerdrError> {
     let info: AgentInfo = serde_json::from_value(answer.get("agent").cloned().unwrap_or_default())
         .map_err(|error| HerdrError::Failed(format!("herdr sent an unreadable agent: {error}")))?;
     let expected = reply.agent;
-    let same = info.pane_id == reply.pane_id
-        && info.terminal_id == expected.terminal_id
-        && expected
-            .agent
+    let instance = match (&expected.session, &expected.name) {
+        (Some(session), _) => info
+            .agent_session
             .as_ref()
-            .is_none_or(|kind| info.agent.as_ref() == Some(kind));
+            .is_some_and(|now| now.kind.to_string() == session.kind && now.value == session.value),
+        (None, Some(name)) => info.name.as_ref() == Some(name),
+        (None, None) => false,
+    };
+    let same = instance
+        && info.pane_id == reply.pane_id
+        && info.terminal_id == expected.terminal_id
+        && expected.agent.is_some()
+        && info.agent == expected.agent;
     if same {
         Ok(())
     } else {
@@ -338,11 +396,17 @@ mod tests {
         host
     }
 
-    /// The identity [`FakeAgent::default_for`] reports for `pane`.
+    /// The identity [`FakeAgent::default_for`] reports for `pane`: its terminal, its kind and
+    /// its session.
     fn claude(pane: &str) -> AgentIdentity {
         AgentIdentity {
             terminal_id: format!("term_{pane}"),
             agent: Some("claude".into()),
+            name: None,
+            session: Some(AgentSession {
+                kind: "id".into(),
+                value: format!("sess_{pane}"),
+            }),
         }
     }
 
@@ -587,16 +651,6 @@ mod tests {
             );
             assert!(!sent(&host), "{:?}", host.served());
         }
-        // A reply that names no kind needs only the terminal.
-        let host = self::host();
-        let unnamed = AgentIdentity {
-            terminal_id: "term_w1:p1".into(),
-            agent: None,
-        };
-        assert_eq!(
-            reply_to(&host, &Directory::new(), &unnamed, "yes").await,
-            Ok(ReplyRoute::Prompted)
-        );
         // The agent changes between the prompt's refusal and the typing: nothing is typed.
         let host = self::host();
         host.fail_prompt(AGENT_BLOCKED, "blocked");
@@ -615,6 +669,228 @@ mod tests {
         let (result, ()) = tokio::join!(reply(&host, &directory, "yes"), swap);
         assert_eq!(result, Err(HerdrError::PaneNotFound));
         assert!(typed(&host).is_empty(), "{:?}", host.served());
+    }
+
+    /// Another instance of the same kind in the same terminal (a Codex exited and another
+    /// started there): its session differs, or it has none yet. Nothing is prompted or typed,
+    /// also when the replacement comes between the prompt's refusal and the typing.
+    #[tokio::test(start_paused = true)]
+    async fn a_replacement_of_the_same_kind_in_the_same_terminal_gets_nothing() {
+        let replacement = |session: Option<&str>| FakeAgent {
+            session: session.map(|value| ("id".to_owned(), value.to_owned())),
+            ..FakeAgent::default_for(PANE)
+        };
+        for (session, refusal) in [
+            (Some("sess_next"), None),
+            (None, None),
+            (Some("sess_next"), Some(AGENT_BLOCKED)),
+            (None, Some(AGENT_NOT_READY)),
+        ] {
+            let host = self::host();
+            if let Some(refusal) = refusal {
+                host.fail_prompt(refusal, "refused");
+            }
+            host.set_agent(PANE, replacement(session));
+            assert_eq!(
+                reply(&host, &Directory::new(), "yes").await,
+                Err(HerdrError::PaneNotFound),
+                "{session:?} {refusal:?}"
+            );
+            assert!(!sent(&host), "{:?}", host.served());
+        }
+        // A session of another kind (`path`) with the same value is another session.
+        let host = self::host();
+        host.set_agent(
+            PANE,
+            FakeAgent {
+                session: Some(("path".to_owned(), format!("sess_{PANE}"))),
+                ..FakeAgent::default_for(PANE)
+            },
+        );
+        assert_eq!(
+            reply(&host, &Directory::new(), "yes").await,
+            Err(HerdrError::PaneNotFound)
+        );
+        assert!(!sent(&host), "{:?}", host.served());
+
+        for session in [Some("sess_next"), None] {
+            let host = self::host();
+            host.fail_prompt(AGENT_BLOCKED, "blocked");
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            host.hold_next("agent.prompt", Arc::clone(&entered), Arc::clone(&release));
+            let swap = async {
+                entered.notified().await;
+                host.set_agent(PANE, replacement(session));
+                release.notify_one();
+            };
+            let directory = Directory::new();
+            let (result, ()) = tokio::join!(reply(&host, &directory, "yes"), swap);
+            assert_eq!(result, Err(HerdrError::PaneNotFound), "{session:?}");
+            assert!(typed(&host).is_empty(), "{:?}", host.served());
+        }
+    }
+
+    /// An unchanged session is the same agent: prompted, or typed when herdr refuses the prompt.
+    #[tokio::test(start_paused = true)]
+    async fn an_unchanged_session_gets_the_reply() {
+        let host = self::host();
+        assert_eq!(
+            reply(&host, &Directory::new(), "go on").await,
+            Ok(ReplyRoute::Prompted)
+        );
+        let host = self::host();
+        host.fail_prompt(AGENT_BLOCKED, "blocked");
+        assert_eq!(
+            reply(&host, &Directory::new(), "yes").await,
+            Ok(ReplyRoute::Typed)
+        );
+        assert_eq!(typed(&host).len(), 1);
+    }
+
+    /// An agent herdr started, with no session: its name (which herdr clears when it exits or is
+    /// replaced) names the instance, with its terminal and kind.
+    #[tokio::test(start_paused = true)]
+    async fn an_agent_herdr_started_is_named_by_its_name() {
+        let named = AgentIdentity {
+            name: Some("reviewer".into()),
+            session: None,
+            ..claude(PANE)
+        };
+        let started = |name: Option<&str>, terminal: &str| FakeAgent {
+            name: name.map(str::to_owned),
+            ..FakeAgent::running(terminal, Some("claude"), "claude")
+        };
+        let host = self::host();
+        host.set_agent(PANE, started(Some("reviewer"), "term_w1:p1"));
+        assert_eq!(
+            reply_to(&host, &Directory::new(), &named, "go on").await,
+            Ok(ReplyRoute::Prompted)
+        );
+        for (name, terminal) in [
+            (None, "term_w1:p1"),
+            (Some("other"), "term_w1:p1"),
+            (Some("reviewer"), "term_new"),
+        ] {
+            let host = self::host();
+            host.set_agent(PANE, started(name, terminal));
+            assert_eq!(
+                reply_to(&host, &Directory::new(), &named, "go on").await,
+                Err(HerdrError::PaneNotFound),
+                "{name:?} {terminal}"
+            );
+            assert!(!sent(&host), "{:?}", host.served());
+        }
+    }
+
+    /// Nothing absent is a wildcard: an identity with no kind, or with neither a session nor a
+    /// name, is refused before anything reaches herdr, whatever the pane holds.
+    #[tokio::test(start_paused = true)]
+    async fn an_identity_without_kind_or_instance_is_refused_before_anything_is_sent() {
+        let no_kind = AgentIdentity {
+            agent: None,
+            ..claude(PANE)
+        };
+        let no_instance = AgentIdentity {
+            session: None,
+            name: None,
+            ..claude(PANE)
+        };
+        for identity in [no_kind, no_instance] {
+            for fake in [
+                FakeAgent::default_for(PANE),
+                FakeAgent::running("term_w1:p1", None, "agent"),
+                FakeAgent::running("term_w1:p1", Some("claude"), "claude"),
+            ] {
+                let host = self::host();
+                host.set_agent(PANE, fake);
+                assert_eq!(
+                    reply_to(&host, &Directory::new(), &identity, "yes").await,
+                    Err(HerdrError::Failed(OPEN_THE_PANE.into())),
+                    "{identity:?}"
+                );
+                assert!(replies(&host).is_empty(), "{:?}", host.served());
+            }
+        }
+        // A pane whose agent herdr reports with no kind gets nothing, even for a reply naming its
+        // terminal and session.
+        let host = self::host();
+        host.set_agent(
+            PANE,
+            FakeAgent {
+                agent: Some(("term_w1:p1".into(), None)),
+                ..FakeAgent::default_for(PANE)
+            },
+        );
+        assert_eq!(
+            reply(&host, &Directory::new(), "yes").await,
+            Err(HerdrError::PaneNotFound)
+        );
+        assert!(!sent(&host), "{:?}", host.served());
+    }
+
+    /// The identity a view's agent gives a reply: a kind and a session, or a kind and the name of
+    /// an agent herdr started; none otherwise.
+    #[test]
+    fn only_an_agent_herdr_identifies_gets_an_identity() {
+        let agent = Agent {
+            pane_id: PANE.into(),
+            tab_id: "w1:t1".into(),
+            workspace_id: "w1".into(),
+            name: None,
+            agent: Some("claude".into()),
+            display_agent: None,
+            status: super::super::AgentStatus::Blocked,
+            cwd: None,
+            title: None,
+            focused: false,
+            state_change_seq: 1,
+            terminal_id: "term_w1:p1".into(),
+            agent_session: Some(AgentSession {
+                kind: "id".into(),
+                value: "sess_w1:p1".into(),
+            }),
+            interactive_ready: false,
+        };
+        assert_eq!(AgentIdentity::of(&agent), Some(claude(PANE)));
+        let started = Agent {
+            name: Some("reviewer".into()),
+            agent_session: None,
+            interactive_ready: true,
+            ..agent.clone()
+        };
+        assert_eq!(
+            AgentIdentity::of(&started),
+            Some(AgentIdentity {
+                name: Some("reviewer".into()),
+                session: None,
+                ..claude(PANE)
+            })
+        );
+        for none in [
+            // Reported, with no session (yet).
+            Agent {
+                agent_session: None,
+                ..agent.clone()
+            },
+            // Renamed, but herdr did not start it.
+            Agent {
+                name: Some("renamed".into()),
+                agent_session: None,
+                ..agent.clone()
+            },
+            // No kind.
+            Agent {
+                agent: None,
+                ..agent.clone()
+            },
+            Agent {
+                agent: None,
+                ..started.clone()
+            },
+        ] {
+            assert_eq!(AgentIdentity::of(&none), None, "{none:?}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

@@ -59,8 +59,23 @@ pub struct Agent {
     /// herdr's counter of status transitions for this pane.
     pub state_change_seq: u64,
     /// herdr's id of the pane's terminal: a pane id reused for a new terminal (herdr
-    /// restarted) is a new pane. With the agent's kind, what a reply names ([`super::AgentIdentity`]).
+    /// restarted) is a new pane. Part of what a reply names ([`super::AgentIdentity`]).
     pub terminal_id: String,
+    /// herdr's `agent_session`: the session the agent's own integration reported (Claude Code's
+    /// session id, through herdr's hooks), kept for the life of that agent's process. Absent
+    /// until reported, and for an agent whose integration reports none.
+    pub agent_session: Option<AgentSession>,
+    /// herdr started this agent (`herdr agent start`) and found it ready for input
+    /// (`interactive_ready`).
+    pub interactive_ready: bool,
+}
+
+/// One agent instance's session, as herdr reports it (`agent_session`): its `kind` (`id` or
+/// `path`, or one this build does not know) and `value`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSession {
+    pub kind: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

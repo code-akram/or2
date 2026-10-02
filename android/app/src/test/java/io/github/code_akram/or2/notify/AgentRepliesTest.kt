@@ -2,6 +2,7 @@ package io.github.code_akram.or2.notify
 
 import io.github.code_akram.or2.app.MemoryPrefStore
 import io.github.code_akram.or2.ffi.AgentIdentity
+import io.github.code_akram.or2.ffi.AgentSession
 import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.HerdrAgent
 import io.github.code_akram.or2.ffi.HerdrView
@@ -28,7 +29,7 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class AgentRepliesTest {
     private val key = AgentPaneKey(7, "work", "w1:p1")
-    private val claude = AgentIdentity("term_1", "claude")
+    private val claude = AgentIdentity("term_1", "claude", "Claude Code", AgentSession("id", "sess_1"))
     private val alert = AgentAlert(key, "Claude Code", "Needs input", "Workstation", agent = claude)
     private val posted = mutableListOf<AgentAlert>()
     private val sent = mutableListOf<Pair<AgentPaneKey, String>>()
@@ -84,6 +85,7 @@ class AgentRepliesTest {
             HostException.NotInstalled("herdr") to "Not sent: herdr is not installed on Workstation",
             HostException.CommandFailed("the host did not answer in time") to "Not sent: the host did not answer in time",
             HostException.CommandFailed("x".repeat(200)) to "Not sent: " + "x".repeat(80),
+            HostException.CommandFailed("open the pane to reply") to AgentReplies.NOT_SENT_OPEN_PANE,
             HostException.InvalidName() to "Not sent: herdr refused it",
         )
         for ((error, reason) in reasons) {
@@ -107,10 +109,12 @@ class AgentRepliesTest {
     }
 
     @Test
-    fun aReplyThatNamesNoAgentIsNotSent() = runTest {
+    fun aReplyThatNamesNoAgentInstanceIsNotSent() = runTest {
+        // An agent herdr does not identify (no session, no name): its notification has no Reply, and a reply that
+        // still came (an older PendingIntent) is refused in words, with nothing sent.
         replies().reply(alert.copy(agent = null), "hello")
         assertTrue(sent.isEmpty())
-        assertEquals(AgentReplies.NOT_SENT_GONE, posted.single().outcome)
+        assertEquals(AgentReplies.NOT_SENT_OPEN_PANE, posted.single().outcome)
     }
 
     /**
@@ -126,7 +130,7 @@ class AgentRepliesTest {
         val watch = Any()
         fun view(status: AgentStatus, seq: ULong) = HerdrView(
             1uL, 22u, null, emptyList(), emptyList(), emptyList(),
-            listOf(HerdrAgent(key.paneId, "w1:t1", "w1", "Claude Code", "claude", "Claude Code", status, "/work", null, false, seq, "term_1")),
+            listOf(HerdrAgent(key.paneId, "w1:t1", "w1", "Claude Code", "claude", "Claude Code", status, "/work", null, false, seq, "term_1", claude)),
         )
         alerts.viewChanged(watch, key.hostId, "Workstation", key.session, view(AgentStatus.WORKING, 1u))
         alerts.viewChanged(watch, key.hostId, "Workstation", key.session, view(AgentStatus.BLOCKED, 2u))
@@ -184,18 +188,31 @@ class AgentRepliesTest {
     @Test
     fun aReplyIntentNamesItsPaneAndCapabilityByItsDataAndItsAgentByItsExtras() {
         val action = AgentNotifications.ACTION_REPLY
-        val reply = agentReplyFrom(action, key.tag, "n1", "term_1", "claude", "Claude Code", "Needs input", "Workstation")
+        val reply = agentReplyFrom(
+            action, key.tag, "n1", "term_1", "claude", "Claude Code", "id", "sess_1", "Claude Code", "Needs input", "Workstation",
+        )
         assertEquals(alert.copy(nonce = "n1"), reply)
-        assertNull(agentReplyFrom(AgentNotifications.ACTION_OPEN_AGENT, key.tag, "n1", "term_1", null, "t", "x", "h"))
-        assertNull(agentReplyFrom(action, null, "n1", "term_1", null, "t", "x", "h"))
-        assertNull(agentReplyFrom(action, "not-a-tag", "n1", "term_1", null, "t", "x", "h"))
-        assertNull(agentReplyFrom(action, AgentPaneKey(0, null, "w1:p1").tag, "n1", "term_1", null, "t", "x", "h"))
+        fun parse(action: String?, tag: String?) = agentReplyFrom(action, tag, "n1", "term_1", "claude", null, "id", "s", "t", "x", "h")
+        assertNull(parse(AgentNotifications.ACTION_OPEN_AGENT, key.tag))
+        assertNull(parse(action, null))
+        assertNull(parse(action, "not-a-tag"))
+        assertNull(parse(action, AgentPaneKey(0, null, "w1:p1").tag))
         // What is only shown has defaults; no terminal names no agent (such a reply is not sent).
         assertEquals(
             AgentAlert(key, "Agent", "", "", agent = null, nonce = null),
-            agentReplyFrom(action, key.tag, null, null, "claude", null, null, null),
+            agentReplyFrom(action, key.tag, null, null, "claude", null, "id", "s", null, null, null),
         )
-        assertEquals(AgentIdentity("term_1", null), agentReplyFrom(action, key.tag, "n", "term_1", null, null, null, null)?.agent)
+        // An agent herdr started: its name, no session.
+        assertEquals(
+            AgentIdentity("term_1", "claude", "reviewer", null),
+            agentReplyFrom(action, key.tag, "n", "term_1", "claude", "reviewer", null, null, null, null, null)?.agent,
+        )
+        // Nothing absent is a wildcard: no kind, or neither a session nor a name, names no agent instance.
+        for (agent in listOf(
+            agentReplyFrom(action, key.tag, "n", "term_1", null, "reviewer", "id", "s", null, null, null),
+            agentReplyFrom(action, key.tag, "n", "term_1", "claude", null, null, null, null, null, null),
+            agentReplyFrom(action, key.tag, "n", "term_1", "claude", "", "id", "", null, null, null),
+        )) assertNull(agent?.agent)
     }
 
     @Test
@@ -205,7 +222,7 @@ class AgentRepliesTest {
         val watch = Any()
         fun view(status: AgentStatus, seq: ULong) = HerdrView(
             1uL, 22u, null, emptyList(), emptyList(), emptyList(),
-            listOf(HerdrAgent(key.paneId, "w1:t1", "w1", "Claude Code", "claude", "Claude Code", status, "/work", null, false, seq, "term_1")),
+            listOf(HerdrAgent(key.paneId, "w1:t1", "w1", "Claude Code", "claude", "Claude Code", status, "/work", null, false, seq, "term_1", claude)),
         )
         alerts.viewChanged(watch, key.hostId, "Workstation", key.session, view(AgentStatus.WORKING, 1u))
         alerts.viewChanged(watch, key.hostId, "Workstation", key.session, view(AgentStatus.BLOCKED, 2u))

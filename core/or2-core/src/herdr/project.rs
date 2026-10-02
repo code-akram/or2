@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use super::generated;
 use super::generated::success_response::{AgentStatus as WireStatus, SessionSnapshot};
-use super::view::{Agent, AgentStatus, HerdrView, Pane, Tab, Workspace};
+use super::view::{Agent, AgentSession, AgentStatus, HerdrView, Pane, Tab, Workspace};
 
 /// The oldest herdr API protocol whose snapshot this build reads. Newer protocols are accepted
 /// (herdr only adds fields; unknown ones are ignored); an older one is
@@ -116,6 +116,11 @@ pub fn project(snapshot: &SessionSnapshot) -> HerdrView {
                 focused: agent.focused,
                 state_change_seq: agent.state_change_seq,
                 terminal_id: agent.terminal_id.clone(),
+                agent_session: agent.agent_session.as_ref().map(|session| AgentSession {
+                    kind: session.kind.to_string(),
+                    value: session.value.clone(),
+                }),
+                interactive_ready: agent.interactive_ready == Some(true),
             })
             .collect(),
     }
@@ -230,6 +235,12 @@ mod tests {
                     focused: true,
                     state_change_seq: 7,
                     terminal_id: "term_a".into(),
+                    // A kind this build does not know is kept as herdr named it.
+                    agent_session: Some(AgentSession {
+                        kind: "teleport".into(),
+                        value: "v".into(),
+                    }),
+                    interactive_ready: true,
                 },
                 Agent {
                     pane_id: "w1:p2".into(),
@@ -244,6 +255,8 @@ mod tests {
                     focused: false,
                     state_change_seq: 0,
                     terminal_id: "term_b".into(),
+                    agent_session: None,
+                    interactive_ready: false,
                 }
             ]
         );

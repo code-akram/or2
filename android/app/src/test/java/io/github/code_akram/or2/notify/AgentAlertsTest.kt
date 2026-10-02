@@ -6,6 +6,7 @@ import io.github.code_akram.or2.connection.FakeTrust
 import io.github.code_akram.or2.connection.HostConnections
 import io.github.code_akram.or2.connection.testHost
 import io.github.code_akram.or2.ffi.AgentIdentity
+import io.github.code_akram.or2.ffi.AgentSession
 import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HerdrAgent
@@ -59,8 +60,14 @@ class AgentAlertsTest {
     private val alerts = AgentAlerts(sink) { on }
     private val watch = Any()
 
-    private fun agent(pane: String, status: AgentStatus, seq: ULong, name: String? = "Claude Code", terminal: String = "term_$pane") =
-        HerdrAgent(pane, "w1:t1", "w1", name, "claude", name, status, "/work", "title", false, seq, terminal)
+    /** An agent whose hooks reported [session] (Rust's `reply_identity` then names it), or none. */
+    private fun agent(
+        pane: String, status: AgentStatus, seq: ULong, name: String? = "Claude Code", terminal: String = "term_$pane",
+        session: String? = "sess_$pane",
+    ) = HerdrAgent(
+        pane, "w1:t1", "w1", name, "claude", name, status, "/work", "title", false, seq, terminal,
+        session?.let { AgentIdentity(terminal, "claude", name, AgentSession("id", it)) },
+    )
 
     private fun view(vararg agents: HerdrAgent, focused: String? = null) =
         HerdrView(1uL, 22u, focused, emptyList(), emptyList(), emptyList(), agents.toList())
@@ -107,7 +114,7 @@ class AgentAlertsTest {
         deliver(view(agent("w1:p1", AgentStatus.BLOCKED, 2u, name = "Codex")))
         val posted = sink.posted.single()
         assertEquals(
-            AgentAlert(AgentPaneKey(1, null, "w1:p1"), "Codex", "Needs input", "Workstation", agent = AgentIdentity("term_w1:p1", "claude")),
+            AgentAlert(AgentPaneKey(1, null, "w1:p1"), "Codex", "Needs input", "Workstation", agent = AgentIdentity("term_w1:p1", "claude", "Codex", AgentSession("id", "sess_w1:p1"))),
             posted.copy(nonce = null),
         )
         // Each post carries its own Reply capability.
@@ -407,7 +414,7 @@ class AgentAlertsTest {
         val key = AgentPaneKey(1, null, "w1:p1")
         deliver(view(agent("w1:p1", AgentStatus.WORKING, 1u, terminal = "term_a")))
         deliver(view(agent("w1:p1", AgentStatus.BLOCKED, 2u, terminal = "term_a")))
-        assertEquals(AgentIdentity("term_a", "claude"), sink.posted.single().agent)
+        assertEquals(AgentIdentity("term_a", "claude", "Claude Code", AgentSession("id", "sess_w1:p1")), sink.posted.single().agent)
         // The same pane id, a new terminal (herdr restarted and numbered its panes again), still blocked with no new
         // edge: the notification was about an agent that is gone.
         deliver(view(agent("w1:p1", AgentStatus.BLOCKED, 2u, terminal = "term_b")))
@@ -419,6 +426,45 @@ class AgentAlertsTest {
         assertTrue(key in sink.up)
         deliver(view(HerdrAgent("w1:p1", "w1:t1", "w1", "Codex", "codex", "Codex", AgentStatus.DONE, "/work", null, false, 3u, "term_b")))
         assertFalse(key in sink.up)
+    }
+
+    @Test
+    fun anotherInstanceOfTheSameKindInTheSameTerminalLosesItsNotification() {
+        // A Codex exits and another starts in the same terminal: the same terminal and kind, another session, or
+        // none yet (its hooks have not reported one). Either way the notification was about the one that is gone.
+        for (replacement in listOf("sess_next", null)) {
+            val sink = RecordingSink()
+            val alerts = AgentAlerts(sink) { on }
+            val key = AgentPaneKey(1, null, "w1:p1")
+            alerts.viewChanged(watch, 1, "Workstation", null, view(agent("w1:p1", AgentStatus.WORKING, 1u)))
+            alerts.viewChanged(watch, 1, "Workstation", null, view(agent("w1:p1", AgentStatus.BLOCKED, 2u)))
+            // The same instance keeps it.
+            alerts.viewChanged(watch, 1, "Workstation", null, view(agent("w1:p1", AgentStatus.BLOCKED, 2u)))
+            assertTrue(key in sink.up)
+            alerts.viewChanged(watch, 1, "Workstation", null, view(agent("w1:p1", AgentStatus.BLOCKED, 2u, session = replacement)))
+            assertFalse("$replacement", key in sink.up)
+            assertEquals(listOf("post w1:p1 Needs input", "cancel w1:p1"), sink.events)
+        }
+    }
+
+    @Test
+    fun anAgentHerdrDoesNotIdentifyIsNotifiedWithoutAReply() {
+        // A reported agent with no session and no herdr name: Rust gives it no `reply_identity`, so the alert names
+        // no agent, and its notification has no Reply action (AgentNotifications adds one only with an agent).
+        deliver(view(agent("w1:p1", AgentStatus.WORKING, 1u, session = null)))
+        deliver(view(agent("w1:p1", AgentStatus.BLOCKED, 2u, session = null)))
+        assertNull(sink.posted.single().agent)
+        // Nothing absent is a wildcard: an alert's instance never matches an agent without one.
+        val was = AgentIdentity("term_w1:p1", "claude", null, AgentSession("id", "s"))
+        assertFalse(sameAgent(was, agent("w1:p1", AgentStatus.BLOCKED, 2u, session = null)))
+        assertFalse(sameAgent(was.copy(agent = null), agent("w1:p1", AgentStatus.BLOCKED, 2u, session = "s")))
+        assertFalse(sameAgent(was.copy(session = null), agent("w1:p1", AgentStatus.BLOCKED, 2u, session = "s")))
+        assertTrue(sameAgent(was, agent("w1:p1", AgentStatus.BLOCKED, 2u, session = "s")))
+        // An agent herdr started is named by its name.
+        val started = AgentIdentity("term_w1:p1", "claude", "reviewer", null)
+        assertTrue(sameAgent(started, agent("w1:p1", AgentStatus.BLOCKED, 2u, name = "reviewer", session = null)))
+        assertFalse(sameAgent(started, agent("w1:p1", AgentStatus.BLOCKED, 2u, name = "other", session = null)))
+        assertFalse(sameAgent(started, agent("w1:p1", AgentStatus.BLOCKED, 2u, name = null, session = null)))
     }
 
     @Test

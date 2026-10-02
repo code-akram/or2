@@ -237,6 +237,12 @@ fn is_valid_agent_kind(kind: &str) -> bool {
     (1..=128).contains(&kind.len()) && !kind.chars().any(char::is_control)
 }
 
+/// An agent's session value (herdr's `agent_session.value`: an id, or a path): 1 to 4096 bytes
+/// with no control characters.
+fn is_valid_agent_session(value: &str) -> bool {
+    (1..=4096).contains(&value.len()) && !value.chars().any(char::is_control)
+}
+
 impl TerminalTarget {
     pub fn validate(&self) -> Result<(), HostError> {
         let valid = match self {
@@ -801,11 +807,15 @@ impl HostHandle {
     /// herdr refuses that because the agent is blocked or not driven by herdr, typed into the pane
     /// with its Enter in one request, once the pane was checked to hold that agent in its
     /// foreground ([`herdr::ReplyRoute::Typed`]). Several lines are sent as they are. Names are
-    /// validated like [`TerminalTarget`]'s (the terminal id like a pane id, the agent's kind at
-    /// most 128 bytes without control characters), and an empty text is `InvalidName` (Enter
-    /// alone could answer a dialog); a text over [`herdr::MAX_REPLY_BYTES`] is
-    /// [`HostError::TooLarge`]. A host without herdr is `NotInstalled`; a pane that is gone, holds
-    /// no agent or another one, or whose shell has its foreground, `PaneNotFound`. Bounded by
+    /// validated like [`TerminalTarget`]'s (the terminal id like a pane id, the agent's kind and
+    /// name, and the session's kind, at most 128 bytes without control characters, the session's
+    /// value at most 4096), and an empty text is `InvalidName` (Enter alone could answer a
+    /// dialog); a text over [`herdr::MAX_REPLY_BYTES`] is [`HostError::TooLarge`]. An agent that
+    /// names no instance (no kind, or neither a session nor a name;
+    /// [`herdr::AgentIdentity::is_instance`]) is `CommandFailed` with [`herdr::OPEN_THE_PANE`],
+    /// before anything is sent. A host without herdr is `NotInstalled`; a pane that is gone,
+    /// holds no agent or another one (another session, name, terminal or kind), or whose shell
+    /// has its foreground, `PaneNotFound`. Bounded by
     /// [`QUERY_TIMEOUT`]; dropping the future, or that timeout, stops the reply before anything
     /// more is sent. The text is never logged.
     pub async fn reply_to_pane(
@@ -819,9 +829,18 @@ impl HostHandle {
             || !is_valid_herdr_pane_id(&pane_id)
             || !is_valid_herdr_pane_id(&agent.terminal_id)
             || !agent.agent.as_deref().is_none_or(is_valid_agent_kind)
+            || !agent.name.as_deref().is_none_or(is_valid_agent_kind)
+            || !agent.session.as_ref().is_none_or(|session| {
+                is_valid_agent_kind(&session.kind) && is_valid_agent_session(&session.value)
+            })
             || text.is_empty()
         {
             return Err(HostError::InvalidName);
+        }
+        if !agent.is_instance() {
+            return Err(HostError::CommandFailed {
+                message: herdr::OPEN_THE_PANE.into(),
+            });
         }
         if text.len() > herdr::MAX_REPLY_BYTES {
             return Err(HostError::TooLarge);
@@ -1525,6 +1544,11 @@ mod tests {
         herdr::AgentIdentity {
             terminal_id: terminal.into(),
             agent: Some("claude".into()),
+            name: None,
+            session: Some(herdr::AgentSession {
+                kind: "id".into(),
+                value: "0b1f6c1e-1111-4a8e-9a55-2a0c6a3b9d01".into(),
+            }),
         }
     }
 
@@ -1550,18 +1574,64 @@ mod tests {
             claude(""),
             claude("term 1"),
             herdr::AgentIdentity {
-                terminal_id: "term_1".into(),
                 agent: Some(String::new()),
+                ..agent()
             },
             herdr::AgentIdentity {
-                terminal_id: "term_1".into(),
                 agent: Some("claude\n".into()),
+                ..agent()
+            },
+            herdr::AgentIdentity {
+                name: Some("rev\u{1b}iewer".into()),
+                ..agent()
+            },
+            herdr::AgentIdentity {
+                session: Some(herdr::AgentSession {
+                    kind: "id".into(),
+                    value: String::new(),
+                }),
+                ..agent()
+            },
+            herdr::AgentIdentity {
+                session: Some(herdr::AgentSession {
+                    kind: "id\r".into(),
+                    value: "s".into(),
+                }),
+                ..agent()
+            },
+            herdr::AgentIdentity {
+                session: Some(herdr::AgentSession {
+                    kind: "id".into(),
+                    value: "s".repeat(4097),
+                }),
+                ..agent()
             },
         ] {
             assert_eq!(
                 reply(None, "w1:p1", bad.clone(), "hi".into()).await,
                 Err(HostError::InvalidName),
                 "{bad:?}"
+            );
+        }
+        // An agent herdr reports no instance of (no kind, or neither a session nor a name):
+        // only the pane can be answered, connected or not.
+        for unknown in [
+            herdr::AgentIdentity {
+                agent: None,
+                ..agent()
+            },
+            herdr::AgentIdentity {
+                session: None,
+                name: None,
+                ..agent()
+            },
+        ] {
+            assert_eq!(
+                reply(None, "w1:p1", unknown.clone(), "hi".into()).await,
+                Err(HostError::CommandFailed {
+                    message: herdr::OPEN_THE_PANE.into()
+                }),
+                "{unknown:?}"
             );
         }
         assert_eq!(

@@ -8,6 +8,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.code_akram.or2.app.MemoryPrefStore
 import io.github.code_akram.or2.ffi.AgentIdentity
+import io.github.code_akram.or2.ffi.AgentSession
 import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.HerdrAgent
 import io.github.code_akram.or2.ffi.HerdrView
@@ -23,6 +24,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+
+/** The fixture's agent instance: its hooks reported a session. */
+private val CLAUDE = AgentIdentity("term_1", "claude", "Claude Code", AgentSession("id", "sess_1"))
 
 /**
  * Agent notifications on a device: the service creates the `agents` channel with its own, and a Blocked edge posts
@@ -54,7 +58,7 @@ class AgentNotificationsDeviceTest {
 
     private fun view(status: AgentStatus, seq: ULong) = HerdrView(
         1uL, 22u, null, emptyList(), emptyList(), emptyList(),
-        listOf(HerdrAgent(key.paneId, "w1:t1", "w1", "Claude Code", "claude", "Claude Code", status, "/work", null, false, seq, "term_1")),
+        listOf(HerdrAgent(key.paneId, "w1:t1", "w1", "Claude Code", "claude", "Claude Code", status, "/work", null, false, seq, "term_1", CLAUDE)),
     )
 
     @Test
@@ -70,9 +74,11 @@ class AgentNotificationsDeviceTest {
 
     /** Built, not posted: needs no `POST_NOTIFICATIONS`. */
     @Test
-    fun everyAgentNotificationHasAReplyActionWithARemoteInput() {
+    fun anIdentifiedAgentsNotificationHasAReplyActionWithARemoteInput() {
         val notifications = AgentNotifications(context, MemoryPrefStore())
-        val alert = AgentAlert(key, "Claude Code", "Needs input", "Device fixture", agent = AgentIdentity("term_1", "claude"), nonce = "n1")
+        val alert = AgentAlert(key, "Claude Code", "Needs input", "Device fixture", agent = CLAUDE, nonce = "n1")
+        // An agent herdr does not identify (no session, no name): no Reply at all, only the tap that opens the pane.
+        assertTrue(notifications.build(alert.copy(agent = null)).actions.isNullOrEmpty())
         for (shown in listOf(alert, alert.copy(outcome = "Not sent: Device fixture is not connected"), alert.copy(outcome = "Sent", reply = "go on"))) {
             val built = notifications.build(shown)
             val reply = built.actions.orEmpty().single()

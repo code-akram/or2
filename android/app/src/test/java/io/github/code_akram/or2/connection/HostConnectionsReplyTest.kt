@@ -1,6 +1,7 @@
 package io.github.code_akram.or2.connection
 
 import io.github.code_akram.or2.ffi.AgentIdentity
+import io.github.code_akram.or2.ffi.AgentSession
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostListener
@@ -41,7 +42,7 @@ class HostConnectionsReplyTest {
     @Test
     fun aReplyGoesOverTheLiveConnectionOnlyAndNeverConnects() = runTest {
         val holder = holder()
-        val agent = AgentIdentity("term_7", "claude")
+        val agent = AgentIdentity("term_7", "claude", null, AgentSession("id", "sess_7"))
         val reply = suspend { holder.replyToPane(host.id, "work", "w1:p2", agent, "secret reply") }
         // No connection at all: not connected, and nothing is connected for it.
         assertTrue(failure { reply() } is HostException.NotConnected)

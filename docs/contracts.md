@@ -4440,7 +4440,7 @@ notification and pasting images to an agent. One FFI bump, **`API_VERSION` = 16*
 |---|---|
 | `HostConnection.reply_to_pane(session: Option<String>, pane_id: String, agent: AgentIdentity, text: String) async -> Result<ReplyRoute, HostError>`: send `text` to that agent in a herdr pane and submit it, with no terminal open (`agent` added by the review fix, see "Fix: a reply reaches only its agent, never a shell") | Reply |
 | `ReplyRoute { Prompted, Typed }`: which herdr path carried it (below) | Reply |
-| `AgentIdentity { terminal_id: String, agent: Option<String> }` and `HerdrAgent.terminal_id: String`: the agent a notification is about (review fix) | Reply |
+| `AgentIdentity { terminal_id: String, agent: Option<String>, name: Option<String>, session: Option<AgentSession> }`, `AgentSession { kind: String, value: String }`, `HerdrAgent.terminal_id: String` and `HerdrAgent.reply_identity: Option<AgentIdentity>`: the agent instance a notification is about (review fixes; see "Fix: a reply names its agent instance") | Reply |
 | `HostConnection.upload_image(bytes: Vec<u8>, extension: String) async -> Result<String, HostError>`: write the bytes over SFTP to the host's image directory and return the remote absolute path | Paste |
 
 `HostError` gains what each path needs (e.g. `SftpUnavailable` when the server has no SFTP subsystem, and
@@ -4573,7 +4573,9 @@ as its own request) and the PendingIntent described in "Implemented (lane Reply)
     with nothing sent, as is no agent (`agent_not_found`).
   - So a stale notification never reaches another agent under a reused pane id (herdr restarted and numbered its
     panes again) or another kind of agent in the same terminal. Two agents of the same kind, one after the other
-    in the same terminal, cannot be told apart: herdr gives no per-instance id.
+    in the same terminal, cannot be told apart: herdr gives no per-instance id. *(Superseded: herdr's
+    `agent_session` tells them apart, and an absent kind matches nothing; see "Fix: a reply names its agent
+    instance".)*
   - The terminal id is validated like a pane id and the kind is at most 128 bytes without control characters,
     else `InvalidName`.
 - **The typed path is one request, checked right before.**
@@ -4592,6 +4594,7 @@ as its own request) and the PendingIntent described in "Implemented (lane Reply)
   send travels back, about one network round trip, its stream already open) still gets the reply typed into its
   shell. Before the fix that window was the whole agent-exit lag above plus three requests and the 100 ms pause.
   herdr would need one request that types only while a given agent holds the pane's foreground to close it.
+  The owner kept this design (owner decision of 2026-10-02, below).
 - **Cancellation (Codex P2 #4).**
   - `HostCommand::ReplyToPane` carries the caller's `deadline` (`QUERY_TIMEOUT` from the call). The worker
     watches `reply.closed()`, as the upload does.
@@ -4656,6 +4659,98 @@ as its own request) and the PendingIntent described in "Implemented (lane Reply)
     JVM capability and identity tests fail.
   - Device (compile): each post's PendingIntent is distinct, and the intent round-trips the capability and the
     agent.
+
+
+**Owner decision of 2026-10-02: the typed reply stays for agents herdr did not start.** The Codex fix-check
+review (P1, "the final pane-bound reply still has a shell-execution race") proposed dropping the typed reply and
+failing closed for every agent herdr did not start. The owner chose to keep it: those are the owner's Claude Code
+panes, the reason the feature exists. The design stays as above: the checks (`agent.get`, then `agent.get` and
+`pane.process_info` together) immediately before one `pane.send_input` carrying the text and Enter.
+
+- **Residual risk, stated plainly.** An agent that exits within about one network round trip after the checks
+  (their answers travel to the phone, the send travels back) gets the reply typed into its shell, which runs it.
+  The same client check, then send, shape comes before `agent.prompt`, which herdr itself also binds to the
+  agent's foreground.
+- **What would close it.** An atomic agent-bound herdr operation: one request that types text and Enter only
+  while a given agent instance (its `agent_session`) holds the pane's foreground. herdr 0.9.3 has none
+  (`agent.send_keys` takes key names only, and refuses every agent herdr did not start). It is a future request to
+  herdr; more client-side checks cannot close it.
+
+**Fix: a reply names its agent instance (Codex v0.1.2 fix-check P2; branch `v012/fix-3`).** Terminal id and kind
+were not an identity: a Codex that exits and another Codex started in the same persistent terminal match both, and
+a null kind matched every kind. This supersedes the matching in "The reply names its agent" above.
+
+- **What herdr 0.9.3 reports, measured against an isolated session.**
+  - `agent_session` (`{agent, kind, source, value}`, `kind` `id` or `path`) appears on `agent.get`,
+    `pane.get` and the snapshot's agents only when herdr's own integration for that kind reports it
+    (`source: "herdr:claude"`, as Claude Code's hooks do) and herdr detects that kind's process in the pane.
+    A report from any other source (or2's tests' `or2-test`) is kept as the agent's status but gives no session.
+  - herdr keeps one instance's session for the life of its process: a later report with another session id is
+    ignored. When the process exits, the agent goes; a new instance in the same terminal has no session until its
+    integration reports one (`pane.report_agent` or `pane.report_agent_session`), then its own.
+  - `name` is set by `herdr agent start` (with `interactive_ready`) or `agent.rename`, and herdr clears it when
+    that agent exits, is released or is replaced.
+  - `agent.prompt` accepts an agent herdr's integration reports while it is not blocked (`Prompted`), not only one
+    herdr started.
+- **The identity.** `AgentIdentity { terminal_id, agent, name, session }` (`session` is `AgentSession { kind,
+  value }`, herdr's `agent_session`). The view's `Agent` gains `agent_session` and `interactive_ready`, and
+  `HerdrAgent` gains `reply_identity` (`AgentIdentity::of`):
+  - with a kind and an `agent_session`: the terminal, kind, name and session;
+  - with a kind, no session, and a `name` of an agent herdr started (`interactive_ready`): the terminal, kind and
+    name;
+  - otherwise (no kind, or a reported agent with neither a session nor a herdr name, renamed or not): `None`.
+- **The rule, in Rust, on every path.** `same_agent` runs on `agent.get` before `agent.prompt` and again
+  immediately before `pane.send_input`. The pane, the terminal and the kind must match exactly (the reply's kind
+  must be present). When the reply has a session, herdr must report a session now with the same kind and value; an
+  absent one never matches. Without a session, herdr must report the same name. Otherwise `PaneNotFound`, with
+  nothing sent.
+- **Fail closed.** An identity with no kind, or with neither a session nor a name
+  (`AgentIdentity::is_instance`), is refused before anything is sent: `HostHandle::reply_to_pane` answers
+  `CommandFailed` with `open the pane to reply` (`herdr::OPEN_THE_PANE`; `reply_in` refuses it too). The session's
+  kind and the name are validated like the kind (at most 128 bytes, no control characters) and the session's value
+  is at most 4096 bytes with no control characters, else `InvalidName`.
+- **Kotlin.**
+  - The alert's agent is `HerdrAgent.reply_identity`. A notification whose alert has none has no Reply action, only
+    the tap that opens the pane.
+  - The intent carries the name and the session's kind and value in extras it always sets.
+    `agentReplyFrom` names no agent unless there is a terminal, a kind, and a session or a name.
+  - A reply with no agent is not sent: `Not sent: open the pane to reply` (`NOT_SENT_OPEN_PANE`), as is Rust's
+    refusal (`CommandFailed`).
+  - `AgentAlerts.sameAgent` mirrors Rust. A notification this process posted is cancelled when the pane's agent
+    now has another session, none, another name, terminal or kind.
+- **Unchanged limit.** An agent herdr started that is replaced by another started with the same name in the same
+  terminal, before its integration reports a session, cannot be told apart: herdr gives nothing more.
+- **Tests (each written to fail before the fix; run against the old matching with the new shape).**
+  - Rust, herdr fake (now reporting `agent_session`, `name` and `interactive_ready`), `herdr::reply`:
+    - `a_replacement_of_the_same_kind_in_the_same_terminal_gets_nothing`: another session, or none, with the same
+      terminal and kind; on the prompt path and the typed path; also a replacement between the prompt's refusal
+      and the typing; a session of kind `path` with the same value. Old code: `Ok(Prompted)`.
+    - `an_identity_without_kind_or_instance_is_refused_before_anything_is_sent`: no kind, or neither a session nor
+      a name, whatever the pane holds, with no request at all; and an agent herdr reports with no kind. Old code:
+      `Ok(Prompted)`.
+    - `an_agent_herdr_started_is_named_by_its_name`: the same name is sent; none, another name, or another
+      terminal is not. Old code: `Ok(Prompted)`.
+    - `an_unchanged_session_gets_the_reply` (prompted and typed), and
+      `only_an_agent_herdr_identifies_gets_an_identity` (`AgentIdentity::of`).
+  - Rust, `host`: the identity's validation and `open the pane to reply` before anything is sent.
+    `ssh::connection`: the in-process herdr reports the session.
+  - Live herdr (isolated sessions, fake agents only):
+    - `a_reply_reaches_only_the_agent_instance_it_names`: the fake agent is a copy of `cat` named `claude` in a
+      temporary directory, which herdr's process detection takes for Claude Code. Its session is reported with
+      `pane.report_agent_session` from `herdr:claude`. A reply naming it arrives, another session's does not, and
+      no kind or no instance is refused. Then it exits and another starts in the same terminal: with no session yet,
+      then with its own, the first one's reply gets `PaneNotFound` and nothing on the screen; the second one's
+      arrives. Old code: the other session's reply was `Ok(Prompted)`.
+    - `a_reply_reaches_an_agent_panes_input_and_is_submitted` and
+      `a_reply_never_runs_in_the_shell_after_the_agent_exits` name their reported agent with `agent.rename`; a
+      reply naming another name is refused (old code: `Ok(Typed)`).
+  - JVM: `AgentAlertsTest.anotherInstanceOfTheSameKindInTheSameTerminalLosesItsNotification`,
+    `anAgentHerdrDoesNotIdentifyIsNotifiedWithoutAReply` and `AgentRepliesTest.aReplyThatNamesNoAgentInstanceIsNotSent`
+    fail with the old `identity`, `sameAgent` and no-agent message. `AgentRepliesTest` (the intent parse: no kind,
+    or neither a session nor a name, names no agent), `HostContractTest` (the probe's agents carry a session, a
+    herdr-started name and none; another session or name is `PaneNotFound`; no instance is `CommandFailed` with
+    `open the pane to reply`), `HostConnectionsReplyTest`.
+  - Device (compile): an alert with no agent builds a notification with no action.
 
 
 ## Image paste (lane Paste)

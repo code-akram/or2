@@ -1,6 +1,7 @@
 package io.github.code_akram.or2.notify
 
 import io.github.code_akram.or2.ffi.AgentIdentity
+import io.github.code_akram.or2.ffi.AgentSession
 import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.ReplyRoute
 import kotlinx.coroutines.CoroutineScope
@@ -52,7 +53,7 @@ class AgentReplies(
         val agent = alert.agent
         val failure = when {
             text.isNullOrBlank() -> NOT_SENT_EMPTY
-            agent == null -> NOT_SENT_GONE
+            agent == null -> NOT_SENT_OPEN_PANE
             else -> try {
                 if (withTimeoutOrNull(timeoutMs) { send(alert.key, agent, text) } == null) NOT_SENT_TIMEOUT else null
             } catch (e: HostException) {
@@ -68,6 +69,9 @@ class AgentReplies(
         const val NOT_SENT_EMPTY = "Not sent: the reply is empty"
         const val NOT_SENT_TIMEOUT = "Not sent: the host did not answer"
         const val NOT_SENT_GONE = "Not sent: the agent is gone"
+
+        /** herdr reports nothing that tells this agent instance from the next one: only the pane can be answered. */
+        const val NOT_SENT_OPEN_PANE = "Not sent: open the pane to reply"
         const val REPLY_TIMEOUT_MS = 45_000L
 
         /** The longest reason shown after `Not sent: `. */
@@ -88,16 +92,20 @@ class AgentReplies(
 /**
  * The pane, the agent and the alert a reply intent names ([AgentNotifications.replyIntent]), with its Reply capability
  * [nonce], or null for any other intent. The pane and the capability come from the intent's data ([tag], [nonce]),
- * which a RemoteInput's fill-in cannot change; the agent ([terminal], [kind]) from extras the intent always sets;
- * [title], [text] and [host] are only shown. An intent without a terminal names no agent: its reply is not sent.
+ * which a RemoteInput's fill-in cannot change; the agent instance ([terminal], [kind], [name], the session's
+ * [sessionKind] and [sessionValue]) from extras the intent always sets; [title], [text] and [host] are only shown. An
+ * intent without a terminal, a kind, or a session or name names no agent instance: its reply is not sent.
  */
 fun agentReplyFrom(
     action: String?, tag: String?, nonce: String?, terminal: String?, kind: String?,
+    name: String?, sessionKind: String?, sessionValue: String?,
     title: String?, text: String?, host: String?,
 ): AgentAlert? {
     if (action != AgentNotifications.ACTION_REPLY || tag == null) return null
     val key = AgentPaneKey.fromTag(tag) ?: return null
     if (key.hostId <= 0 || key.paneId.isEmpty()) return null
-    val agent = terminal?.takeIf { it.isNotEmpty() }?.let { AgentIdentity(it, kind) }
+    val session = if (sessionKind.isNullOrEmpty() || sessionValue.isNullOrEmpty()) null else AgentSession(sessionKind, sessionValue)
+    val agent = AgentIdentity(terminal.orEmpty(), kind, name, session)
+        .takeIf { it.terminalId.isNotEmpty() && !it.agent.isNullOrEmpty() && (it.session != null || !it.name.isNullOrEmpty()) }
     return AgentAlert(key, title.orEmpty().ifEmpty { "Agent" }, text.orEmpty(), host.orEmpty(), agent = agent, nonce = nonce)
 }

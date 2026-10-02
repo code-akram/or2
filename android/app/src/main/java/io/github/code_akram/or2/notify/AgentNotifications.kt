@@ -69,7 +69,8 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
             .setWhen(now)
             .setAutoCancel(true)
             .setContentIntent(open)
-            .addAction(replyAction(alert))
+        // Only an agent instance herdr identifies can be answered from here: any other is opened to reply.
+        if (alert.agent != null) builder.addAction(replyAction(alert))
         if (alert.outcome != null) builder.setOnlyAlertOnce(true)
         alert.reply?.let { reply ->
             val agent = Person.Builder().setName(alert.title).build()
@@ -125,19 +126,25 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
         private const val EXTRA_HOST = "io.github.code_akram.or2.extra.HOST"
         private const val EXTRA_TERMINAL = "io.github.code_akram.or2.extra.TERMINAL"
         private const val EXTRA_AGENT = "io.github.code_akram.or2.extra.AGENT"
+        private const val EXTRA_AGENT_NAME = "io.github.code_akram.or2.extra.AGENT_NAME"
+        private const val EXTRA_SESSION_KIND = "io.github.code_akram.or2.extra.AGENT_SESSION_KIND"
+        private const val EXTRA_SESSION_VALUE = "io.github.code_akram.or2.extra.AGENT_SESSION_VALUE"
         private const val YOU = "You"
 
         /**
          * The Reply action's intent: explicitly [AgentReplyReceiver]; its data is the pane's tag with this post's Reply
-         * capability as the fragment (each post's pending intent distinct); the agent it is for (terminal and kind,
-         * always set, so a fill-in's extras never replace them); and what the notification showed (title,
-         * `Needs input`/`Done`, host), for the update.
+         * capability as the fragment (each post's pending intent distinct); the agent instance it is for (terminal,
+         * kind, name and session, always set, so a fill-in's extras never replace them); and what the notification
+         * showed (title, `Needs input`/`Done`, host), for the update.
          */
         fun replyIntent(context: Context, alert: AgentAlert): Intent = Intent(ACTION_REPLY)
             .setComponent(ComponentName(context, AgentReplyReceiver::class.java))
             .setData(Uri.fromParts(REPLY_SCHEME, alert.key.tag, alert.nonce))
             .putExtra(EXTRA_TERMINAL, alert.agent?.terminalId)
             .putExtra(EXTRA_AGENT, alert.agent?.agent)
+            .putExtra(EXTRA_AGENT_NAME, alert.agent?.name)
+            .putExtra(EXTRA_SESSION_KIND, alert.agent?.session?.kind)
+            .putExtra(EXTRA_SESSION_VALUE, alert.agent?.session?.value)
             .putExtra(EXTRA_TITLE, alert.title)
             .putExtra(EXTRA_TEXT, alert.text)
             .putExtra(EXTRA_HOST, alert.subText)
@@ -148,7 +155,8 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
             return agentReplyFrom(
                 intent.action, intent.data?.schemeSpecificPart, intent.data?.fragment,
                 intent.getStringExtra(EXTRA_TERMINAL), intent.getStringExtra(EXTRA_AGENT),
-                intent.getStringExtra(EXTRA_TITLE), intent.getStringExtra(EXTRA_TEXT), intent.getStringExtra(EXTRA_HOST),
+                intent.getStringExtra(EXTRA_AGENT_NAME), intent.getStringExtra(EXTRA_SESSION_KIND),
+                intent.getStringExtra(EXTRA_SESSION_VALUE), intent.getStringExtra(EXTRA_TITLE), intent.getStringExtra(EXTRA_TEXT), intent.getStringExtra(EXTRA_HOST),
             )
         }
 
