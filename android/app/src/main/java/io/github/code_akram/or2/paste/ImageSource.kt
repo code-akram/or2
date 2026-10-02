@@ -1,13 +1,15 @@
 package io.github.code_akram.or2.paste
 
-import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.InputStream
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.Semaphore
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration
@@ -44,16 +46,60 @@ class Once(private val action: () -> Unit) {
     }
 }
 
-/** Blocking reads run here, outside any caller's job: a cancelled caller never waits for one. */
-private val readers = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+/** How many provider reads may be live at once, abandoned ones (a provider ignoring its abort) included. */
+const val MAX_LIVE_READS = 4
 
 /**
- * Reads [source] whole (at most [MAX_IMAGE_BYTES], [readCapped]) within [timeout]. The read runs on its own
- * IO thread: a caller that is cancelled, or the timeout, [ImageSource.abort]s it and returns at once, even
- * while the provider has not answered. Throws [ImageRefused] ([TOO_SLOW] past the timeout).
+ * The threads blocking provider reads run on, outside any caller's job (a cancelled caller never waits for
+ * one), at most [cap] of them. A read holds its place until its blocking call really returns, not when its
+ * caller gave up: a provider that ignores [ImageSource.abort] keeps its thread, and once [cap] such reads are
+ * stuck a new one is refused ([STILL_READING]) without starting any more blocking work. So stuck providers
+ * cost at most [cap] threads, never the shared IO pool.
  */
-suspend fun readImage(source: ImageSource, timeout: Duration = READ_TIMEOUT): ByteArray {
-    val reading = readers.async { source.open().use { readCapped(it) } }
+class ImageReaders(val cap: Int = MAX_LIVE_READS) {
+    private val places = Semaphore(cap)
+    private val threads = ThreadPoolExecutor(cap, cap, 30, TimeUnit.SECONDS, LinkedBlockingQueue()) { task ->
+        Thread(task, "or2-image-read").apply { isDaemon = true }
+    }.apply { allowCoreThreadTimeOut(true) }
+
+    /** The reads whose blocking call has not returned yet. */
+    val live: Int get() = cap - places.availablePermits()
+
+    /** Starts [block] on a reader thread, or returns null (nothing started) when [cap] reads are live. */
+    fun <T> start(block: () -> T): CompletableDeferred<T>? {
+        if (!places.tryAcquire()) return null
+        val result = CompletableDeferred<T>()
+        try {
+            threads.execute {
+                try {
+                    result.complete(block())
+                } catch (error: Throwable) {
+                    result.completeExceptionally(error)
+                } finally {
+                    places.release()
+                }
+            }
+        } catch (error: Throwable) {
+            places.release()
+            throw error
+        }
+        return result
+    }
+
+    companion object {
+        /** Every image read of the app. */
+        val shared = ImageReaders()
+    }
+}
+
+/**
+ * Reads [source] whole (at most [MAX_IMAGE_BYTES], [readCapped]) within [timeout]. The read runs on a thread of
+ * [readers]: a caller that is cancelled, or the timeout, [ImageSource.abort]s it and returns at once, even
+ * while the provider has not answered. Throws [ImageRefused] ([TOO_SLOW] past the timeout, [STILL_READING]
+ * when [readers] is full of reads that have not returned, in which case [source] is never opened).
+ */
+suspend fun readImage(source: ImageSource, timeout: Duration = READ_TIMEOUT, readers: ImageReaders = ImageReaders.shared): ByteArray {
+    val reading = readers.start { source.open().use { readCapped(it) } } ?: throw ImageRefused(STILL_READING)
     try {
         return withTimeout(timeout) { reading.await() }
     } catch (_: TimeoutCancellationException) {
@@ -65,10 +111,7 @@ suspend fun readImage(source: ImageSource, timeout: Duration = READ_TIMEOUT): By
     } catch (_: Exception) {
         throw ImageRefused(UNREADABLE)
     } finally {
-        if (!reading.isCompleted) {
-            source.abort()
-            reading.cancel()
-        }
+        if (!reading.isCompleted) source.abort()
     }
 }
 
@@ -80,12 +123,13 @@ suspend fun readImage(source: ImageSource, timeout: Duration = READ_TIMEOUT): By
  */
 fun <I> imagePreparation(
     scheme: String?, source: () -> ImageSource, release: () -> Unit, codec: ImageCodec<I>, timeout: Duration = READ_TIMEOUT,
+    readers: ImageReaders = ImageReaders.shared,
 ): suspend () -> PreparedImage {
     val released = Once(release)
     return {
         val bytes = try {
             if (!readableImageScheme(scheme)) throw ImageRefused(UNREADABLE)
-            readImage(source(), timeout)
+            readImage(source(), timeout, readers)
         } finally {
             released()
         }
@@ -94,3 +138,6 @@ fun <I> imagePreparation(
 }
 
 const val TOO_SLOW = "The image took too long to read"
+
+/** A read refused because [MAX_LIVE_READS] earlier ones are stuck on providers that have not answered. */
+const val STILL_READING = "Earlier images are still being read; try again later"

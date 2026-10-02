@@ -3,6 +3,7 @@ package io.github.code_akram.or2.paste
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertArrayEquals
@@ -142,6 +143,57 @@ class ImageSourceTest {
             override fun abort() {}
         }
         assertEquals(TOO_LARGE, runCatching { readImage(endless) }.exceptionOrNull()?.message)
+    }
+
+    /** A provider that ignores its abort, as a hostile one may: its open blocks until the test opens [gate]. */
+    private class Deaf(
+        private val gate: CountDownLatch, private val started: CountDownLatch,
+        private val live: AtomicInteger, private val most: AtomicInteger, private val opens: AtomicInteger,
+    ) : ImageSource {
+        override fun open(): InputStream {
+            opens.incrementAndGet()
+            most.accumulateAndGet(live.incrementAndGet(), ::maxOf)
+            started.countDown()
+            try {
+                gate.await()
+            } finally {
+                live.decrementAndGet()
+            }
+            return ByteArrayInputStream(byteArrayOf(1))
+        }
+
+        override fun abort() {}
+    }
+
+    @Test
+    fun providersThatIgnoreTheAbortHoldAtMostTheCapAndLaterReadsAreRefusedWithoutStartingAny() = runBlocking {
+        assertEquals(MAX_LIVE_READS, ImageReaders.shared.cap)
+        val readers = ImageReaders(cap = 2)
+        val gate = CountDownLatch(1)
+        val started = CountDownLatch(2)
+        val live = AtomicInteger()
+        val most = AtomicInteger()
+        val opens = AtomicInteger()
+        try {
+            // Shared, keyboard, attach button, again and again: each read times out, its provider never returns.
+            val outcomes = (1..6).map {
+                val source = Deaf(gate, started, live, most, opens)
+                runCatching { readImage(source, timeout = 100.milliseconds, readers = readers) }.exceptionOrNull()?.message
+            }
+            assertTrue("the first two opened", started.await(5, TimeUnit.SECONDS))
+            assertEquals(listOf(TOO_SLOW, TOO_SLOW) + List(4) { STILL_READING }, outcomes)
+            // Only the first two ever reached a provider: no blocking work was started for the refused ones.
+            assertEquals(2, opens.get())
+            assertEquals(2, most.get())
+            assertEquals(2, readers.live)
+            assertEquals(STILL_READING, uploadErrorMessage(ImageRefused(STILL_READING)))
+        } finally {
+            gate.countDown()
+        }
+        // Once the stuck providers answer, their places are free again.
+        withTimeout(5.seconds) { while (readers.live > 0) delay(10) }
+        assertEquals(0, live.get())
+        assertArrayEquals(byteArrayOf(9), readImage(Bytes(byteArrayOf(9)), readers = readers))
     }
 
     @Test
