@@ -11,6 +11,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -69,8 +70,9 @@ class TransportChromeDeviceTest {
         compose.onNodeWithTag("terminal-link").assertDoesNotExist() // Exactly five seconds is not stale yet.
         assertBadgeGreyed(false)
         compose.runOnUiThread { health = LinkHealth(12_300uL, 12_300uL) }
-        compose.onNodeWithTag("terminal-link").assertIsDisplayed().assertTextEquals("Last heard 12 s ago")
-        compose.onNodeWithTag("terminal-transport", useUnmergedTree = true).assertTextEquals("Mosh") // Greyed, not renamed.
+        compose.onNodeWithTag("terminal-link").assertIsDisplayed().assertContentDescriptionEquals("Last heard 12 s ago")
+        // The pill says it, so the centred title keeps its room.
+        compose.onNodeWithTag("terminal-transport", useUnmergedTree = true).assertTextEquals("Mosh · 12 s")
         assertBadgeGreyed(true)
         compose.runOnUiThread { health = LinkHealth(400uL, 400uL) }
         compose.onNodeWithTag("terminal-link").assertDoesNotExist() // Recovered.

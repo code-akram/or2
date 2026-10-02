@@ -23,6 +23,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -32,6 +33,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.terminal.Transport
+import io.github.code_akram.or2.ui.Badge
 import io.github.code_akram.or2.ui.NoticeTone
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dimens
@@ -71,7 +73,8 @@ fun terminalNotice(state: SessionState): TerminalNotice? = when (state) {
  * The terminal card's header, 36 dp, one composed piece: a thin drag handle centred at the top, the
  * two round discs as a pair at the left (minimise in `attention`, the sessions sheet in `done`), the
  * title centred on the card's full width (the host in `text`, medium, then the target muted in mono),
- * and at the right the stale-link label ([stale], in `attention`) and the transport pill. The caller
+ * and at the right the transport pill, which also says how long a quiet link has been silent ([stale]:
+ * "Mosh · 12 s" in `attention`). The caller
  * gives it its fill and its drag-to-minimise gesture.
  */
 @Composable
@@ -97,11 +100,19 @@ fun TerminalHeader(
             },
             trailing = {
                 Row(Modifier.padding(end = Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
-                    if (stale != null) {
-                        Text(stale, style = Or2Type.MonoSmall, color = Or2Colors.Attention, maxLines = 1,
-                            modifier = Modifier.padding(end = 6.dp).testTag("terminal-link"))
+                    if (stale == null) {
+                        TransportBadge(transport, Modifier.testTag("terminal-transport"), small = true)
+                    } else {
+                        // A quiet link says so inside the pill ("Mosh · 12 s" in `attention`), so the centred title
+                        // keeps its room; the full sentence is the pill's description.
+                        Box(Modifier.testTag("terminal-link").semantics { contentDescription = stale }) {
+                            Badge(
+                                "${transport.label} · ${staleAge(stale)}",
+                                Modifier.testTag("terminal-transport").semantics { stateDescription = STALE_BADGE_DESCRIPTION },
+                                container = Or2Colors.SurfaceTrack, content = Or2Colors.Attention, small = true,
+                            )
+                        }
                     }
-                    TransportBadge(transport, Modifier.testTag("terminal-transport"), small = true, stale = stale != null)
                 }
             },
         )
@@ -175,3 +186,6 @@ private fun HeaderDisc(icon: ImageVector, description: String, color: Color, onC
         }
     }
 }
+
+/** "12 s" from "Last heard 12 s ago" ([io.github.code_akram.or2.connection.linkStaleLabel]). */
+fun staleAge(stale: String): String = stale.removePrefix("Last heard ").removeSuffix(" ago")

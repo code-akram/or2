@@ -292,10 +292,10 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   - **At the right:** the transport pill, 12 dp from the edge (`Mosh` in a saturated teal pill with dark
     text, `SSH` in a `surfaceTrack` pill with full `text`, mono 11). It shows the transport the session
     really runs over (`SSH` after an AUTO fallback; it flips `SSH` to `Mosh` when AUTO swaps a terminal to
-    its background mosh session). A mosh session that has heard nothing for more than 5 s greys it (the
-    `SSH` look: `surfaceTrack` with `textMuted` text, still reading `Mosh`) and a `MonoSmall`
-    `Last heard 12 s ago` in `attention` appears just before it, 6 dp away, in the header row itself (the
-    centred title's slot narrows on both sides). It goes away on recovery and when the session closes.
+    its background mosh session). A mosh session that has heard nothing for more than 5 s says so inside
+    the pill: `Mosh · 12 s` in `attention` on `surfaceTrack` (its description reads `Last heard 12 s ago`),
+    so the centred title keeps its room. It goes back to the teal `Mosh` on recovery and when the session
+    closes.
   - **Drag handle:** a thin 28 x 3 dp pill in `handle` (`#585B70`), 4 dp from the card's top edge,
     centred over the title, inside the 36 dp row: it costs no height and is part of the header, not a bar
     of its own. Dragging down anywhere on the header minimises (past 96 dp; less snaps back).
