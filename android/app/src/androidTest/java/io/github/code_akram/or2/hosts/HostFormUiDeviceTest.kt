@@ -45,11 +45,14 @@ class HostFormUiDeviceTest {
     private fun show(
         previous: Host?, keys: List<KeyRecord> = listOf(key), save: (Host) -> Unit = {}, close: () -> Unit = {},
         createKey: suspend (String, String) -> KeyRecord = { _, _ -> error("no key is made in this test") },
+        saved: (() -> Unit)? = null,
     ) = compose.runOnUiThread {
         val generation = ++generations
         // A new key per call: remember state must not leak from the previous show().
         compose.activity.setContent {
-            key(generation) { Or2Theme { HostFormScreen(previous, keys, false, save, close, createKey, deviceLabel = "Fixture phone") } }
+            key(generation) {
+                Or2Theme { HostFormScreen(previous, keys, false, save, close, createKey, deviceLabel = "Fixture phone", saved = saved ?: close) }
+            }
         }
     }
 
@@ -201,6 +204,28 @@ class HostFormUiDeviceTest {
             assertEquals(0, saved)
             assertEquals(0, closed)
         }
+    }
+
+    @Test
+    fun aSaveEndsTheFormThroughSavedSoTheAppCanGoOnToTheBatteryStep() {
+        val ends = mutableListOf<String>()
+        show(null, save = { ends += "save" }, close = { ends += "close" }, saved = { ends += "saved" })
+        fillHostFields()
+        compose.onNodeWithTag("host-form-primary").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(listOf("save", "saved"), ends) } // Not "close": that is leaving without saving.
+    }
+
+    @Test
+    fun withNewKeyTheFormEndsThroughSavedOnlyAfterTheKeyLine() {
+        val made = key.copy(id = "made-key", openssh = "ssh-ed25519 AAAAmade or2@Fixture phone", fingerprint = "SHA256:made")
+        val ends = mutableListOf<String>()
+        show(null, emptyList(), save = { ends += "save" }, close = { ends += "close" }, createKey = { _, _ -> made }, saved = { ends += "saved" })
+        fillHostFields()
+        compose.onNodeWithTag("host-form-primary").performScrollTo().performClick()
+        compose.onNodeWithTag("pair-install").assertIsDisplayed()
+        compose.runOnIdle { assertEquals(listOf("save"), ends) } // The key line comes first.
+        compose.onNodeWithTag("pair-install-done").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(listOf("save", "saved"), ends) }
     }
 
     @Test

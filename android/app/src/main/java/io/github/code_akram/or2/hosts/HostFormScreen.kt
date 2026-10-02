@@ -58,7 +58,8 @@ import kotlinx.coroutines.launch
 /**
  * Add or edit a host: filled fields with labels above and mono placeholders, an ordered address
  * list (each with its own port), the key choice, the inbox toggle, a full-width pill and a
- * mirrored top-bar check. Stateless storage-wise: [save] gets the finished host, then the form [close]s.
+ * mirrored top-bar check. Stateless storage-wise: [save] gets the finished host, then the form ends with [saved]
+ * (by default [close]; the app goes on to the battery step after a new host). [close] alone leaves without saving.
  *
  * The key choice ends with **New key**, as on the Easy pair review (preselected when the phone has no key): Save
  * first makes and stores it with [createKey] (the biometric prompt), selects it, saves the host with it and then
@@ -68,6 +69,7 @@ import kotlinx.coroutines.launch
 fun HostFormScreen(
     previous: Host?, keys: List<KeyRecord>, busy: Boolean, save: (Host) -> Unit, close: () -> Unit,
     createKey: suspend (label: String, comment: String) -> KeyRecord, deviceLabel: String,
+    saved: () -> Unit = close,
 ) {
     // Typed input survives rotation and process death, and is re-seeded when a different host is edited.
     val identity = previous?.id ?: 0L
@@ -94,7 +96,7 @@ fun HostFormScreen(
     installKeyId?.let { id ->
         val key = keys.find { it.id == id } ?: madeKey?.takeIf { it.id == id }
         if (key != null) {
-            PairInstallKeyScreen(label.trim(), key.openssh, key.fingerprint, done = close, trusted = false)
+            PairInstallKeyScreen(label.trim(), key.openssh, key.fingerprint, done = saved, trusted = false)
             return
         }
     }
@@ -107,7 +109,7 @@ fun HostFormScreen(
         if (!valid || busy || working) return
         if (!newKey) {
             save(host(keyId))
-            close()
+            saved()
             return
         }
         working = true

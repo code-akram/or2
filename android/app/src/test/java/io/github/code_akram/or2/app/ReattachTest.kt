@@ -8,7 +8,7 @@ import io.github.code_akram.or2.ffi.TerminalTransport
 import org.junit.Assert.*
 import org.junit.Test
 
-/** Reattach: what is remembered, what is decided on return, and the one-time prompts. */
+/** Reattach: what is remembered and what is decided on return. The one-time prompts are in [OneTimePromptsTest]. */
 class ReattachTest {
     private val pane = TerminalTarget.Herdr("work", "w1:p2")
     private val last = LastTerminal(7, pane, TerminalTransport.MOSH)
@@ -109,103 +109,6 @@ class ReattachTest {
         assertEquals(ResumeStep.OPEN, resumeStep(connected, busy = true))
         assertEquals(ResumeStep.ABORT, resumeStep(null, busy = false)) // Biometric cancelled.
         assertEquals(ResumeStep.ABORT, resumeStep(lost, busy = false)) // Connect failed.
-    }
-
-    @Test
-    fun notificationPermissionIsAskedOnceOnAndroid13Up() {
-        val store = MemoryPrefStore()
-        val policy = NotificationPermissionPolicy(store)
-        assertFalse(policy.shouldAsk(sdk = 32, granted = false))
-        assertFalse(policy.shouldAsk(sdk = 34, granted = true))
-        assertTrue(policy.shouldAsk(sdk = 34, granted = false))
-        policy.markAsked()
-        assertFalse(policy.shouldAsk(sdk = 34, granted = false)) // Denied once: never asked again.
-        assertFalse(NotificationPermissionPolicy(store).shouldAsk(sdk = 36, granted = false)) // Persisted.
-    }
-
-    // --- the battery exemption, asked up front ----------------------------------------------------
-
-    @Test
-    fun theBatteryExplanationIsAskedBeforeTheFirstConnectionAndOnlyOnce() {
-        val store = MemoryPrefStore()
-        val prompt = BatteryPrompt(store) { false }
-        assertTrue(prompt.shouldExplain()) // The first time a connection starts.
-        assertFalse(prompt.explaining.value)
-        prompt.explain()
-        assertTrue(prompt.explaining.value) // Up on screen, waiting for the answer.
-        prompt.explained()
-        assertFalse(prompt.explaining.value)
-        assertFalse(prompt.shouldExplain()) // Never again...
-        assertFalse(BatteryPrompt(store) { false }.shouldExplain()) // ...also after a restart.
-    }
-
-    @Test
-    fun aRecreatedActivityWaitingOnTheExplanationShowsItAgainInsteadOfStayingBusy() {
-        // The process died while the explanation was up: nothing was answered, nothing recorded,
-        // and the new process's prompt starts with no explanation on screen.
-        val store = MemoryPrefStore()
-        val restored = BatteryPrompt(store) { false }
-        assertFalse(restored.explaining.value)
-        assertEquals(BatteryStage.EXPLANATION, restored.restoreStage())
-        assertTrue(restored.explaining.value) // On screen again, awaiting the answer.
-        restored.explained()
-        assertFalse(restored.explaining.value)
-        // Same process (rotation): the explanation is still up and restoring it changes nothing.
-        val live = BatteryPrompt(MemoryPrefStore()) { false }
-        live.explain()
-        assertEquals(BatteryStage.EXPLANATION, live.restoreStage())
-        assertTrue(live.explaining.value)
-    }
-
-    @Test
-    fun aRestoredConnectAfterTheExplanationWaitsForTheSystemRequestAndNeverRelaunchesIt() {
-        val store = MemoryPrefStore()
-        val prompt = BatteryPrompt(store) { false }
-        prompt.explain()
-        prompt.explained() // "Allow" was tapped: the system dialog is (or was) up.
-        val restored = BatteryPrompt(store) { false }
-        assertEquals(BatteryStage.SYSTEM_REQUEST, restored.restoreStage())
-        assertFalse(restored.explaining.value) // Nothing of ours to show; the result callback carries on.
-    }
-
-    @Test
-    fun aRestoredConnectWhoseAppBecameExemptJustConnects() {
-        val restored = BatteryPrompt(MemoryPrefStore()) { true }
-        assertEquals(BatteryStage.PROCEED, restored.restoreStage())
-        assertFalse(restored.explaining.value)
-    }
-
-    @Test
-    fun anAlreadyExemptAppIsNeverAskedAndNeverShowsTheCard() {
-        val prompt = BatteryPrompt(MemoryPrefStore()) { true }
-        assertFalse(prompt.shouldExplain())
-        prompt.declined()
-        assertFalse(prompt.card.value)
-    }
-
-    @Test
-    fun aDeclinedExemptionLeavesADismissibleCardUntilItIsGranted() {
-        val store = MemoryPrefStore()
-        var exempt = false
-        val prompt = BatteryPrompt(store) { exempt }
-        assertFalse(prompt.card.value) // Nothing declined yet.
-        prompt.explained()
-        assertFalse(prompt.card.value) // Allow was tapped: the system dialog decides.
-        prompt.declined() // "Not now", or the system dialog was refused.
-        assertTrue(prompt.card.value)
-        assertTrue(BatteryPrompt(store) { exempt }.card.value) // Persisted.
-        assertFalse(prompt.shouldExplain()) // The explanation is still not repeated.
-
-        exempt = true // Granted from the card, in the system dialog or in Settings.
-        prompt.refresh()
-        assertFalse(prompt.card.value)
-        exempt = false // Withdrawn later: the card comes back (declined, not dismissed).
-        prompt.refresh()
-        assertTrue(prompt.card.value)
-
-        prompt.dismissCard()
-        assertFalse(prompt.card.value)
-        assertFalse(BatteryPrompt(store) { exempt }.card.value) // Dismissed for good.
     }
 
     // --- cold launch: the marker and the decision -------------------------------------------------

@@ -1703,11 +1703,12 @@ FFI unit tests: the registry (roams live mosh sessions only, forgets closed and 
 - **Foreground service** (type `specialUse`, subtype documented in the manifest) owns the
   application's `HostConnections` while any host or session is open; it stops itself when the
   last one closes. Its ongoing notification shows hosts and sessions and offers "Disconnect
-  all". Request `POST_NOTIFICATIONS` (Android 13+) the first time a connection starts; the
-  service still runs if it is denied.
+  all". `POST_NOTIFICATIONS` is **never asked on connect**: the service starts and runs without it
+  (on Android 13+ only its notification is not shown), and Home offers it in context, as a small
+  dismissible card while a host is connected (see [Permissions: none on connect](#permissions-none-on-connect)).
 - **Battery optimisation:** a one-time explanation and `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`
-  **up front**, the first time the user starts a connection, in the foreground and before the
-  first unlock (see "M3 polish"); never nag again.
+  as the **last step of adding a host** (after Easy pair, after the manual form's save), never during a
+  connect; never nag again (see [Permissions: none on connect](#permissions-none-on-connect)).
 - **Network callback:** `ConnectivityManager.registerDefaultNetworkCallback` → `network_changed()`
   on every default-network change; debounce 500 ms.
 - **Transport preference** per host in Room v3 (`transport`: `AUTO` default, `SSH`, `MOSH`), real
@@ -1764,7 +1765,9 @@ mosh session. Where the text above left a choice open, this is what the code doe
     `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` property), `POST_NOTIFICATIONS`, `ACCESS_NETWORK_STATE`,
     `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` (lint `BatteryLife` is suppressed on the one request:
     the Play policy does not apply to F-Droid).
-- **Notification permission:** asked once (persisted flag `notifications_asked`), the first time
+- **Notification permission:** *superseded by [Permissions: none on connect](#permissions-none-on-connect):
+  nothing is asked on connect any more; the flag below is read only so that a user who answered is not
+  offered it again.* Asked once (persisted flag `notifications_asked`), the first time
   the user starts a connection, then the connect proceeds whatever the answer. The hosts waiting
   for the answer are kept as ids in the activity's saved instance state, so an activity recreated
   while the dialog is up (rotation, a theme change, process death) still connects them when the
@@ -1991,7 +1994,8 @@ to fail v0 step 3. These changes landed after lanes M3-A and M3-B and are integr
   row, the host screen) instead of a failure, and the reconnect offer never includes it. It still
   reads asleep only when the host went quiet (connection lost, unreachable, timed out): a rejected
   key or host key is a failure whatever the flag says. A tap on the host, or `Unlock` in the inbox,
-  still connects it. The one-time battery explanation is asked up front, once (see "M3 polish").
+  still connects it. The one-time battery explanation is the last step of adding a host, once (see
+  [Permissions: none on connect](#permissions-none-on-connect)).
 - **Multi-address mosh.** Mosh pins to the address SSH actually reached. The host form says so under
   the address list: `In order of preference. All are tried; the first to answer wins. Mosh stays on
   the address SSH reached, so list the one that works on every network first.`
@@ -2186,9 +2190,14 @@ unaffected: each host is its own driver thread, and the Android flows are per ho
 
 ### Battery exemption up front
 
+*Superseded by [Permissions: none on connect](#permissions-none-on-connect): the explanation is now the
+last step of adding a host, never part of a connect, and the saved host ids (`pending_battery`,
+`pending_connect`) and `restoreStage()` are gone. The Home card below is unchanged. The text is kept as
+the record of the M3 polish.*
+
 OxygenOS lets the SSH connections die within about ten minutes in the background unless the app is
 exempt from battery optimisation (mosh survives; with the exemption SSH does too). The explanation
-used to appear as a modal dialog over the terminal on the first return from the background. Now:
+used to appear as a modal dialog over the terminal on the first return from the background. Then:
 
 - **When.** The first time the user starts a connection (any Connect, Resume, reconnect chip or
   automatic resume), after the `POST_NOTIFICATIONS` request and **before the first unlock**, in the
@@ -2303,8 +2312,8 @@ is a failure whatever the flag says. Tests: `SessionMessagesTest`, `HomeModelTes
   the ZeroTier path, the UDP round trip of a mosh start) are what `or2.timing` is for: read
   `connect host=N connected / capabilities / live`, `tap ... focused / terminal-connected / frame`
   and `resume ...` on a debug build, and compare each leg with the round trips counted above.
-- The cold-launch resume, the up-front battery request (and OxygenOS's own dialog), and the Home card
-  have run only on fakes and compile-checked device tests (`HomeUiDeviceTest`); the biometric prompt
+- The cold-launch resume, the battery request (and OxygenOS's own dialog; now the last step of adding a
+  host), and the Home card have run only on fakes and compile-checked device tests (`HomeUiDeviceTest`); the biometric prompt
   at a cold start is the thing to watch.
 - The per-address timeout and the `.local` retry are tested against scripted resolvers and a
   blackholing transport; the real Android resolver (and a first mDNS lookup that fails after 1.5 s) is
@@ -2892,12 +2901,13 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
   host key's fingerprint, the key to authorize (an existing key or **New key**, saved first so a retry
   reuses it). The button is **Pair**; then **Pairing with <name>…** (1 to 3 s).
 - **After `ok`**: the host, its addresses (the offer's port on each), user, key and the trusted `hk` are
-  saved in one Room transaction (`AppDao.saveHostWithTrust`), then the usual connect runs. The usual
-  connect includes, on a fresh install, the one-time prompts that come **before the first unlock**: the
-  system's notification permission (Allow / Don't allow) and the battery explanation ("Keep sessions
-  connected", Allow / Not now, then possibly the system's own request), M3 polish "Battery exemption up
-  front". They are not host-key prompts: a host-key prompt can only follow the unlock (the connection
-  needs the decrypted key), and its buttons are **Trust and connect** / **Reject**. If saving
+  saved in one Room transaction (`AppDao.saveHostWithTrust`). On a fresh install the last step of adding
+  the host comes next, **before** the host connects: or2's battery step ("Keep sessions alive in the
+  background?", Allow / Not now, then possibly the system's own request), once ever and skipped when or2 is
+  already exempt ([Permissions: none on connect](#permissions-none-on-connect)). Then the host's page opens and
+  the usual connect runs, which goes straight to the biometric unlock: no notification permission and no
+  battery dialog during a connect. A host-key prompt can only follow the unlock (the connection needs the
+  decrypted key), and its buttons are **Trust and connect** / **Reject**. If saving
   fails after the host installed the key, the retry is **bound to that key** (its stored key id and
   fingerprint): key selection and **New key** are disabled on the review, and the retry repeats only
   the atomic host and trust save, never `pair_enroll` (the host's run is spent).
@@ -3065,3 +3075,79 @@ designs for one job. Now there is one chooser, and no key step before it.
   `HostFormUiDeviceTest` (New key preselected without keys; Save makes the key with Easy pair's names, saves the
   host with it and shows its line; a failed key saves nothing) and `PairUiDeviceTest` (the sheet, unchanged).
 - UI gallery: `home-empty` shows the chooser; `host-form-new-key` is the form with no stored key.
+
+# Permissions: none on connect
+
+The owner's first run on a fresh install: the first connect showed four dialogs in a row in the middle of
+connecting (Android's notification permission, or2's "Keep sessions connected", Android's battery-optimisation
+request, then the biometric unlock). Moshi does not ambush the user like that. Now **no permission dialog comes
+during a connect**: every connect, the first one included, goes straight to the biometric unlock
+(`MainActivity.connect` is the grouped unlock and nothing else). The two one-time questions moved to where they
+make sense.
+
+## Android
+
+- **Battery exemption: the last step of adding a host.** `BatteryPrompt` (`app/OneTimePrompts.kt`) decides with
+  `keepAliveStep(asked, exempt, requesting)`: `ASK` when it was never asked and
+  `PowerManager.isIgnoringBatteryOptimizations` is false, `WAIT` while the system's request it opened is up,
+  `DONE` otherwise. `shouldOffer()` is "`ASK` now". Adding a host ends on the step when it is:
+  - **Easy pair**: once the paired host is saved, `NavStack.afterPaired(id, keepAlive)` opens
+    `Destination.KeepAlive(id)` (`home|keepalive:<id>`) instead of the host page, and nothing connects yet; when the
+    step is done it opens `HostPage(id)` and connects (the usual unlock). Without the step the host page opens and
+    connects at once, as before. A code made with `--manual` ends on its key line; **Done** goes to
+    `KeepAlive(0)` (`NavStack.afterKeyToInstall`), then Home.
+  - **Manual form**: `HostFormScreen` ends a save through its new `saved` callback (after the key-line screen with
+    **New key**); for a new host `NavStack.afterHostFormSaved(keepAlive)` replaces the form with `KeepAlive(0)`,
+    which returns to the screen the form was opened from (Home or the inbox). An edit never shows the step.
+  - **The step** (`pair/KeepAliveScreen.kt`, compact, centred like the pairing progress): the `CardTitle`
+    "Keep sessions alive in the background?", one muted `Secondary` line "Android may stop the connection while or2
+    is in the background.", **Allow** (`PrimaryButton`) and **Not now** (`TextAction`); Back is **Not now**. Tags
+    `keepalive`, `keepalive-title`, `keepalive-why`, `keepalive-allow`, `keepalive-not-now`. `answer(allow)`
+    records it at once (`battery_asked`), whatever the answer. **Allow** launches
+    `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` through an activity-result launcher; the step shows its buttons
+    off (`WAIT`) until `requestClosed()` (the result, or a device without the screen), so the biometric prompt never
+    comes up over Android's dialog. **Not now**, or a refusal there, leaves Home's battery card (unchanged: "Background
+    connections may drop", Allow, dismiss).
+  - **Done**: an effect in `Or2App` watches `step` on a `KeepAlive` destination and, once `DONE` (and the stored
+    hosts are read and nothing is busy), navigates with `afterKeepAlive()` and connects the paired host. The same
+    effect covers a restore: a saved `keepalive:` destination whose answer is already stored (process death after
+    the answer, or with the system dialog up: the wait is memory-only) goes on at once, and so does a step whose app
+    became exempt meanwhile (`refresh()` on every `onStart`).
+- **Notifications: offered in context, never on connect.** The foreground service starts and runs without
+  `POST_NOTIFICATIONS` (on Android 13+ its notification is simply not shown). `NotificationPermission` holds the
+  permission's state; `offer(NotificationUse.CONNECTION)` is Home's one-line card **"Show connection
+  notification"** (Allow, close glyph; tags `home-notification-card`, `notification-card-allow`,
+  `notification-card-dismiss`), shown only while a host is connected and the permission is not granted, until it is
+  dismissed (`notification_offer_connection_dismissed`). It stays after a denial. **Allow**
+  (`AppActions.allowNotifications`, `MainActivity.allowNotifications`) launches Android's dialog
+  (`NotificationGrant.REQUEST`, recording `notifications_requested`) or, once Android no longer shows it (requested
+  before and `shouldShowRequestPermissionRationale` false: denied for good), opens
+  `Settings.ACTION_APP_NOTIFICATION_SETTINGS` (`NotificationGrant.SETTINGS`). Every offer re-reads the permission
+  after the dialog and on every `onStart`.
+- **The hook for later uses.** Agent alerts (M4) add a `NotificationUse` (its own dismissal key), show its offer where
+  the alerts are switched on, and call the same `allowNotifications`; nothing asks on connect.
+- **Migration.** The flags stay in `OneTimePrompts` over the app's `PrefStore`. `battery_asked`,
+  `battery_declined` and `battery_card_dismissed` keep their keys, so a user who answered the connect-time
+  explanation is not asked again and keeps (or does not get) the card. `notifications_asked` (the connect-time
+  request) hides the connection offer and counts as a request for the Settings fallback. The saved instance state
+  keys `pending_connect` and `pending_battery` are no longer written or read.
+
+## Tests
+
+- JVM: `OneTimePromptsTest` (the step's decision table; exempt and already-asked apps are never offered it; "Not
+  now" and "Allow" are recorded at once, Allow waits for the system dialog, a refusal leaves the card; a new process
+  after Allow does not wait; the old keys still count; the notification offer's visibility, dismissal and legacy
+  flag; request versus Settings), `AddHostEndTest` (as `Or2App` drives it: Easy pair ends on the step and connects
+  only after it; an exempt or already-asked app pairs straight into the connect; the step is asked for the first
+  host only; the manual save ends on the step and returns to Home or the inbox without connecting; an edit never
+  does; a `--manual` code's key line; a step restored after its answer), `NavigationTest` (`keepalive:` saved
+  state, `afterPaired`, `afterKeyToInstall`, `afterHostFormSaved`, `afterKeepAlive`).
+- Device (compiled in the gate; run on the phone): `AddHostEndDeviceTest` (the whole `Or2App` over fakes: Easy
+  pair ends on the step and the host connects only after **Allow**; an exempt app pairs straight into the connect;
+  the manual form's save ends on the step and **Not now** returns Home with the card; a connect from Home shows no
+  dialog), `PairUiDeviceTest` (the step's copy, Allow, Not now and Back; nothing answers while Android's dialog is
+  up; screenshot `keepalive`), `HostFormUiDeviceTest` (a save ends through `saved`, with **New key** only after the
+  key line), `HomeUiDeviceTest` (the notification card next to the battery card),
+  `ConnectionServiceDeviceTest.theServiceStartsAndKeepsRunningWithoutTheNotificationPermission` (skipped where the
+  permission is granted).
+- UI gallery: `keepalive`, `keepalive-waiting` (Android's dialog up), `home-notices` (both one-line cards).

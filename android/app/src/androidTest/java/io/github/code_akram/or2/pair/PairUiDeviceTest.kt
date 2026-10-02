@@ -181,6 +181,29 @@ class PairUiDeviceTest {
     }
 
     @Test
+    fun theBatteryStepExplainsInOneLineAndAllowNotNowAndBackAnswerIt() {
+        val answers = mutableListOf<String>()
+        show { KeepAliveScreen(waiting = false, allow = { answers += "allow" }, notNow = { answers += "not-now" }) }
+        compose.onNodeWithTag("keepalive-title").assertIsDisplayed().assertTextEquals(KEEP_ALIVE_TITLE)
+        compose.onNodeWithTag("keepalive-why").assertIsDisplayed().assertTextEquals(KEEP_ALIVE_WHY)
+        shoot("keepalive")
+        compose.onNodeWithTag("keepalive-allow").assertIsEnabled().performClick()
+        compose.onNodeWithTag("keepalive-not-now").assertIsEnabled().performClick()
+        compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() } // Back is "Not now".
+        compose.runOnIdle { assertEquals(listOf("allow", "not-now", "not-now"), answers) }
+    }
+
+    @Test
+    fun whileAndroidsBatteryDialogIsUpTheStepAnswersNothing() {
+        val answers = mutableListOf<String>()
+        show { KeepAliveScreen(waiting = true, allow = { answers += "allow" }, notNow = { answers += "not-now" }) }
+        compose.onNodeWithTag("keepalive-allow").assertIsNotEnabled()
+        compose.onNodeWithTag("keepalive-not-now").assertIsNotEnabled()
+        compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        compose.runOnIdle { assertEquals(emptyList<String>(), answers) }
+    }
+
+    @Test
     fun aManualCodeEndsOnTheKeyToInstall() {
         var done = 0
         show { PairInstallKeyScreen("Work Mac", "ssh-ed25519 AAAA phone", "SHA256:abc", done = { done++ }) }

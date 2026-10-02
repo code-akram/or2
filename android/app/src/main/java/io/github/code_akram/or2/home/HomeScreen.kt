@@ -113,6 +113,13 @@ fun HomeScreen(
     batteryCard: Boolean = false,
     allowBattery: () -> Unit = {},
     dismissBattery: () -> Unit = {},
+    /**
+     * A host is connected and the connection notification cannot show (no `POST_NOTIFICATIONS`): a small, dismissible
+     * card offers it, in context. Nothing asks for it on connect.
+     */
+    notificationCard: Boolean = false,
+    allowNotifications: () -> Unit = {},
+    dismissNotifications: () -> Unit = {},
 ) {
     var options by remember { mutableStateOf<HostCard?>(null) }
     var deleting by remember { mutableStateOf<Host?>(null) }
@@ -138,7 +145,11 @@ fun HomeScreen(
                         icon = Or2Icons.Terminal, onClick = onResume, modifier = Modifier.padding(top = Or2Dimens.Gutter).testTag("home-resume"))
                 }
                 if (batteryCard) {
-                    BatteryCard(allowBattery, dismissBattery, Modifier.padding(top = Or2Dimens.Gutter))
+                    NoticeCard("Background connections may drop", "battery", allowBattery, dismissBattery, Modifier.padding(top = Or2Dimens.Gutter))
+                }
+                if (notificationCard) {
+                    NoticeCard("Show connection notification", "notification", allowNotifications, dismissNotifications,
+                        Modifier.padding(top = if (batteryCard) 8.dp else Or2Dimens.Gutter))
                 }
                 if (sessions.isNotEmpty()) {
                     SectionHeader("Sessions", topGap = 8.dp)
@@ -211,15 +222,19 @@ fun HomeScreen(
     }
 }
 
-/** "Background connections may drop": the exemption was declined; Allow opens the system's request. */
+/**
+ * A one-line, dismissible offer above SESSIONS: "Background connections may drop" (the battery exemption was
+ * declined; Allow opens the system's request) and "Show connection notification" (Allow asks for the permission, or
+ * opens the app's notification settings once Android no longer asks). Tagged `home-<tag>-card`,
+ * `<tag>-card-allow` and `<tag>-card-dismiss`.
+ */
 @Composable
-private fun BatteryCard(allow: () -> Unit, dismiss: () -> Unit, modifier: Modifier = Modifier) {
-    Or2Card(modifier.fillMaxWidth().testTag("home-battery-card"), color = Or2Colors.SurfaceRaised) {
+private fun NoticeCard(text: String, tag: String, allow: () -> Unit, dismiss: () -> Unit, modifier: Modifier = Modifier) {
+    Or2Card(modifier.fillMaxWidth().testTag("home-$tag-card"), color = Or2Colors.SurfaceRaised) {
         Row(Modifier.padding(start = Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
-            Text("Background connections may drop", style = Or2Type.Secondary, color = Or2Colors.TextMuted,
-                modifier = Modifier.weight(1f).padding(vertical = 8.dp))
-            TextAction("Allow", allow, modifier = Modifier.testTag("battery-card-allow"))
-            IconAction(Or2Icons.Close, "Dismiss", dismiss, Modifier.testTag("battery-card-dismiss"), tint = Or2Colors.TextMuted)
+            Text(text, style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.weight(1f).padding(vertical = 8.dp))
+            TextAction("Allow", allow, modifier = Modifier.testTag("$tag-card-allow"))
+            IconAction(Or2Icons.Close, "Dismiss", dismiss, Modifier.testTag("$tag-card-dismiss"), tint = Or2Colors.TextMuted)
         }
     }
 }

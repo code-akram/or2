@@ -225,8 +225,9 @@ over the real FFI with `contract_probe_host` (host-key relay and persistence, ca
 agents into the inbox, terminals and frames, disconnect ordering).
 `TimingTest` covers the `or2.timing` markers (connect, capabilities and first herdr view per host, the
 unreachable host's `failed`); `TerminalActivationsTest` the tap, reuse and reopen paths including the
-terminal that starts beside its focus and is dismissed when the pane vanished; `ReattachTest` the
-battery prompt (asked once, up front; the card) and the cold-launch marker and decision.
+terminal that starts beside its focus and is dismissed when the pane vanished; `OneTimePromptsTest` the
+battery step (the last step of adding a host, once; the card) and the notification offer, `AddHostEndTest`
+how adding a host ends on that step, and `ReattachTest` the cold-launch marker and decision.
 Timing markers are read on a debug build with `adb logcat -v time -s or2.timing:D` (one tag; one line per
 marker; host and pane ids only); see [contracts](contracts.md) "Timing markers".
 Tests that wait on those callbacks wait for the specific thing (a frame whose row shows the echo, the
@@ -323,12 +324,13 @@ retry intervals (about 20 s in all).
 `UiGalleryActivity` (debug source set, like `TerminalProbeActivity`) renders every screen and key
 state with fake data: no network, no biometrics, no database. Without an extra it lists the
 screens; `am start -n io.github.code_akram.or2/.gallery.UiGalleryActivity --es screen <name>`
-opens one directly. Names: `home`, `home-empty`, `host-cards` (unlocking, checking,
+opens one directly. Names: `home`, `home-empty`, `home-notices` (the battery and notification cards), `host-cards` (unlocking, checking,
 authenticating, connected with a blocked agent, failed, idle), `inbox`, `inbox-empty`,
 `picker-herdr`, `picker-tmux`, `picker-recent`, `host-form`, `host-form-new-key` (no stored key: **New key** chosen), `host-form-edit`, `keys`,
 `keys-empty`, `about`, `licenses`, `hostkey-first`, `hostkey-changed`, `add-host` (the add-host chooser in its sheet; `home-empty` shows it inline), `pair-scan`,
 `pair-scan-denied`, `pair-review`, `pair-review-new` (with a failure), `pair-progress`, `pair-install`
-(Easy pair; the camera preview itself is not in the gallery), `terminal`, `terminal-arrowpad`,
+(Easy pair; the camera preview itself is not in the gallery), `keepalive` (the battery step that ends adding a
+host), `keepalive-waiting` (Android's dialog up), `terminal`, `terminal-arrowpad`,
 `terminal-composer` (opens with a message typed and the keyboard up, to show the caret and the
 lit send button). The terminal screens run the native contract probe and replace its first
 frame with a Catppuccin demo session (`gallery/DemoFrames.kt`). Use it to screenshot the phone
@@ -424,6 +426,9 @@ asserted unconditionally. The notification's contents (title, "Disconnect all", 
 count) are a separate test that runs only where `POST_NOTIFICATIONS` is already granted to the
 app and is skipped with a message otherwise: the test never grants it, because OEM builds
 (OxygenOS) refuse shell grants (`GRANT_RUNTIME_PERMISSIONS`); grant it in Settings once to run it.
+Its counterpart, `theServiceStartsAndKeepsRunningWithoutTheNotificationPermission`, runs only where the
+permission is *not* granted (the usual case for "or2 devicetest", since nothing asks for it on connect) and
+checks the service starts and keeps holding the connection without it.
 `TransportChromeDeviceTest` covers the header badge, the "Last heard N s ago" text past five seconds
 and the AUTO-fallback note. `VaultDeviceTest` creates and
 deletes a disposable Keystore alias: it verifies hardware security level, per-use strong

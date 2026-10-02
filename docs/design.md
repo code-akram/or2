@@ -155,9 +155,14 @@ maps windows and panes to native tabs, comes later.
 
 ### Notifications
 
-User choice, per host and per agent state (blocked, done). Default off; or2 asks the first time
-it connects to herdr. While the app is alive, herdr events drive local notifications. Remote push,
-if ever, goes through UnifiedPush or ntfy, never FCM.
+User choice, per host and per agent state (blocked, done). Default off; or2 asks in context, where the
+alerts are switched on, never while connecting. While the app is alive, herdr events drive local
+notifications. Remote push, if ever, goes through UnifiedPush or ntfy, never FCM.
+
+No permission dialog ever comes in the middle of a connect: every connect, the first one included, goes
+straight to the biometric unlock. The battery-optimisation exemption is the last step of adding a host
+(asked once); the connection notification is offered by a small, dismissible card on Home while a host is
+connected, and the service runs without it ([contracts](contracts.md#permissions-none-on-connect)).
 
 ## Android specifics
 
@@ -166,7 +171,8 @@ if ever, goes through UnifiedPush or ntfy, never FCM.
 - `compileSdk` / `targetSdk` 36, `minSdk` 34 (Android 14).
 - OxygenOS kills background apps aggressively. Defences: a foreground service with a persistent
   notification while sessions are open (type `specialUse`), a one-time battery-optimisation
-  exemption prompt, and sub-second reattach to the last tmux session or herdr pane.
+  exemption prompt as the last step of adding a host, and sub-second reattach to the last tmux
+  session or herdr pane.
 - No Google Play Services or FCM dependencies, so F-Droid stays possible. Distribution starts as a
   sideloaded APK.
 
@@ -458,8 +464,14 @@ address) the extra port was unreachable although SSH worked. Version 2 pairs ove
   offers **New key** like the pairing review ([contracts](contracts.md#first-run-one-add-host-chooser)). Verified
   by `AddHostOptionsTest`, `NavigationTest`, `KeyOperationsTest` and the device tests, which pass on the
   phone (the `.devicetest` app; 2026-10-02).
+- [x] No permission dialogs during a connect (owner feedback on a fresh install against Moshi): the battery
+  exemption is the last step of adding a host (after Easy pair, before the host connects; after the manual form's
+  save), once, skipped when exempt; the notification permission is offered in context on Home, and the service
+  runs without it ([contracts](contracts.md#permissions-none-on-connect)). Verified by `OneTimePromptsTest`,
+  `AddHostEndTest`, `NavigationTest` and the compile-checked device tests (`AddHostEndDeviceTest` and others);
+  the device tests are still to run on the phone.
 - [ ] Phone acceptance of Easy pair: a real `or2-pair` code on a host reached over its public address
-  and on a LAN host, with the permission dialog, then connect.
+  and on a LAN host, with the battery step, then connect.
 - [ ] Installer: release binaries for Linux and macOS and a POSIX `sh` installer (after v2).
 
 ## Decisions

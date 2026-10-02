@@ -60,6 +60,7 @@ class HomeUiDeviceTest {
     private fun show(
         hosts: List<HostCard>, sessions: List<HomeSession> = emptyList(), keyCount: Int = 1, blocked: Int = 0, working: Int = 0,
         canConnectAll: Boolean = false, busy: Boolean = false, resume: HomeResume? = null, batteryCard: Boolean = false,
+        notificationCard: Boolean = false,
     ) = compose.runOnUiThread {
         compose.activity.setContent {
             Or2Theme {
@@ -72,6 +73,8 @@ class HomeUiDeviceTest {
                     openAbout = { calls += "about" },
                     resume = resume, onResume = { calls += "resume" },
                     batteryCard = batteryCard, allowBattery = { calls += "allow-battery" }, dismissBattery = { calls += "dismiss-battery" },
+                    notificationCard = notificationCard, allowNotifications = { calls += "allow-notifications" },
+                    dismissNotifications = { calls += "dismiss-notifications" },
                 )
             }
         }
@@ -121,6 +124,24 @@ class HomeUiDeviceTest {
     fun noBatteryCardWhenTheExemptionIsInPlaceOrNeverDeclined() {
         show(listOf(card(one, null)), batteryCard = false)
         compose.onNodeWithTag("home-battery-card").assertDoesNotExist()
+    }
+
+    @Test
+    fun theConnectionNotificationIsOfferedInContextAsASmallDismissibleCard() {
+        show(listOf(card(one, HostState.Connected(0u))), batteryCard = true, notificationCard = true)
+        compose.onNodeWithTag("home-notification-card").assertIsDisplayed()
+        compose.onNodeWithText("Show connection notification").assertIsDisplayed()
+        compose.onNodeWithTag("home-battery-card").assertIsDisplayed() // Both one-line offers fit together.
+        compose.onNodeWithTag("host:1").assertIsDisplayed().performClick()
+        compose.onNodeWithTag("notification-card-allow").performClick()
+        compose.onNodeWithTag("notification-card-dismiss").performClick()
+        compose.runOnIdle { assertEquals(listOf("open:1", "allow-notifications", "dismiss-notifications"), calls) }
+    }
+
+    @Test
+    fun noNotificationCardUnlessItIsOffered() {
+        show(listOf(card(one, HostState.Connected(0u))))
+        compose.onNodeWithTag("home-notification-card").assertDoesNotExist()
     }
 
     @Test

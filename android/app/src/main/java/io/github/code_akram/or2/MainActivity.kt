@@ -4,7 +4,6 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -23,7 +22,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.github.code_akram.or2.app.AppActions
 import io.github.code_akram.or2.app.AppViewModel
-import io.github.code_akram.or2.app.BatteryStage
+import io.github.code_akram.or2.app.NotificationGrant
+import io.github.code_akram.or2.app.NotificationUse
 import io.github.code_akram.or2.app.Or2App
 import io.github.code_akram.or2.app.Or2Application
 import io.github.code_akram.or2.connection.KeyUnlocker
@@ -64,42 +64,25 @@ class MainActivity : FragmentActivity() {
     private var busy by mutableStateOf(false)
 
     /**
-     * The hosts of a connect that waits for the `POST_NOTIFICATIONS` dialog, by id. It is saved
-     * with the instance state: the dialog's result goes to whichever activity instance exists when
-     * it returns (rotation, a theme change or process death while it is up), and the tap must not
-     * be lost with the old one. [busy] covers the wait, so a second tap cannot start a connect in
-     * parallel and a Resume waiting on the connect does not take the quiet moment for its end.
+     * Android's `POST_NOTIFICATIONS` dialog, opened only from an in-context offer (Home's "Show connection
+     * notification"), never on connect. Its result goes to whichever activity instance exists when it returns, and
+     * every offer re-reads the permission.
      */
-    private var pendingConnect: LongArray? = null
-    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
-        // Granted or not, connecting goes on: the service runs without its notification being visible.
-        val ids = pendingConnect ?: return@registerForActivityResult
-        pendingConnect = null
-        lifecycleScope.launch {
-            val hosts = ids.toList().mapNotNull { app.database.dao().host(it) }
-            // Back to back with no suspension between: busy never reads false in between.
-            busy = false
-            if (hosts.isNotEmpty()) connectAfterNotifications(hosts)
-        }
+    private val notificationRequest = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        app.notifications.refresh()
     }
 
     /**
-     * The hosts of a connect that waits for the battery-optimisation explanation (and the system's own
-     * request after it), by id, saved like [pendingConnect]: the dialog is up in the foreground before
-     * the first unlock, and a connect must survive the activity being recreated meanwhile.
+     * The system's battery-optimisation request after "Allow" on the battery step (the last step of adding a host).
+     * Whatever it answered, the step is done: the paired host connects, or the screen goes back to where the host was
+     * added from. Registered in every instance, so a result that arrives after a recreation still ends the step.
      */
-    private var pendingBattery: LongArray? = null
     private val batteryExemption = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        // The system's dialog is closed; whatever it answered, the exemption is read afresh and connecting goes on.
-        if (app.isBatteryExempt()) app.battery.refresh() else app.battery.declined()
-        continueAfterBattery()
+        app.battery.requestClosed()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        pendingConnect = savedInstanceState?.getLongArray(PENDING_CONNECT)
-        pendingBattery = savedInstanceState?.getLongArray(PENDING_BATTERY)
-        if (pendingConnect != null || pendingBattery != null) busy = true
         app.watchConnections()
         enableEdgeToEdge(
             // Dark only: transparent bars with light icons over the app's own background.
@@ -128,7 +111,9 @@ class MainActivity : FragmentActivity() {
             reattach = app.reattach,
             battery = app.battery,
             requestBatteryExemption = ::requestBatteryExemption,
-            answerBatteryExplanation = ::answerBatteryExplanation,
+            answerKeepAlive = ::answerKeepAlive,
+            notifications = app.notifications.offer(NotificationUse.CONNECTION),
+            allowNotifications = ::allowNotifications,
             takeColdResume = app.sessionMarker::takeColdResume,
             pair = pairModel.flow,
             deviceLabel = Build.MODEL.takeIf { it.isNotBlank() } ?: "Android phone",
@@ -140,14 +125,6 @@ class MainActivity : FragmentActivity() {
             val message by model.message.collectAsStateWithLifecycle()
             val loaded by model.loaded.collectAsStateWithLifecycle()
             Or2App(hosts, keys, message, busy, app.connections, actions, loaded)
-        }
-        // A connect that waited on the battery flow: the explanation is memory-only, so a restored
-        // process has none on screen. Put it back (or carry on), or `busy` would never end.
-        if (pendingBattery != null) {
-            when (app.battery.restoreStage()) {
-                BatteryStage.EXPLANATION, BatteryStage.SYSTEM_REQUEST -> Unit // The answer, or the launcher's result, carries on.
-                BatteryStage.PROCEED -> continueAfterBattery()
-            }
         }
     }
 
@@ -216,41 +193,20 @@ class MainActivity : FragmentActivity() {
         }
     }
 
-    /** The first connection asks for `POST_NOTIFICATIONS` (Android 13+), once; then connects either way. */
-    private fun connect(hosts: List<Host>) {
-        if (busy) return
-        val granted = checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-        if (app.notificationPolicy.shouldAsk(Build.VERSION.SDK_INT, granted)) {
-            app.notificationPolicy.markAsked()
-            pendingConnect = hosts.map { it.id }.toLongArray()
-            busy = true
-            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-        } else {
-            connectAfterNotifications(hosts)
-        }
-    }
+    /**
+     * Every connect, the first one on a fresh install included, goes straight to the biometric unlock: no permission
+     * or battery dialog comes first (the battery exemption is the last step of adding a host, and the notification
+     * permission is offered in context).
+     */
+    private fun connect(hosts: List<Host>) = operation { connectGrouped(hosts, app.connections, biometricUnlocker) }
 
     /**
-     * The battery-optimisation exemption is asked for up front, once: before the first unlock, in the
-     * foreground (not as a modal over a terminal on a later return). The explanation is Compose's
-     * (`battery.explaining`); "Allow" goes on to the system's own request, "Not now" to the connect.
+     * The battery step was answered. "Allow" opens the system's request (the step waits for its result); a device with
+     * no such screen, like "Not now", ends the step at once and leaves Home's card.
      */
-    private fun connectAfterNotifications(hosts: List<Host>) {
-        if (app.battery.shouldExplain()) {
-            pendingBattery = hosts.map { it.id }.toLongArray()
-            busy = true
-            app.battery.explain()
-        } else {
-            startConnect(hosts)
-        }
-    }
-
-    private fun answerBatteryExplanation(allow: Boolean) {
-        if (!app.battery.explaining.value) return
-        app.battery.explained()
-        if (allow && launchBatteryRequest()) return // The result callback carries on.
-        app.battery.declined()
-        continueAfterBattery()
+    private fun answerKeepAlive(allow: Boolean) {
+        if (!app.battery.answer(allow)) return
+        if (allow && !launchBatteryRequest()) app.battery.requestClosed()
     }
 
     /** Opens the system's request; false when this device has no such screen. */
@@ -262,14 +218,24 @@ class MainActivity : FragmentActivity() {
         false
     }
 
-    private fun continueAfterBattery() {
-        val ids = pendingBattery ?: return
-        pendingBattery = null
-        lifecycleScope.launch {
-            val hosts = ids.toList().mapNotNull { app.database.dao().host(it) }
-            // Back to back with no suspension between: busy never reads false in between.
-            busy = false
-            if (hosts.isNotEmpty()) startConnect(hosts)
+    /**
+     * "Allow" on a notification offer: Android's `POST_NOTIFICATIONS` dialog, or the app's notification settings once
+     * Android no longer shows it (denied for good). The one entry point for every use ([NotificationUse]); agent alerts
+     * will call it from their own offer.
+     */
+    private fun allowNotifications() {
+        val permission = app.notifications
+        if (permission.isGranted()) return permission.refresh()
+        when (permission.grant(shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS))) {
+            NotificationGrant.REQUEST -> {
+                permission.requested()
+                notificationRequest.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            NotificationGrant.SETTINGS -> try {
+                startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
+            } catch (_: ActivityNotFoundException) {
+                // No such screen on this device; the card stays until it is dismissed.
+            }
         }
     }
 
@@ -280,26 +246,14 @@ class MainActivity : FragmentActivity() {
         // Whatever the network did while the app was away is settled by one roam (debounced with any
         // callback event that arrives with it).
         app.networkChanges.foregrounded()
-        // The exemption may have been given (or taken away) in Settings while the app was away.
+        // The exemption and the notification permission may have been given (or taken away) in Settings meanwhile.
         app.battery.refresh()
-    }
-
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        pendingConnect?.let { outState.putLongArray(PENDING_CONNECT, it) }
-        pendingBattery?.let { outState.putLongArray(PENDING_BATTERY, it) }
-    }
-
-    private fun startConnect(hosts: List<Host>) = operation { connectGrouped(hosts, app.connections, biometricUnlocker) }
-
-    private companion object {
-        const val PENDING_CONNECT = "pending_connect"
-        const val PENDING_BATTERY = "pending_battery"
+        app.notifications.refresh()
     }
 
     /**
      * The system's own "let this app ignore battery optimisations?" dialog, from Home's card (the
-     * explanation was shown once, before the first connection). Play Store policy restricts this request;
+     * explanation was shown once, as the last step of adding a host). Play Store policy restricts this request;
      * or2 ships through F-Droid.
      */
     @SuppressLint("BatteryLife", "UseKtx")

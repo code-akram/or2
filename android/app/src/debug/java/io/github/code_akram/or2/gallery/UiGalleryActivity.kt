@@ -56,6 +56,7 @@ import io.github.code_akram.or2.ffi.generateEd25519Key
 import io.github.code_akram.or2.ffi.parsePairPayload
 import io.github.code_akram.or2.pair.AddHostSheet
 import io.github.code_akram.or2.pair.CameraAccess
+import io.github.code_akram.or2.pair.KeepAliveScreen
 import io.github.code_akram.or2.pair.KeyChoice
 import io.github.code_akram.or2.pair.PairInstallKeyScreen
 import io.github.code_akram.or2.pair.PairProgressScreen
@@ -140,6 +141,7 @@ class UiGalleryActivity : ComponentActivity() {
         when (name) {
             "home" -> Home(HomeVariant.Sessions)
             "home-empty" -> Home(HomeVariant.Empty)
+            "home-notices" -> Home(HomeVariant.Notices)
             "host-cards" -> Home(HomeVariant.CardStates)
             "inbox" -> Inbox(empty = false)
             "inbox-empty" -> Inbox(empty = true)
@@ -157,6 +159,8 @@ class UiGalleryActivity : ComponentActivity() {
             "pair-review-new" -> pairReview(emptyList(), KeyChoice.New, error = "Couldn't reach workstation on port 22. Pairing uses the same SSH port as connecting: the phone must reach it (same network, ZeroTier or Tailscale, or a public address).")
             "pair-progress" -> PairProgressScreen("workstation", cancel = {})
             "pair-install" -> PairInstallKeyScreen("workstation", key1.openssh, key1.fingerprint, done = {})
+            "keepalive" -> KeepAliveScreen(waiting = false, allow = {}, notNow = {})
+            "keepalive-waiting" -> KeepAliveScreen(waiting = true, allow = {}, notNow = {})
             "keys" -> KeysScreen(listOf(key1, key2), false, { _, _ -> }, { _, _, _ -> }, {})
             "keys-empty" -> KeysScreen(emptyList(), false, { _, _ -> }, { _, _, _ -> }, {})
             "about" -> AboutRoute(back = {}, openLicenses = {})
@@ -217,7 +221,7 @@ class UiGalleryActivity : ComponentActivity() {
 
     // --- screens -------------------------------------------------------------------------
 
-    private enum class HomeVariant { Sessions, Empty, CardStates }
+    private enum class HomeVariant { Sessions, Empty, CardStates, Notices }
 
     @Composable
     private fun Home(variant: HomeVariant) {
@@ -228,7 +232,7 @@ class UiGalleryActivity : ComponentActivity() {
         )
         val hosts = when (variant) {
             HomeVariant.Empty -> emptyList()
-            HomeVariant.Sessions -> listOf(
+            HomeVariant.Sessions, HomeVariant.Notices -> listOf(
                 card(host(1, "workstation"), HostState.Connected(0u), blocked = 1),
                 card(host(2, "build-box", address = "198.51.100.7"), HostState.Connected(0u)),
                 card(host(3, "nas"), null),
@@ -249,6 +253,8 @@ class UiGalleryActivity : ComponentActivity() {
             canConnectAll = false, busy = false,
             openSession = {}, openHost = {}, addHost = {}, easyPair = {}, manualHost = {}, editHost = {}, connectHost = {}, disconnectHost = {}, deleteHost = {},
             openInbox = {}, openKeys = {}, connectAll = {},
+            // Both one-line offers: the battery exemption was declined, and the connection notification is not allowed.
+            batteryCard = variant == HomeVariant.Notices, notificationCard = variant == HomeVariant.Notices,
         )
     }
 
@@ -370,9 +376,9 @@ class UiGalleryActivity : ComponentActivity() {
 
     companion object {
         val screens = listOf(
-            "home", "home-empty", "host-cards", "inbox", "inbox-empty", "picker-herdr", "picker-tmux", "picker-recent",
+            "home", "home-empty", "home-notices", "host-cards", "inbox", "inbox-empty", "picker-herdr", "picker-tmux", "picker-recent",
             "host-form", "host-form-new-key", "host-form-edit", "keys", "keys-empty", "about", "licenses", "hostkey-first", "hostkey-changed",
-            "add-host", "pair-scan", "pair-scan-denied", "pair-review", "pair-review-new", "pair-progress", "pair-install",
+            "add-host", "pair-scan", "pair-scan-denied", "pair-review", "pair-review-new", "pair-progress", "pair-install", "keepalive", "keepalive-waiting",
             "terminal", "terminal-arrowpad", "terminal-composer",
         )
     }

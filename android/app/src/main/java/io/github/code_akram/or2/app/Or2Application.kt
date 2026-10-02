@@ -1,7 +1,9 @@
 package io.github.code_akram.or2.app
 
+import android.Manifest
 import android.app.Application
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.os.PowerManager
 import android.util.Log
 import androidx.room.Room
@@ -37,7 +39,12 @@ class Or2Application : Application() {
 
     /** The mosh servers this app started, so one orphaned by process death is stopped at the next connect. */
     val moshServers by lazy { MoshServerLedger(prefs) }
-    val notificationPolicy by lazy { NotificationPermissionPolicy(prefs) }
+    /** `POST_NOTIFICATIONS`, offered in context only (never on connect); the service runs without it. */
+    val notifications by lazy {
+        NotificationPermission(prefs) { checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED }
+    }
+
+    /** The battery exemption: the last step of adding a host, once; Home's card after a decline. */
     val battery by lazy { BatteryPrompt(prefs, isExempt = ::isBatteryExempt) }
 
     /**

@@ -138,6 +138,27 @@ class ConnectionServiceDeviceTest {
         await("the notification to go") { notification() == null }
     }
 
+    /**
+     * Nothing asks for `POST_NOTIFICATIONS` on connect any more, so a fresh install connects without it: the service
+     * must start and keep holding the connection anyway (on Android 13+ only its notification is not shown). The
+     * device-test app is never granted the permission by a test, so this normally runs exactly that case.
+     */
+    @Test
+    fun theServiceStartsAndKeepsRunningWithoutTheNotificationPermission() {
+        assumeTrue("POST_NOTIFICATIONS is granted to ${context.packageName}; this test is for an install without it", !notificationsVisible())
+        val begun = ServiceRunState.Process.begins.get()
+        runBlocking(Dispatchers.Main) { app.connections.connect(host, byteArrayOf(1)) }
+        await("the service to start") { ServiceRunState.Process.begins.get() > begun }
+        await("the service to run") { ServiceRunState.Process.running }
+        // Still running a while later (Android stops a foreground service that failed to start well within this).
+        Thread.sleep(3_000)
+        assertTrue("the service keeps running without the notification permission", ServiceRunState.Process.running)
+        runBlocking(Dispatchers.Main) { assertTrue(app.connections.host(host.id)!!.state.value is HostState.Connected) }
+
+        context.startService(ConnectionService.disconnectAllIntent(context))
+        await("the service to stop") { !ServiceRunState.Process.running }
+    }
+
     @Test
     fun aServiceStartedWithNothingOpenStopsItself() {
         // It must still post its notification at once (Android's deadline), then notice there is nothing to hold.

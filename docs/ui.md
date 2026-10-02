@@ -189,7 +189,10 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   if needed, then returns to this terminal." and the transport it had as the mono meta line
   (`Mosh`/`SSH`); tapping it unlocks, connects and reopens it. When the battery exemption was declined a
   small, dismissible card above SESSIONS says "Background connections may drop" with an **Allow** text
-  action and a close glyph (`Or2Card` on `SurfaceRaised`, `Secondary` muted text, no modal). A host
+  action and a close glyph (`Or2Card` on `SurfaceRaised`, `Secondary` muted text, no modal). While a host is
+  connected and notifications are not allowed, a second card of the same kind says "Show connection
+  notification" (**Allow** asks for the permission, or opens the app's notification settings once Android no
+  longer asks; the glyph dismisses it for good). A host
   that was unreachable shows, under its failure (or under `Asleep`), one `MonoSmall` muted line per
   address: `host:port \u00b7 what happened`.
 - **Key choice (host form):** an `SSH key` label, the muted hint `Choose a key` while nothing is chosen, and the
@@ -198,8 +201,15 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   `Secondary` sentence under the group while it is chosen. **Save** then makes the key first (the biometric
   prompt; the pill reads **Working…**), selects it, saves the host and shows the key's public line on the
   "Add the key to the host" screen (the one a `--manual` pairing code ends on, with a note that the host key is
-  trusted on first connect); **Done** closes the form. A key that could not be made is one `danger` line above
-  **Save**, and nothing is saved.
+  trusted on first connect); **Done** closes the form (through the battery step below, the first time). A key
+  that could not be made is one `danger` line above **Save**, and nothing is saved.
+- **Battery step (end of adding a host):** once ever, after Easy pair (before the host connects) and after the
+  manual form saves a new host (after its key line), unless or2 is already exempt. A plain screen with no title
+  bar text, centred like the pairing progress: the `CardTitle` "Keep sessions alive in the background?", one
+  muted `Secondary` line ("Android may stop the connection while or2 is in the background."), a full-width
+  **Allow** pill and a **Not now** text action in `text` under it; Back is **Not now**. While Android's own
+  dialog is up both are off. Never a dialog in the middle of a connect: connecting goes straight to the
+  biometric prompt.
 - **Transport preference (host form):** under the inbox switch, a `Transport` label and an
   `Auto` / `SSH` / `Mosh` segmented control (the 32 dp control above) with one muted `Secondary`
   sentence that follows the selection (`Mosh when the host has mosh-server; SSH if mosh cannot

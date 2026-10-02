@@ -77,6 +77,7 @@ import io.github.code_akram.or2.inbox.linkStatus
 import io.github.code_akram.or2.inbox.pendingHostKeys
 import io.github.code_akram.or2.keys.KeysScreen
 import io.github.code_akram.or2.pair.AddHostSheet
+import io.github.code_akram.or2.pair.KeepAliveScreen
 import io.github.code_akram.or2.pair.PairDestination
 import io.github.code_akram.or2.pair.PairFlow
 import io.github.code_akram.or2.pair.PairState
@@ -93,9 +94,7 @@ import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Icons
 import io.github.code_akram.or2.ui.Or2Theme
-import io.github.code_akram.or2.ui.Or2Dialog
 import io.github.code_akram.or2.ui.Or2Type
-import io.github.code_akram.or2.ui.TextAction
 import io.github.code_akram.or2.ui.Spinner
 import io.github.code_akram.or2.ui.TopBar
 import io.github.code_akram.or2.ui.or2Background
@@ -117,13 +116,21 @@ class AppActions(
     /** The last focused terminal, for reattach after the app returns to the foreground. */
     val reattach: ReattachMemory = ReattachMemory(MemoryPrefStore()),
     /**
-     * The battery-optimisation exemption, asked up front before the first connection: its explanation
-     * ([BatteryPrompt.explaining], answered through [answerBatteryExplanation]) and the non-blocking Home card
-     * that remains when it was declined ([requestBatteryExemption] opens the system's own request).
+     * The battery-optimisation exemption, asked once as the last step of adding a host ([Destination.KeepAlive],
+     * [BatteryPrompt.step], answered through [answerKeepAlive]: "Allow" opens the system's own request) and the
+     * non-blocking Home card that remains when it was declined ([requestBatteryExemption] opens the request again).
+     * Never asked on connect.
      */
     val battery: BatteryPrompt = BatteryPrompt(MemoryPrefStore()),
     val requestBatteryExemption: () -> Unit = {},
-    val answerBatteryExplanation: (allow: Boolean) -> Unit = {},
+    val answerKeepAlive: (allow: Boolean) -> Unit = {},
+    /**
+     * The in-context offer of the connection notification (Home's card while a host is connected); never asked on
+     * connect. [allowNotifications] asks for `POST_NOTIFICATIONS` (or opens the app's notification settings once
+     * Android no longer asks); it is the one entry point later uses (agent alerts) call from their own offer.
+     */
+    val notifications: NotificationOffer = NotificationPermission(MemoryPrefStore()) { true }.offer(NotificationUse.CONNECTION),
+    val allowNotifications: () -> Unit = {},
     /** True once per process when the previous one died with sessions open ([SessionMarker]): the launcher resumes. */
     val takeColdResume: () -> Boolean = { false },
     /** Easy pair: the flow (its state outlives the activity), and the phone's name for the host and for new keys. */
@@ -172,8 +179,9 @@ fun Or2App(
     val transports by remember(connections) { connections.transports() }.collectAsStateWithLifecycle(emptyMap())
     val closedStates by remember(connections) { connections.terminalClosedStates() }.collectAsStateWithLifecycle(emptyMap())
     val last by actions.reattach.last.collectAsStateWithLifecycle()
-    val batteryExplaining by actions.battery.explaining.collectAsStateWithLifecycle()
+    val keepAliveStep by actions.battery.step.collectAsStateWithLifecycle()
     val batteryCard by actions.battery.card.collectAsStateWithLifecycle()
+    val notificationOffer by actions.notifications.visible.collectAsStateWithLifecycle()
 
     // "Add host" (the FAB) opens the add-host chooser in a sheet; the empty Home and inbox show the same chooser
     // inline. Its two cards lead to Easy pair (scan) or the manual form.
@@ -432,6 +440,9 @@ fun Or2App(
                         connectAll = { connect(connectable.map { it.host }) },
                         resume = resumeCard, onResume = { resumeLast() },
                         batteryCard = batteryCard, allowBattery = actions.requestBatteryExemption, dismissBattery = actions.battery::dismissCard,
+                        // In context: offered only while a host is connected, which is when the notification would show.
+                        notificationCard = notificationOffer && connectedHosts.isNotEmpty(),
+                        allowNotifications = actions.allowNotifications, dismissNotifications = actions.notifications::dismiss,
                     )
                 }
                 Destination.Inbox -> InboxScreen(
@@ -454,14 +465,21 @@ fun Or2App(
                 Destination.EasyPair -> if (pairFlow == null) Column { TopBar(back = ::pop) } else PairDestination(
                     pairState, keys, pairFlow, actions.deviceLabel, actions.createKey,
                     close = ::pop,
-                    // A code made with --manual ends on the key to install: Done returns Home with the host saved.
-                    done = { pairFlow.consume(); navigate(NavStack()) },
+                    // A code made with --manual ends on the key to install: Done returns Home with the host saved (through
+                    // the battery step, the last step of adding a host, when it is still to be asked).
+                    done = { pairFlow.consume(); navigate(NavStack.afterKeyToInstall(actions.battery.shouldOffer())) },
                 )
                 is Destination.HostForm -> {
                     val previous = hosts.find { it.id == current.hostId }
                     HostFormScreen(previous, keys, busy, save = { host -> actions.saveHost(host, previous) }, close = ::pop,
-                        createKey = actions.createKey, deviceLabel = actions.deviceLabel)
+                        createKey = actions.createKey, deviceLabel = actions.deviceLabel,
+                        // A new host ends on the battery step (after the key line, with New key); an edit just closes.
+                        saved = { navigate(nav.afterHostFormSaved(previous == null && actions.battery.shouldOffer())) })
                 }
+                is Destination.KeepAlive -> KeepAliveScreen(
+                    waiting = keepAliveStep == KeepAliveStep.WAIT,
+                    allow = { actions.answerKeepAlive(true) }, notNow = { actions.answerKeepAlive(false) },
+                )
                 is Destination.HostPage -> HostPage(
                     current.hostId, hosts, terminals, connections, busy, actions, ::openTerminal, back = ::pop,
                     pickerOffered = current.hostId in offered,
@@ -494,14 +512,28 @@ fun Or2App(
         AddHostSheet(easyPair = ::easyPair, manual = ::manualHost, dismiss = { addSheet = false })
     }
     // Paired: the host and its trusted key are saved. Once the stored list shows it, go to its page and connect
-    // (the unlock is the usual one; the host key is already trusted, so no first-use prompt).
+    // (the unlock is the usual one; the host key is already trusted, so no first-use prompt). When the battery step
+    // is still to be asked, it comes first, as the last step of adding the host: it then opens the page and connects.
     val paired = (pairState as? PairState.Paired)?.host
     LaunchedEffect(paired, hosts, busy) {
         val host = paired ?: return@LaunchedEffect
         if (hosts.none { it.id == host.id } || busy) return@LaunchedEffect
         pairFlow?.consume()
         offered = offered - host.id
-        navigate(NavStack().push(Destination.HostPage(host.id)))
+        val keepAlive = actions.battery.shouldOffer()
+        navigate(NavStack.afterPaired(host.id, keepAlive))
+        if (!keepAlive) connect(listOf(host))
+    }
+    // The battery step is answered (or there is nothing left to ask: exempt meanwhile, or answered before a restore):
+    // on to the paired host's page, connecting it, or back to where the host was added from. Never during a connect:
+    // a paired host connects only after the step.
+    val keepAliveHost = (current as? Destination.KeepAlive)?.hostId
+    LaunchedEffect(keepAliveHost, keepAliveStep, loaded, busy) {
+        val hostId = keepAliveHost ?: return@LaunchedEffect
+        if (keepAliveStep != KeepAliveStep.DONE || !loaded || busy) return@LaunchedEffect
+        navigate(NavStack.decode(saved).afterKeepAlive())
+        val host = hostsNow.value.find { it.id == hostId } ?: return@LaunchedEffect
+        offered = offered - host.id
         connect(listOf(host))
     }
     // A prompt for a host whose screen is not showing still needs an answer, one dialog at a time:
@@ -509,22 +541,6 @@ fun Or2App(
     pending.dialogForOtherHost((current as? Destination.HostPage)?.hostId)?.let { (active, prompt) ->
         HostTrustDialog(prompt, busy, { actions.approve(active, prompt) }, { actions.reject(active) },
             hostLabel = hosts.find { it.id == active.host.id }?.label ?: active.host.label)
-    }
-    // Up front, in the foreground, before the first unlock: never over a terminal on a later return.
-    if (batteryExplaining) {
-        Or2Dialog(
-            onDismiss = { actions.answerBatteryExplanation(false) }, title = "Keep sessions connected",
-            confirm = {
-                TextAction("Allow", { actions.answerBatteryExplanation(true) }, modifier = Modifier.testTag("battery-allow"))
-            },
-            dismiss = { TextAction("Not now", { actions.answerBatteryExplanation(false) }, color = Or2Colors.Text, modifier = Modifier.testTag("battery-dismiss")) },
-            modifier = Modifier.testTag("battery-dialog"),
-        ) {
-            Text(
-                "Android may stop or slow or2 while it is in the background and drop your SSH connections. " +
-                    "Allow or2 to ignore battery optimisation so they stay connected. This is asked only once.",
-            )
-        }
     }
 }
 

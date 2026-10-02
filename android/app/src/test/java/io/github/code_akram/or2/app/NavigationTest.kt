@@ -82,6 +82,43 @@ class NavigationTest {
     }
 
     @Test
+    fun theBatteryStepSurvivesSavedState() {
+        val stack = NavStack().push(Destination.KeepAlive(5))
+        assertEquals("home|keepalive:5", stack.encode())
+        assertEquals(stack, NavStack.decode(stack.encode()))
+        assertEquals(Destination.KeepAlive(0), NavStack.decode("home|inbox|keepalive:0").current)
+        assertEquals(NavStack(), NavStack.decode("home|keepalive:x")) // Garbage is dropped.
+    }
+
+    @Test
+    fun easyPairEndsOnTheBatteryStepOrStraightOnTheHostPage() {
+        assertEquals(NavStack(listOf(Destination.Home, Destination.KeepAlive(5))), NavStack.afterPaired(5, keepAlive = true))
+        assertEquals(NavStack(listOf(Destination.Home, Destination.HostPage(5))), NavStack.afterPaired(5, keepAlive = false))
+        // The step leads on to the paired host's page (where it connects), wherever pairing started.
+        assertEquals(NavStack().push(Destination.HostPage(5)), NavStack.afterPaired(5, keepAlive = true).afterKeepAlive())
+        // A --manual code ends on its key line, then the step, then Home.
+        assertEquals(NavStack().push(Destination.KeepAlive(0)), NavStack.afterKeyToInstall(keepAlive = true))
+        assertEquals(NavStack(), NavStack.afterKeyToInstall(keepAlive = false))
+        assertEquals(NavStack(), NavStack.afterKeyToInstall(keepAlive = true).afterKeepAlive())
+    }
+
+    @Test
+    fun theManualFormEndsOnTheBatteryStepInItsPlaceThenReturnsWhereItWasOpened() {
+        val fromHome = NavStack().push(Destination.HostForm(0))
+        val fromInbox = NavStack().push(Destination.Inbox).push(Destination.HostForm(0))
+        assertEquals(NavStack().push(Destination.KeepAlive(0)), fromHome.afterHostFormSaved(keepAlive = true))
+        assertEquals("home|inbox|keepalive:0", fromInbox.afterHostFormSaved(keepAlive = true).encode())
+        assertEquals(NavStack(), fromHome.afterHostFormSaved(keepAlive = true).afterKeepAlive())
+        assertEquals(NavStack().push(Destination.Inbox), fromInbox.afterHostFormSaved(keepAlive = true).afterKeepAlive())
+        // No step (exempt, asked, or an edit): the form just closes.
+        assertEquals(NavStack(), fromHome.afterHostFormSaved(keepAlive = false))
+        val edit = NavStack().push(Destination.HostPage(3)).push(Destination.HostForm(3))
+        assertEquals(NavStack().push(Destination.HostPage(3)), edit.afterHostFormSaved(keepAlive = false))
+        // Anything that is not the step is left alone.
+        assertEquals(edit, edit.afterKeepAlive())
+    }
+
+    @Test
     fun aboutAndTheLicenseListArePushedOnHomeAndSurviveSavedState() {
         val stack = NavStack().push(Destination.About).push(Destination.Licenses)
         assertEquals("home|about|licenses", stack.encode())
