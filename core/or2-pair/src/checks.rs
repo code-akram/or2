@@ -482,12 +482,15 @@ fn included_files(pattern: &str, etc_ssh: &Path) -> Option<Vec<PathBuf>> {
     Some(files)
 }
 
-/// Records the first value of each keyword that matters into `settings`.
+/// Records the first value of each keyword that matters into `settings`. The enumerated values
+/// (`yes`/`no`, `none`) are compared ignoring case, as sshd does (`sshd -T` reads
+/// `PubkeyAuthentication No` as `no` and `ForceCommand None` as `none`).
 fn set(settings: &mut Settings, keyword: &str, args: &[String]) {
     let first = args.first().map(String::as_str);
+    let is = |value: &str| first.is_some_and(|first| first.eq_ignore_ascii_case(value));
     match keyword {
         "pubkeyauthentication" if settings.pubkey_authentication.is_none() && first.is_some() => {
-            settings.pubkey_authentication = Some(first != Some("no"));
+            settings.pubkey_authentication = Some(!is("no"));
         }
         "authorizedkeysfile" if settings.authorized_keys_file.is_none() => {
             settings.authorized_keys_file = Some(args.to_vec());
@@ -495,10 +498,10 @@ fn set(settings: &mut Settings, keyword: &str, args: &[String]) {
         "authorizedkeyscommand"
             if settings.authorized_keys_command.is_none() && first.is_some() =>
         {
-            settings.authorized_keys_command = Some(first != Some("none"));
+            settings.authorized_keys_command = Some(!is("none"));
         }
         "forcecommand" if settings.force_command.is_none() && first.is_some() => {
-            settings.force_command = Some(first != Some("none"));
+            settings.force_command = Some(!is("none"));
         }
         "authenticationmethods" if settings.authentication_methods.is_none() => {
             settings.authentication_methods = Some(args.join(" "));
@@ -1325,6 +1328,45 @@ mod tests {
                     .chain(&warnings)
                     .all(|w| !w.contains("sshd_config")),
                 "{config}: {fails:?} {warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sshd_config_values_are_read_ignoring_case_as_sshd_does() {
+        // Fix check of the v2 fixes: `PubkeyAuthentication No` was taken for enabled (and the
+        // code was asked for a run that could not work), `ForceCommand None` for a command (and
+        // a good host was blocked). `sshd -T` reads them as `no` and `none` (tests/sshd.rs).
+        let setup = Setup::new(banner("SSH-2.0-OpenSSH_9.9"));
+        for config in [
+            "PubkeyAuthentication No\n",
+            "PubkeyAuthentication NO\n",
+            "Match User dev\n  PubkeyAuthentication nO\n",
+        ] {
+            setup.config(config);
+            let checks = setup.run();
+            assert!(
+                texts(&checks, Level::Fail)
+                    .iter()
+                    .any(|f| f.contains("PubkeyAuthentication no")),
+                "{config}: {checks:?}"
+            );
+        }
+        for config in [
+            "ForceCommand None\n",
+            "ForceCommand NONE\n",
+            "AuthorizedKeysCommand None\n",
+            "PubkeyAuthentication Yes\n",
+            "Match User dev\n  ForceCommand None\nMatch all\n  ForceCommand /bin/true\n",
+        ] {
+            setup.config(config);
+            let checks = setup.run();
+            assert!(
+                texts(&checks, Level::Fail)
+                    .iter()
+                    .chain(&texts(&checks, Level::Warn))
+                    .all(|w| !w.contains("sshd_config")),
+                "{config}: {checks:?}"
             );
         }
     }

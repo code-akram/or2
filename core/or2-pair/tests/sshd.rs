@@ -1023,6 +1023,64 @@ fn a_forcecommand_in_sshd_config_is_not_or2_pair() {
 }
 
 #[test]
+fn the_checks_read_enumerated_values_ignoring_case_as_sshd_does() {
+    // Fix check of the v2 fixes: the checks compared `no` and `none` case-sensitively. sshd
+    // does not: `sshd -T` (the effective configuration) of the same file says `no` and `none`,
+    // and it accepts `AuthorizedKeysCommand NONE` without an `AuthorizedKeysCommandUser`
+    // (which it requires for a real command), so it reads that as `none` too.
+    if !sshd_ready() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let etc = dir.path().join("etc");
+    fs::create_dir(&etc).unwrap();
+    let host = dir.path().join("host");
+    assert!(
+        Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", "", "-f"])
+            .arg(&host)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let config = etc.join("sshd_config");
+    fs::write(
+        &config,
+        format!(
+            "Port {}\nListenAddress 127.0.0.1\nHostKey {}\nPidFile {}\nUsePAM no\nPubkeyAuthentication No\nForceCommand None\nAuthorizedKeysCommand NONE\n",
+            free_port(),
+            host.display(),
+            dir.path().join("pid").display(),
+        ),
+    )
+    .unwrap();
+    let out = Command::new("/usr/bin/sshd")
+        .arg("-T")
+        .arg("-f")
+        .arg(&config)
+        .output()
+        .unwrap();
+    let effective = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    assert!(
+        out.status.success(),
+        "{effective}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<&str> = effective.lines().collect();
+    assert!(lines.contains(&"pubkeyauthentication no"), "{effective}");
+    assert!(lines.contains(&"forcecommand none"), "{effective}");
+
+    let read = or2_pair::checks::read_sshd_config(&etc).unwrap();
+    assert_eq!(read.global.pubkey_authentication, Some(false), "No is no");
+    assert_eq!(read.global.force_command, Some(false), "None is none");
+    assert_eq!(
+        read.global.authorized_keys_command,
+        Some(false),
+        "NONE is none"
+    );
+}
+
+#[test]
 fn sshd_honours_the_expiry_time_option_this_tool_writes() {
     // The contract says `expiry-time` is OpenSSH 7.7 or newer and in local time: a key whose
     // expiry has passed is refused, one that has not is accepted. (The success tests above cover
