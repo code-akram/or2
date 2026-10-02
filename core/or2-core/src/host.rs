@@ -317,6 +317,11 @@ pub enum HostCommand {
     Capabilities {
         reply: oneshot::Sender<Result<HostCapabilities, HostError>>,
     },
+    /// The path of `mosh-server` (`None`: not installed), from the program probe alone: the
+    /// reply never waits for herdr's session listing.
+    MoshServer {
+        reply: oneshot::Sender<Result<Option<String>, HostError>>,
+    },
     ListTmux {
         reply: oneshot::Sender<Result<Vec<TmuxSession>, HostError>>,
     },
@@ -514,6 +519,16 @@ impl HostHandle {
         let (reply, response) = oneshot::channel();
         self.require_connected()?;
         self.send(HostCommand::Capabilities { reply })?;
+        await_reply(response, QUERY_TIMEOUT).await
+    }
+
+    /// The path of `mosh-server` on the host, `None` when it is not installed. Resolved by the
+    /// program probe alone (one exec round trip, cached per connection), never by herdr's
+    /// session listing, so a transport choice that awaits it is not held up by a slow herdr.
+    pub async fn mosh_server(&self) -> Result<Option<String>, HostError> {
+        let (reply, response) = oneshot::channel();
+        self.require_connected()?;
+        self.send(HostCommand::MoshServer { reply })?;
         await_reply(response, QUERY_TIMEOUT).await
     }
 

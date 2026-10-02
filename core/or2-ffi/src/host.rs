@@ -375,6 +375,14 @@ impl HostConnection {
         Ok(self.handle.capabilities().await?.into())
     }
 
+    /// The path of `mosh-server` on the host, `None` when it is not installed (API 14).
+    /// Resolved by the program probe alone (one exec round trip, cached per connection), never
+    /// by herdr's session listing: the transport choice awaits this instead of
+    /// `capabilities()`. Cancelling the coroutine drops the reply only.
+    pub async fn mosh_server(&self) -> Result<Option<String>, HostError> {
+        Ok(self.handle.mosh_server().await?)
+    }
+
     /// Most recently active first; empty when no tmux server runs.
     pub async fn list_tmux_sessions(&self) -> Result<Vec<TmuxSession>, HostError> {
         Ok(self

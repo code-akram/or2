@@ -142,7 +142,7 @@ pub(super) async fn plan(
         TerminalTarget::Shell => (None, None),
         TerminalTarget::Tmux { session_name } => {
             let path = host
-                .capabilities()
+                .programs()
                 .await
                 .map_err(remote_failure)?
                 .tmux
@@ -152,7 +152,7 @@ pub(super) async fn plan(
         }
         TerminalTarget::Herdr { session, pane_id } => {
             let path = host
-                .capabilities()
+                .programs()
                 .await
                 .map_err(remote_failure)?
                 .herdr

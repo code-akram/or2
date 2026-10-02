@@ -242,7 +242,7 @@ fn publish(driver: &mut SessionDriver, frame: Frame) {
 ///
 /// The host uses the production trust check against the request's trusted keys with the same
 /// per-process host key as `contract_probe_session`, then reports `Connected { 0 }`.
-/// `capabilities` (which reports a `mosh-server`) and `list_tmux_sessions` return fixed data. `focus_herdr_pane` succeeds for the
+/// `capabilities` (which reports a `mosh-server`), `mosh_server` (its path) and `list_tmux_sessions` return fixed data. `focus_herdr_pane` succeeds for the
 /// probe view's panes (`w1:p1`, `w1:p2`, `w2:p1`) and is `PaneNotFound` for any other id; the
 /// focused pane then shows as `focused` in the views of watches started afterwards. `open_terminal` returns a
 /// session served by the M1 probe script without host-key states (`Connecting` to
@@ -353,6 +353,9 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
         match driver.next_command().await {
             HostCommand::Capabilities { reply } => {
                 let _ = reply.send(Ok(probe_capabilities()));
+            }
+            HostCommand::MoshServer { reply } => {
+                let _ = reply.send(Ok(probe_capabilities().mosh_server));
             }
             HostCommand::ListTmux { reply } => {
                 let _ = reply.send(Ok(probe_tmux_sessions()));

@@ -268,6 +268,8 @@ enum HerdrList {
     Json(&'static str),
     /// herdr exits with an error.
     Fails,
+    /// herdr never answers (a wedged herdr server).
+    Hang,
 }
 
 /// What the server does with a `direct-streamlocal@openssh.com` open.
@@ -518,6 +520,7 @@ impl server::Handler for Server {
                     session.extended_data(channel, 1, b"herdr: boom\n".to_vec())?;
                     finish(session, channel, 1)
                 }
+                HerdrList::Hang => Ok(()),
             };
         }
         if command.starts_with("sh -c") && command.contains("or2:list-begin") {
@@ -539,6 +542,12 @@ impl server::Handler for Server {
                     HerdrList::Fixture => (HERDR_LISTING, 0),
                     HerdrList::Json(json) => (json, 0),
                     HerdrList::Fails => ("", 1),
+                    HerdrList::Hang => {
+                        // herdr's path, then a listing that never ends.
+                        output.push_str("or2:list-begin\n");
+                        session.data(channel, output.into_bytes())?;
+                        return Ok(());
+                    }
                 };
                 output.push_str(&format!("or2:list-begin\n{json}\nor2:list-end:{status}\n"));
             }
@@ -1355,6 +1364,69 @@ fn the_capability_probe_reads_herdr_sessions_through_the_herdr_client() {
         ]
     );
     fixture.handle.disconnect();
+}
+
+#[test]
+fn mosh_server_and_tmux_resolve_from_the_program_probe_while_the_herdr_listing_hangs() {
+    const PROBE_WITH_MOSH: &str = "or2:tmux:/fake/tmux\nor2:herdr:/fake/herdr\n\
+        or2:mosh-server:/fake/mosh-server\nor2:locale:C.UTF-8\nor2:end\n";
+    let exec_timeout = Duration::from_secs(3);
+    let fixture = Fixture::connected_with(exec_timeout, PROBE_WITH_MOSH);
+    *fixture.shared.herdr_list.lock().unwrap() = HerdrList::Hang;
+    let handle = &fixture.handle;
+    std::thread::scope(|scope| {
+        // The whole probe starts first and is held up by the listing until its bound.
+        let started = std::time::Instant::now();
+        let whole = scope.spawn(|| runtime().block_on(handle.capabilities()));
+        wait_for(|| fixture.shared.probes.load(Ordering::SeqCst) == 1);
+
+        let asked = std::time::Instant::now();
+        assert_eq!(
+            runtime().block_on(handle.mosh_server()),
+            Ok(Some("/fake/mosh-server".into()))
+        );
+        // tmux needs only the program probe's path too.
+        *fixture.shared.listing.lock().unwrap() = Listing::Sessions;
+        assert_eq!(
+            runtime()
+                .block_on(handle.list_tmux_sessions())
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "waited for herdr's listing: {:?}",
+            asked.elapsed()
+        );
+        assert!(!whole.is_finished(), "the listing still hangs");
+
+        let caps = whole.join().unwrap().unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert_eq!(caps.herdr.as_deref(), Some("/fake/herdr"));
+        assert_eq!(caps.mosh_server.as_deref(), Some("/fake/mosh-server"));
+        assert!(caps.herdr_sessions.is_empty(), "a hung herdr lists nothing");
+    });
+    // One program probe served the whole probe, mosh_server() and the tmux listing.
+    assert_eq!(fixture.shared.probes.load(Ordering::SeqCst), 1);
+    fixture.handle.disconnect();
+}
+
+#[test]
+fn mosh_server_is_none_without_it_and_runs_only_the_program_probe() {
+    let fixture = Fixture::connected_with(Duration::from_secs(5), PROBE_WITH_HERDR);
+    *fixture.shared.herdr_list.lock().unwrap() = HerdrList::Hang;
+    let asked = std::time::Instant::now();
+    assert_eq!(runtime().block_on(fixture.handle.mosh_server()), Ok(None));
+    assert!(asked.elapsed() < Duration::from_secs(1));
+    assert_eq!(runtime().block_on(fixture.handle.mosh_server()), Ok(None));
+    assert_eq!(fixture.shared.probes.load(Ordering::SeqCst), 1, "cached");
+    fixture.handle.disconnect();
+    wait_for(|| matches!(fixture.handle.state(), HostState::Closed(_)));
+    assert_eq!(
+        runtime().block_on(fixture.handle.mosh_server()),
+        Err(HostError::Closed)
+    );
 }
 
 // ---------------------------------------------------------------------------------------

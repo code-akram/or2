@@ -129,6 +129,9 @@ impl From<TransportEnd> for HostEvent {
 pub(super) struct SshHost {
     handle: Handle<Client<HostEvent>>,
     exec_timeout: Duration,
+    /// The program probe (programs and locale), cached the moment its script returns.
+    programs: OnceCell<HostCapabilities>,
+    /// The whole probe: the programs above and herdr's first session listing.
     capabilities: OnceCell<HostCapabilities>,
     /// The last herdr session list read successfully (the probe's own list until then), which
     /// the herdr watches and pane focuses find their sockets in.
@@ -187,6 +190,7 @@ impl SshHost {
         Arc::new_cyclic(|me| SshHost {
             handle,
             exec_timeout,
+            programs: OnceCell::new(),
             capabilities: OnceCell::new(),
             sessions: probe::SessionsCache::new(),
             focus: herdr::FocusGate::new(),
@@ -206,11 +210,24 @@ impl SshHost {
             .await;
     }
 
-    /// The probe's answer, run once per connection. A failed probe is not cached.
+    /// The program probe's answer (programs and locale, `herdr_sessions` empty), run once per
+    /// connection and available as soon as its script returns: every wait for a program's path
+    /// (terminal opens, mosh starts, `mosh_server()`, tmux listings, pane focuses) uses this,
+    /// never herdr's listing. A failed probe is not cached.
+    pub(super) async fn programs(&self) -> Result<&HostCapabilities, RemoteError> {
+        self.programs
+            .get_or_try_init(|| probe::probe_programs(self))
+            .await
+    }
+
+    /// The whole probe's answer, the program probe (shared with [`SshHost::programs`]) and
+    /// herdr's listing run at once, once per connection. A failed probe is not cached.
     pub(super) async fn capabilities(&self) -> Result<&HostCapabilities, RemoteError> {
         self.capabilities
             .get_or_try_init(|| async {
-                let (capabilities, entries) = probe::probe_entries(self).await?;
+                let programs = async { self.programs().await.cloned() };
+                let (capabilities, entries) =
+                    probe::probe_within(self, probe::HERDR_LIST_TIMEOUT, programs).await?;
                 // The listing the probe read is what the watches and focuses discover from.
                 if let Some(entries) = entries {
                     self.sessions.directory().seed(entries);
@@ -1005,6 +1022,22 @@ fn dispatch<D: DatagramTransport>(
                 }
             });
         }
+        HostCommand::MoshServer { reply } => {
+            let host = Arc::clone(host);
+            let (mut closing, tracker) = (closing.clone(), tracker.clone());
+            runtime().spawn(async move {
+                let _tracker = tracker;
+                // The program probe alone: never held up by herdr's listing.
+                let query = async {
+                    let programs = host.programs().await.map_err(host_error)?;
+                    Ok(programs.mosh_server.clone())
+                };
+                tokio::select! {
+                    result = query => { let _ = reply.send(result); }
+                    _ = closed_reason(&mut closing) => {}
+                }
+            });
+        }
         HostCommand::ListTmux { reply } => {
             let host = Arc::clone(host);
             let (mut closing, tracker) = (closing.clone(), tracker.clone());
@@ -1133,7 +1166,7 @@ fn host_error(error: RemoteError) -> HostError {
 }
 
 async fn list_tmux(host: &SshHost) -> Result<Vec<TmuxSession>, HostError> {
-    let capabilities = host.capabilities().await.map_err(host_error)?;
+    let capabilities = host.programs().await.map_err(host_error)?;
     let Some(path) = &capabilities.tmux else {
         return Err(HostError::NotInstalled {
             program: "tmux".into(),
@@ -1153,7 +1186,7 @@ async fn focus_herdr_pane(
     session: Option<String>,
     pane_id: String,
 ) -> Result<(), HostError> {
-    let capabilities = host.capabilities().await.map_err(host_error)?;
+    let capabilities = host.programs().await.map_err(host_error)?;
     let Some(path) = &capabilities.herdr else {
         return Err(HostError::NotInstalled {
             program: "herdr".into(),

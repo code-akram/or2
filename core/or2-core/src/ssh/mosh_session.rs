@@ -265,7 +265,7 @@ async fn prepare(
     started: &Started,
 ) -> Result<Option<MoshParams>, SessionFailure> {
     let host: &SshHost = shared;
-    let capabilities = host.capabilities().await.map_err(remote_failure)?;
+    let capabilities = host.programs().await.map_err(remote_failure)?;
     if capabilities.mosh_server.is_none() {
         return Err(not_installed("mosh-server"));
     }

@@ -11,6 +11,11 @@
 //! path). The host driver caches the answer for the connection's lifetime (Rust has no
 //! storage), seeds the connection's [`Directory`] with the listing, and re-reads only the
 //! session list when `capabilities()` is queried ([`SessionsCache`]).
+//!
+//! The two halves are published apart: the program probe ([`probe_programs`]) is cached on its
+//! own the moment [`PROBE_SCRIPT`] returns, and everything that needs only a program's path (a
+//! tmux or herdr terminal, a mosh start, `mosh_server()`) waits for it alone, never for herdr's
+//! listing ([`probe_within`]).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -100,25 +105,39 @@ pub async fn probe<H: RemoteHost>(host: &H) -> Result<HostCapabilities, RemoteEr
 pub async fn probe_entries<H: RemoteHost>(
     host: &H,
 ) -> Result<(HostCapabilities, Option<Vec<SessionEntry>>), RemoteError> {
-    probe_within(host, HERDR_LIST_TIMEOUT).await
+    probe_within(host, HERDR_LIST_TIMEOUT, probe_programs(host)).await
 }
 
-async fn probe_within<H: RemoteHost>(
-    host: &H,
-    herdr_limit: Duration,
-) -> Result<(HostCapabilities, Option<Vec<SessionEntry>>), RemoteError> {
-    let (programs, herdr) = tokio::join!(
-        host.exec_script(PROBE_SCRIPT),
-        tokio::time::timeout(herdr_limit, host.exec_script(HERDR_SCRIPT)),
-    );
-    let output = programs?;
+/// The program probe alone: [`PROBE_SCRIPT`]'s programs and locale, `herdr_sessions` empty.
+/// One exec round trip, never held up by herdr's session listing: the host driver caches it
+/// apart from the listing, so a terminal open (which needs only a program's path) and
+/// `mosh_server()` resolve as soon as this script returns, however long herdr takes.
+pub async fn probe_programs<H: RemoteHost>(host: &H) -> Result<HostCapabilities, RemoteError> {
+    let output = host.exec_script(PROBE_SCRIPT).await?;
     if !output.success() {
         return Err(RemoteError::Io(format!(
             "the capability probe exited with status {:?}",
             output.status
         )));
     }
-    let mut caps = parse(&String::from_utf8_lossy(&output.stdout));
+    Ok(parse(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// The whole probe: `programs` (the program probe: [`probe_programs`], or the host driver's
+/// cache of it, which publishes its answer to every waiter the moment [`PROBE_SCRIPT`] returns)
+/// and [`HERDR_SCRIPT`] in its own exec at the same time, the listing bounded by
+/// `herdr_limit`. The listing only fills `herdr_sessions`; nothing that needs a program's path
+/// waits for it.
+pub(crate) async fn probe_within<H: RemoteHost>(
+    host: &H,
+    herdr_limit: Duration,
+    programs: impl Future<Output = Result<HostCapabilities, RemoteError>>,
+) -> Result<(HostCapabilities, Option<Vec<SessionEntry>>), RemoteError> {
+    let (programs, herdr) = tokio::join!(
+        programs,
+        tokio::time::timeout(herdr_limit, host.exec_script(HERDR_SCRIPT)),
+    );
+    let mut caps = programs?;
     let mut entries = None;
     if caps.herdr.is_some() {
         match herdr {
@@ -724,5 +743,49 @@ mod tests {
         // The next call reads the listing.
         let again = cache.capabilities(&host, &caps).await.unwrap();
         assert_eq!(names(&again), ["other"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_program_probe_is_published_when_its_script_returns_not_with_the_listing() {
+        let host = Stub {
+            herdr: Herdr::Hangs,
+        };
+        let programs = tokio::sync::OnceCell::new();
+        let start = tokio::time::Instant::now();
+        let (whole, published) = tokio::join!(
+            probe_within(&host, HERDR_LIST_TIMEOUT, async {
+                programs
+                    .get_or_try_init(|| probe_programs(&host))
+                    .await
+                    .cloned()
+            }),
+            async {
+                // A terminal open waiting on the same cache while the probe runs.
+                tokio::task::yield_now().await;
+                let caps = programs
+                    .get_or_try_init(|| probe_programs(&host))
+                    .await
+                    .unwrap()
+                    .clone();
+                (caps, start.elapsed())
+            },
+        );
+        let (caps, waited) = published;
+        assert_eq!(caps.tmux.as_deref(), Some("/fake/tmux"));
+        assert_eq!(
+            waited,
+            Duration::ZERO,
+            "the programs did not wait for herdr"
+        );
+        assert!(start.elapsed() >= HERDR_LIST_TIMEOUT, "the listing hung");
+        let (whole, entries) = whole.unwrap();
+        assert_eq!(whole.herdr.as_deref(), Some("/fake/herdr"));
+        assert!(entries.is_none() && whole.herdr_sessions.is_empty());
+        // The program probe alone never runs herdr's script.
+        let alone = tokio::time::timeout(Duration::from_secs(1), probe_programs(&host))
+            .await
+            .expect("the program probe ran the hung listing")
+            .unwrap();
+        assert_eq!(alone, caps);
     }
 }
