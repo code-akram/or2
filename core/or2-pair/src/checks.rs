@@ -118,7 +118,8 @@ pub const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 /// output pipe open long after the shell has exited, so the pipe is read inside the same
 /// deadline, and at the limit the shell's process group (on Unix the shell gets one of its own,
 /// so that its background jobs are in it) is killed and whatever was read is used. Nothing waits
-/// on the reading thread past the limit.
+/// on the reading thread past the limit. SIGINT, SIGTERM, SIGHUP or SIGQUIT while it runs kill
+/// that group too before they end `or2-pair` ([`crate::signals::spawn_group`]).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemShell;
 
@@ -140,8 +141,13 @@ impl ShellProbe for SystemShell {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        // On Unix in a process group of its own, which an ending signal kills before it ends
+        // this process (the group does not get the terminal's Ctrl-C): `_ending` lives until
+        // the shell is done with.
         #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut shell_command, 0);
+        let (mut child, _ending) = crate::signals::spawn_group(&mut shell_command)
+            .map_err(|error| format!("it could not be started: {error}"))?;
+        #[cfg(not(unix))]
         let mut child = shell_command
             .spawn()
             .map_err(|error| format!("it could not be started: {error}"))?;

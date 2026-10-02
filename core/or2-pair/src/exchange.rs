@@ -38,7 +38,7 @@ use crate::authorized_keys::{self, Edit, Replaced};
 use crate::bootstrap::PairingId;
 use crate::date::DateTime;
 use crate::keyline::KeyLine;
-use crate::state::{Done, Held, State, StateDir, WARNING_CHARS};
+use crate::state::{Done, Held, State, StateDir, record_warning};
 
 pub const VERSION: u32 = 2;
 /// The request line is at most this many bytes.
@@ -313,7 +313,7 @@ fn commit(
         }
     };
     if let Some(warning) = committed.warning {
-        done.warning = Some(warning.chars().take(WARNING_CHARS).collect());
+        done.warning = Some(record_warning(&warning));
         let _ = dir.rewrite_done(id, &done);
     }
     Ok(replaced)

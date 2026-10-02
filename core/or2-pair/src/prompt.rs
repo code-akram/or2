@@ -64,8 +64,21 @@ mod echo {
     /// installs it again after the stop.
     static STOP_HANDLED: AtomicBool = AtomicBool::new(false);
 
+    /// Set while the guard puts the terminal back: [`resume`] then leaves echo alone.
+    static CLOSING: AtomicBool = AtomicBool::new(false);
+
     /// The signals that end the process while the code is typed.
     const ENDING: [libc::c_int; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
+
+    /// Every signal the guard handles: blocked while it puts things back.
+    const HANDLED: [libc::c_int; 6] = [
+        libc::SIGINT,
+        libc::SIGTERM,
+        libc::SIGHUP,
+        libc::SIGQUIT,
+        libc::SIGTSTP,
+        libc::SIGCONT,
+    ];
 
     /// Installs `handler` for `signal` (no flags: a blocked read returns early); the previous
     /// action goes into `old` when asked for.
@@ -134,10 +147,10 @@ mod echo {
 
     /// SIGCONT: the process goes on with the prompt, so echo goes off again (what the terminal
     /// has now, without `ECHO` and `ECHONL`), and SIGTSTP is handled again (the stop gave it its
-    /// default action). Nothing once the guard is gone.
+    /// default action). Nothing once the guard is putting things back, or gone.
     extern "C" fn resume(_: libc::c_int) {
         let fd = SAVED_FD.load(Ordering::SeqCst);
-        if fd < 0 {
+        if fd < 0 || CLOSING.load(Ordering::SeqCst) {
             return;
         }
         // SAFETY: `tcgetattr`, `tcsetattr` and `sigaction` are async-signal-safe; `stop` is
@@ -179,6 +192,7 @@ mod echo {
             }
             // SAFETY: see `Saved`; no handler reads it before `SAVED_FD` is set below.
             unsafe { (*SAVED.0.get()).write(original) };
+            CLOSING.store(false, Ordering::SeqCst);
             SAVED_FD.store(fd, Ordering::SeqCst);
             let handled = ENDING
                 .iter()
@@ -224,21 +238,76 @@ mod echo {
     }
 
     impl Drop for EchoOff {
+        /// One protected sequence: the handled signals are blocked in this thread, the settings
+        /// and the previous handlers are put back, and only then is the mask restored, so a
+        /// signal that arrived meanwhile is delivered to the previous handlers, after echo is
+        /// back. A handler that runs on another thread meanwhile still finds the descriptor until
+        /// the settings are back, and puts them back itself. (Fix check of the v2 fixes: an
+        /// ending signal after the handlers were told there was no terminal, and before the
+        /// restore, re-raised without restoring, and echo stayed off.)
         fn drop(&mut self) {
-            // First, so that a SIGCONT arriving now does not switch echo off again.
-            SAVED_FD.store(-1, Ordering::SeqCst);
+            // SAFETY: `sigset_t` is plain old data that `sigemptyset` initialises.
+            let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
+            let mut before: libc::sigset_t = unsafe { std::mem::zeroed() };
+            // SAFETY: both sets are valid; `pthread_sigmask` changes only this thread's mask.
+            let masked = unsafe {
+                libc::sigemptyset(&mut blocked);
+                for signal in HANDLED {
+                    libc::sigaddset(&mut blocked, signal);
+                }
+                libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut before) == 0
+            };
+            // A SIGCONT from here on does not switch echo off again.
+            CLOSING.store(true, Ordering::SeqCst);
             STOP_HANDLED.store(false, Ordering::SeqCst);
+            #[cfg(feature = "test-support")]
+            hooks::teardown();
             if let Some(original) = &self.original {
                 // SAFETY: `original` came from `tcgetattr` on this descriptor.
                 unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, original) };
             }
+            // Only once the settings are back: until here an ending signal restores them itself.
+            SAVED_FD.store(-1, Ordering::SeqCst);
             for (signal, old) in self.handlers.drain(..) {
                 // SAFETY: `old` is what `sigaction` reported before.
                 unsafe { libc::sigaction(signal, &old, std::ptr::null_mut()) };
             }
+            if masked {
+                // SAFETY: `before` is the mask `pthread_sigmask` reported above.
+                unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &before, std::ptr::null_mut()) };
+            }
+        }
+    }
+
+    /// Test-only (`test-support`): a function [`EchoOff`]'s teardown calls after the handlers
+    /// are told the terminal is being put back and before it is, the window a signal must not
+    /// spoil.
+    #[cfg(feature = "test-support")]
+    pub mod hooks {
+        use std::sync::Mutex;
+
+        static TEARDOWN: Mutex<Option<fn()>> = Mutex::new(None);
+
+        /// Calls `hook` inside every later teardown.
+        pub fn on_teardown(hook: fn()) {
+            *TEARDOWN
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
+        }
+
+        pub(super) fn teardown() {
+            let hook = *TEARDOWN
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(hook) = hook {
+                hook();
+            }
         }
     }
 }
+
+#[cfg(all(unix, feature = "test-support"))]
+pub use echo::hooks;
 
 #[cfg(unix)]
 fn read_line_from_stdin() -> Option<Zeroizing<String>> {

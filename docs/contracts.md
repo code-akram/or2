@@ -2482,13 +2482,24 @@ restrict,command="<exe> enroll <id>",expiry-time="<YYYYMMDDHHMM>Z"
   the same 5 s; at the limit the group is killed and what was read is used, so a job an rc file starts
   in the background that keeps the output open does not hold the check (a shell that exited 0 with the
   line passes). (Fix check of the v2 fixes: the output was read to its end after the shell exited.)
+  That group does not get the terminal's Ctrl-C, and the run's own handlers are not armed yet, so while
+  the shell runs SIGINT, SIGTERM, SIGHUP and SIGQUIT (those not ignored) go to a handler that kills the
+  group with SIGKILL and then ends `or2-pair` with the signal's default action, as before; a signal
+  that arrives while the shell is being started is acted on as soon as its group is known, and the
+  previous actions come back when the check ends. (Fix check of the v2 fixes, round 2: Ctrl-C during
+  the check ended `or2-pair` and left the shell running.)
 - **The lock.** Every change of `authorized_keys` and of a run's state is made while holding an
   exclusive `flock` on `~/.ssh/or2-pair/lock` (a stable file, created 0600 and never removed, opened with
   the checked-handle rules: no link followed, regular, owner, one name, StrictModes). Its mode is 0600
-  whatever the umask: a new one is set to 0600 (`fchmod`), and so is one of the account's own with
-  another mode, even one the account cannot open (it is checked by name first, then `fchmodat`); one
-  of another account that cannot be opened is refused with a message that says to remove it. (Fix
-  check of the v2 fixes: under umask 0777 it was created 000, and every later lock failed.) One lock for
+  whatever the umask: a new one is set to 0600 (`fchmod`), and so is any regular file of the account's
+  own with one name and another mode, before the StrictModes check: one the account cannot open (it is
+  checked by name first, then `fchmodat`) and one that group or others may write (`0666`, `0620`,
+  `0060`; it holds nothing, and `~/.ssh/or2-pair` is the account's, 0700). What cannot be repaired is
+  refused with a message about the lock file, not about `authorized_keys`, that says what it is and to
+  remove it: a symbolic link, a directory, anything else that is not a regular file (a FIFO), a file of
+  another account, a file with another hard link; its mode is left as it is. (Fix check of the v2
+  fixes: under umask 0777 it was created 000, and every later lock failed; round 2: a lock writable by
+  group or others was refused with the StrictModes message for `authorized_keys`.) One lock for
   everything (the bootstrap append, `enroll`'s commit, the foreground's cleanup, the sweep), so no two of
   them interleave. A lock that is taken is tried again every 50 ms: `or2-pair` waits up to 3 s (a second
   signal during a cleanup ends the waiting after one more try), `enroll` up to 2 s. (Version 2 as first
@@ -2626,8 +2637,11 @@ restrict,command="<exe> enroll <id>",expiry-time="<YYYYMMDDHHMM>Z"
     refuses. The run's lock on the state file goes with it.
 - The state file's `id`, `deadline` (Unix seconds, the start plus 5 minutes), `uid` and `fingerprint`
   (`SHA256:…` of the bootstrap key) are JSON; `<id>.done` is `{"device":…,"fingerprint":…}`, plus
-  `"warning":…` (at most 1024 characters) when something failed after the key file took its new
-  contents. Both are read with a 4 KiB limit.
+  `"warning":…` when something failed after the key file took its new contents: control characters
+  replaced by spaces, and cut at a character boundary so that its JSON form (escapes included,
+  without the quotes) is at most 1024 bytes. Both are read with a 4 KiB limit, which a rewritten
+  `.done` therefore always fits. (Fix check of the v2 fixes, round 2: the warning was cut to 1024
+  characters, and a control character is six bytes of JSON.)
 
 ## The exchange
 
@@ -2725,8 +2739,14 @@ its default action; the previous handlers come back with the guard). SIGTSTP (Ct
 process, and the prompt is still waiting when it goes on: a SIGCONT handler, installed for the guard's
 life (even when SIGCONT was ignored), switches echo off again (the terminal's settings at that moment
 without `ECHO` and `ECHONL`) and handles SIGTSTP again, so the rest of the code is not echoed either.
-The guard stops the handlers from touching the terminal before it puts the settings back. (Fix check
-of the v2 fixes: after Ctrl-Z and `fg` the rest of the code was echoed.) Something that is not a
+(Fix check of the v2 fixes: after Ctrl-Z and `fg` the rest of the code was echoed.) The guard's
+teardown is one protected sequence: it blocks the six handled signals in its thread
+(`pthread_sigmask`), tells the SIGCONT handler to leave echo alone, puts the settings back, only then
+tells the ending handlers there is nothing left to restore, puts the previous handlers back, and
+restores the signal mask, so a signal that arrived meanwhile is delivered to the previous handlers
+(the default action, normally) after echo is back; one that another thread takes meanwhile still
+restores the settings itself. (Fix check of the v2 fixes, round 2: the guard told its handlers there
+was no terminal before restoring it, and an ending signal in between left echo off.) Something that is not a
 terminal is left alone. (Review of the v2 integration: echo was left on, so `K` reached scrollback and
 session recorders.) It is read from descriptor 0 a byte at a time into a zeroizing buffer, and
 `PairCode` is zeroized on drop.
@@ -2928,7 +2948,10 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
   refused in words with the old file kept, a directory sync that fails after the rename a warning with
   the change kept (test-only fault injection: `safefs::fault`); the state directory checks, the
   complete publish (nothing visible before it), the liveness lock, the one lock, a lock of the account
-  with an unusable mode repaired; `enroll` (missing,
+  with an unusable or group/other-writable mode repaired (`0000` to `0644`, `0666`, `0620`, `0060`), a
+  directory, a FIFO, another account's file and a hard-linked file refused in words about the lock; a
+  rewritten `.done` whose warning is control characters, escapes or multi-byte text still read back
+  (and one cut by characters is not); `enroll` (missing,
   expired, foreign, unheld state; bounded request; `.done`; a `.done` that cannot be written installs
   nothing; a replacement that fails takes the `.done` back; a sync that fails after the rename keeps the
   `.done`, with the warning, and answers `ok`; the lock held); the foreground's endings
@@ -2941,7 +2964,11 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
   and back after, nothing echoed, echo back after Ctrl-C at the prompt, the echo guard on a panic);
   what needs a process of its own (`tests/process.rs`, the other half in a child: the prompt on a
   pseudo-terminal in its own process group, a prefix typed, SIGTSTP, SIGCONT, the rest typed, nothing
-  echoed and echo back after; the lock under umask 0777 created 0600 and taken twice);
+  echoed and echo back after; the prompt ending while SIGINT is raised in its teardown window, or
+  SIGTERM sent to the process, through a test-only teardown hook (`test-support`), with echo back
+  after; Ctrl-C (SIGINT) during a login-shell check whose shell and its background job are slow, which
+  leaves none of the shell's process group running; the lock under umask 0777 created 0600 and taken
+  twice);
   cleanup on SIGINT, SIGTERM and SIGHUP of the built binary; SIGKILL of the built testhost (`enroll`
   refuses, the next run sweeps); `--manual`; the removed flags; the QR read back with `rqrr`.
 - **End to end against a disposable sshd** (gated like the existing sshd tests, required in the full

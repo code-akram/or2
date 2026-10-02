@@ -93,8 +93,9 @@ pretend sshd banner (nothing of the user's `~/.ssh`, sshd, tmux or herdr is read
 direct call of the forced command's code. `tests/cli.rs`: the built binary (usage, the removed `--bind` and
 `--pair-port`, `enroll`, and the cleanup on SIGINT, SIGTERM, SIGHUP and the timeout). `tests/manual_keys.rs`:
 the no-key-installation (Windows) behaviour. `tests/process.rs`: what needs a process of its own, its other half
-run in a child (this test binary again): the code prompt on a pseudo-terminal through Ctrl-Z and `fg`, and the lock
-file under umask 0777. `tests/sshd.rs`: the end to end suite against a **disposable
+run in a child (this test binary again): the code prompt on a pseudo-terminal through Ctrl-Z and `fg`, an ending
+signal in the prompt's teardown (a `test-support` hook), Ctrl-C during a slow login-shell check (no process of the
+shell's group left running; Linux, read from `/proc`), and the lock file under umask 0777. `tests/sshd.rs`: the end to end suite against a **disposable
 `sshd`** (its own host key, config and `authorized_keys`, a loopback port, run as the current user): the built
 `or2-pair-testhost` pairs with a test-only russh phone (derives the bootstrap key, pins the host key,
 authenticates, runs the exchange through the forced command, then logs in with the key it handed over), plus

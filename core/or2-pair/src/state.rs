@@ -73,9 +73,33 @@ pub struct Done {
     pub warning: Option<String>,
 }
 
-/// A [`Done::warning`] is cut to this many characters, so the record stays well inside its
-/// size limit.
-pub const WARNING_CHARS: usize = 1024;
+/// A [`Done::warning`] takes at most this many bytes of the record (as JSON, without its
+/// quotes), so the record stays well inside [`MAX_BYTES`] whatever the warning says.
+pub const WARNING_BYTES: usize = 1024;
+
+/// `text` made fit for [`Done::warning`]: control characters become spaces (JSON would write
+/// each as up to six bytes), and it is cut, at a character boundary, where its JSON form would
+/// pass [`WARNING_BYTES`]. (Fix check of the v2 fixes: it was cut to 1024 characters, which
+/// escaping could grow past the 4 KiB the record is read with.)
+pub fn record_warning(text: &str) -> String {
+    let mut out = String::new();
+    let mut size = 0;
+    for c in text.chars() {
+        let c = if c.is_control() { ' ' } else { c };
+        // What `serde_json` writes for it: `"` and `\` are escaped, the rest is as is.
+        let encoded = if matches!(c, '"' | '\\') {
+            2
+        } else {
+            c.len_utf8()
+        };
+        if size + encoded > WARNING_BYTES {
+            break;
+        }
+        size += encoded;
+        out.push(c);
+    }
+    out
+}
 
 /// The `or2-pair/lock` held exclusively: `authorized_keys` and the state may be changed. Dropping
 /// it releases the lock.
@@ -100,6 +124,30 @@ pub struct StateDir {
 
 fn bad(path: &std::path::Path, what: &str) -> io::Error {
     refuse(format!("{} {what}", path.display()))
+}
+
+/// What the lock file must be before its mode is repaired: a regular file of the account with
+/// one name. Anything else is refused in words about the lock (not about `authorized_keys`),
+/// with the fix: it holds nothing, so removing it is safe.
+fn check_lock(stat: &libc::stat, uid: u32, path: &std::path::Path) -> io::Result<()> {
+    let why = match kind(stat) {
+        libc::S_IFREG if stat.st_uid != uid => format!(
+            "it belongs to another user (user id {}), not to the account or2-pair runs as",
+            stat.st_uid
+        ),
+        libc::S_IFREG if stat.st_nlink > 1 => format!(
+            "it has another hard link ({} names for one file), so changing its mode would change the other name too",
+            stat.st_nlink
+        ),
+        libc::S_IFREG => return Ok(()),
+        libc::S_IFDIR => "it is a directory".to_owned(),
+        libc::S_IFLNK => "it is a symbolic link, which or2-pair does not follow".to_owned(),
+        _ => "it is not a regular file (a FIFO, a socket or a device)".to_owned(),
+    };
+    Err(refuse(format!(
+        "or2-pair cannot use its lock file {}: {why}. Remove it (it holds nothing) and run again",
+        path.display()
+    )))
 }
 
 impl StateDir {
@@ -167,36 +215,41 @@ impl StateDir {
         }
     }
 
-    /// Opens the lock file, creating it, checked like any other file, and readable and writable
-    /// by the account whatever the umask: a new one gets 0600 (the umask could leave it 000,
-    /// and then no later run could open it), and so does one of the account's own with another
-    /// mode, even one it cannot open. One that belongs to another account is refused.
+    /// Opens the lock file, creating it, readable and writable by the account whatever the
+    /// umask: a new one gets 0600 (the umask could leave it 000, and then no later run could open
+    /// it), and so does one of the account's own with another mode (it holds nothing, and this
+    /// directory is the account's, 0700): one it cannot open, and one that group or others may
+    /// write (0666, 0620, 0060). The repair comes before the checks of any other file (StrictModes
+    /// included), so they pass. What cannot be repaired is refused with what it is and the advice
+    /// to remove it: a symbolic link, a directory, something else that is not a regular file, a
+    /// file of another account, a file with another hard link.
     fn open_lock(&self, path: &std::path::Path) -> io::Result<OwnedFd> {
         let dir = self.fd.as_raw_fd();
         let open = || open_file(dir, LOCK, path, libc::O_RDWR | libc::O_CREAT, 0o600);
         let fd = match open() {
             Ok(fd) => fd,
-            Err(error) if error.raw_os_error() == Some(libc::EACCES) => {
-                // It is there, and its mode does not let this account open it.
-                let stat = stat_at(dir, LOCK)?;
-                check_file(&stat, self.uid, path).map_err(|why| {
-                    refuse(format!(
-                        "or2-pair cannot open its lock file ({error}): {why}. Remove {} (it holds nothing) and run again",
-                        path.display()
-                    ))
-                })?;
+            Err(error) => {
+                // Say what is in the way, by name (nothing is opened or followed).
+                let Ok(stat) = stat_at(dir, LOCK) else {
+                    return Err(error);
+                };
+                check_lock(&stat, self.uid, path)?;
+                if error.raw_os_error() != Some(libc::EACCES) {
+                    return Err(error);
+                }
+                // A file of the account whose mode does not let it open it.
                 chmod_at(dir, LOCK, 0o600)?;
                 open()?
             }
-            Err(error) => return Err(error),
         };
         let stat = fstat(fd.as_raw_fd())?;
-        check_file(&stat, self.uid, path)?;
+        check_lock(&stat, self.uid, path)?;
         // `st_mode` is 16 bits wide on macOS and 32 on Linux.
         #[allow(clippy::useless_conversion)]
         if u32::from(stat.st_mode) & 0o7777 != 0o600 {
             fchmod(fd.as_raw_fd(), 0o600)?;
         }
+        check_file(&fstat(fd.as_raw_fd())?, self.uid, path)?;
         Ok(fd)
     }
 
@@ -637,7 +690,9 @@ mod tests {
         let (home, account) = ssh_home();
         let dir = StateDir::open(&account, true).unwrap().unwrap();
         let lock = home.path().join(".ssh").join(DIR).join(LOCK);
-        for mode in [0o000, 0o200, 0o400, 0o644] {
+        // Fix check of the v2 fixes: one that group or others may write (0666, 0620, 0060) was
+        // refused with the StrictModes message for authorized_keys instead of repaired.
+        for mode in [0o000, 0o200, 0o400, 0o644, 0o666, 0o620, 0o060, 0o4777] {
             fs::write(&lock, "").unwrap();
             fs::set_permissions(&lock, fs::Permissions::from_mode(mode)).unwrap();
             let held = dir.lock(Duration::ZERO, &|| false);
@@ -647,7 +702,107 @@ mod tests {
                 0o600,
                 "mode {mode:o}"
             );
+            drop(held);
             fs::remove_file(&lock).unwrap();
         }
+    }
+
+    #[test]
+    fn a_rewritten_record_stays_readable_whatever_its_warning_says() {
+        // Fix check of the v2 fixes: the warning was cut to 1024 characters, but a control
+        // character is six bytes of JSON, so a record could pass the 4 KiB it is read with.
+        let (_home, account) = ssh_home();
+        let dir = StateDir::open(&account, true).unwrap().unwrap();
+        let id = id("aaaaaaaaaaaaa");
+        let done = |warning: Option<String>| Done {
+            device: "p".repeat(32),
+            fingerprint: format!("SHA256:{}", "x".repeat(43)),
+            warning,
+        };
+        // What the cut by characters let through is indeed unreadable.
+        dir.write_done(&id, &done(None)).unwrap();
+        let by_chars: String = "\u{1}".repeat(5000).chars().take(1024).collect();
+        dir.rewrite_done(&id, &done(Some(by_chars))).unwrap();
+        assert!(dir.read_done(&id).is_err());
+
+        let nasty = [
+            "\u{1}".repeat(5000),
+            "\"\\".repeat(3000),
+            "é€😀".repeat(1000),
+            format!("{}\n{}", "a".repeat(1023), "\u{7f}".repeat(2000)),
+        ];
+        for text in nasty {
+            let warning = record_warning(&text);
+            assert!(!warning.chars().any(char::is_control), "{warning:?}");
+            let json = serde_json::to_string(&warning).unwrap();
+            assert!(json.len() <= WARNING_BYTES + 2, "{} bytes", json.len());
+            assert!(text.starts_with(&warning) || text.chars().any(char::is_control));
+            dir.rewrite_done(&id, &done(Some(warning.clone()))).unwrap();
+            let read = dir.read_done(&id).unwrap().expect("the record is there");
+            assert_eq!(read.warning.as_deref(), Some(warning.as_str()));
+        }
+        // A short warning is kept as it is, control characters aside.
+        assert_eq!(
+            record_warning("could not be synced\t(Input/output error)"),
+            "could not be synced (Input/output error)"
+        );
+    }
+
+    #[test]
+    fn a_lock_that_cannot_be_repaired_is_refused_in_words_about_the_lock() {
+        let (home, account) = ssh_home();
+        let dir = StateDir::open(&account, true).unwrap().unwrap();
+        let lock = home.path().join(".ssh").join(DIR).join(LOCK);
+        let refused = |dir: &StateDir, what: &str| {
+            let error = dir.lock(Duration::ZERO, &|| false).unwrap_err();
+            let text = error.to_string();
+            assert!(
+                text.contains("cannot use its lock file")
+                    && text.contains(what)
+                    && text.contains("Remove it")
+                    && !text.contains("authorized_keys"),
+                "{text}"
+            );
+        };
+
+        fs::create_dir(&lock).unwrap();
+        refused(&dir, "is a directory");
+        fs::remove_dir(&lock).unwrap();
+
+        let name = std::ffi::CString::new(lock.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `name` is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        refused(&dir, "not a regular file");
+        // Also with a mode it cannot open: still named for what it is, not repaired.
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o000)).unwrap();
+        refused(&dir, "not a regular file");
+        fs::remove_file(&lock).unwrap();
+
+        fs::write(&lock, "").unwrap();
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o666)).unwrap();
+        let other = home.path().join(".ssh").join(DIR).join("other");
+        fs::hard_link(&lock, &other).unwrap();
+        refused(&dir, "another hard link");
+        assert_eq!(
+            fs::metadata(&lock).unwrap().permissions().mode() & 0o7777,
+            0o666,
+            "a file with another name is not changed"
+        );
+        fs::remove_file(&other).unwrap();
+
+        // The same file seen by another account (it cannot be made foreign without root).
+        let foreign = StateDir {
+            fd: dir.fd.try_clone().unwrap(),
+            path: dir.path.clone(),
+            uid: dir.uid.wrapping_add(1),
+        };
+        refused(&foreign, "belongs to another user");
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o000)).unwrap();
+        refused(&foreign, "belongs to another user");
+        assert_eq!(
+            fs::metadata(&lock).unwrap().permissions().mode() & 0o7777,
+            0o000,
+            "another account's file is not changed"
+        );
     }
 }
