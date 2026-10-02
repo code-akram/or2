@@ -316,6 +316,11 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   glyphs never touch the screen edge or sit under a curved bezel; the background fills the inset.
 - A pinch accumulates: each event's scale factor multiplies a continuous size and only the applied
   size is rounded to half steps, so a slow pinch works at the small default.
+- Navigation swipes on tmux and herdr terminals (one finger sideways: window or tab; two fingers
+  sideways: pane; two fingers up or down: session or workspace) give a haptic tick and no other
+  chrome: the terminal itself shows the move. A shell ignores them. The hardware-keyboard shortcuts
+  (Ctrl+Shift+...) are listed in a compact sheet (Ctrl+Shift+/): two grouped cards of dense rows,
+  keys in small mono text, what they do in muted secondary text.
 
 ## Motion and feedback
 

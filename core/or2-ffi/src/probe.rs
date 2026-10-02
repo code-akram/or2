@@ -252,7 +252,9 @@ fn publish(driver: &mut SessionDriver, frame: Frame) {
 /// `Session.roam()` (or `network_changed()`) is counted in row 2, the echo row: `roams N`
 /// alone, or after the latest text echo as `text 61 | roams N`. SSH probe terminals never
 /// report health and ignore `roam()`. `watch_herdr` goes `Live`, updates once and closes on
-/// `stop()`. Closing the host closes its terminals and watches first.
+/// `stop()`. `navigate` (API 14) succeeds for every tmux and herdr move, except one from a
+/// `pane_id` the probe view does not have (`PaneNotFound`). Closing the host closes its
+/// terminals and watches first.
 #[uniffi::export]
 pub fn contract_probe_host(
     request: HostConnectRequest,
@@ -395,6 +397,15 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
             }
             HostCommand::ScrollTarget { reply, .. } => {
                 let _ = reply.send(Ok(()));
+            }
+            HostCommand::Navigate { pane_id, reply, .. } => {
+                // Every move succeeds, except one from a herdr pane the probe does not have.
+                let _ = reply.send(match pane_id {
+                    Some(pane) if !PROBE_PANES.contains(&pane.as_str()) => {
+                        Err(core_host::HostError::PaneNotFound)
+                    }
+                    _ => Ok(()),
+                });
             }
             HostCommand::WatchHerdr {
                 session,

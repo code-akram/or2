@@ -21,8 +21,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::frame::{
-    Cell, CellLink, CellStyle, CellWidth, Cursor, CursorShape, Frame, Rgb, Row, Scrollback, TerminalModes,
-    Underline,
+    Cell, CellLink, CellStyle, CellWidth, Cursor, CursorShape, Frame, Rgb, Row, Scrollback,
+    TerminalModes, Underline,
 };
 use crate::input::{Key, KeyInput, Modifiers, ViewportScroll};
 use crate::term::TerminalSize;

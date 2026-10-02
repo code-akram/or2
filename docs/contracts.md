@@ -3738,3 +3738,95 @@ behind `Bottom`, a failed call), `TerminalGridTest` (modes per frame), `HostConn
   other key goes to the terminal as today. Matched by key code, not by the character (layouts differ).
 - Tests: JVM tests for the gesture classifier (thresholds, pinch priority, selection) and the shortcut
   table; Rust tests for the tmux commands and the herdr calls against fixtures.
+
+### Gestures: implemented (branch `v011/gestures`)
+
+**Rust.** `or2_core::host::{TargetNav, NavDirection}` and `HostHandle::navigate(target, pane_id,
+nav)`, a host query like `focus_herdr_pane` (`HostCommand::Navigate`, bounded by `QUERY_TIMEOUT`).
+The handle validates first (`InvalidName` for a bad tmux/herdr name or `pane_id`), then a `Shell`
+target is `Ok(())` at once, before the connection state is even looked at; nothing is sent. The
+FFI wraps it as `HostConnection.navigate` with `uniffi::Enum` copies of both enums; the contract
+probe host answers every move `Ok`, except one from a `pane_id` its view lacks (`PaneNotFound`).
+
+- **tmux** (`or2_core::tmux::navigate`, over exec with the probed tmux path): `next-window -t
+  =<s>`, `previous-window -t =<s>`, `select-pane -L|-R|-U|-D -t =<s>:`, and `switch-client -c
+  <client> -n|-p`. Targets are `=name`, tmux's exact match, so `main` never reaches `main2`.
+  *Which client* is the terminal's: `list-clients -F
+  '#{client_activity}:#{client_session}:#{client_name}'`, the most recently active client showing
+  the target session. *Decision:* the client's **name** rather than `#{client_tty}`: they are the
+  same for a terminal client, and the name also works for a client without a tty. *Decision:* after
+  a session move the terminal's client shows another session, which the target's name no longer
+  finds, so the host connection remembers the switched client per target name
+  (`tmux::NavClients`, on `SshHost`); later window and pane moves act on the session that client
+  shows now (one `list-clients` more), session moves keep switching it, and a client that is no
+  longer listed (the terminal reattached) is forgotten. Before any session move a window or pane
+  move is one exec. A session move with no client attached to the target is `CommandFailed`.
+  "Nowhere to go" (`no next window`, `no previous window`, `can't find next|previous session`) is
+  `Ok`; tmux itself wraps windows and sessions around.
+- **herdr** (`or2_core::herdr::navigate_in`, the socket from the connection's `Directory` with the
+  same one-time rediscovery as a focus): a window move reads `workspace.list` (the focused
+  workspace and its `active_tab_id`), then `tab.list { workspace_id }`, and `tab.focus`es the next
+  or previous tab by `number`, wrapping; a pane move is one `pane.focus_direction { direction,
+  pane_id }` (herdr answers `no_neighbor` as a success); a session move reads `workspace.list` and
+  `workspace.focus`es the neighbour by `number`, wrapping. One tab or workspace, or none focused (an
+  empty session), is `Ok` with nothing sent. **Finding:** herdr 0.9.3 answers **one request per
+  connection** (a second request on the same stream gets a broken pipe), so each request is its own
+  `wire::call`; the live test caught it. Results are parsed with the generated
+  `success_response::ResponseResult` (unknown fields and agent statuses tolerated).
+- `pane_id`: herdr's pane to move from, `None` for the focused one; tmux ignores it.
+
+**Kotlin.**
+
+- `SwipeClassifier` (plain JVM): one finger decides once it has moved the touch slop (Euclidean, so
+  no later than the platform's scroll): horizontal at least twice the vertical makes a horizontal
+  swipe, anything else leaves the touch to the terminal; it fires once at 56 dp. A second finger at
+  any time before a swipe fired (also after the first began to scroll) makes it a two-finger swipe
+  from the fingers' centre, firing at 56 dp along a dominant (2×) axis. **Pinch priority:** the span
+  changing past the pinch slop (2 × touch slop, `ScaleGestureDetector`'s own) ends classification,
+  and `onScaleBegin` cancels it; since the scale detector sees every event first, a pinch is never
+  also a swipe. A third finger or a lifted one ends classification. No swipe starts during a
+  selection, and one is cancelled when a long press begins one. Once a touch is a swipe the view
+  sends its `GestureDetector` a cancel (no scroll, tap or long press) and consumes the rest of the
+  touch. In `TerminalView.onTouchEvent` this is one call, `swipeTouch`, after the pinch handling
+  and before the gesture detector; the one-finger vertical path (`onScroll`, `scrollPixels`, fling)
+  is untouched.
+- Mapping (`swipeNav`): left `NextWindow`, right `PreviousWindow`; two fingers left/right
+  `Pane { Left | Right }` (*decision:* the direction the fingers move, read literally); two fingers
+  up `NextSession`, down `PreviousSession`. `SessionScreen` runs it through
+  `HostConnections.navigate(terminal, nav)` with a haptic tick (`GestureThresholdActivate`). For a
+  `Shell` target it passes no `onSwipe`, and the view then never classifies: a shell's touches
+  (including a two-finger scroll) behave exactly as before. `navigate` uses the host's live connection, runs one move at a time per
+  terminal (a `Mutex`: herdr's next tab is read, then focused), passes **`pane_id = null`** (herdr's
+  focused pane is what a herdr client shows; the pane the terminal opened on may no longer be
+  focused) and swallows failures (a gesture has no error UI; it returns `false`).
+- Shortcuts (`terminalShortcut`, by key code, exactly Ctrl+Shift, never with Alt or Meta, never for
+  `FLAG_SOFT_KEYBOARD` events): checked at the top of `TerminalView.handleKey`, which
+  `dispatchKeyEventPreIme` and `onKeyDown/Up` call; a shortcut's press acts once (repeats ignored)
+  and its release is consumed too. `Ctrl+Shift+1..9` selects `open[n-1]` (Home's order: the
+  holder's terminal list); `W` dismisses the terminal (disconnecting it if it runs) and returns
+  Home; `V` is the toolbar's paste (multi-line confirmation included); `C` copies the selection
+  (nothing without one); `Enter` (and numpad Enter) toggles the composer; `/` opens
+  `ShortcutsSheet` (an `Or2Sheet` with two compact grouped cards, keys in `MonoSmall`, actions in
+  muted `Secondary`, listing the keyboard shortcuts and the gestures). While the composer has the
+  keys the same table applies through `onPreviewKeyEvent`, except `V` and `C`, which stay the text
+  field's; closing the composer with `Ctrl+Shift+Enter` gives the keys back to the terminal.
+- `HostPort.navigate` (API 14) on `NativeHostPort` and the test fakes.
+
+**Tests.** Rust: `tmux` unit tests (command rendering with exact targets, client parsing, the
+terminal client's choice, "nowhere to go", the session-move memory and its forgetting, against a
+scripted exec host); `herdr::navigate` unit tests (a scripted herdr, one request per connection:
+neighbour by number, wrapping, pane directions with and without `pane_id`, `no_neighbor`, nothing to
+do, `PaneNotFound`, a dead cached socket rediscovered once, unreadable answers); `host` unit test
+(validation, `Shell` short-circuit, the command and its reply); FFI mapping test;
+`tests/host_nav.rs` (sshd + tmux end to end, see build.md); `herdr_live.rs` navigation test against
+a real isolated herdr. JVM: `SwipeClassifierTest` (thresholds, slop, dominance, two fingers, pinch
+priority, lifted/third finger, cancel, mapping), `TerminalShortcutsTest` (the table, modifiers),
+`HostConnectionsNavigateTest` (shell ignored, null pane, failures, disconnected host, one move at a
+time), `HostContractTest.navigationCrossesTheFfi...` (the real FFI with the probe host). No device
+test was added (the lane runs without the phone).
+
+**Open.** A herdr pane move or tab move changes herdr's focus behind the connection's `FocusGate`,
+which may still remember an acknowledged focus for up to 2 s; a terminal opened on that same pane
+within that window could be answered from memory although the focus moved. Rare (a swipe and an
+open of the previous pane within 2 s), not handled. Two or2 terminals on the same tmux target
+session of one host share the session-move memory (the most recently active client is taken).

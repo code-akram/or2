@@ -171,6 +171,17 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll) {
         scrolls += Triple(target, paneId, scroll)
     }
+
+    /** `navigate` calls in order; a failure is thrown after the call is recorded. */
+    val navigations = mutableListOf<Triple<TerminalTarget, String?, TargetNav>>()
+    var navigateFailure: Exception? = null
+    var navigateGate: CompletableDeferred<Unit>? = null
+    override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav) {
+        events += "navigate"
+        navigateGate?.await()
+        navigations += Triple(target, paneId, nav)
+        navigateFailure?.let { throw it }
+    }
     override suspend fun focusHerdrPane(session: String?, paneId: String) {
         events += "focus:$session:$paneId"
         focusGate?.await()

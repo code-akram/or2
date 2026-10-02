@@ -21,6 +21,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
@@ -43,10 +44,13 @@ import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dimens
 import kotlinx.coroutines.CoroutineScope
 import kotlin.math.ceil
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 /** How long a tapped link stays underlined. */
 private const val LINK_FLASH_MS = 300L
+/** How far a navigation swipe travels before it counts. */
+private const val SWIPE_DISTANCE_DP = 56f
 
 /** Canvas is the only renderer. The cache retains glyph commands, not terminal bitmaps. */
 class TerminalView(context: Context) : View(context) {
@@ -93,6 +97,15 @@ class TerminalView(context: Context) : View(context) {
     private val glyphs = LruCache<Glyph, Picture>(2048)
     var onInputChanged: () -> Unit = {}
     var onSelectionChanged: () -> Unit = {}
+
+    /**
+     * A navigation swipe was recognised ([SwipeClassifier]); the screen decides what it moves. Null (a
+     * shell, which has nothing to move) leaves every touch to the terminal, as before swipes existed.
+     */
+    var onSwipe: ((Swipe) -> Unit)? = null
+
+    /** A hardware-keyboard shortcut was pressed ([terminalShortcut]); the key never reaches the terminal. */
+    var onShortcut: (TerminalShortcut) -> Unit = {}
 
     /** Called with the terminal's default background (0xRRGGBB) when a frame changes it (OSC 11). */
     var onBackgroundChanged: (UInt) -> Unit = {}
@@ -163,6 +176,10 @@ class TerminalView(context: Context) : View(context) {
         }
     })
     private var pinching = false
+    private val swipes = ViewConfiguration.get(context).scaledTouchSlop.toFloat().let { slop ->
+        // The pinch slop is the platform's (ScaleGestureDetector uses twice the touch slop).
+        SwipeClassifier(slop, distance = SWIPE_DISTANCE_DP * resources.displayMetrics.density, pinchSlop = 2 * slop)
+    }
 
     /** True from the start of a pinch until all fingers are up: the finger left over must not scroll. */
     private var pinchedSinceDown = false
@@ -174,6 +191,7 @@ class TerminalView(context: Context) : View(context) {
         override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
             pinching = true
             pinchedSinceDown = true
+            swipes.cancel() // Pinch has priority over a two-finger swipe.
             pinchSize = fontSizeSp
             scroller.forceFinished(true)
             // The two fingers must never also be a scroll or a long-press selection.
@@ -329,6 +347,14 @@ class TerminalView(context: Context) : View(context) {
     }
 
     internal fun handleKey(event: KeyEvent): Boolean {
+        // An attached keyboard's app shortcuts first (never the IME's keys); releases and repeats
+        // of a shortcut are consumed too, so none of it reaches the terminal.
+        if (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD == 0) {
+            terminalShortcut(event.keyCode, event.isCtrlPressed, event.isShiftPressed, event.isAltPressed, event.isMetaPressed)?.let { shortcut ->
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) onShortcut(shortcut)
+                return true
+            }
+        }
         if (event.action == KeyEvent.ACTION_MULTIPLE && event.characters != null) {
             input.commit(event.characters)
             return true
@@ -386,12 +412,56 @@ class TerminalView(context: Context) : View(context) {
             if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) pinchedSinceDown = false
             return true
         }
+        if (swipeTouch(event)) return true
         if (event.actionMasked == MotionEvent.ACTION_DOWN) parent?.requestDisallowInterceptTouchEvent(true)
         if (selection != null && event.actionMasked == MotionEvent.ACTION_MOVE) {
             position(event.x, event.y)?.let { selection?.end = it }
             invalidate()
         }
         return gestures.onTouchEvent(event) || event.actionMasked == MotionEvent.ACTION_UP
+    }
+
+    /**
+     * Feeds the swipe classifier. True once the touch is a navigation swipe: the gesture detector was
+     * cancelled, so the touch never also scrolls, taps or selects, and the rest of it is consumed here.
+     * Not during a selection (its drag moves the selection end), and not without [onSwipe].
+     */
+    private fun swipeTouch(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                if (selection == null && onSwipe != null) swipes.down(event.x, event.y) else swipes.cancel()
+                return false
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> return swipes.up()
+        }
+        if (selection != null) swipes.cancel()
+        // The fingers still down (a finger going up is in this event but no longer counts): their
+        // centre, and the span between the first two.
+        val lifted = if (event.actionMasked == MotionEvent.ACTION_POINTER_UP) event.actionIndex else -1
+        var count = 0
+        var sumX = 0f
+        var sumY = 0f
+        var first = -1
+        var second = -1
+        for (index in 0 until event.pointerCount) {
+            if (index == lifted) continue
+            count++
+            sumX += event.getX(index)
+            sumY += event.getY(index)
+            if (first < 0) first = index else if (second < 0) second = index
+        }
+        if (count == 0) return swipes.claimed
+        val span = if (second < 0) 0f else hypot(event.getX(first) - event.getX(second), event.getY(first) - event.getY(second))
+        val wasClaimed = swipes.claimed
+        val swipe = swipes.move(count, sumX / count, sumY / count, span)
+        if (swipes.claimed && !wasClaimed) {
+            val cancel = MotionEvent.obtain(0, 0, MotionEvent.ACTION_CANCEL, 0f, 0f, 0)
+            gestures.onTouchEvent(cancel)
+            cancel.recycle()
+            scroller.forceFinished(true)
+        }
+        if (swipe != null) onSwipe?.invoke(swipe)
+        return swipes.claimed
     }
 
     private fun position(x: Float, y: Float): CellPosition? =

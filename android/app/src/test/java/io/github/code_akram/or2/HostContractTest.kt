@@ -12,10 +12,12 @@ import io.github.code_akram.or2.ffi.HostConnection
 import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
+import io.github.code_akram.or2.ffi.NavDirection
 import io.github.code_akram.or2.ffi.Session
 import io.github.code_akram.or2.ffi.SessionException
 import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.SessionState
+import io.github.code_akram.or2.ffi.TargetNav
 import io.github.code_akram.or2.ffi.TerminalFrame
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TerminalTransport
@@ -425,6 +427,37 @@ class HostContractTest {
         recorder.await<HerdrState.Closed>()
         // The last successful focus stands after a refused one; the host stays usable.
         runBlocking { host.focusHerdrPane(null, "w2:p1") }
+        assertEquals(HostState.Connected(0u), host.state())
+        host.disconnect()
+        host.close()
+    }
+
+    @Test
+    fun navigationCrossesTheFfiValidatesNamesAndAShellDoesNothing() {
+        val host = connectedHost()
+        val tmux = TerminalTarget.Tmux("main")
+        runBlocking {
+            for (nav in listOf(
+                TargetNav.NextWindow, TargetNav.PreviousWindow, TargetNav.NextSession, TargetNav.PreviousSession,
+                TargetNav.Pane(NavDirection.LEFT), TargetNav.Pane(NavDirection.RIGHT),
+                TargetNav.Pane(NavDirection.UP), TargetNav.Pane(NavDirection.DOWN),
+            )) {
+                host.navigate(tmux, null, nav)
+                host.navigate(TerminalTarget.Herdr("work", null), "w1:p2", nav)
+            }
+            // A shell has nothing to move: answered at once, whatever the move.
+            host.navigate(TerminalTarget.Shell, null, TargetNav.NextSession)
+        }
+        // A herdr pane that has gone, and names validated like terminal targets.
+        assertThrows(HostException.PaneNotFound::class.java) {
+            runBlocking { host.navigate(TerminalTarget.Herdr(null, null), "w9:p9", TargetNav.Pane(NavDirection.LEFT)) }
+        }
+        assertThrows(HostException.InvalidName::class.java) {
+            runBlocking { host.navigate(TerminalTarget.Tmux("a:b"), null, TargetNav.NextWindow) }
+        }
+        assertThrows(HostException.InvalidName::class.java) {
+            runBlocking { host.navigate(TerminalTarget.Herdr(null, null), "w1 p1", TargetNav.NextWindow) }
+        }
         assertEquals(HostState.Connected(0u), host.state())
         host.disconnect()
         host.close()

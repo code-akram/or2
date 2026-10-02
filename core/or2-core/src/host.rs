@@ -281,6 +281,32 @@ pub struct TmuxSession {
     pub activity_unix: i64,
 }
 
+/// A direction on screen, for moving between panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// What a navigation gesture asks of the multiplexer a terminal shows
+/// ([`HostHandle::navigate`]): tmux windows, panes and sessions, or herdr tabs, panes and
+/// workspaces. The previous and next ones wrap around, as tmux's own keys do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetNav {
+    /// The next tmux window, or herdr tab of the focused workspace.
+    NextWindow,
+    PreviousWindow,
+    /// The pane in `direction` from the active (tmux) or focused (herdr) pane.
+    Pane {
+        direction: NavDirection,
+    },
+    /// The next tmux session (the terminal's tmux client switches to it), or herdr workspace.
+    NextSession,
+    PreviousSession,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HostError {
     #[error("the host is not connected yet")]
@@ -364,6 +390,17 @@ pub enum HostCommand {
         target: TerminalTarget,
         pane_id: Option<String>,
         scroll: TargetScroll,
+        reply: oneshot::Sender<Result<(), HostError>>,
+    },
+    /// Move the multiplexer `target` shows ([`HostHandle::navigate`]): tmux through exec with the
+    /// probed tmux path, herdr through its API with the probed herdr path. `target` is never
+    /// `Shell` (the handle answers that itself) and its names are validated. Reply
+    /// `NotInstalled` without the program, `PaneNotFound` when herdr says `pane_id` is gone,
+    /// `CommandFailed` for other failures.
+    Navigate {
+        target: TerminalTarget,
+        pane_id: Option<String>,
+        nav: TargetNav,
         reply: oneshot::Sender<Result<(), HostError>>,
     },
     /// Run [`herdr::run`] (or an equivalent) on `driver`, with the herdr path from the probe.
@@ -638,6 +675,38 @@ impl HostHandle {
             target,
             pane_id,
             scroll,
+            reply,
+        })?;
+        await_reply(response, QUERY_TIMEOUT).await
+    }
+
+    /// Moves what a terminal on `target` shows (a gesture or a shortcut): for tmux the window,
+    /// the pane or (switching the terminal's tmux client) the session; for herdr the tab of the
+    /// focused workspace, the pane, or the workspace. `pane_id` is herdr's pane to move from
+    /// (`None`: the focused one, which is what a herdr client shows); tmux ignores it. A
+    /// `Shell` target has nothing to move: `Ok(())` at once, nothing runs. Names are validated
+    /// like [`TerminalTarget`]'s (`InvalidName`); a host without the program is
+    /// `NotInstalled`, a vanished herdr pane `PaneNotFound`. Moving past the last window, tab or
+    /// workspace wraps around; with only one there is nothing to do, which is `Ok(())`.
+    pub async fn navigate(
+        &self,
+        target: TerminalTarget,
+        pane_id: Option<String>,
+        nav: TargetNav,
+    ) -> Result<(), HostError> {
+        target.validate()?;
+        if !pane_id.as_deref().is_none_or(is_valid_herdr_pane_id) {
+            return Err(HostError::InvalidName);
+        }
+        if target == TerminalTarget::Shell {
+            return Ok(());
+        }
+        let (reply, response) = oneshot::channel();
+        self.require_connected()?;
+        self.send(HostCommand::Navigate {
+            target,
+            pane_id,
+            nav,
             reply,
         })?;
         await_reply(response, QUERY_TIMEOUT).await
@@ -1255,6 +1324,124 @@ mod tests {
         assert_eq!(focus().await, Ok(()));
         assert_eq!(focus().await, Err(HostError::PaneNotFound));
         drop(answers.join().unwrap());
+    }
+
+    #[tokio::test]
+    async fn navigation_validates_skips_a_shell_and_is_answered_through_its_reply() {
+        let (_recorder, handle, mut driver) = setup(false);
+        let tmux = TerminalTarget::Tmux {
+            session_name: "main".into(),
+        };
+        // A shell has nothing to move: `Ok` whatever the host's state, and nothing is sent.
+        assert_eq!(
+            handle
+                .navigate(TerminalTarget::Shell, None, TargetNav::NextWindow)
+                .await,
+            Ok(())
+        );
+        assert_eq!(
+            handle
+                .navigate(tmux.clone(), None, TargetNav::NextWindow)
+                .await,
+            Err(HostError::NotConnected)
+        );
+        connect(&mut driver);
+        assert_eq!(
+            handle
+                .navigate(TerminalTarget::Shell, None, TargetNav::NextSession)
+                .await,
+            Ok(())
+        );
+        let herdr = |session: Option<&str>| TerminalTarget::Herdr {
+            session: session.map(str::to_owned),
+            pane_id: None,
+        };
+        for (target, pane) in [
+            (
+                TerminalTarget::Tmux {
+                    session_name: "a:b".into(),
+                },
+                None,
+            ),
+            (herdr(Some("a b")), None),
+            (herdr(None), Some("w1 p1")),
+            (herdr(None), Some("")),
+        ] {
+            assert_eq!(
+                handle
+                    .navigate(
+                        target.clone(),
+                        pane.map(str::to_owned),
+                        TargetNav::NextWindow
+                    )
+                    .await,
+                Err(HostError::InvalidName),
+                "{target:?} {pane:?}"
+            );
+        }
+        assert!(driver.commands.try_recv().is_err(), "nothing was enqueued");
+
+        let answers = std::thread::spawn(move || {
+            let expected = [
+                (
+                    TerminalTarget::Tmux {
+                        session_name: "main".into(),
+                    },
+                    None,
+                    TargetNav::NextWindow,
+                    Ok(()),
+                ),
+                (
+                    TerminalTarget::Herdr {
+                        session: Some("work".into()),
+                        pane_id: None,
+                    },
+                    Some("w1:p2".to_owned()),
+                    TargetNav::Pane {
+                        direction: NavDirection::Left,
+                    },
+                    Err(HostError::PaneNotFound),
+                ),
+            ];
+            for (want_target, want_pane, want_nav, answer) in expected {
+                let HostCommand::Navigate {
+                    target,
+                    pane_id,
+                    nav,
+                    reply,
+                } = driver.blocking_next_command()
+                else {
+                    panic!("unexpected command")
+                };
+                assert_eq!((target, pane_id, nav), (want_target, want_pane, want_nav));
+                reply.send(answer).unwrap();
+            }
+            driver
+        });
+        assert_eq!(
+            handle.navigate(tmux, None, TargetNav::NextWindow).await,
+            Ok(())
+        );
+        assert_eq!(
+            handle
+                .navigate(
+                    herdr(Some("work")),
+                    Some("w1:p2".into()),
+                    TargetNav::Pane {
+                        direction: NavDirection::Left
+                    }
+                )
+                .await,
+            Err(HostError::PaneNotFound)
+        );
+        let mut driver = answers.join().unwrap();
+        driver.close(CloseReason::Disconnected);
+        assert_eq!(
+            handle
+                .navigate(herdr(None), None, TargetNav::NextSession)
+                .await,
+            Err(HostError::Closed)
+        );
     }
 
     #[tokio::test]

@@ -13,15 +13,18 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use or2_core::herdr::generated::request::{
-    PaneAgentState, PaneReleaseAgentParams, PaneReportAgentParams, PaneRightClickTarget,
-    PaneSendTextParams, PaneSplitParams, PaneTarget, RequestBody, SplitDirection, TabCreateParams,
-    WorkspaceCloseParams, WorkspaceCreateParams, WorkspaceRenameParams,
+    EmptyParams, PaneAgentState, PaneReleaseAgentParams, PaneReportAgentParams,
+    PaneRightClickTarget, PaneSendTextParams, PaneSplitParams, PaneTarget, RequestBody,
+    SplitDirection, TabCreateParams, WorkspaceCloseParams, WorkspaceCreateParams,
+    WorkspaceRenameParams,
 };
 use or2_core::herdr::view::AgentStatus;
 use or2_core::herdr::{
     Directory, FocusGate, HerdrError, HerdrObserver, HerdrState, HerdrUnavailable, HerdrView,
-    HerdrWatchHandle, Timing, focus_pane, list_sessions, run_in, watch, watch_with_timing, wire,
+    HerdrWatchHandle, Timing, focus_pane, list_sessions, navigate_in, run_in, watch,
+    watch_with_timing, wire,
 };
+use or2_core::host::{NavDirection, TargetNav};
 use or2_core::remote::{ExecOutput, LocalHost, RemoteError, RemoteHost};
 use serde_json::Value;
 
@@ -805,4 +808,126 @@ async fn scroll_pane_moves_a_panes_history_by_lines_and_back_to_the_bottom() {
         scroll(Some("w9:p9"), TargetScroll::Up { lines: 1 }).await,
         Err(HerdrError::PaneNotFound)
     );
+}
+/// The focused workspace, its active tab and the focused pane, from a snapshot.
+async fn focus_of(herdr: &Isolated) -> (String, String, String) {
+    let snapshot = herdr
+        .call(RequestBody::SessionSnapshot(EmptyParams(
+            serde_json::Map::new(),
+        )))
+        .await;
+    let snapshot = &snapshot["snapshot"];
+    let workspace = snapshot["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["focused"] == true)
+        .unwrap_or_else(|| panic!("a focused workspace in {snapshot}"));
+    (
+        str_at(workspace, "/workspace_id").to_owned(),
+        str_at(workspace, "/active_tab_id").to_owned(),
+        str_at(snapshot, "/focused_pane_id").to_owned(),
+    )
+}
+
+#[tokio::test]
+async fn navigation_moves_between_tabs_panes_and_workspaces_of_an_isolated_session() {
+    let Some(mut herdr) = Isolated::new() else {
+        return;
+    };
+    herdr.start();
+    let host = LocalHost::new();
+    let directory = Directory::new();
+    let session = Some(herdr.name.as_str());
+    let nav = async |pane_id: Option<&str>, nav: TargetNav| {
+        navigate_in(&host, herdr.herdr(), &directory, session, pane_id, nav).await
+    };
+
+    // An empty session has nothing to move.
+    nav(None, TargetNav::NextWindow).await.unwrap();
+    nav(None, TargetNav::NextSession).await.unwrap();
+
+    // Workspace A (focused): two panes side by side in its first tab, and a second tab.
+    let created = herdr
+        .call(RequestBody::WorkspaceCreate(WorkspaceCreateParams {
+            cwd: Some("/tmp".into()),
+            label: Some("or2-a".into()),
+            focus: true,
+            ..WorkspaceCreateParams::default()
+        }))
+        .await;
+    let a = str_at(&created, "/workspace/workspace_id").to_owned();
+    let a_tab = str_at(&created, "/tab/tab_id").to_owned();
+    let left = str_at(&created, "/root_pane/pane_id").to_owned();
+    let split = herdr
+        .call(RequestBody::PaneSplit(PaneSplitParams {
+            cwd: None,
+            direction: SplitDirection::Right,
+            env: HashMap::new(),
+            focus: false,
+            ratio: None,
+            right_click: PaneRightClickTarget::Herdr,
+            target_pane_id: Some(left.clone()),
+            workspace_id: None,
+        }))
+        .await;
+    let right = str_at(&split, "/pane/pane_id").to_owned();
+    let tab = herdr
+        .call(RequestBody::TabCreate(TabCreateParams {
+            workspace_id: Some(a.clone()),
+            label: Some("second".into()),
+            focus: false,
+            ..TabCreateParams::default()
+        }))
+        .await;
+    let a_second = str_at(&tab, "/tab/tab_id").to_owned();
+    // Workspace B, not focused.
+    let created = herdr
+        .call(RequestBody::WorkspaceCreate(WorkspaceCreateParams {
+            cwd: Some("/tmp".into()),
+            label: Some("or2-b".into()),
+            focus: false,
+            ..WorkspaceCreateParams::default()
+        }))
+        .await;
+    let b = str_at(&created, "/workspace/workspace_id").to_owned();
+    assert_eq!(
+        focus_of(&herdr).await,
+        (a.clone(), a_tab.clone(), left.clone())
+    );
+
+    // Panes: right, then left again; nothing further left is not an error.
+    let pane = |direction| TargetNav::Pane { direction };
+    nav(None, pane(NavDirection::Right)).await.unwrap();
+    assert_eq!(focus_of(&herdr).await.2, right);
+    nav(None, pane(NavDirection::Left)).await.unwrap();
+    assert_eq!(focus_of(&herdr).await.2, left);
+    nav(None, pane(NavDirection::Left)).await.unwrap();
+    assert_eq!(focus_of(&herdr).await.2, left);
+    // From a given pane, and from one that does not exist.
+    nav(Some(&left), pane(NavDirection::Right)).await.unwrap();
+    assert_eq!(focus_of(&herdr).await.2, right);
+    assert_eq!(
+        nav(Some("w99:p99"), pane(NavDirection::Left)).await,
+        Err(HerdrError::PaneNotFound)
+    );
+
+    // Tabs of the focused workspace, wrapping around.
+    nav(None, TargetNav::NextWindow).await.unwrap();
+    assert_eq!(focus_of(&herdr).await.1, a_second);
+    nav(None, TargetNav::NextWindow).await.unwrap();
+    assert_eq!(focus_of(&herdr).await.1, a_tab);
+    nav(None, TargetNav::PreviousWindow).await.unwrap();
+    assert_eq!(focus_of(&herdr).await.1, a_second);
+
+    // Workspaces, wrapping around.
+    nav(None, TargetNav::NextSession).await.unwrap();
+    assert_eq!(focus_of(&herdr).await.0, b);
+    nav(None, TargetNav::NextSession).await.unwrap();
+    assert_eq!(focus_of(&herdr).await.0, a);
+    nav(None, TargetNav::PreviousSession).await.unwrap();
+    assert_eq!(focus_of(&herdr).await.0, b);
+    // B has one tab: a window move there has nowhere to go.
+    nav(None, TargetNav::NextWindow).await.unwrap();
+    assert_eq!(focus_of(&herdr).await.0, b);
 }

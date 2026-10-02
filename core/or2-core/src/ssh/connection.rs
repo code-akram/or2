@@ -45,8 +45,8 @@ use super::terminal_session;
 use crate::herdr::{self, HerdrState, HerdrUnavailable, HerdrWatchDriver};
 use crate::host::{
     HostCapabilities, HostCommand, HostConnectRequest, HostDriver, HostError, HostHandle,
-    HostObserver, HostState, TargetScroll, TerminalTarget, TerminalTransport, TmuxSession,
-    UserCancel,
+    HostObserver, HostState, TargetNav, TargetScroll, TerminalTarget, TerminalTransport,
+    TmuxSession, UserCancel,
 };
 use crate::mosh;
 use crate::probe;
@@ -143,6 +143,9 @@ pub(super) struct SshHost {
     scroll_offsets: herdr::ScrollOffsets,
     /// The mosh servers this connection still has to stop (see [`mosh_session::ServerDebt`]).
     pub(super) servers: mosh_session::ServerDebt,
+    /// The tmux clients that session moves switched, per terminal target (see
+    /// [`tmux::NavClients`]).
+    tmux_clients: tmux::NavClients,
     /// The session-channel opens still waiting for the server's answer (see
     /// [`SshHost::start_open`]). `None` once the connection is over.
     opens: Mutex<Option<JoinSet<()>>>,
@@ -199,6 +202,7 @@ impl SshHost {
             focus: herdr::FocusGate::new(),
             scroll_offsets: herdr::ScrollOffsets::new(),
             servers: mosh_session::ServerDebt::default(),
+            tmux_clients: tmux::NavClients::new(),
             opens: Mutex::new(Some(JoinSet::new())),
             me: me.clone(),
             #[cfg(test)]
@@ -1097,6 +1101,22 @@ fn dispatch<D: DatagramTransport>(
                 }
             });
         }
+        HostCommand::Navigate {
+            target,
+            pane_id,
+            nav,
+            reply,
+        } => {
+            let host = Arc::clone(host);
+            let (mut closing, tracker) = (closing.clone(), tracker.clone());
+            runtime().spawn(async move {
+                let _tracker = tracker;
+                tokio::select! {
+                    result = navigate(&host, target, pane_id, nav) => { let _ = reply.send(result); }
+                    _ = closed_reason(&mut closing) => {}
+                }
+            });
+        }
         HostCommand::WatchHerdr { session, driver } => {
             let host = Arc::clone(host);
             let (mut closing, tracker) = (closing.clone(), tracker.clone());
@@ -1231,7 +1251,7 @@ async fn scroll_target(
     pane_id: Option<String>,
     scroll: TargetScroll,
 ) -> Result<(), HostError> {
-    let capabilities = host.capabilities().await.map_err(host_error)?;
+    let capabilities = host.programs().await.map_err(host_error)?;
     let missing = |program: &str| HostError::NotInstalled {
         program: program.into(),
     };
@@ -1262,6 +1282,56 @@ async fn scroll_target(
                 session.as_deref(),
                 pane_id.as_deref(),
                 scroll,
+            )
+            .await
+            .map_err(|error| match error {
+                herdr::HerdrError::PaneNotFound => HostError::PaneNotFound,
+                herdr::HerdrError::Remote(error) => host_error(error),
+                error @ herdr::HerdrError::Failed(_) => HostError::CommandFailed {
+                    message: error.to_string(),
+                },
+            })
+        }
+    }
+}
+
+/// `HostHandle::navigate`: tmux through exec, herdr through its API, each with the probed path.
+async fn navigate(
+    host: &Arc<SshHost>,
+    target: TerminalTarget,
+    pane_id: Option<String>,
+    nav: TargetNav,
+) -> Result<(), HostError> {
+    let capabilities = host.programs().await.map_err(host_error)?;
+    let not_installed = |program: &str| HostError::NotInstalled {
+        program: program.into(),
+    };
+    match target {
+        TerminalTarget::Shell => Ok(()),
+        TerminalTarget::Tmux { session_name } => {
+            let path = capabilities
+                .tmux
+                .as_ref()
+                .ok_or_else(|| not_installed("tmux"))?;
+            tmux::navigate(&**host, path, &host.tmux_clients, &session_name, nav)
+                .await
+                .map_err(|error| match error {
+                    TmuxError::Remote(error) => host_error(error),
+                    TmuxError::Failed(message) => HostError::CommandFailed { message },
+                })
+        }
+        TerminalTarget::Herdr { session, .. } => {
+            let path = capabilities
+                .herdr
+                .as_ref()
+                .ok_or_else(|| not_installed("herdr"))?;
+            herdr::navigate_in(
+                &**host,
+                path,
+                host.sessions.directory(),
+                session.as_deref(),
+                pane_id.as_deref(),
+                nav,
             )
             .await
             .map_err(|error| match error {
