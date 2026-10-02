@@ -72,7 +72,7 @@ cargo test --manifest-path core/Cargo.toml --workspace --all-features --locked
 cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
 cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- gen-herdr-types --offline --check
 cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- gen-licenses --check
-android/gradlew -p android :app:assembleDebug :app:testDebugUnitTest :app:assembleDeviceTestAndroidTest :app:lintDebug
+android/gradlew -p android :app:assembleDebug :app:testDebugUnitTest :app:assembleDeviceTest :app:assembleDeviceTestAndroidTest :app:lintDebug :app:lintDeviceTest :app:assembleRelease
 ```
 
 Repository tooling is the `core/xtask` crate (Rust; no scripts in other languages). Inside `core/` the
