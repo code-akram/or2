@@ -2,6 +2,7 @@ package io.github.code_akram.or2.terminal
 
 import android.content.ClipboardManager
 import android.graphics.RectF
+import android.view.KeyEvent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
@@ -28,6 +29,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
@@ -67,6 +69,12 @@ fun TerminalScreen(
     chrome: TerminalChromeState = remember { TerminalChromeState() },
     /** A frame was drawn (reported to the timing markers, which ignore it unless a path is waiting for one). */
     onFrameDrawn: () -> Unit = {},
+    /** A navigation swipe on the terminal ([SwipeClassifier]). */
+    onSwipe: (Swipe) -> Unit = {},
+    /** Ctrl+Shift+1..9: the open terminal at this index (0-based, Home's order). */
+    switchTo: (Int) -> Unit = {},
+    /** Ctrl+Shift+W. */
+    closeTerminal: () -> Unit = {},
 ) {
     key(session) {
         val context = LocalContext.current
@@ -77,6 +85,7 @@ fun TerminalScreen(
         var selecting by remember { mutableStateOf(false) }
         var pendingPaste by remember { mutableStateOf<String?>(null) }
         var pendingSend by remember { mutableStateOf<String?>(null) }
+        var shortcutsOpen by remember { mutableStateOf(false) }
         val sessionState by state.collectAsState()
         val background by rememberUpdatedState(onBackground)
         val frameDrawn by rememberUpdatedState(onFrameDrawn)
@@ -122,6 +131,29 @@ fun TerminalScreen(
             copy = { view.copySelection() },
             clearSelection = { view.clearSelection() },
         )
+        val shortcut by rememberUpdatedState<(TerminalShortcut) -> Unit> { pressed ->
+            when (pressed) {
+                is TerminalShortcut.SwitchTo -> switchTo(pressed.index)
+                TerminalShortcut.Close -> closeTerminal()
+                TerminalShortcut.Paste -> toolbar.paste()
+                TerminalShortcut.Copy -> if (view.selection != null) view.copySelection()
+                TerminalShortcut.Composer -> {
+                    toolbar.toggleComposer()
+                    // Closed from inside the composer: the keys go back to the terminal.
+                    if (!chrome.composerOpen) view.requestFocus()
+                }
+                TerminalShortcut.Help -> shortcutsOpen = true
+            }
+        }
+        val swiped by rememberUpdatedState(onSwipe)
+        DisposableEffect(view) {
+            view.onShortcut = { shortcut(it) }
+            view.onSwipe = { swiped(it) }
+            onDispose {
+                view.onShortcut = {}
+                view.onSwipe = {}
+            }
+        }
         val pad = PadActions(
             backspace = { view.input.key(TerminalKey.Backspace) },
             up = { view.input.key(TerminalKey.ArrowUp) },
@@ -162,6 +194,17 @@ fun TerminalScreen(
                         }
                     },
                     close = { chrome.composerOpen = false },
+                    // A hardware keyboard's shortcuts work while the composer has the keys, except
+                    // paste and copy, which are the text field's own there.
+                    modifier = Modifier.onPreviewKeyEvent { event ->
+                        val native = event.nativeKeyEvent
+                        val pressed = terminalShortcut(native.keyCode, native.isCtrlPressed, native.isShiftPressed, native.isAltPressed, native.isMetaPressed)
+                        if (native.flags and KeyEvent.FLAG_SOFT_KEYBOARD != 0 || pressed == null ||
+                            pressed == TerminalShortcut.Paste || pressed == TerminalShortcut.Copy
+                        ) return@onPreviewKeyEvent false
+                        if (native.action == KeyEvent.ACTION_DOWN && native.repeatCount == 0) shortcut(pressed)
+                        true
+                    },
                 )
             }
             KeyToolbar(
@@ -170,6 +213,7 @@ fun TerminalScreen(
                 onKeyPositioned = { label, coordinates -> view.toolbarKeyBounds[label] = coordinates.unclippedBoundsInRoot() },
             )
         }
+        if (shortcutsOpen) ShortcutsSheet(dismiss = { shortcutsOpen = false })
         pendingSend?.let { text ->
             Or2Dialog(
                 onDismiss = { pendingSend = null }, title = "Send ${pasteLineCount(text)} lines?",

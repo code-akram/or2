@@ -22,6 +22,7 @@ import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionListener
 import io.github.code_akram.or2.ffi.SessionState
+import io.github.code_akram.or2.ffi.TargetNav
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.ffi.TmuxSession
@@ -42,6 +43,8 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
@@ -78,6 +81,13 @@ interface HostPort : AutoCloseable {
      * alone); throws when the stop could not run, and the caller keeps the pid.
      */
     suspend fun stopMoshServer(pid: UInt)
+
+    /**
+     * API 14: moves what a terminal on [target] shows (tmux window, pane or session; herdr tab, pane or
+     * workspace). [paneId] is the herdr pane to move from, null for the focused one. A shell target
+     * does nothing.
+     */
+    suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav)
 }
 
 class NativeHostPort(private val connection: HostConnection) : HostPort {
@@ -94,6 +104,7 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
         connection.watchHerdr(session, listener)
     override suspend fun focusHerdrPane(session: String?, paneId: String) = connection.focusHerdrPane(session, paneId)
     override suspend fun stopMoshServer(pid: UInt) = connection.stopMoshServer(pid)
+    override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav) = connection.navigate(target, paneId, nav)
     override fun close() = connection.close()
 }
 
@@ -207,6 +218,9 @@ class ActiveTerminal internal constructor(val id: Long, val host: Host, val targ
 
     /** AUTO chose mosh, so a `TimedOut` or `NotInstalled` before the first frame retries over SSH. */
     internal var fallbackEligible = false
+
+    /** One navigation swipe at a time: herdr's next tab is read, then focused, so two at once could pick the same one. */
+    internal val navigation = Mutex()
     val state = mutableState.asStateFlow()
     val hasConnected = mutableHasConnected.asStateFlow()
 
@@ -872,6 +886,28 @@ class HostConnections(
      */
     suspend fun awaitTransportChoice(current: ActiveHost) {
         if (current.transportPref == TransportPref.AUTO) awaitCapabilities(current)
+    }
+
+    /**
+     * A navigation swipe on [terminal]: moves the tmux window, pane or session, or the herdr tab, pane
+     * or workspace, it shows, on its host's live connection, one move at a time per terminal. herdr
+     * moves start from herdr's focused pane (the one a herdr client shows), not from the pane the
+     * terminal was opened on, which may no longer be focused. Returns whether the move ran: a shell
+     * target, a host that is not connected, and a failed move (a gesture has no error to show) are
+     * false.
+     */
+    suspend fun navigate(terminal: ActiveTerminal, nav: TargetNav): Boolean {
+        if (terminal.target is TerminalTarget.Shell) return false
+        return terminal.navigation.withLock {
+            val current = mutableHosts.value[terminal.host.id]?.takeIf { it.isLive && !it.retired }
+            val port = current?.mutablePort?.value ?: return@withLock false
+            try {
+                port.navigate(terminal.target, null, nav)
+                true
+            } catch (_: HostException) {
+                false
+            }
+        }
     }
 
     /** The user ends this terminal. */

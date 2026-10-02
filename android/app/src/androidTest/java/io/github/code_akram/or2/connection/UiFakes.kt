@@ -88,4 +88,5 @@ class UiPort(
     }
     override suspend fun focusHerdrPane(session: String?, paneId: String) = Unit
     override suspend fun stopMoshServer(pid: UInt) = Unit
+    override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav) = Unit
 }

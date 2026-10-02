@@ -26,15 +26,18 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -49,9 +52,11 @@ import io.github.code_akram.or2.connection.HostConnections
 import io.github.code_akram.or2.connection.linkStaleLabel
 import io.github.code_akram.or2.ffi.LinkHealth
 import io.github.code_akram.or2.ffi.SessionState
+import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.terminal.TerminalScreen
 import io.github.code_akram.or2.terminal.Transport
 import io.github.code_akram.or2.terminal.display
+import io.github.code_akram.or2.terminal.swipeNav
 import io.github.code_akram.or2.ui.Badge
 import io.github.code_akram.or2.ui.GroupCard
 import io.github.code_akram.or2.ui.GroupDivider
@@ -66,6 +71,7 @@ import io.github.code_akram.or2.ui.PillButton
 import io.github.code_akram.or2.ui.StatusDot
 import io.github.code_akram.or2.ui.TextAction
 import io.github.code_akram.or2.ui.TopBar
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 /** The mono header title: `host: target`. */
@@ -107,6 +113,8 @@ fun SessionScreen(
         val closed = state is SessionState.Closed
         val endSession = { if (closed) { holder.dismissTerminal(terminal); minimise() } else holder.disconnectTerminal(terminal) }
         var switcher by remember { mutableStateOf(false) }
+        val scope = rememberCoroutineScope()
+        val haptics = LocalHapticFeedback.current
         // The card follows the terminal's own background, which the remote can change (OSC 11).
         var background by remember { mutableStateOf(Or2Colors.TerminalBackground) }
         if (hasConnected) {
@@ -115,7 +123,16 @@ fun SessionScreen(
                 // Keep the borrowed handle composed through Closed so its final frame stays visible.
                 handle?.let { TerminalScreen(it, terminal.state, terminal.frameReady, Modifier.weight(1f),
                     composerHint = "Message " + terminal.host.label + "…", openPanes = { switcher = true },
-                    onBackground = { background = it }, onFrameDrawn = { holder.timing.terminalFrame(terminal.id) }) }
+                    onBackground = { background = it }, onFrameDrawn = { holder.timing.terminalFrame(terminal.id) },
+                    // Swipes move tmux or herdr; a shell has nothing to move, so no feedback either.
+                    onSwipe = { swipe ->
+                        if (terminal.target !is TerminalTarget.Shell) {
+                            haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+                            scope.launch { holder.navigate(terminal, swipeNav(swipe)) }
+                        }
+                    },
+                    switchTo = { index -> open.getOrNull(index)?.let { if (it !== terminal) select(it) } },
+                    closeTerminal = { holder.dismissTerminal(terminal); minimise() }) }
             }
         } else {
             PendingTerminal(terminal, state, closed, endSession, minimise, open, select, note)
