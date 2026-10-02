@@ -68,8 +68,25 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "io.github.code_akram.or2.Or2TestRunner"
+        manifestPlaceholders["appLabel"] = "or2"
         ndk { abiFilters += "arm64-v8a" }
     }
+
+    // Device tests never touch the owner's app. The debug build is a daily app
+    // (io.github.code_akram.or2, its hosts and Keystore keys), and a connected test run installs over
+    // and then uninstalls the app under test. So the instrumented tests target their own build type:
+    // debug in every respect (the same signing, debug-only sources and dependencies) but installed as
+    // io.github.code_akram.or2.devicetest, with its own data, Keystore and permissions. The debug
+    // variant has no androidTest at all, so no task can install a test APK against the daily app.
+    buildTypes {
+        create("deviceTest") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".devicetest"
+            manifestPlaceholders["appLabel"] = "or2 devicetest"
+            matchingFallbacks += "debug"
+        }
+    }
+    testBuildType = "deviceTest"
 
     buildFeatures { compose = true }
     compileOptions {
@@ -79,6 +96,12 @@ android {
     sourceSets["main"].apply {
         java.srcDir(generatedBindings)
         jniLibs.srcDir(generatedLibraries)
+    }
+    // deviceTest builds the debug-only code (TerminalProbeActivity, UiGalleryActivity) from the debug
+    // source set itself, so the tests exercise exactly what the debug app ships.
+    sourceSets["deviceTest"].apply {
+        java.srcDir("src/debug/java")
+        manifest.srcFile("src/debug/AndroidManifest.xml")
     }
     // MigrationTestHelper reads the exported schemas as instrumented-test assets.
     sourceSets["androidTest"].assets.srcDir("$projectDir/schemas")
@@ -125,9 +148,11 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2025.10.00"))
     // room-testing 2.8.3 (androidTest) brings serialization-json 1.8.1, whose generated serializers
     // call GeneratedSerializer methods that core 1.7.3 lacks; consistent resolution holds the
-    // androidTest runtime at the debug runtime's version, so align the group for debug builds only:
-    // the shipped release runtime keeps the version its own dependencies ask for (1.7.3).
+    // androidTest runtime at the tested (deviceTest) runtime's version, so align the group for the
+    // debug-like builds only: the shipped release runtime keeps the version its own dependencies ask
+    // for (1.7.3). debug keeps it so deviceTest stays identical to debug.
     debugImplementation(platform("org.jetbrains.kotlinx:kotlinx-serialization-bom:1.8.1"))
+    "deviceTestImplementation"(platform("org.jetbrains.kotlinx:kotlinx-serialization-bom:1.8.1"))
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
     implementation("net.java.dev.jna:jna:5.17.0@aar")
@@ -149,6 +174,7 @@ dependencies {
     androidTestImplementation("androidx.room:room-testing:2.8.3")
     androidTestImplementation(platform("androidx.compose:compose-bom:2025.10.00"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
-    // Declares the empty ComponentActivity that createComposeRule() hosts tests in (debug only).
+    // Declares the empty ComponentActivity that createComposeRule() hosts tests in (debug-like only).
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+    "deviceTestImplementation"("androidx.compose.ui:ui-test-manifest")
 }

@@ -72,7 +72,7 @@ cargo test --manifest-path core/Cargo.toml --workspace --all-features --locked
 cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
 cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- gen-herdr-types --offline --check
 cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- gen-licenses --check
-android/gradlew -p android :app:assembleDebug :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:lintDebug
+android/gradlew -p android :app:assembleDebug :app:testDebugUnitTest :app:assembleDeviceTestAndroidTest :app:lintDebug
 ```
 
 Repository tooling is the `core/xtask` crate (Rust; no scripts in other languages). Inside `core/` the
@@ -182,9 +182,11 @@ Android runtime classpaths exclude Kotlin's legacy `kotlin-stdlib-common` metada
 Gradle 8.13 otherwise writes a redundant record that fails its next locked resolution.
 The actual JVM `kotlin-stdlib` remains present and strictly locked.
 `room-testing` (androidTest) needs kotlinx-serialization 1.8.1, and consistent resolution holds the
-androidTest classpath at the debug runtime's version, so the 1.8.1 BOM is a `debugImplementation`:
-debug and androidTest resolve 1.8.1, the shipped release runtime stays at 1.7.3. No runtime classpath or
-dependency group is exempted from locking.
+androidTest classpath at the tested runtime's version, so the 1.8.1 BOM is a `debugImplementation` and a
+`deviceTestImplementation` (the `deviceTest` build type, see "Device tests"): debug, deviceTest and androidTest
+resolve 1.8.1, the shipped release runtime stays at 1.7.3. No runtime classpath or
+dependency group is exempted from locking. The lockfile has no `debugAndroidTest*` configurations: the
+instrumented tests belong to `deviceTest` (`deviceTestAndroidTest*`).
 
 Room 2.8.3 uses KSP 2.2.21-2.0.4 with Kotlin 2.2.21; generated DAO implementations are build
 outputs. The KSP argument `room.schemaLocation` writes the schema JSON for every database
@@ -332,26 +334,81 @@ lit send button). The terminal screens run the native contract probe and replace
 frame with a Catppuccin demo session (`gallery/DemoFrames.kt`). Use it to screenshot the phone
 without touching real hosts or the biometric prompt.
 
+In the device-test app the same gallery is
+`am start -n io.github.code_akram.or2.devicetest/io.github.code_akram.or2.gallery.UiGalleryActivity`
+(the class name in full: the `/.gallery...` shorthand resolves against the application id).
+
 Debug artifacts:
-- `android/app/build/outputs/apk/debug/app-debug.apk`
-- `android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk`
+- `android/app/build/outputs/apk/debug/app-debug.apk`: the daily app, `io.github.code_akram.or2`
+- `android/app/build/outputs/apk/deviceTest/app-deviceTest.apk`: the app under test,
+  `io.github.code_akram.or2.devicetest` (label "or2 devicetest")
+- `android/app/build/outputs/apk/androidTest/deviceTest/app-deviceTest-androidTest.apk`: the tests,
+  `io.github.code_akram.or2.devicetest.test`, instrumenting `io.github.code_akram.or2.devicetest`
+
+## Device tests
+
+The debug build is the owner's daily app: `io.github.code_akram.or2`, with their hosts in its
+database and their SSH keys in its Android Keystore entries. A connected test run installs over the
+app under test and uninstalls it when it ends, which deletes both. So the instrumented tests never
+target debug. They belong to the `deviceTest` build type (`testBuildType = "deviceTest"`), which is
+debug in every respect (`initWith(debug)`: debug signing, debuggable, the `src/debug` sources such as
+`TerminalProbeActivity` and `UiGalleryActivity`, the debug-only dependencies) except its application
+id, `io.github.code_akram.or2.devicetest`. It has its own data directory, Keystore namespace,
+permissions, notification channel and battery-optimization entry, and its `${applicationId}`
+authorities and permissions (`androidx-startup`, `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`) do not
+clash with the daily app's, so both are installed side by side. The debug variant has no androidTest:
+`connectedDebugAndroidTest` and `assembleDebugAndroidTest` do not exist, so no Gradle task can install
+a test APK against the daily app.
+
+The device suite (the device chosen by `ANDROID_SERIAL` when several are attached):
+
+```sh
+android/gradlew -p android :app:connectedDeviceTestAndroidTest
+```
+
+It installs `io.github.code_akram.or2.devicetest` and `io.github.code_akram.or2.devicetest.test`, runs
+`Or2TestRunner`, and uninstalls both; `io.github.code_akram.or2` is never installed, cleared or
+uninstalled. Reports land under `android/app/build/reports/androidTests/connected/`.
+Compile the suite without a phone with `:app:assembleDeviceTestAndroidTest`.
+
+The uninstall at the end also deletes the screenshots the suite writes into the app under test's
+`files/` (`terminal-review/` from `TerminalVisualDeviceTest`, with `timings.txt`, and `pair-review/` from
+`PairUiDeviceTest`). To keep them, leave the APKs installed and read them with `run-as`:
+
+```sh
+android/gradlew -p android :app:connectedDeviceTestAndroidTest -Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true
+adb shell run-as io.github.code_akram.or2.devicetest ls files/terminal-review files/pair-review
+adb exec-out run-as io.github.code_akram.or2.devicetest cat files/terminal-review/<name>.png > <name>.png
+adb uninstall io.github.code_akram.or2.devicetest.test
+adb uninstall io.github.code_akram.or2.devicetest
+```
+
+`ConnectionServiceDeviceTest`'s notification test needs `POST_NOTIFICATIONS` granted in Settings to "or2
+devicetest", which a fresh install does not have; run it with the APKs left installed (or installed by
+hand as below) after granting it once.
+
+Never point a test command at `io.github.code_akram.or2`: no `pm clear`, `adb uninstall` or
+`run-as` writes against it, and no instrumentation targeting it.
 
 ## Phone smoke test
 
 Use an already-authorized ADB endpoint. For a remote server, supply the endpoint explicitly to
 every command; do not start/kill the server or change SSH authorization as part of these tests.
-The generic example below uses caller-supplied endpoint and serial variables, not real hosts:
+The generic example below uses caller-supplied endpoint and serial variables, not real hosts. It runs
+the suite by hand against the device-test app, then updates the daily app in place (`install -r` keeps
+its data) and starts it:
 
 ```sh
+adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" install -r android/app/build/outputs/apk/deviceTest/app-deviceTest.apk
+adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" install -r android/app/build/outputs/apk/androidTest/deviceTest/app-deviceTest-androidTest.apk
+adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am instrument -w io.github.code_akram.or2.devicetest.test/io.github.code_akram.or2.Or2TestRunner
 adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" install -r android/app/build/outputs/apk/debug/app-debug.apk
-adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" install -r android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am instrument -w io.github.code_akram.or2.test/io.github.code_akram.or2.Or2TestRunner
 adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am start -W -n io.github.code_akram.or2/.MainActivity
 ```
 
 Run ADB only after receiving an explicit device slot. An unplugged phone is expected to be
 absent; do not modify the bridge, tunnel or security settings. Compile instrumented tests on
-Arch with `assembleDebugAndroidTest` while the phone is unavailable.
+Arch with `assembleDeviceTestAndroidTest` while the phone is unavailable.
 
 `PersistenceDeviceTest` uses an in-memory database: trust replacement, address-list changes
 (host, port, add, remove, reorder) clearing trust while label/key/inbox edits keep it,
