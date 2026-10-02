@@ -42,6 +42,7 @@ use super::mosh_session;
 use super::pump::{CHANNEL_CLOSE_GRACE, connection_error, internal, lost};
 use super::runtime;
 use super::terminal_session;
+use super::upload;
 use crate::herdr::{self, HerdrState, HerdrUnavailable, HerdrWatchDriver};
 use crate::host::{
     HostCapabilities, HostCommand, HostConnectRequest, HostDriver, HostError, HostHandle,
@@ -1187,6 +1188,29 @@ fn dispatch<D: DatagramTransport>(
                 tokio::select! {
                     result = reply_to_pane(&host, session, pane_id, text) => { let _ = reply.send(result); }
                     _ = closed_reason(&mut closing) => {}
+                }
+            });
+        }
+        HostCommand::UploadImage {
+            bytes,
+            extension,
+            mut reply,
+        } => {
+            let host = Arc::clone(host);
+            let (mut closing, tracker) = (closing.clone(), tracker.clone());
+            runtime().spawn(async move {
+                let _tracker = tracker;
+                // A caller that stopped waiting (cancelled, timed out) closes `reply`: the upload
+                // stops and cleans up after itself. A host that closes drops it mid-way.
+                let result = {
+                    let cancelled = reply.closed();
+                    tokio::select! {
+                        result = upload::upload_image(&host, bytes, &extension, cancelled) => Some(result),
+                        _ = closed_reason(&mut closing) => None,
+                    }
+                };
+                if let Some(result) = result {
+                    let _ = reply.send(result);
                 }
             });
         }

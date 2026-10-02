@@ -30,6 +30,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Image paste: an image shared from another app goes to an open terminal (the user picks which). -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
         </activity>
         <!-- specialUse: an interactive SSH/mosh client has no matching foreground-service category.
              It holds user-opened terminal connections open while the app is in the background. -->

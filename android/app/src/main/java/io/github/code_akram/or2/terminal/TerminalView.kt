@@ -105,6 +105,19 @@ class TerminalView(context: Context) : View(context) {
     /** A hardware-keyboard shortcut was pressed ([terminalShortcut]); the key never reaches the terminal. */
     var onShortcut: (TerminalShortcut) -> Unit = {}
 
+    /**
+     * An image a keyboard committed (`commitContent`: a clipboard screenshot, a GIF keyboard): its content
+     * Uri and a `release` for the read permission once it was read; returns whether it was taken. While
+     * set, the editor tells keyboards it takes images; null (no upload for this terminal) it takes none.
+     */
+    var onImage: ((uri: Uri, release: () -> Unit) -> Boolean)? = null
+        set(value) {
+            val changed = (field == null) != (value == null)
+            field = value
+            // The keyboard learns the new content types from a fresh editor.
+            if (changed && hasFocus()) context.getSystemService(InputMethodManager::class.java).restartInput(this)
+        }
+
     /** Called with the terminal's default background (0xRRGGBB) when a frame changes it (OSC 11). */
     var onBackgroundChanged: (UInt) -> Unit = {}
     private var reportedBackground = grid.background
@@ -340,6 +353,24 @@ class TerminalView(context: Context) : View(context) {
         input.paste(text)
     }
 
+    /**
+     * Pastes [text] through the session's `paste_text`: one bracketed paste when the program turned that
+     * mode on, no Enter (an uploaded image's path). Any composition is cancelled first, like [paste].
+     * Returns whether the session took it (held behind a tmux or herdr `Bottom`, it goes out after).
+     */
+    fun pasteText(text: String): Boolean {
+        if (text.isEmpty()) return false
+        clearSelection()
+        inputConnection?.cancelComposition()
+        inputConnection = null
+        input.discardComposition()
+        context.getSystemService(InputMethodManager::class.java).restartInput(this)
+        var taken: Boolean? = null
+        // The paste markers are 12 bytes.
+        val accepted = atBottom(utf8Length(text) + 12) { taken = sessionCall { pasteText(text) } }
+        return taken ?: (accepted && connected && !session.gone)
+    }
+
     override fun onCheckIsTextEditor() = true
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
@@ -352,6 +383,7 @@ class TerminalView(context: Context) : View(context) {
             EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
         outAttrs.initialSelStart = 0
         outAttrs.initialSelEnd = 0
+        if (onImage != null) outAttrs.contentMimeTypes = arrayOf("image/*")
         inputConnection?.cancelComposition()
         return TerminalInputConnection(this).also { inputConnection = it }
     }

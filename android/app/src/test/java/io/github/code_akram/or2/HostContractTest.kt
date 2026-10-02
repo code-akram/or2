@@ -439,6 +439,32 @@ class HostContractTest {
     }
 
     @Test
+    fun anImageUploadCrossesTheFfiAndItsPathIsPastedBracketedWithoutEnter() {
+        val host = connectedHost()
+        // API 16: the probe says where it put the image; the extension is lower-cased by Rust.
+        assertEquals(
+            "/home/probe/.cache/or2/images/or2-19700101-000000-000000.png",
+            runBlocking { host.uploadImage(byteArrayOf(1, 2, 3), "PNG") },
+        )
+        assertThrows(HostException.SftpUnavailable::class.java) { runBlocking { host.uploadImage(byteArrayOf(1), "gif") } }
+        // Refused by Rust before anything is sent.
+        assertThrows(HostException.TooLarge::class.java) { runBlocking { host.uploadImage(ByteArray(20 * 1024 * 1024 + 1), "png") } }
+        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.uploadImage(ByteArray(0), "png") } }
+        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.uploadImage(byteArrayOf(1), "exe") } }
+
+        // The path goes into the terminal as one bracketed paste (the probe pastes as a program with the mode on).
+        val (shell, listener) = openShell(host, columns = 60u)
+        listener.awaitState<SessionState.Connected>()
+        listener.awaitFrame(shell)
+        shell.pasteText(" /p")
+        assertEquals("paste 1b 5b 32 30 30 7e 20 2f 70 1b 5b 32 30 31 7e", listener.awaitFrame(shell).rowText(2))
+        shell.disconnect()
+        host.disconnect()
+        assertThrows(HostException.Closed::class.java) { runBlocking { host.uploadImage(byteArrayOf(1), "png") } }
+        host.close()
+    }
+
+    @Test
     fun navigationCrossesTheFfiValidatesNamesAndAShellDoesNothing() {
         val host = connectedHost()
         val tmux = TerminalTarget.Tmux("main")

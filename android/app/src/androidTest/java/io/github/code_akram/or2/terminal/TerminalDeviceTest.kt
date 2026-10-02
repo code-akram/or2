@@ -93,6 +93,7 @@ class TerminalDeviceTest {
         private var sequence = 0uL
         override fun sendText(text: String) { error?.let { throw it }; texts += text }
         override fun submitText(text: String) { error?.let { throw it } }
+        override fun pasteText(text: String) { error?.let { throw it } }
         override fun sendKey(input: KeyInput) { error?.let { throw it }; keys += input }
         // Deliberately no resize output: remount must recover via requestFullFrame, not resize.
         override fun resize(columns: UShort, rows: UShort) { sizes += GridSize(columns, rows) }

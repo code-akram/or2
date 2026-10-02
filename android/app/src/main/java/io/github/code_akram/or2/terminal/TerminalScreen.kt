@@ -2,7 +2,11 @@ package io.github.code_akram.or2.terminal
 
 import android.content.ClipboardManager
 import android.graphics.RectF
+import android.net.Uri
 import android.view.KeyEvent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -52,6 +56,12 @@ import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalKey
 import io.github.code_akram.or2.ffi.TerminalTarget
+import io.github.code_akram.or2.paste.ImagePaste
+import io.github.code_akram.or2.paste.InsertTarget
+import io.github.code_akram.or2.paste.composerWithPath
+import io.github.code_akram.or2.paste.imageFromUri
+import io.github.code_akram.or2.paste.insertTarget
+import io.github.code_akram.or2.paste.pathInsertion
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dialog
 import io.github.code_akram.or2.ui.Or2Dimens
@@ -97,6 +107,12 @@ fun TerminalScreen(
     switchTo: (Int) -> Unit = {},
     /** Ctrl+Shift+W. */
     closeTerminal: () -> Unit = {},
+    /**
+     * The terminal's image paste: the composer's attach button (the Photo Picker) and a keyboard's
+     * images upload through it, and each uploaded path is inserted here (contracts.md, "Image paste").
+     * Null takes no images.
+     */
+    imagePaste: ImagePaste? = null,
 ) {
     key(session) {
         val context = LocalContext.current
@@ -116,6 +132,26 @@ fun TerminalScreen(
         var pendingSend by remember { mutableStateOf<String?>(null) }
         var shortcutsOpen by remember { mutableStateOf(false) }
         val sessionState by state.collectAsState()
+        // Images: from the Photo Picker (images only, no storage permission) or a keyboard, uploaded by the terminal's paste.
+        val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            if (uri != null) imagePaste?.start(imageFromUri(context.applicationContext, uri))
+        }
+        val attach = imagePaste?.let { { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) } }
+        val receiveImage = imagePaste?.let { paste -> { uri: Uri -> paste.start(imageFromUri(context.applicationContext, uri)) } }
+        DisposableEffect(view, imagePaste) {
+            view.onImage = imagePaste?.let { paste -> { uri, release -> paste.start(imageFromUri(context.applicationContext, uri, release)) } }
+            onDispose { view.onImage = null }
+        }
+        // An uploaded image's path: a space, the quoted path, no Enter; into the message being written when the
+        // composer is open, else pasted into the terminal (bracketed when the program asked for that).
+        LaunchedEffect(view, imagePaste) {
+            imagePaste?.paths?.collect { path ->
+                when (insertTarget(chrome.composerOpen)) {
+                    InsertTarget.COMPOSER -> chrome.composerText = composerWithPath(chrome.composerText, path)
+                    InsertTarget.TERMINAL -> view.pasteText(pathInsertion(path))
+                }
+            }
+        }
         val background by rememberUpdatedState(onBackground)
         val frameDrawn by rememberUpdatedState(onFrameDrawn)
         DisposableEffect(view) {
@@ -219,9 +255,10 @@ fun TerminalScreen(
             if (chrome.composerOpen) {
                 Composer(
                     placeholder = composerHint,
-                    text = chrome.composerText,
-                    onTextChange = { chrome.composerText = it },
+                    state = chrome.composer,
                     canSend = sessionState == SessionState.Connected,
+                    attach = attach,
+                    receiveImage = receiveImage,
                     // Several lines would run as typed, so they are confirmed like a multi-line paste.
                     send = { text ->
                         if (pasteNeedsConfirmation(text)) {

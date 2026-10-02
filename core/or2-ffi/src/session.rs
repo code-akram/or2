@@ -539,6 +539,15 @@ impl Session {
         Ok(self.handle.submit_text(text)?)
     }
 
+    /// Pastes `text` (API 16; the image path of contracts.md, "Image paste"): one bracketed
+    /// paste when the terminal has that mode on (a paste end marker inside `text` is removed),
+    /// else typed with newlines as carriage returns. No Enter. Empty text sends nothing. Input
+    /// after a `submit_text` waits for its Enter. Requires `Connected`. A contract probe
+    /// terminal echoes it as `paste` and the bytes a bracketed paste writes.
+    pub fn paste_text(&self, text: String) -> Result<(), SessionError> {
+        Ok(self.handle.paste_text(text)?)
+    }
+
     /// Keys row, hardware keys and modifier combinations; encoded with the terminal's modes.
     pub fn send_key(&self, input: KeyInput) -> Result<(), SessionError> {
         let input = input.try_into()?;

@@ -29,6 +29,7 @@ import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.ffi.TmuxSession
 import io.github.code_akram.or2.ffi.connectHost
 import io.github.code_akram.or2.hosts.connectionAffectedBy
+import io.github.code_akram.or2.paste.ImagePaste
 import io.github.code_akram.or2.terminal.SessionRoute
 import io.github.code_akram.or2.terminal.TargetScroller
 import kotlinx.coroutines.CancellationException
@@ -118,6 +119,13 @@ interface HostPort : AutoCloseable {
      * its agent is gone, `TooLarge` above 4 KiB. The text is never logged.
      */
     suspend fun replyToPane(session: String?, paneId: String, text: String): ReplyRoute
+
+    /**
+     * API 16: writes [bytes] over SFTP to the host's `~/.cache/or2/images` and returns the file's absolute
+     * path ([extension]: `png`, `jpg`, ...). `SftpUnavailable` without SFTP, `TooLarge` above 20 MiB.
+     * Cancelling stops the upload.
+     */
+    suspend fun uploadImage(bytes: ByteArray, extension: String): String
 }
 
 class NativeHostPort(private val connection: HostConnection) : HostPort {
@@ -140,6 +148,7 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
     override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) =
         connection.navigate(target, paneId, nav, clientId)
     override suspend fun replyToPane(session: String?, paneId: String, text: String) = connection.replyToPane(session, paneId, text)
+    override suspend fun uploadImage(bytes: ByteArray, extension: String) = connection.uploadImage(bytes, extension)
     override fun close() = connection.close()
 }
 
@@ -320,6 +329,13 @@ class ActiveTerminal internal constructor(val id: Long, val host: Host, val targ
     var targetScroller: TargetScroller? = null
         internal set
 
+    /** The terminal's image paste (`upload_image` over its host's current connection), kept with the terminal. */
+    var imagePaste: ImagePaste? = null
+        internal set
+
+    /** When the terminal was last shown (a counter, 0 never): the share picker lists the last used first. */
+    internal var shownAt = 0L
+
     /** The transport the session really runs over (the handle's own answer), SSH after a fallback. */
     val transport = mutableTransport.asStateFlow()
 
@@ -334,6 +350,14 @@ class ActiveTerminal internal constructor(val id: Long, val host: Host, val targ
         const val NO_ATTEMPT = -1
     }
 }
+
+/**
+ * Where a shared image can go: the terminals that are connected and not being closed, the last shown
+ * first (never shown ones after, in the order they were opened).
+ */
+fun shareTargets(terminals: List<ActiveTerminal>): List<ActiveTerminal> = terminals
+    .filter { !it.retired && !it.disconnectRequested && it.state.value == SessionState.Connected }
+    .sortedByDescending { it.shownAt }
 
 /** Short label for a terminal target: `shell`, `tmux main`, `herdr work w1:p2`. */
 fun targetTitle(target: TerminalTarget): String = when (target) {
@@ -881,6 +905,20 @@ class HostConnections(
     }
 
     /**
+     * Uploads an image for [terminal] ([HostPort.uploadImage]) over its host's current connection (a mosh
+     * terminal outlives the one it was opened on). Throws [HostException] when there is none.
+     */
+    suspend fun uploadImage(terminal: ActiveTerminal, bytes: ByteArray, extension: String): String {
+        val current = mutableHosts.value[terminal.host.id] ?: throw HostException.Closed()
+        if (current.retired) throw HostException.Closed()
+        val port = current.mutablePort.value ?: throw HostException.NotConnected()
+        return port.uploadImage(bytes, extension)
+    }
+
+    /** The terminals an image shared from another app can go to: the open ones, the last shown first ([shareTargets]). */
+    fun shareTargets(): List<ActiveTerminal> = shareTargets(mutableTerminals.value)
+
+    /**
      * Whether [hostId]'s current connection (whichever [scrollTarget] would use) is up: a terminal's
      * input held behind a failed `Bottom` retries while it is, and as soon as it is again.
      */
@@ -930,6 +968,7 @@ class HostConnections(
         if (target !is TerminalTarget.Shell) {
             terminal.targetScroller = TargetScroller(scope, { scroll -> scrollTarget(terminal, scroll) }, hostLive(current.host.id))
         }
+        terminal.imagePaste = ImagePaste(scope) { bytes, extension -> uploadImage(terminal, bytes, extension) }
         terminal.mutableTransport.value = session.transport()
         terminal.mutableHandle.value = session
         mutableTerminals.value += terminal
@@ -1333,7 +1372,12 @@ class HostConnections(
         releaseLingering()
     }
 
-    internal fun attachDisplay(terminal: ActiveTerminal) { terminal.displays++ }
+    internal fun attachDisplay(terminal: ActiveTerminal) {
+        terminal.displays++
+        terminal.shownAt = ++shownCount
+    }
+
+    private var shownCount = 0L
 
     /**
      * The terminal screen stopped showing [terminal] (minimised, another terminal selected, the app
@@ -1359,6 +1403,7 @@ class HostConnections(
         terminal.disconnectRequested = true
         cancelBackground(terminal)
         terminal.targetScroller?.close()
+        terminal.imagePaste?.cancel()
         terminal.mutableHandle.value?.disconnect()
         closeRetired(terminal)
     }

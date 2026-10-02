@@ -486,6 +486,18 @@ fn apply_input(
             }
             submits.arm();
         }
+        // A submit's text without its Enter.
+        Command::Paste(text) => {
+            let bytes = session
+                .terminal()
+                .live()
+                .engine()
+                .submit_text_bytes(&text)
+                .map_err(internal)?;
+            if !bytes.is_empty() {
+                session.send_input(&bytes);
+            }
+        }
         Command::Key(key) => {
             let bytes = session
                 .terminal()

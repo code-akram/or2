@@ -39,6 +39,7 @@ class UiSession(private val initial: SessionState = SessionState.Connected) : Se
     override fun resize(columns: UShort, rows: UShort) = Unit
     override fun sendText(text: String) = Unit
     override fun submitText(text: String) = Unit
+    override fun pasteText(text: String) = Unit
     override fun sendKey(input: KeyInput) = Unit
     override fun scroll(scroll: ViewportScroll) = Unit
     override fun mouseClick(column: UShort, row: UShort) = Unit
@@ -94,4 +95,5 @@ class UiPort(
     override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll) = Unit
     override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) = Unit
     override suspend fun replyToPane(session: String?, paneId: String, text: String) = ReplyRoute.PROMPTED
+    override suspend fun uploadImage(bytes: ByteArray, extension: String) = "/home/u/.cache/or2/images/or2-1.$extension"
 }

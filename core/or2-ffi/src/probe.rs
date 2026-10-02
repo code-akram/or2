@@ -189,6 +189,15 @@ async fn serve_terminal(
                 screen.text_echo = format!("submit{typed} | 0d");
                 publish(&mut driver, screen.delta(2));
             }
+            Command::Paste(text) => {
+                // Echoed as a program with bracketed paste on would receive it (API 16).
+                let pasted: String = submit_text_bytes(&text, true)
+                    .iter()
+                    .map(|b| format!(" {b:02x}"))
+                    .collect();
+                screen.text_echo = format!("paste{pasted}");
+                publish(&mut driver, screen.delta(2));
+            }
             Command::Key(key) => {
                 let m = key.modifiers();
                 let modifiers: String = [
@@ -261,7 +270,9 @@ fn publish(driver: &mut SessionDriver, frame: Frame) {
 /// `pane_id` the probe view does not have (`PaneNotFound`). `reply_to_pane` (API 16) is `Typed`
 /// for the blocked agent's pane `w1:p1`, `Prompted` for `w1:p2` and `w2:p1`, and `PaneNotFound`
 /// for any other pane; the validation (`InvalidName`, `TooLarge` above 4 KiB) is the real one.
-/// Closing the host closes its terminals and watches first.
+/// `upload_image` (API 16) returns [`PROBE_IMAGE_DIR`]`/or2-19700101-000000-000000.<extension>`
+/// (after the handle's own checks), except for a `gif`, which is `SftpUnavailable`. Closing the
+/// host closes its terminals and watches first.
 #[uniffi::export]
 pub fn contract_probe_host(
     request: HostConnectRequest,
@@ -403,6 +414,18 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                     Ok(())
                 });
             }
+            HostCommand::UploadImage {
+                extension, reply, ..
+            } => {
+                // A failure the app can show, for tests of the notice strip.
+                let _ = reply.send(if extension == "gif" {
+                    Err(core_host::HostError::SftpUnavailable)
+                } else {
+                    Ok(format!(
+                        "{PROBE_IMAGE_DIR}/or2-19700101-000000-000000.{extension}"
+                    ))
+                });
+            }
             HostCommand::ScrollTarget { reply, .. } => {
                 let _ = reply.send(Ok(()));
             }
@@ -484,6 +507,8 @@ async fn run_herdr_watch(
 pub const PROBE_SERVER_PID: u32 = 4242;
 /// A pid whose `stop_mosh_server` fails on a probe host, whatever else is true.
 pub const PROBE_UNSTOPPABLE_PID: u32 = 13;
+/// Where a probe host says it put an uploaded image.
+pub const PROBE_IMAGE_DIR: &str = "/home/probe/.cache/or2/images";
 const PROBE_PANES: [&str; 3] = ["w1:p1", "w1:p2", "w2:p1"];
 /// The probe view's blocked agent (until its second view resolves it): a reply to it is typed.
 const PROBE_BLOCKED_PANE: &str = "w1:p1";

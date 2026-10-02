@@ -67,6 +67,11 @@ import io.github.code_akram.or2.pair.PairProgressScreen
 import io.github.code_akram.or2.pair.PairReview
 import io.github.code_akram.or2.pair.PairReviewScreen
 import io.github.code_akram.or2.pair.PairScanScreen
+import io.github.code_akram.or2.paste.ImagePaste
+import io.github.code_akram.or2.paste.ShareTarget
+import io.github.code_akram.or2.paste.SharePickerSheet
+import io.github.code_akram.or2.paste.UploadState
+import io.github.code_akram.or2.paste.uploadNotice
 import io.github.code_akram.or2.home.HomeScreen
 import io.github.code_akram.or2.home.HomeSession
 import io.github.code_akram.or2.home.HostCard
@@ -229,6 +234,18 @@ class UiGalleryActivity : ComponentActivity() {
             "terminal-arrowpad-text" -> Terminal(pad = true, dense = true)
             "terminal-herdr-wheel" -> Terminal(target = "herdr personal w1:p2", herdrWheelAway = true)
             "terminal-composer" -> Terminal(composer = true)
+            "terminal-attach" -> Terminal(composer = true, images = true)
+            "terminal-uploading" -> Terminal(target = "tmux main", images = true, upload = UploadState.Uploading)
+            "terminal-upload-failed" -> Terminal(target = "tmux main", images = true,
+                upload = UploadState.Failed("SFTP is not available on this host"))
+            "share-picker" -> Box(Modifier.fillMaxSize()) {
+                Home(HomeVariant.Sessions)
+                SharePickerSheet(
+                    listOf(ShareTarget(1, "workstation", "tmux main"), ShareTarget(2, "build-box", "herdr personal"),
+                        ShareTarget(3, "workstation", "shell")),
+                    pick = {}, dismiss = {},
+                )
+            }
             else -> Text("Unknown screen: $name", color = Or2Colors.Danger)
         }
     }
@@ -402,7 +419,7 @@ class UiGalleryActivity : ComponentActivity() {
     private fun Terminal(
         host: String = "workstation", target: String = "shell", transport: Transport = Transport.SSH,
         cardState: SessionState = SessionState.Connected, health: LinkHealth? = null, pad: Boolean = false, composer: Boolean = false,
-        dense: Boolean = false, herdrWheelAway: Boolean = false,
+        dense: Boolean = false, herdrWheelAway: Boolean = false, images: Boolean = false, upload: UploadState = UploadState.Idle,
     ) {
         val session = remember { startProbe() }
         val scope = rememberCoroutineScope()
@@ -411,6 +428,8 @@ class UiGalleryActivity : ComponentActivity() {
             if (herdrWheelAway) TargetScroller(scope, { _ -> }).apply { wheeled(-6) } else null
         }
         val state by probeState.collectAsStateWithLifecycle()
+        // Uploads that never leave the phone: the attach button shows, and a pick says where it would have gone.
+        val paste = remember(images) { if (images) ImagePaste(scope) { _, extension -> "/home/dev/.cache/or2/images/or2-gallery.$extension" } else null }
         // The composer opens with a message typed, so the caret, the focus ring and the lit send button show.
         val chrome = remember { TerminalChromeState(padOpen = pad, composerOpen = composer, composerText = if (composer) "yes, go ahead" else "") }
         LaunchedEffect(Unit) {
@@ -432,10 +451,11 @@ class UiGalleryActivity : ComponentActivity() {
                 }
             }
         }
-        TerminalCard(host, target, transport, cardState, minimise = {}, openSwitcher = {}, endSession = {}, linkHealth = health) {
+        TerminalCard(host, target, transport, cardState, minimise = {}, openSwitcher = {}, endSession = {}, linkHealth = health,
+            upload = uploadNotice(upload)) {
             TerminalScreen(session, probeState, probeFrames.receiveAsFlow(), Modifier.weight(1f),
                 composerHint = "Message $host…", chrome = chrome,
-                target = if (scroller != null) herdr else TerminalTarget.Shell, targetScroller = scroller)
+                target = if (scroller != null) herdr else TerminalTarget.Shell, targetScroller = scroller, imagePaste = paste)
         }
     }
 
@@ -511,6 +531,7 @@ class UiGalleryActivity : ComponentActivity() {
             "pair-progress", "pair-install", "keepalive", "keepalive-waiting",
             "terminal", "terminal-tmux", "terminal-long", "terminal-stale", "terminal-connecting", "terminal-closed",
             "terminal-arrowpad", "terminal-arrowpad-text", "terminal-herdr-wheel", "terminal-composer",
+            "terminal-attach", "terminal-uploading", "terminal-upload-failed", "share-picker",
         )
     }
 }

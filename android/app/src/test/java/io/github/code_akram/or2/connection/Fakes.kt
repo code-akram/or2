@@ -88,6 +88,7 @@ class FakeSession(val events: MutableList<String> = mutableListOf(), val transpo
     override fun sendKey(input: KeyInput) = take("key:${input.key}")
     override fun sendText(text: String) = take("text:$text")
     override fun submitText(text: String) = take("submit:$text")
+    override fun pasteText(text: String) = take("paste:$text")
     override fun state() = nativeState
     override fun takeFrame(): TerminalFrame? {
         check(!destroyed) { "Session object has already been destroyed" }
@@ -243,6 +244,17 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         replyGate?.await()
         replyFailure?.let { throw it }
         return replyRoute
+    }
+
+    /** `upload_image` calls in order (the extension and the size); [uploadGate] holds each, [uploadFailure] is thrown after. */
+    val uploads = mutableListOf<Pair<String, Int>>()
+    var uploadGate: CompletableDeferred<Unit>? = null
+    var uploadFailure: Exception? = null
+    override suspend fun uploadImage(bytes: ByteArray, extension: String): String {
+        uploads += extension to bytes.size
+        uploadGate?.await()
+        uploadFailure?.let { throw it }
+        return "/home/u/.cache/or2/images/or2-${uploads.size}.$extension"
     }
     override suspend fun focusHerdrPane(session: String?, paneId: String) {
         events += "focus:$session:$paneId"

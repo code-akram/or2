@@ -4574,3 +4574,114 @@ timeout.
 
 `russh-sftp` (or the SFTP client chosen) is recorded in THIRD_PARTY_NOTICES as needed, and `xtask gen-licenses`
 stays green.
+
+**Implemented (branch `v012/paste`).**
+
+- **SFTP client.** `russh-sftp` 3.0.1 (Apache-2.0, pinned `=3.0.1` in `core/Cargo.toml` and
+  `Cargo.lock`), its client only (`RawSftpSession`), with no default features. It speaks SFTP v3 over
+  any `AsyncRead + AsyncWrite`, so it runs on the pinned russh 0.63 channel stream with no russh
+  dependency of its own; it is maintained alongside russh (its tests use russh 0.63). It brings
+  `dashmap`, `tokio-util`, `serde_bytes`, `smallvec`, `hashbrown`, `lock_api`, `parking_lot_core`,
+  `crossbeam-utils` and `scopeguard` (MIT or MIT/Apache-2.0, all GPL-3.0-compatible). Nothing is
+  vendored or ported, so `THIRD_PARTY_NOTICES.md` is unchanged: the generator lists the crates, with
+  their licence texts, in `rust.json` (Open source licenses); `gen-licenses --check` is green.
+- **Rust (`core/or2-core/src/ssh/upload.rs`).** `HostHandle::upload_image(bytes, extension)` validates
+  first, before anything is sent: the extension, lower-cased, is one of `png`, `jpg`, `jpeg`, `gif`,
+  `webp` (`IMAGE_EXTENSIONS`), else `InvalidName`, as is an empty image; more than 20 MiB
+  (`MAX_IMAGE_BYTES`) is `TooLarge`. The host driver (`HostCommand::UploadImage`) opens one session
+  channel on the host's connection (the connection's own open, so a refused or late channel is closed),
+  requests the `sftp` subsystem with a reply and initialises SFTP, within the exec timeout. A
+  `channel_failure`, a channel closed instead, or a subsystem that does not answer SFTP's init (a
+  missing `sftp-server`) is `SftpUnavailable`. Every path is relative to where the server's SFTP
+  starts, which is the login's home, so `~` needs neither `$HOME` nor a shell, and no exec runs at
+  all. Then:
+  1. each missing part of `.cache/or2/images` is made with `mkdir` mode `0700` (another upload making
+     it meanwhile is fine); an image directory something else made is `chmod`ed to `0700` (best
+     effort: a server that refuses `chmod` still gets the upload); a part that is not a directory is
+     `CommandFailed`;
+  2. the sweep: the directory's regular files named `or2-*` with an mtime more than 7 days before the
+     phone's clock are removed (best effort, at most 5 s; directories and other names stay);
+  3. the bytes go to `<name>.part` (`CREATE|EXCL|WRITE`, mode `0600`, then `fsetstat 0600` in case the
+     server ignored the mode), 32 KiB writes with up to 16 in flight; the handle is closed;
+  4. `rename` to `or2-<UTC yyyyMMdd-HHmmss>-<6 random hex>.<ext>` (`.part` is an `or2-*` name too, so a
+     left-over one is swept later), and the reply is the server's `realpath` of it (absolute, through
+     symlinks).
+  The whole call is bounded by the query timeout (30 s). A caller that stops waiting (the coroutine
+  cancelled, or the timeout) closes the reply: the upload stops and removes its `.part` (2 s, best
+  effort). Failures are `CommandFailed` with a reason that never carries a path (`creating the image:
+  permission denied`), `Closed` when the connection went. The SFTP channel closes when the upload
+  ends, whichever way.
+- **FFI (API 16).** `HostConnection.upload_image(bytes, extension)` as in the table, and
+  `HostError::SftpUnavailable` and `HostError::TooLarge`. The contract probe host answers
+  `/home/probe/.cache/or2/images/or2-19700101-000000-000000.<ext>`, and `SftpUnavailable` for a `gif`.
+- **Deviation: `Session.paste_text(text)` (API 16).** "Into the terminal as a bracketed paste" needs
+  the terminal's bracketed-paste mode, which only Rust knows (the existing `send_text` is typed text,
+  never bracketed). `paste_text` writes what a submit writes without its Enter: one bracketed paste
+  while the program has DECSET 2004 on (a paste end marker inside the text removed), else typed with
+  newlines as carriage returns; empty text sends nothing; it waits behind a submit's pending Enter like
+  other input (`SubmitSequencer`). Both transports (`Command::Paste` in the SSH pump and the mosh
+  driver). A probe terminal echoes it as `paste` and the bracketed bytes.
+- **Kotlin, processing (`paste/ImagePipeline.kt`, `AndroidImageCodec.kt`).** `prepareImage` decides,
+  an `ImageCodec` does the pixels: `ImageDecoder` (PNG, JPEG, WebP, HEIF, a GIF's first frame; EXIF
+  orientation applied) scales while it decodes to `fitWithin` 2048 px on the long edge (never up),
+  into a software bitmap; `Bitmap.compress` writes PNG, or JPEG at 85, with no metadata, so EXIF and
+  GPS are gone, also for an image that needed no scaling (nothing of the source is ever passed on).
+  PNG when any pixel is not opaque (an alpha channel that is fully opaque does not count), or when the
+  source is a PNG under 2 MiB (a screenshot); JPEG otherwise. The 20 MiB cap is applied to the image
+  as read (`readCapped` stops reading past it, before any decoding) and to the result; the decoded
+  bitmap itself never exceeds 2048 x 2048 (16 MiB), because the decoder samples down while it decodes.
+  Reading runs on the IO dispatcher, processing on the default one.
+- **Kotlin, upload and insert (`paste/ImagePaste.kt`, `PathInsert.kt`).** Each `ActiveTerminal` has an
+  `ImagePaste` in the holder's scope: one upload at a time (a second image while one runs is not
+  taken), over the terminal's host's current connection (`HostConnections.uploadImage`, so a mosh
+  terminal that outlived its connection uses the new one). Its state drives the terminal card's
+  notice strip: `Uploading image…` with the spinner and **Cancel** (the coroutine is cancelled, Rust
+  cleans up), or the reason in `attention` with **Dismiss** (`SFTP is not available on this host`,
+  `The image is larger than 20 MiB`, `Not sent: the host is not connected`, `Upload failed: <reason>`).
+  The connection notice (connecting, closed) wins the strip when both apply. The path arrives on a
+  channel the terminal screen collects, so it is inserted once, even if the screen showed later:
+  `shellQuote` leaves a path of `[A-Za-z0-9_@%+=:,./-]` alone and single-quotes anything else (`'` as
+  `'\''`), and `pathInsertion` puts a space before it, no Enter after. Into the composer's text when
+  the composer is open, else `TerminalView.pasteText` (through `paste_text`, behind a tmux or herdr
+  `Bottom` like other input). Closing or dismissing a terminal cancels its upload.
+- **Sources.** The composer's attach button: an outline image glyph in a 40 dp box at the left of the
+  text (the text's own 14 dp start padding then goes), `textMuted`, shown only for a terminal that
+  takes images; it opens the Photo Picker (`PickVisualMedia`, `ImageOnly`, no permission). Keyboard
+  images: the composer is now a state-based `BasicTextField(TextFieldState)` (the only Compose text
+  field that receives content) with `Modifier.contentReceiver`, which takes image items and leaves the
+  rest; `TerminalChromeState.composerText` stays a plain string view of it. The terminal's
+  `InputConnection` advertises `image/*` (`EditorInfo.contentMimeTypes`) while the view has an
+  `onImage`, and `commitContent` takes an image with its read permission, given back once it was read.
+  Shares: `MainActivity` has an `ACTION_SEND` filter for `image/*`; a new share (not a recreation, not a
+  relaunch from Recents) is offered to the UI, which keeps it in saved state and shows the share picker
+  (`SharePickerSheet`, a compact sheet, "Send image to"): the connected terminals that are not closing,
+  the last shown first (`ActiveTerminal.shownAt`, counted on each display), then the never shown in
+  opening order. A pick shows that terminal and uploads the image to it. No open terminal: the message
+  `No open terminal to send the image to`.
+- **Gallery.** `terminal-attach` (the composer with its attach button), `terminal-uploading`,
+  `terminal-upload-failed` and `share-picker`.
+- **Tests.** Rust, the in-process server (it now serves the `sftp` subsystem with `russh-sftp`'s
+  server over a temporary directory, `ssh/sftp_test_server.rs`, or refuses it): the directories made
+  `0700` and the file `0600` with its bytes, the name's shape, the write before the rename and no
+  `.part` left, no exec, the channel closed; the sweep (old `or2-*` files gone, recent ones, other
+  names and an old `or2-` directory kept) and an existing `0755` directory made `0700`; no SFTP is
+  `SftpUnavailable` with the channel closed and the connection fine; too large, empty and unknown
+  extensions refused with nothing opened, exactly 20 MiB taken; a cancelled upload removes its
+  `.part` and never renames. Names and dates (`image_name`, leap day, year end), mode bits, the pump's
+  `Paste` (bracketed only with the mode on, no Enter, behind a submit's Enter), the handle's
+  `paste_text`. The disposable sshd (`Subsystem sftp internal-sftp -d <fixture home>`, so the real home
+  is never touched): an upload lands with `0600`/`0700` and an 8-day-old `or2-` file is swept; with no
+  `Subsystem` line, `SftpUnavailable`. JVM: `ImagePipelineTest` (downscale to 2048, EXIF and GPS gone
+  from a JPEG and a PNG text chunk, PNG versus JPEG, the 20 MiB cap before decoding and while reading,
+  unreadable images) through a test codec of real PNG and a JPEG-container stand-in (unit tests have
+  neither Android graphics nor AWT); `ImagePasteTest` (quoting, the insert target, progress, one at a
+  time, delivered once even when no screen collected, cancel, failure reasons);
+  `HostConnectionsImagePasteTest` (the host's connection, a closed host, close cancels, the share
+  order); the FFI contract across JNA (`upload_image`'s path and errors, `paste_text`'s bracketed
+  echo). Device (compile; not run here): the attach button only with images and left of the text, the
+  path into the composer or the terminal, Cancel in the strip, the `ACTION_SEND` filter for image types
+  only, and `commitContent` (images only, permission given back).
+- **Open.** An upload larger than about 30 s of the link's speed hits the query timeout (a 3 MiB JPEG
+  needs about 1 Mbit/s); the processed images are usually far smaller. `russh-sftp` decodes SFTP
+  handles as UTF-8 strings (lossily): OpenSSH's handles are small integers and survive, a server with
+  binary handles above 0x7f could fail. The sweep compares with the phone's clock.

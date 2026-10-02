@@ -333,11 +333,20 @@ pub enum HostError {
     /// A command ran but failed; the message is a diagnostic without secrets.
     #[error("command failed: {message}")]
     CommandFailed { message: String },
+    /// `upload_image`: the server has no SFTP subsystem (or it would not start).
+    #[error("SFTP is not available on this host")]
+    SftpUnavailable,
     /// What was to be sent is over its limit (`reply_to_pane`: more than
-    /// [`herdr::MAX_REPLY_BYTES`]); nothing was sent.
+    /// [`herdr::MAX_REPLY_BYTES`]; `upload_image`: more than [`MAX_IMAGE_BYTES`]); nothing was sent.
     #[error("too large to send")]
     TooLarge,
 }
+
+/// The largest image [`HostHandle::upload_image`] sends (20 MiB).
+pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+
+/// The image types [`HostHandle::upload_image`] takes, by file extension (lower case).
+pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 
 /// What the host driver is asked to do.
 pub enum HostCommand {
@@ -423,6 +432,19 @@ pub enum HostCommand {
         pane_id: String,
         text: String,
         reply: oneshot::Sender<Result<herdr::ReplyRoute, HostError>>,
+    },
+    /// Write `bytes` over SFTP to the host's image directory (contracts.md, "Image paste"):
+    /// `~/.cache/or2/images` (created `0700`), a temporary name renamed to
+    /// `or2-<UTC yyyyMMdd-HHmmss>-<6 hex>.<extension>` (`0600`), after sweeping that
+    /// directory's `or2-*` files older than seven days. Reply the absolute path,
+    /// `SftpUnavailable` without an SFTP subsystem, `CommandFailed` for other failures.
+    /// `bytes` and `extension` are validated (size, lower-case known extension). A dropped
+    /// `reply` (the caller cancelled or timed out) stops the upload and removes its temporary
+    /// file, best effort.
+    UploadImage {
+        bytes: Vec<u8>,
+        extension: String,
+        reply: oneshot::Sender<Result<String, HostError>>,
     },
     /// Run [`herdr::run`] (or an equivalent) on `driver`, with the herdr path from the probe.
     /// The session name is validated. With no herdr found, move `driver` to
@@ -782,6 +804,35 @@ impl HostHandle {
             session,
             pane_id,
             text,
+            reply,
+        })?;
+        await_reply(response, QUERY_TIMEOUT).await
+    }
+
+    /// Uploads an image for an agent to read (contracts.md, "Image paste"): `bytes` go over
+    /// SFTP, on this connection, to `~/.cache/or2/images/or2-<UTC yyyyMMdd-HHmmss>-<6 hex>.<ext>`
+    /// (`~` being where the server's SFTP starts, the login's home; the directory `0700`, the
+    /// file `0600`, written to a temporary name and renamed); each upload first removes that
+    /// directory's `or2-*` files older than seven days, best effort. No shell command runs.
+    /// Resolves with the file's absolute path. `extension` is one of [`IMAGE_EXTENSIONS`]
+    /// (any case; `jpeg` is kept as given, lower-cased), else `InvalidName`, as is an empty
+    /// image; more than [`MAX_IMAGE_BYTES`] is `TooLarge`; both are refused before anything is
+    /// sent. A server without SFTP is `SftpUnavailable`; other failures `CommandFailed`.
+    /// Bounded by [`QUERY_TIMEOUT`]. Dropping the future (a cancelled upload) stops the upload
+    /// and removes its temporary file, best effort.
+    pub async fn upload_image(&self, bytes: Vec<u8>, extension: &str) -> Result<String, HostError> {
+        let extension = extension.to_ascii_lowercase();
+        if bytes.is_empty() || !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
+            return Err(HostError::InvalidName);
+        }
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return Err(HostError::TooLarge);
+        }
+        let (reply, response) = oneshot::channel();
+        self.require_connected()?;
+        self.send(HostCommand::UploadImage {
+            bytes,
+            extension,
             reply,
         })?;
         await_reply(response, QUERY_TIMEOUT).await
