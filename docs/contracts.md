@@ -4428,3 +4428,85 @@ A long press still selects; swipes, flings and pinches are unchanged.
 session's active pane (tmux): with several panes, scrolling one that is not focused leaves it scrolled
 after `Bottom`. tmux with `mouse on` running a mouse-tracking program in the pane passes the wheel to
 that program; the `Bottom` sent afterwards is then a harmless `-X cancel` ("not in a mode").
+
+# v0.1.2: reply from a notification, image paste (API 16)
+
+Owner decision of 2026-10-02: after the v0.1.2 polish, the next two features are replying to an agent from its
+notification and pasting images to an agent. One FFI bump, **`API_VERSION` = 16**, covers both lanes.
+
+## FFI (API 16)
+
+| Export | Lane |
+|---|---|
+| `HostConnection.reply_to_pane(session: Option<String>, pane_id: String, text: String) async -> Result<ReplyRoute, HostError>`: send `text` to a herdr pane and submit it, with no terminal open | Reply |
+| `ReplyRoute { Prompted, Typed }`: which herdr path carried it (below) | Reply |
+| `HostConnection.upload_image(bytes: Vec<u8>, extension: String) async -> Result<String, HostError>`: write the bytes over SFTP to the host's image directory and return the remote absolute path | Paste |
+
+`HostError` gains what each path needs (e.g. `SftpUnavailable` when the server has no SFTP subsystem, and
+`TooLarge`). Both calls run on the host's existing SSH connection (no new connection), bounded by the query
+timeout.
+
+## Reply from a notification (lane Reply)
+
+- **The notification** (v0.1.1's agent notification) gains a **Reply** action with an Android `RemoteInput`
+  ("Reply to <agent>"), next to the tap that opens the pane. No other actions: approve or deny keys differ
+  per agent, so they are not guessed.
+- **The path in Rust** (`reply_to_pane`):
+  - When the agent is **not blocked**, it goes through herdr's `agent.prompt` (target: the pane id), which
+    submits like the agent's own input: `Prompted`.
+  - herdr refuses `agent.prompt` while the agent is **blocked** (`agent_blocked`), and blocked is the usual
+    case for a notification. Then the text is typed into the pane (`pane.send_text`), then, after the same
+    short pause the composer's `submit_text` uses, Enter (`pane.send_keys`, `Enter`): `Typed`. This is the
+    composer's submit, through herdr instead of a terminal.
+  - A text with several lines is sent as typed (no confirmation is possible from a notification). The text
+    is limited to 4 KiB.
+- **The path in Kotlin:**
+  - A `BroadcastReceiver` (explicit, not exported) receives the RemoteInput and finds the host's live
+    connection. A reply to a host that is not connected says so in the notification (`Not sent: <host> is
+    not connected`), with no reconnect from the background.
+  - It calls `reply_to_pane`. On success the notification is updated to `Sent` with the reply quoted
+    (`Android's MessagingStyle` reply history) and stops alerting. The next Blocked/Done edge posts a fresh
+    one, as before.
+  - On failure it shows the reason and keeps the Reply action.
+  - The PendingIntent is immutable except for the RemoteInput's fill-in (`FLAG_MUTABLE` is required for
+    RemoteInput: restrict it with an explicit component and no other extras trusted from the fill-in).
+- **Privacy:** the reply text is never logged and never kept after it is sent.
+- **Tests:** Rust against the herdr fake (`Prompted` for a working or idle agent, the `agent_blocked`
+  refusal leading to `Typed` with text, then the pause, then Enter, an over-long text refused, a vanished
+  pane `PaneNotFound`) and the live herdr suite (a reply reaches an isolated pane's input). JVM: the receiver
+  (not connected; success updates the notification; failure keeps Reply; nothing logged). Device (compile):
+  the action exists with a RemoteInput.
+
+## Image paste (lane Paste)
+
+- **Sources**, each ending in the same upload:
+  1. The composer's attach button (a compact `+` or image glyph left of the text). It opens the Android
+     Photo Picker (`PickVisualMedia`, images only, no storage permission).
+  2. An image committed by the keyboard (IME `commitContent`, e.g. a clipboard screenshot or a GIF
+     keyboard) into the terminal or the composer.
+  3. Android's share sheet: or2 accepts `ACTION_SEND` of `image/*` and asks which open terminal to send it to
+     (a compact picker of open terminals, the last used first; no open terminal → a short message).
+- **Processing on the phone:**
+  - Decode, downscale so the long edge is at most 2048 px, and re-encode: PNG stays PNG when the image has
+    transparency or is a screenshot-sized PNG under 2 MiB, otherwise JPEG quality 85.
+  - Re-encoding drops EXIF and GPS. Nothing of the original file's metadata is sent.
+  - Refuse above 20 MiB decoded.
+- **Upload** (`upload_image`, Rust, `russh-sftp`, Apache-2.0, on the host's SSH connection):
+  - The directory is `~/.cache/or2/images` (created `0700`; files `0600`).
+  - Names are `or2-<UTC yyyyMMdd-HHmmss>-<6 random hex>.<ext>`.
+  - The write goes to a temporary name and is then renamed.
+  - Each upload first removes this directory's `or2-*` files older than 7 days (best effort).
+  - No shell command is involved.
+- **Insert:** the returned absolute path (shell-quoted if it needs quoting) is inserted with a leading space
+  and no Enter. It goes into the composer when the composer is open, else into the terminal as a bracketed
+  paste. Claude Code and Codex take an image path in the prompt.
+- **UI:** while it runs, the terminal's notice strip shows `Uploading image…` with a spinner and a cancel
+  action; a failure shows the reason (e.g. `SFTP is not available on this host`). Compact, per the UI system.
+- **Tests:** Rust against the in-process SSH server with an SFTP subsystem (the directory created `0700`,
+  file `0600`, the rename, old files swept, a server without SFTP → `SftpUnavailable`, a too-large refusal)
+  and the disposable sshd suite if it offers `internal-sftp`. JVM: the processing (downscale, EXIF gone, PNG
+  versus JPEG, size cap), quoting, the insert target. Device (compile): the attach button and the share
+  target's intent filter.
+
+`russh-sftp` (or the SFTP client chosen) is recorded in THIRD_PARTY_NOTICES as needed, and `xtask gen-licenses`
+stays green.
