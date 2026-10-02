@@ -40,6 +40,12 @@ Each release's notes are in [docs/releases/](docs/releases/).
   build-machine path is left in `libor2_ffi.so` (v0.1.0 applied the remap by hand).
 - The arrow pad floats over the terminal with no panel behind it.
 - The session picker's "Skip" is now "Shell" (it opens a plain login shell).
+- Home host cards have two actions: the card opens the host's page, and a `>_` button opens the session picker
+  straight over Home (connecting the host first when needed). The picker no longer opens by itself.
+- Opening a tmux or herdr session that is already open on that host brings its terminal to the front instead of
+  opening a second one; a shell still opens a new one.
+- Close session in the sessions sheet ends and removes a terminal in one tap.
+- A host whose UDP was blocked is checked again after five minutes, unseen, on the next tmux or herdr open.
 - FFI API 14.
 
 ### Fixed
