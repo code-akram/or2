@@ -5,7 +5,10 @@ import io.github.code_akram.or2.session.TerminalNotice
 import io.github.code_akram.or2.ui.NoticeTone
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,8 +21,22 @@ import kotlinx.coroutines.launch
 sealed interface UploadState {
     data object Idle : UploadState
     data object Uploading : UploadState
+
+    /** Uploading, and another image just came and was not taken: the strip says so for [ALREADY_SHOWN]. */
+    data object AlreadyUploading : UploadState
     data class Failed(val reason: String) : UploadState
 }
+
+/** Whether an upload runs (Cancel stops it). */
+val UploadState.uploading: Boolean get() = this == UploadState.Uploading || this == UploadState.AlreadyUploading
+
+/** How long the strip says a second image was not taken. */
+const val ALREADY_SHOWN = 3_000L
+
+const val ALREADY_UPLOADING = "An image is already uploading"
+
+/** What a host's answer that is no path to type into a terminal fails with ([insertablePath]). */
+const val UNUSABLE_PATH = "Upload failed: the host answered an unusable path"
 
 /**
  * A terminal's image paste (contracts.md, "Image paste"): one upload at a time, from any source (the
@@ -45,20 +62,41 @@ class ImagePaste(
     /** Which upload speaks for the state: a cancelled one's late end must not overwrite a newer one's. */
     private var generation = 0
 
+    /** Puts the strip back from [UploadState.AlreadyUploading]. */
+    private var already: Job? = null
+
     /**
-     * Starts an upload of what [prepare] makes; false (and nothing starts) while one is running. Call on
-     * the main thread, like [cancel] and [dismiss].
+     * Starts an upload of what [prepare] makes. While one is running, nothing starts: the strip says
+     * [ALREADY_UPLOADING] for a moment (no image is dropped without a word, whichever source it came
+     * from), and the result is false, so the caller gives back what it holds for it (a keyboard's grant).
+     * Once taken, [prepare] always runs, even when the upload is cancelled before it began, so it can give
+     * back its own. Call on the main thread, like [cancel] and [dismiss].
      */
+    @OptIn(DelicateCoroutinesApi::class)
     fun start(prepare: suspend () -> PreparedImage): Boolean {
-        if (job?.isActive == true) return false
+        if (job?.isActive == true) {
+            val run = generation
+            mutableState.value = UploadState.AlreadyUploading
+            already?.cancel()
+            already = scope.launch {
+                delay(ALREADY_SHOWN)
+                if (run == generation && mutableState.value == UploadState.AlreadyUploading) mutableState.value = UploadState.Uploading
+            }
+            return false
+        }
         val run = ++generation
         mutableState.value = UploadState.Uploading
-        job = scope.launch {
+        // Atomic: a cancel before it is dispatched still runs `prepare` (which then stops at once).
+        job = scope.launch(start = CoroutineStart.ATOMIC) {
             val outcome: UploadState = try {
                 val image = prepare()
                 val path = upload(image.bytes, image.format.extension)
-                if (run == generation) inserts.trySend(path)
-                UploadState.Idle
+                if (insertablePath(path)) {
+                    if (run == generation) inserts.trySend(path)
+                    UploadState.Idle
+                } else {
+                    UploadState.Failed(UNUSABLE_PATH)
+                }
             } catch (error: CancellationException) {
                 if (run == generation) mutableState.value = UploadState.Idle
                 throw error
@@ -73,6 +111,7 @@ class ImagePaste(
     /** Stops the running upload; nothing is inserted. */
     fun cancel() {
         generation++
+        already?.cancel()
         job?.cancel()
         job = null
         mutableState.value = UploadState.Idle
@@ -104,5 +143,6 @@ data class UploadNotice(val notice: TerminalNotice, val action: String)
 fun uploadNotice(state: UploadState): UploadNotice? = when (state) {
     UploadState.Idle -> null
     UploadState.Uploading -> UploadNotice(TerminalNotice("Uploading image…", NoticeTone.Info, busy = true, closable = false), "Cancel")
+    UploadState.AlreadyUploading -> UploadNotice(TerminalNotice(ALREADY_UPLOADING, NoticeTone.Info, busy = true, closable = false), "Cancel")
     is UploadState.Failed -> UploadNotice(TerminalNotice(state.reason, NoticeTone.Warning, busy = false, closable = false), "Dismiss")
 }

@@ -96,7 +96,23 @@ class TerminalChromeState(padOpen: Boolean = false, composerOpen: Boolean = fals
     var composerText: String
         get() = composer.text.toString()
         set(value) = composer.setTextAndPlaceCursorAtEnd(value)
+
+    /**
+     * [sent] went out from the composer (a confirmed multi-line send): only that text is cleared. What
+     * arrived since the send was asked (an uploaded image's path, while the confirmation was open) stays.
+     */
+    fun composerSent(sent: String) {
+        composerText = composerAfterSend(composerText, sent)
+    }
 }
+
+/**
+ * What the composer holds once [sent] went out, when it holds [current] now: what was added after the sent
+ * text (an image's path, inserted while a confirmation was open), without the space before it; all of
+ * [current] when it no longer starts with what was sent (nothing is lost).
+ */
+fun composerAfterSend(current: String, sent: String): String =
+    if (current.startsWith(sent)) current.substring(sent.length).trimStart() else current
 
 /**
  * One key of the floating toolbar: a 30 dp tall rounded pill in `surface` (in a 40 dp touch box)

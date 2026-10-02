@@ -38,6 +38,10 @@ class ImagePasteDeviceTest {
         assertNull(sharedImage(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, uri)))
         assertNull(sharedImage(Intent(Intent.ACTION_VIEW).setType("image/png").putExtra(Intent.EXTRA_STREAM, uri)))
         assertNull(sharedImage(null))
+        // Only content: a file of or2's own, or a URI without a scheme, is never taken.
+        for (other in listOf("file:///data/data/io.github.code_akram.or2/files/secret.png", "/sdcard/x.png", "x.png")) {
+            assertNull(other, sharedImage(Intent(Intent.ACTION_SEND).setType("image/png").putExtra(Intent.EXTRA_STREAM, Uri.parse(other))))
+        }
         val shares = ImageShares()
         shares.offer(uri)
         assertEquals(uri, shares.take())

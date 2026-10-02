@@ -10,12 +10,14 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -124,6 +126,79 @@ class ImagePasteTest {
         assertTrue(paste.start { png })
         advanceUntilIdle()
         assertEquals("/home/u/.cache/or2/images/or2-2.png", paste.paths.first())
+    }
+
+    /** Hostile answers a host could give for the image's path: each would act in a terminal, quoted or not. */
+    private val hostilePaths = listOf(
+        "/home/x\u0003touch /tmp/pwn\n/or2-1.png", // ETX ends the quote's line, LF runs the rest
+        "/home/\u001b]0;owned\u0007/or2-1.png", // ESC: a terminal sequence
+        "/home/x\rrm -rf ~/or2-1.png", // CR
+        "/home/x\n/or2-1.png", // LF
+        "/home/x\u001b[201~touch /tmp/pwn\n/or2-1.png", // a bracketed paste's end marker
+        "/home/x\u009b2J/or2-1.png", // C1 CSI
+        "/home/x\u0000/or2-1.png", // NUL
+        "/home/x\u007f/or2-1.png", // DEL
+        "relative/or2-1.png",
+    )
+
+    @Test
+    fun aPathWithControlCharactersIsNeverInsertedInEitherTarget() = runTest(StandardTestDispatcher()) {
+        for (path in hostilePaths) {
+            assertFalse(path, insertablePath(path))
+            // The terminal's insertion (bracketed paste or typed) and the composer's both refuse it.
+            assertThrows(IllegalArgumentException::class.java) { pathInsertion(path) }
+            assertThrows(IllegalArgumentException::class.java) { composerWithPath("look at", path) }
+        }
+        assertTrue(insertablePath("/home/zoë's files/or2-1.png"))
+        // An upload whose host answers one fails in words, and nothing reaches the screen.
+        for (path in hostilePaths) {
+            val paste = ImagePaste(CoroutineScope(StandardTestDispatcher(testScheduler))) { _, _ -> path }
+            assertTrue(paste.start { png })
+            advanceUntilIdle()
+            assertEquals(UploadState.Failed(UNUSABLE_PATH), paste.state.value)
+            assertNull(withTimeoutOrNull(1_000) { paste.paths.first() })
+        }
+    }
+
+    @Test
+    fun aSecondImageWhileOneUploadsIsRefusedInWords() = runTest(StandardTestDispatcher()) {
+        val upload = Upload().apply { gate = CompletableDeferred() }
+        val paste = paste(upload)
+        assertTrue(paste.start { png })
+        advanceUntilIdle()
+        var second = false
+        assertFalse(paste.start { second = true; png })
+        // The strip says so, still with Cancel for the running upload.
+        assertEquals(UploadState.AlreadyUploading, paste.state.value)
+        assertTrue(paste.state.value.uploading)
+        val notice = uploadNotice(paste.state.value)!!
+        assertEquals(ALREADY_UPLOADING, notice.notice.text)
+        assertTrue(notice.notice.busy)
+        assertEquals("Cancel", notice.action)
+        // For a moment, then back to the upload's own words.
+        advanceTimeBy(ALREADY_SHOWN + 1)
+        assertEquals(UploadState.Uploading, paste.state.value)
+        // Its end speaks for itself, even over the moment.
+        assertFalse(paste.start { png })
+        upload.gate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(UploadState.Idle, paste.state.value)
+        assertFalse("the second image was never read", second)
+        assertEquals(1, upload.calls.size)
+    }
+
+    @Test
+    fun aTakenImageIsAlwaysPreparedSoItsGrantIsGivenBackEvenWhenCancelledAtOnce() = runTest(StandardTestDispatcher()) {
+        val upload = Upload()
+        val paste = paste(upload)
+        var prepared = 0
+        assertTrue(paste.start { prepared++; png })
+        // Cancelled before the upload's coroutine was ever dispatched.
+        paste.cancel()
+        advanceUntilIdle()
+        assertEquals(1, prepared)
+        assertEquals(UploadState.Idle, paste.state.value)
+        assertNull(withTimeoutOrNull(1_000) { paste.paths.first() })
     }
 
     @Test

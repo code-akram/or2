@@ -94,6 +94,8 @@ import io.github.code_akram.or2.paste.NO_TERMINAL_FOR_IMAGE
 import io.github.code_akram.or2.paste.ShareTarget
 import io.github.code_akram.or2.paste.SharePickerSheet
 import io.github.code_akram.or2.paste.imageFromUri
+import io.github.code_akram.or2.paste.restoredShare
+import io.github.code_akram.or2.paste.savedShare
 import io.github.code_akram.or2.session.HostTrustDialog
 import io.github.code_akram.or2.session.SessionScreen
 import io.github.code_akram.or2.terminal.TerminalThumbnail
@@ -405,8 +407,9 @@ fun Or2App(
 
     // --- images shared from another app: the open terminal they go to ------------------------------
     // Saved state: a rotation while the picker is open keeps the image (its read grant belongs to the activity).
+    // A recreation after the process died drops it (`restoredShare`): the terminals it was for are gone.
     val shareOffer by actions.imageShares.request.collectAsStateWithLifecycle()
-    var sharing by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var sharing by rememberSaveable(stateSaver = SHARE_SAVER) { mutableStateOf<Uri?>(null) }
     LaunchedEffect(shareOffer) {
         if (shareOffer == null) return@LaunchedEffect
         val uri = actions.imageShares.take() ?: return@LaunchedEffect
@@ -664,6 +667,12 @@ fun Or2App(
 private val AgentPaneSaver: Saver<AgentPaneKey?, Array<String>> = Saver(
     save = { it?.toParts() },
     restore = { AgentPaneKey.fromParts(it) },
+)
+
+/** A pending shared image as saved state, with the process that took it ([savedShare], [restoredShare]). */
+private val SHARE_SAVER: Saver<Uri?, Array<String>> = Saver(
+    save = { uri -> uri?.let { savedShare(it.toString()) } },
+    restore = { saved -> restoredShare(saved)?.let(Uri::parse) },
 )
 
 /** The Home card for the last terminal: what it was and how it was reached. */

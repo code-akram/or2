@@ -354,6 +354,17 @@ pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 /// The image types [`HostHandle::upload_image`] takes, by file extension (lower case).
 pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 
+/// The longest [`upload_timeout`].
+pub const MAX_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
+
+/// How long [`HostHandle::upload_image`] of `bytes` may take: [`QUERY_TIMEOUT`] and one more
+/// second for each 100 KiB begun (a link of 100 KiB/s, about 0.8 Mbit/s, still gets there), at
+/// most [`MAX_UPLOAD_TIMEOUT`] (a 20 MiB image gets 235 s).
+pub fn upload_timeout(bytes: usize) -> std::time::Duration {
+    let seconds = bytes.div_ceil(100 * 1024) as u64;
+    (QUERY_TIMEOUT + std::time::Duration::from_secs(seconds)).min(MAX_UPLOAD_TIMEOUT)
+}
+
 /// What the host driver is asked to do.
 pub enum HostCommand {
     ApproveHostKey {
@@ -447,11 +458,11 @@ pub enum HostCommand {
     /// Write `bytes` over SFTP to the host's image directory (contracts.md, "Image paste"):
     /// `~/.cache/or2/images` (created `0700`), a temporary name renamed to
     /// `or2-<UTC yyyyMMdd-HHmmss>-<6 hex>.<extension>` (`0600`), after sweeping that
-    /// directory's `or2-*` files older than seven days. Reply the absolute path,
-    /// `SftpUnavailable` without an SFTP subsystem, `CommandFailed` for other failures.
-    /// `bytes` and `extension` are validated (size, lower-case known extension). A dropped
-    /// `reply` (the caller cancelled or timed out) stops the upload and removes its temporary
-    /// file, best effort.
+    /// directory's `or2-*` files older than seven days. Reply the absolute path (one safe to
+    /// type into a terminal), `SftpUnavailable` without an SFTP subsystem, `CommandFailed` for
+    /// other failures. `bytes` and `extension` are validated (size, lower-case known
+    /// extension). A dropped `reply` (the caller cancelled or timed out) stops the upload and
+    /// removes what it made (the temporary file, or the image once renamed), best effort.
     UploadImage {
         bytes: Vec<u8>,
         extension: String,
@@ -837,8 +848,8 @@ impl HostHandle {
     /// (any case; `jpeg` is kept as given, lower-cased), else `InvalidName`, as is an empty
     /// image; more than [`MAX_IMAGE_BYTES`] is `TooLarge`; both are refused before anything is
     /// sent. A server without SFTP is `SftpUnavailable`; other failures `CommandFailed`.
-    /// Bounded by [`QUERY_TIMEOUT`]. Dropping the future (a cancelled upload) stops the upload
-    /// and removes its temporary file, best effort.
+    /// Bounded by [`upload_timeout`] of its size. Dropping the future (a cancelled upload)
+    /// stops the upload and removes what it made, best effort.
     pub async fn upload_image(&self, bytes: Vec<u8>, extension: &str) -> Result<String, HostError> {
         let extension = extension.to_ascii_lowercase();
         if bytes.is_empty() || !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
@@ -847,6 +858,7 @@ impl HostHandle {
         if bytes.len() > MAX_IMAGE_BYTES {
             return Err(HostError::TooLarge);
         }
+        let timeout = upload_timeout(bytes.len());
         let (reply, response) = oneshot::channel();
         self.require_connected()?;
         self.send(HostCommand::UploadImage {
@@ -854,7 +866,7 @@ impl HostHandle {
             extension,
             reply,
         })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        await_reply(response, timeout).await
     }
 
     /// Watches a herdr session (`None` is the default session). The watch ends with the
@@ -1470,6 +1482,43 @@ mod tests {
         assert_eq!(focus().await, Ok(()));
         assert_eq!(focus().await, Err(HostError::PaneNotFound));
         drop(answers.join().unwrap());
+    }
+
+    #[test]
+    fn the_upload_timeout_grows_with_the_image_up_to_a_cap() {
+        let seconds = |bytes| upload_timeout(bytes).as_secs();
+        assert_eq!(seconds(1), 31);
+        assert_eq!(seconds(100 * 1024), 31);
+        assert_eq!(seconds(100 * 1024 + 1), 32);
+        assert_eq!(seconds(3 * 1024 * 1024), 61, "a 3 MiB photo");
+        assert_eq!(seconds(MAX_IMAGE_BYTES), 235);
+        assert_eq!(seconds(usize::MAX / 2), MAX_UPLOAD_TIMEOUT.as_secs());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_upload_waits_its_size_s_timeout_not_the_query_timeout() {
+        let (_recorder, handle, mut driver) = setup(false);
+        connect(&mut driver);
+        // The host takes the upload and never answers (a slow link).
+        let held = tokio::spawn(async move {
+            let command = driver.next_command().await;
+            let HostCommand::UploadImage { reply, .. } = command else {
+                panic!("unexpected command")
+            };
+            std::future::pending::<()>().await;
+            drop(reply);
+        });
+        let started = tokio::time::Instant::now();
+        let bytes = vec![1; 3 * 1024 * 1024];
+        assert_eq!(
+            handle.upload_image(bytes, "jpg").await,
+            Err(HostError::CommandFailed {
+                message: "the host did not answer in time".into()
+            })
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(61));
+        assert!(started.elapsed() > QUERY_TIMEOUT);
+        held.abort();
     }
 
     fn claude(terminal: &str) -> herdr::AgentIdentity {

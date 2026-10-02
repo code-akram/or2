@@ -69,7 +69,8 @@ multiplexer navigation is second. or2 should support few agents well and never a
 4. From the reference-app pass: scan for SSH servers, recent directories / one-tap shells,
    gestures, hardware shortcuts, OSC 52 clipboard, optional app lock.
 
-**M4:** image paste over SFTP (`russh-sftp`, Apache-2.0; EXIF-stripped, downscaled, uploaded to
+**M4:** image paste over SFTP (`russh-sftp`, Apache-2.0, OpenSSH-compatible: it reads SFTP handles as UTF-8, so a
+server with binary handles fails the upload; EXIF-stripped, downscaled, uploaded to
 a private cache dir, path inserted without Enter); notification actions (reply through
 `submit_text`, approve/deny with confirmation) and an Android 16 Live Update summary; a history
 sheet that pages tmux/herdr history under mosh; an ntfy hook snippet as opt-in remote push

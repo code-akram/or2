@@ -1,12 +1,14 @@
 package io.github.code_akram.or2.paste
 
+import android.content.ContentResolver
 import android.content.Context
+import android.content.res.AssetFileDescriptor
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.net.Uri
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import android.os.CancellationSignal
 import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.nio.ByteBuffer
 
 /**
@@ -51,21 +53,53 @@ object AndroidImageCodec : ImageCodec<Bitmap> {
 }
 
 /**
- * The upload's preparation for an image at [uri] (the Photo Picker, a keyboard's content, a share):
- * read (at most 20 MiB) on the IO dispatcher, processed on the default one. [release] runs once it was
- * read, whatever happened (a keyboard's read permission is given back).
+ * The upload's preparation for an image at [uri] (the Photo Picker, a keyboard's content, a share), by
+ * [imagePreparation]: only a `content:` URI is read ([readableImageScheme]), at most 20 MiB within
+ * [READ_TIMEOUT], and a cancel or the timeout stops a provider that does not answer ([AndroidImageSource]).
+ * [release] (a keyboard's read grant) runs exactly once, as soon as the reading is over, whichever way.
  */
-fun imageFromUri(context: Context, uri: Uri, release: () -> Unit = {}): suspend () -> PreparedImage = {
-    val bytes = withContext(Dispatchers.IO) {
+fun imageFromUri(context: Context, uri: Uri, release: () -> Unit = {}): suspend () -> PreparedImage {
+    val resolver = context.applicationContext.contentResolver
+    return imagePreparation(uri.scheme, { AndroidImageSource(resolver, uri) }, release, AndroidImageCodec)
+}
+
+/**
+ * A `content:` image read through an [AssetFileDescriptor] opened with a [CancellationSignal]: [abort]
+ * cancels a pending open (the provider is told) and closes the descriptor, which wakes a read blocked on it
+ * (Android signals the threads blocked on a descriptor it closes). A provider that ignores the cancel keeps
+ * one IO thread until it answers; the upload has ended by then and its grant was given back.
+ */
+class AndroidImageSource(private val resolver: ContentResolver, private val uri: Uri) : ImageSource {
+    private val signal = CancellationSignal()
+    private var descriptor: AssetFileDescriptor? = null
+    private var aborted = false
+
+    override fun open(): InputStream {
+        val opened = resolver.openAssetFileDescriptor(uri, "r", signal) ?: throw ImageRefused(UNREADABLE)
+        synchronized(this) {
+            if (aborted) {
+                closeQuietly(opened)
+                throw ImageRefused(UNREADABLE)
+            }
+            descriptor = opened
+        }
+        return opened.createInputStream()
+    }
+
+    override fun abort() {
+        val opened = synchronized(this) {
+            if (aborted) return
+            aborted = true
+            descriptor
+        }
+        signal.cancel()
+        opened?.let(::closeQuietly)
+    }
+
+    private fun closeQuietly(opened: AssetFileDescriptor) {
         try {
-            context.contentResolver.openInputStream(uri)?.use { readCapped(it) } ?: throw ImageRefused(UNREADABLE)
-        } catch (error: ImageRefused) {
-            throw error
+            opened.close()
         } catch (_: Exception) {
-            throw ImageRefused(UNREADABLE)
-        } finally {
-            release()
         }
     }
-    withContext(Dispatchers.Default) { prepareImage(bytes, AndroidImageCodec) }
 }

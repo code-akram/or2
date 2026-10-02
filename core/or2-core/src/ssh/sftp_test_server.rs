@@ -1,18 +1,52 @@
 //! A small SFTP server over a real directory, for the in-process SSH server of
 //! `connection_tests`: `russh-sftp`'s server side, mapping every path below `root` (relative
 //! paths start there, like OpenSSH's `sftp-server` in the home directory). Only what an image
-//! upload uses: stat, mkdir, setstat, open/write/fsetstat/close, opendir/readdir, remove,
-//! rename and realpath. Every request is logged by name.
+//! upload uses: stat, lstat, mkdir, setstat, open/write/fstat/fsetstat/close,
+//! opendir/readdir, remove, rename and realpath. Every request is logged by name. [`Quirks`]
+//! make it a slow, careless or hostile server.
 
 use std::collections::HashMap;
 use std::fs::{self, DirBuilder, File as FsFile, OpenOptions, Permissions};
 use std::os::unix::fs::{DirBuilderExt, FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use russh_sftp::protocol::{
     Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
 };
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+/// What `realpath` answers.
+#[derive(Clone, Default)]
+pub(super) enum Realpath {
+    /// The canonical path.
+    #[default]
+    Real,
+    /// A failure status, for every path.
+    Fail,
+    /// The canonical path, after a pause (the server answers nothing else meanwhile).
+    Delay(Duration),
+    /// Whatever the function makes of the canonical path (a hostile server).
+    Rewrite(Arc<dyn Fn(&str) -> String + Send + Sync>),
+}
+
+/// How the server misbehaves. Taken afresh by each SFTP session, except
+/// [`Quirks::first_write_delay`], which only the next session gets.
+#[derive(Clone, Default)]
+pub(super) struct Quirks {
+    /// How long the first write waits before it is done (a slow host, for cancel tests).
+    pub(super) first_write_delay: Option<Duration>,
+    pub(super) realpath: Realpath,
+    /// Directories are made with the server's own mode, and `setstat` does nothing.
+    pub(super) ignore_directory_modes: bool,
+    /// Files are made with the server's own mode, and `fsetstat` does nothing.
+    pub(super) ignore_file_modes: bool,
+    /// Paths (below the root, relative) reported as owned by another user.
+    pub(super) foreign: Vec<PathBuf>,
+    /// Handles go out as bytes that are not UTF-8 ([`binary_handles`]).
+    pub(super) binary_handles: bool,
+}
 
 pub(super) struct FsSftp {
     root: PathBuf,
@@ -20,24 +54,31 @@ pub(super) struct FsSftp {
     directories: HashMap<String, Option<Vec<File>>>,
     next: u32,
     log: Arc<Mutex<Vec<String>>>,
-    /// How long the first write waits before it is done (a slow host, for cancel tests).
-    first_write_delay: Option<std::time::Duration>,
+    quirks: Quirks,
 }
 
 impl FsSftp {
-    pub(super) fn new(
-        root: PathBuf,
-        log: Arc<Mutex<Vec<String>>>,
-        first_write_delay: Option<std::time::Duration>,
-    ) -> Self {
+    pub(super) fn new(root: PathBuf, log: Arc<Mutex<Vec<String>>>, quirks: Quirks) -> Self {
         Self {
             root,
             files: HashMap::new(),
             directories: HashMap::new(),
             next: 0,
             log,
-            first_write_delay,
+            quirks,
         }
+    }
+
+    /// The attributes of `metadata` at `path`, with another owner for a foreign path.
+    fn attributes(&self, path: &Path, metadata: &fs::Metadata) -> FileAttributes {
+        let mut attributes = FileAttributes::from(metadata);
+        let foreign = path
+            .strip_prefix(&self.root)
+            .is_ok_and(|relative| self.quirks.foreign.iter().any(|path| path == relative));
+        if foreign {
+            attributes.uid = attributes.uid.map(|uid| uid + 1);
+        }
+        attributes
     }
 
     fn record(&self, request: &str) {
@@ -100,15 +141,46 @@ impl russh_sftp::server::Handler for FsSftp {
         self.record("realpath");
         let resolved = self.resolve(&path)?;
         let canonical = fs::canonicalize(resolved).map_err(failure)?;
+        let canonical = canonical.to_string_lossy().into_owned();
+        let answer = match &self.quirks.realpath {
+            Realpath::Real => canonical,
+            Realpath::Fail => return Err(StatusCode::Failure),
+            Realpath::Delay(delay) => {
+                tokio::time::sleep(*delay).await;
+                canonical
+            }
+            Realpath::Rewrite(rewrite) => rewrite(&canonical),
+        };
         Ok(Name {
             id,
-            files: vec![File::dummy(canonical.to_string_lossy())],
+            files: vec![File::dummy(answer)],
         })
     }
 
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
         self.record("stat");
-        let metadata = fs::metadata(self.resolve(&path)?).map_err(failure)?;
+        let path = self.resolve(&path)?;
+        let metadata = fs::metadata(&path).map_err(failure)?;
+        Ok(Attrs {
+            id,
+            attrs: self.attributes(&path, &metadata),
+        })
+    }
+
+    async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        self.record("lstat");
+        let path = self.resolve(&path)?;
+        let metadata = fs::symlink_metadata(&path).map_err(failure)?;
+        Ok(Attrs {
+            id,
+            attrs: self.attributes(&path, &metadata),
+        })
+    }
+
+    async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
+        self.record("fstat");
+        let file = self.files.get(&handle).ok_or(StatusCode::Failure)?;
+        let metadata = file.metadata().map_err(failure)?;
         Ok(Attrs {
             id,
             attrs: FileAttributes::from(&metadata),
@@ -123,7 +195,11 @@ impl russh_sftp::server::Handler for FsSftp {
     ) -> Result<Status, Self::Error> {
         self.record("mkdir");
         DirBuilder::new()
-            .mode(attrs.permissions.unwrap_or(0o777) & 0o7777)
+            .mode(if self.quirks.ignore_directory_modes {
+                0o777
+            } else {
+                attrs.permissions.unwrap_or(0o777) & 0o7777
+            })
             .create(self.resolve(&path)?)
             .map_err(failure)?;
         Ok(Self::ok(id))
@@ -136,6 +212,9 @@ impl russh_sftp::server::Handler for FsSftp {
         attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
         self.record("setstat");
+        if self.quirks.ignore_directory_modes {
+            return Ok(Self::ok(id));
+        }
         if let Some(mode) = attrs.permissions {
             fs::set_permissions(self.resolve(&path)?, Permissions::from_mode(mode & 0o7777))
                 .map_err(failure)?;
@@ -155,7 +234,11 @@ impl russh_sftp::server::Handler for FsSftp {
         options
             .read(flags.contains(OpenFlags::READ))
             .write(flags.contains(OpenFlags::WRITE))
-            .mode(attrs.permissions.unwrap_or(0o666) & 0o7777);
+            .mode(if self.quirks.ignore_file_modes {
+                0o666
+            } else {
+                attrs.permissions.unwrap_or(0o666) & 0o7777
+            });
         if flags.contains(OpenFlags::CREATE) && flags.contains(OpenFlags::EXCLUDE) {
             options.create_new(true);
         } else if flags.contains(OpenFlags::CREATE) {
@@ -174,7 +257,7 @@ impl russh_sftp::server::Handler for FsSftp {
         offset: u64,
         data: Vec<u8>,
     ) -> Result<Status, Self::Error> {
-        if let Some(delay) = self.first_write_delay.take() {
+        if let Some(delay) = self.quirks.first_write_delay.take() {
             tokio::time::sleep(delay).await;
         }
         let file = self.files.get(&handle).ok_or(StatusCode::Failure)?;
@@ -189,6 +272,9 @@ impl russh_sftp::server::Handler for FsSftp {
         attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
         self.record("fsetstat");
+        if self.quirks.ignore_file_modes {
+            return Ok(Self::ok(id));
+        }
         let file = self.files.get(&handle).ok_or(StatusCode::Failure)?;
         if let Some(mode) = attrs.permissions {
             file.set_permissions(Permissions::from_mode(mode & 0o7777))
@@ -273,4 +359,84 @@ impl russh_sftp::server::Handler for FsSftp {
         data.truncate(read);
         Ok(Data { id, data })
     }
+}
+
+/// What a binary handle starts with: two bytes that are not UTF-8.
+const BINARY_PREFIX: [u8; 2] = [0xff, 0xfe];
+
+/// Relays SFTP packets between the `client` and an SFTP server on `server`, turning every
+/// handle the server gives out into bytes that are not UTF-8 (valid in SFTP, where a handle is
+/// an opaque string) and back. A request naming any other handle reaches the server unchanged,
+/// so a client that does not send the handle's exact bytes back gets the server's failure.
+pub(super) async fn binary_handles<C, S>(client: C, server: S)
+where
+    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut client_read, mut client_write) = tokio::io::split(client);
+    let (mut server_read, mut server_write) = tokio::io::split(server);
+    let requests = async {
+        while let Some(mut packet) = next_packet(&mut client_read).await {
+            // CLOSE, READ, WRITE, FSTAT, FSETSTAT, READDIR: the handle follows the request id.
+            if matches!(packet.first(), Some(4 | 5 | 6 | 8 | 10 | 12)) {
+                replace_handle(&mut packet, |handle| {
+                    handle.strip_prefix(&BINARY_PREFIX).map(<[u8]>::to_vec)
+                });
+            }
+            if send_packet(&mut server_write, &packet).await.is_err() {
+                break;
+            }
+        }
+        let _ = server_write.shutdown().await;
+    };
+    let replies = async {
+        while let Some(mut packet) = next_packet(&mut server_read).await {
+            // HANDLE.
+            if packet.first() == Some(&102) {
+                replace_handle(&mut packet, |handle| {
+                    Some([&BINARY_PREFIX[..], handle].concat())
+                });
+            }
+            if send_packet(&mut client_write, &packet).await.is_err() {
+                break;
+            }
+        }
+        let _ = client_write.shutdown().await;
+    };
+    tokio::join!(requests, replies);
+}
+
+async fn next_packet(stream: &mut (impl AsyncRead + Unpin)) -> Option<Vec<u8>> {
+    let length = stream.read_u32().await.ok()?;
+    let mut packet = vec![0; length as usize];
+    stream.read_exact(&mut packet).await.ok()?;
+    Some(packet)
+}
+
+async fn send_packet(stream: &mut (impl AsyncWrite + Unpin), packet: &[u8]) -> std::io::Result<()> {
+    let length = u32::try_from(packet.len()).expect("a small packet");
+    stream.write_all(&length.to_be_bytes()).await?;
+    stream.write_all(packet).await?;
+    stream.flush().await
+}
+
+/// Replaces the handle at the start of `packet`'s fields (type, request id, then the handle as
+/// an SFTP string) with what `map` makes of it, when it makes anything.
+fn replace_handle(packet: &mut Vec<u8>, map: impl Fn(&[u8]) -> Option<Vec<u8>>) {
+    let Some(length) = packet.get(5..9) else {
+        return;
+    };
+    let length = u32::from_be_bytes(length.try_into().expect("four bytes")) as usize;
+    let Some(handle) = packet.get(9..9 + length) else {
+        return;
+    };
+    let Some(replaced) = map(handle) else {
+        return;
+    };
+    let mut rewritten = packet[..5].to_vec();
+    let replaced_length = u32::try_from(replaced.len()).expect("a short handle");
+    rewritten.extend_from_slice(&replaced_length.to_be_bytes());
+    rewritten.extend_from_slice(&replaced);
+    rewritten.extend_from_slice(&packet[9 + length..]);
+    *packet = rewritten;
 }
