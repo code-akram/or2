@@ -100,7 +100,11 @@ fun SessionScreen(
     key(terminal) {
         DisposableEffect(terminal) {
             holder.attachDisplay(terminal)
-            onDispose { holder.detachDisplay(terminal) }
+            onDispose {
+                // Leaving the terminal (not the swap's new view, which keeps this effect): tmux or herdr back to live.
+                holder.hideTerminal(terminal)
+                holder.detachDisplay(terminal)
+            }
         }
         val state by terminal.state.collectAsStateWithLifecycle()
         val handle by terminal.handle.collectAsStateWithLifecycle()
@@ -121,7 +125,7 @@ fun SessionScreen(
                 handle?.let { TerminalScreen(it, terminal.state, terminal.frameReady, Modifier.weight(1f),
                     composerHint = "Message " + terminal.host.label + "…", openPanes = { switcher = true },
                     onBackground = { background = it }, onFrameDrawn = { holder.timing.terminalFrame(terminal.id) },
-                    target = terminal.target, scrollTarget = { holder.scrollTarget(terminal, it) },
+                    target = terminal.target, targetScroller = terminal.targetScroller, input = terminal.input,
                     // Swipes move tmux or herdr; a shell has nothing to move and keeps every touch.
                     onSwipe = if (terminal.target is TerminalTarget.Shell) null else { swipe ->
                         haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)

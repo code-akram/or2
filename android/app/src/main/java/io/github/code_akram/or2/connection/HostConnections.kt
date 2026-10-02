@@ -28,6 +28,8 @@ import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.ffi.TmuxSession
 import io.github.code_akram.or2.ffi.connectHost
 import io.github.code_akram.or2.hosts.connectionAffectedBy
+import io.github.code_akram.or2.terminal.SessionRoute
+import io.github.code_akram.or2.terminal.TargetScroller
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
@@ -282,6 +284,21 @@ class ActiveTerminal internal constructor(val id: Long, val host: Host, val targ
         get() = mutableState.value == SessionState.Connected && !disconnectRequested && !retired
     val frameReady = mutableFrames.asSharedFlow()
     val handle = mutableHandle.asStateFlow()
+
+    /**
+     * Where every input of this terminal's views goes: the handle published now, read at each call. A
+     * view bound to a handle the terminal has replaced (the SSH-to-mosh swap, before the screen has
+     * recomposed) types into the new session, never the old.
+     */
+    val input = SessionRoute { mutableHandle.value }
+
+    /**
+     * A tmux or herdr target's scroll state (`scroll_target`), kept with the terminal rather than a
+     * view: it survives the terminal being hidden and shown again, and the swap's new view. Null for a
+     * shell.
+     */
+    var targetScroller: TargetScroller? = null
+        internal set
 
     /** The transport the session really runs over (the handle's own answer), SSH after a fallback. */
     val transport = mutableTransport.asStateFlow()
@@ -858,6 +875,8 @@ class HostConnections(
         terminal.fallbackEligible = plan.fallbackEligible
         val session = port.openTerminal(target, plan.transport, 80u, 24u, plan.moshBudgetMs, sessionListener(terminal, current, attempt = 0))
         nextTerminalId++
+        // The holder's scope, not a view's: a Bottom sent as the terminal is hidden is not cancelled with the view.
+        if (target !is TerminalTarget.Shell) terminal.targetScroller = TargetScroller(scope, { scroll -> scrollTarget(terminal, scroll) })
         terminal.mutableTransport.value = session.transport()
         terminal.mutableHandle.value = session
         mutableTerminals.value += terminal
@@ -945,6 +964,10 @@ class HostConnections(
         setVerdict(current, UdpVerdict.OK)
         // The view binds the new handle and draws its frame.
         terminal.mutableFrames.tryEmit(Unit)
+        // Nothing can target SSH any more: every view's input resolves the published handle at call
+        // time (`terminal.input`), the old view's until it is recomposed too, and input held behind a
+        // target's Bottom resolves it when released. Input already sent to SSH is ahead of this
+        // disconnect in the session's one command queue.
         if (previous != null) {
             try {
                 previous.disconnect()
@@ -1240,6 +1263,17 @@ class HostConnections(
     }
 
     internal fun attachDisplay(terminal: ActiveTerminal) { terminal.displays++ }
+
+    /**
+     * The terminal screen stopped showing [terminal] (minimised, another terminal selected, the app
+     * left; not the swap's new view, which shows the same terminal): a tmux or herdr target scrolled
+     * into its history goes back to its live screen, best effort, in the holder's scope. When that
+     * fails the terminal stays scrolled away (`TargetScroller.unconfirmed`): the button shows when it is
+     * shown again, and the next input sends `Bottom` first.
+     */
+    fun hideTerminal(terminal: ActiveTerminal) {
+        terminal.targetScroller?.leave()
+    }
 
     internal fun detachDisplay(terminal: ActiveTerminal) {
         check(terminal.displays > 0)

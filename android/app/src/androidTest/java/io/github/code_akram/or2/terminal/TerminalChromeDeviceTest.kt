@@ -36,6 +36,11 @@ import io.github.code_akram.or2.ffi.TerminalFrame
 import io.github.code_akram.or2.ffi.TerminalKey
 import io.github.code_akram.or2.ffi.ViewportScroll
 import io.github.code_akram.or2.ui.Or2Theme
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import io.github.code_akram.or2.ffi.TerminalTarget
+import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
@@ -103,6 +108,30 @@ class TerminalChromeDeviceTest {
 
     private fun armed() = SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Armed for next key")
     private fun off() = SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Off")
+
+    @Test
+    fun aTargetScrolledAwayBeforeTheViewExistedShowsTheButtonAlsoAfterTheSwapsNewView() {
+        // The terminal's own scroller, scrolled up while another view (or none) showed it.
+        val scroller = TargetScroller(MainScope(), { _ -> })
+        var current by mutableStateOf<SessionInterface>(session)
+        compose.runOnUiThread {
+            scroller.scroll(-5)
+            compose.activity.setContent {
+                Or2Theme {
+                    TerminalScreen(current, MutableStateFlow(SessionState.Connected), MutableSharedFlow(), Modifier.fillMaxSize(),
+                        target = TerminalTarget.Tmux("main"), targetScroller = scroller, input = { current })
+                }
+            }
+        }
+        compose.onNodeWithTag("scroll-to-bottom").assertIsDisplayed()
+        // The SSH-to-mosh swap: a new handle, so a new view, of the same terminal.
+        compose.runOnUiThread { current = Recording() }
+        compose.waitForIdle()
+        compose.onNodeWithTag("scroll-to-bottom").assertIsDisplayed()
+        compose.onNodeWithTag("scroll-to-bottom").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithTag("scroll-to-bottom").assertDoesNotExist()
+    }
 
     @Test
     fun theToolbarSendsEscapeTabAndLatchesModifiersForExactlyOneKey() {

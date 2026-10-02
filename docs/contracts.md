@@ -3458,6 +3458,24 @@ filled it in, so a shell kept opening over SSH until a reconnect.
   `aMoshServerQueryThatKeepsFailingIsAnsweredByARefreshedCapabilityProbe` (bounded at five queries, SSH
   meanwhile, then mosh with the 3 s budget after a refresh), `aMoshServerAnswerFromTheCapabilityProbeWhileTheQueryFailsAtConnect`;
   the wait test now spends the bounded retries.
+**Fix: no input is lost in the swap (Codex v0.1.1 review, P1; branch `v011/fix-terminal-input`).**
+The swap publishes the mosh handle and disconnects SSH in one main-dispatcher turn, but the view on
+screen is recreated for the new handle only at the next recomposition; a key or IME commit taken by
+the old view in between went to the disconnected SSH session and was silently dropped. Input now
+never goes to a view's handle: `ActiveTerminal.input` is a stable `SessionRoute` (terminal package)
+that reads the published handle at each call, and `TerminalScreen(input =)` binds every view to it
+(`TerminalView.bind(session, route)`, `TerminalSession.call`). Every input path of a view (hardware
+keys, IME commits, paste, the composer's submit, the toolbar and pad, wheel and arrow-key scrolls, and
+input held behind a target's `Bottom`) goes through `TerminalSession.call`, so it reaches the session
+the terminal shows when it is sent, exactly once. Only the view's own frame plumbing stays on its bound
+handle (`callOwn`: `request_full_frame`, `resize`; `take_frame`), and a destroyed bound handle ends the
+view's frames, never its input. Ordering: once the handle is published nothing can target SSH; input
+sent to SSH before that is ahead of its `Disconnect` in the session's single command queue, so it is
+written before SSH closes. No FFI change. Tests: `HostConnectionsTerminalInputTest` (a key, a text, a
+submit sent through the view still bound to SSH after the swap reach mosh once each and SSH never,
+also after the SSH object is destroyed; a key held behind a `Bottom` that returns after the swap goes
+to mosh once), `TerminalSessionTest` (input follows the route, frames stay with the bound handle).
+`FakeSession` now records input and refuses it after `disconnect`, as Rust does.
 
 ## or2-pair on macOS: the firewall (lane Instant, host side)
 
@@ -3738,6 +3756,34 @@ names, a missing session), `tests/herdr_live.rs` (an isolated herdr 0.9.3 sessio
 JVM: `TargetScrollerTest` (routes, button visibility, coalescing, down at the bottom, input held
 behind `Bottom`, a failed call), `TerminalGridTest` (modes per frame), `HostConnectionsTest`
 (`scrollTarget` through the connection with the watch's focused pane).
+
+**Fix: the scroll state belongs to the terminal (Codex v0.1.1 review, P1; branch
+`v011/fix-terminal-input`).** The `TargetScroller` lived in one `TerminalView`, in the composition's
+coroutine scope: hiding a scrolled terminal (minimise, another terminal selected) or the swap's new
+view forgot that tmux was in copy mode (or the herdr pane scrolled), the button vanished, and the
+next key went straight into copy mode. Now:
+- One `TargetScroller` per tmux or herdr terminal (`ActiveTerminal.targetScroller`, null for a shell),
+  created by `HostConnections.openTerminal` in the holder's scope with `scrollTarget(terminal, _)`; it
+  survives the swap, a new view and the terminal being hidden. `TerminalScreen(targetScroller =)`
+  hands it to each view (`TerminalView.useTargetScroll(target, scroller)`); the view reads
+  `awayState` (a `StateFlow`) at creation and on change, so a view of a terminal already scrolled away
+  shows the button at once.
+- Hiding: `SessionScreen` calls `HostConnections.hideTerminal(terminal)` as it leaves composition (not
+  on the swap, which keeps the screen): `TargetScroller.leave()` sends `Bottom` when the target is
+  away, best effort, in the holder's scope (a view going away no longer cancels it). The swap and a
+  recreated view send nothing: the user is still reading the history.
+- **Unconfirmed.** A `Bottom` that fails or is cancelled (unless another `Bottom` is already queued
+  behind it) leaves the scroller `unconfirmed`, which counts as `away`: the button shows, and the next
+  input sends `Bottom` first and goes out once it has returned. Input held behind a failed `Bottom`
+  still goes out (typing is never dropped, as before), and the state stays unconfirmed, so every later
+  input tries again until one succeeds. A swipe down while unconfirmed is sent and does not clear it.
+- Tests: `TargetScrollerTest` (a failed `Bottom` keeps the target away until one succeeds, a queued
+  `Bottom` decides over a failed one, `leave` only while away, a cancelled `Bottom`),
+  `HostConnectionsTerminalInputTest` (state kept across the swap with the button for the new view and
+  `Bottom` before the first key; a recreated view of a scrolled herdr terminal; hiding sends `Bottom`;
+  a failed hiding `Bottom` shows the button again and the next key waits for a successful one; a
+  `Bottom` in flight when hidden is not cancelled; a shell has no scroller). Device test (compiled, not
+  run here): `TerminalChromeDeviceTest.aTargetScrolledAwayBeforeTheViewExistedShowsTheButtonAlsoAfterTheSwapsNewView`.
 
 ## Tap links and OSC 52 (lane Links)
 

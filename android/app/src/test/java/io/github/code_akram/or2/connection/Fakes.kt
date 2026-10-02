@@ -62,17 +62,27 @@ class FakeSession(val events: MutableList<String> = mutableListOf(), val transpo
     override fun roam() { roams++ }
     override fun approveHostKey(fingerprint: String) = Unit
     override fun rejectHostKey() = Unit
+    private var disconnected = false
+
+    /** Input the session took, in order (`text:`, `key:`, `submit:`, `scroll:`); after `disconnect` input is refused as Rust does. */
+    val inputs = mutableListOf<String>()
     override fun disconnect() {
         check(!destroyed) { "Session object has already been destroyed" }
+        disconnected = true
         events += "disconnect"
     }
     override fun close() { destroyed = true; events += "close" }
     override fun requestFullFrame() = Unit
     override fun resize(columns: UShort, rows: UShort) = Unit
-    override fun scroll(scroll: ViewportScroll) = Unit
-    override fun sendKey(input: KeyInput) = Unit
-    override fun sendText(text: String) = Unit
-    override fun submitText(text: String) = Unit
+    private fun take(input: String) {
+        check(!destroyed) { "Session object has already been destroyed" }
+        if (disconnected) throw SessionException.NotConnected()
+        inputs += input
+    }
+    override fun scroll(scroll: ViewportScroll) = take("scroll:$scroll")
+    override fun sendKey(input: KeyInput) = take("key:${input.key}")
+    override fun sendText(text: String) = take("text:$text")
+    override fun submitText(text: String) = take("submit:$text")
     override fun state() = nativeState
     override fun takeFrame(): TerminalFrame? {
         check(!destroyed) { "Session object has already been destroyed" }
@@ -192,8 +202,13 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     }
     /** `scroll_target` calls in order: the target, the herdr pane passed and the scroll. */
     val scrolls = mutableListOf<Triple<TerminalTarget, String?, TargetScroll>>()
+    /** While set, a `scroll_target` call waits for it; a failure is thrown after the call is recorded. */
+    var scrollGate: CompletableDeferred<Unit>? = null
+    var scrollFailure: Exception? = null
     override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll) {
         scrolls += Triple(target, paneId, scroll)
+        scrollGate?.await()
+        scrollFailure?.let { throw it }
     }
 
     /** `navigate` calls in order; a failure is thrown after the call is recorded. */
