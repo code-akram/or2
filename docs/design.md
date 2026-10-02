@@ -456,8 +456,8 @@ address) the extra port was unreachable although SSH worked. Version 2 pairs ove
 - [x] One add-host chooser (owner feedback against Moshi): the empty Home, the empty inbox and the **+** sheet show
   the same two cards (Easy pair with QR, Set up manually) and Home has no "Add an SSH key" step; the manual form
   offers **New key** like the pairing review ([contracts](contracts.md#first-run-one-add-host-chooser)). Verified
-  by `AddHostOptionsTest`, `NavigationTest`, `KeyOperationsTest` and the compiled device tests; to be run on the
-  phone.
+  by `AddHostOptionsTest`, `NavigationTest`, `KeyOperationsTest` and the device tests, which pass on the
+  phone (the `.devicetest` app; 2026-10-02).
 - [ ] Phone acceptance of Easy pair: a real `or2-pair` code on a host reached over its public address
   and on a LAN host, with the permission dialog, then connect.
 - [ ] Installer: release binaries for Linux and macOS and a POSIX `sh` installer (after v2).
