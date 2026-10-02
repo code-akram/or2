@@ -46,6 +46,7 @@ import io.github.code_akram.or2.keys.newKeyErrorMessage
 import io.github.code_akram.or2.keys.readPrivateKey
 import io.github.code_akram.or2.keys.vaultErrorMessage
 import io.github.code_akram.or2.notify.AgentNotifications
+import io.github.code_akram.or2.notify.AgentTaps
 import io.github.code_akram.or2.session.hostConnectErrorMessage
 import io.github.code_akram.or2.session.hostErrorMessage
 import kotlinx.coroutines.CancellationException
@@ -63,6 +64,9 @@ class MainActivity : FragmentActivity() {
     private lateinit var model: AppViewModel
     private lateinit var pairModel: PairViewModel
     private var busy by mutableStateOf(false)
+
+    /** The notification taps this activity (and the ones it was recreated from) acted on. */
+    private lateinit var agentTaps: AgentTaps
 
     /**
      * Android's `POST_NOTIFICATIONS` dialog, opened only from an in-context offer (Home's "Show connection
@@ -85,8 +89,10 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         app.watchConnections()
-        // A notification's tap that started (or restarted) the activity; a recreation does not repeat it.
-        if (savedInstanceState == null) openAgentFrom(intent)
+        // A notification's tap that started (or restarted) the activity, saved state or not: Android may create it,
+        // with the killed one's state, for a new tap. A recreation handing back a tap already taken does not repeat it.
+        agentTaps = AgentTaps(savedInstanceState?.getStringArray(AGENT_TAPS))
+        openAgentFrom(intent)
         enableEdgeToEdge(
             // Dark only: transparent bars with light icons over the app's own background.
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
@@ -135,6 +141,11 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putStringArray(AGENT_TAPS, agentTaps.saved())
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -146,7 +157,8 @@ class MainActivity : FragmentActivity() {
      * inbox tap's path), connecting the host first when it is not connected. Any other intent is ignored.
      */
     private fun openAgentFrom(intent: Intent?) {
-        val pane = AgentNotifications.paneOf(intent, app.prefs) ?: return
+        val fromHistory = intent != null && intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0
+        val pane = agentTaps.take(AgentNotifications.paneOf(intent, app.prefs), AgentNotifications.tapOf(intent), fromHistory) ?: return
         app.agentAlerts.opened(pane)
         app.agentOpens.request(pane)
     }
@@ -310,5 +322,10 @@ class MainActivity : FragmentActivity() {
                 bytes.fill(0)
             }
         }
+    }
+
+    private companion object {
+        /** Saved state: the ids of the notification taps acted on ([AgentTaps]). */
+        const val AGENT_TAPS = "agent_taps"
     }
 }

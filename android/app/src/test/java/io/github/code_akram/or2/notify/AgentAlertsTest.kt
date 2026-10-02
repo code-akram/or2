@@ -29,18 +29,26 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** A sink that records what would be posted and cancelled. */
-class RecordingSink : AgentAlertSink {
+/**
+ * A sink that behaves like the system's notifications: what is up outlives the [AgentAlerts] that posted it (a second
+ * instance over the same sink is a new process), and a cancel takes away only what is up. [events] records what was
+ * posted and what was really taken away. With [lists] false, reading what is up fails (as the system's call may).
+ */
+class RecordingSink(var lists: Boolean = true) : AgentAlertSink {
     val events = mutableListOf<String>()
     val posted = mutableListOf<AgentAlert>()
+    val up = linkedSetOf<AgentPaneKey>()
     override fun post(alert: AgentAlert) {
         posted += alert
+        up += alert.key
         events += "post ${alert.key.paneId} ${alert.text}"
     }
 
     override fun cancel(key: AgentPaneKey) {
-        events += "cancel ${key.paneId}"
+        if (up.remove(key)) events += "cancel ${key.paneId}"
     }
+
+    override fun shown(): Set<AgentPaneKey> = if (lists) up.toSet() else emptySet()
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -185,6 +193,7 @@ class AgentAlertsTest {
         assertEquals("cancel w1:p1", sink.events.last())
         assertTrue(alerts.active.isEmpty())
         // One left up by a process that died (this one never posted it) goes too.
+        sink.up += AgentPaneKey(1, null, "w1:p7")
         alerts.opened(AgentPaneKey(1, null, "w1:p7"))
         assertEquals("cancel w1:p7", sink.events.last())
     }
@@ -247,6 +256,48 @@ class AgentAlertsTest {
     }
 
     @Test
+    fun aNewProcessReconcilesTheNotificationsTheOldOneLeftUp() {
+        val p1 = AgentPaneKey(1, null, "w1:p1")
+        val p2 = AgentPaneKey(1, null, "w1:p2")
+        val p3 = AgentPaneKey(1, null, "w1:p3")
+        deliver(view(agent("w1:p1", AgentStatus.WORKING, 1u), agent("w1:p2", AgentStatus.WORKING, 1u), agent("w1:p3", AgentStatus.WORKING, 1u)))
+        deliver(view(agent("w1:p1", AgentStatus.BLOCKED, 2u), agent("w1:p2", AgentStatus.DONE, 2u), agent("w1:p3", AgentStatus.BLOCKED, 2u)))
+        assertEquals(setOf(p1, p2, p3), sink.up)
+        // The process died with them up; the next one starts from what the system still shows.
+        val next = AgentAlerts(sink) { on }
+        assertEquals(setOf(p1, p2, p3), next.active)
+        // Its first view of the reconnected session is a baseline (nothing posts), yet it reconciles: p1 went back to
+        // work and p2 is gone while the app was dead, so theirs go; p3 still needs input and stays.
+        next.viewChanged(Any(), 1, "Workstation", null, view(agent("w1:p1", AgentStatus.WORKING, 3u), agent("w1:p3", AgentStatus.BLOCKED, 2u)))
+        assertEquals(setOf(p3), sink.up)
+        assertEquals(3, sink.posted.size)
+        // The off switch in the new process takes away the rest.
+        on = false
+        next.enabledChanged()
+        assertTrue(sink.up.isEmpty())
+        assertTrue(next.active.isEmpty())
+    }
+
+    @Test
+    fun aPaneSeenWorkingIsCancelledEvenWhenWhatIsUpCannotBeRead() {
+        deliver(view(agent("w1:p1", AgentStatus.WORKING, 1u), agent("w1:p2", AgentStatus.WORKING, 1u)))
+        deliver(view(agent("w1:p1", AgentStatus.BLOCKED, 2u), agent("w1:p2", AgentStatus.WORKING, 1u)))
+        sink.lists = false
+        val next = AgentAlerts(sink) { on }
+        assertTrue(next.active.isEmpty())
+        // A baseline view: Working means nothing needs input, whatever this process thinks is up.
+        next.viewChanged(Any(), 1, "Workstation", null, view(agent("w1:p1", AgentStatus.WORKING, 3u), agent("w1:p2", AgentStatus.WORKING, 1u)))
+        assertTrue(sink.up.isEmpty())
+        // The off switch asks the system too, for one this process never knew of.
+        sink.lists = true
+        val another = AgentPaneKey(2, "work", "w1:p4")
+        sink.up += another
+        on = false
+        next.enabledChanged()
+        assertTrue(sink.up.isEmpty())
+    }
+
+    @Test
     fun theSettingIsOnByDefaultAndRemembered() {
         val store = MemoryPrefStore()
         assertTrue(AgentAlertSettings(store).enabled.value)
@@ -268,6 +319,11 @@ class AgentAlertsTest {
         assertEquals("agent:1:d:w1:p1", keys[0].tag)
         assertEquals("agent:1:s2:w1:p1", keys[1].tag)
         for (key in keys) assertEquals(key, AgentPaneKey.fromParts(key.toParts()))
+        // A notification's tag reads back as its pane (a new process finds what is up); nothing else does.
+        for (key in keys) assertEquals(key, AgentPaneKey.fromTag(key.tag))
+        for (tag in listOf("agent:1:s5:w1:p1", "agent:1:s9:w1:p1", "agent:x:d:p", "agent:+1:d:p", "agent:1:q:p", "agent:1:s:p", "agent::d:p", "or2:1:d:p", "")) {
+            assertNull(tag, AgentPaneKey.fromTag(tag))
+        }
         assertArrayEquals(arrayOf("1", "d", "w1:p1"), keys[0].toParts())
         assertNull(AgentPaneKey.fromParts(arrayOf("x", "d", "p")))
         assertNull(AgentPaneKey.fromParts(arrayOf("1", "q", "p")))
@@ -284,6 +340,39 @@ class AgentAlertsTest {
         assertNull(agentOpenFrom(0, null, "w1:p2", "secret", "secret"))
         assertNull(agentOpenFrom(3, null, null, "secret", "secret"))
         assertNull(agentOpenFrom(3, null, "", "secret", "secret"))
+    }
+
+    @Test
+    fun aTapOpensWhateverTheSavedStateAndARecreationNeverRepeatsOne() {
+        val pane = AgentPaneKey(1, null, "w1:p1")
+        val other = AgentPaneKey(2, "work", "w1:p2")
+        // A cold start (no saved state) on a tap: opened, once.
+        val first = AgentTaps(null)
+        assertEquals(pane, first.take(pane, "tap-1", fromHistory = false))
+        assertNull(first.take(pane, "tap-1", fromHistory = false))
+        // A rotation (or a restore after process death) hands the same intent to the new instance: not again.
+        val rotated = AgentTaps(first.saved())
+        assertNull(rotated.take(pane, "tap-1", fromHistory = false))
+        // Android restored the task after killing the process and created the activity, with its saved state, for a
+        // new tap (no live activity to get onNewIntent): opened.
+        assertEquals(other, rotated.take(other, "tap-2", fromHistory = false))
+        // Saved state from an activity started from the launcher (no tap taken), then a tap: opened.
+        assertEquals(pane, AgentTaps(emptyArray()).take(pane, "tap-3", fromHistory = false))
+        // Both taps survive the next recreation.
+        val again = AgentTaps(rotated.saved())
+        assertNull(again.take(pane, "tap-1", fromHistory = false))
+        assertNull(again.take(other, "tap-2", fromHistory = false))
+        // Relaunched from Recents with a tap as the task's intent: an old tap, not opened.
+        assertNull(AgentTaps(null).take(pane, "tap-4", fromHistory = true))
+        // Not a tap (no pane or no id): nothing.
+        assertNull(AgentTaps(null).take(null, "tap-5", fromHistory = false))
+        assertNull(AgentTaps(null).take(pane, null, fromHistory = false))
+        // The remembered ids stay few: the oldest go first, except the first of all.
+        val many = AgentTaps(null)
+        repeat(100) { many.take(pane, "t$it", fromHistory = false) }
+        assertTrue(many.saved().size <= 32)
+        assertNull(AgentTaps(many.saved()).take(pane, "t99", fromHistory = false))
+        assertNull(AgentTaps(many.saved()).take(pane, "t0", fromHistory = false)) // Maybe the intent that created it.
     }
 
     @Test

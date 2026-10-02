@@ -34,6 +34,15 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
 
     override fun cancel(key: AgentPaneKey) = manager.cancel(key.tag, NOTIFICATION_ID)
 
+    /** Our agent notifications up now (the `agents` channel, id [NOTIFICATION_ID], a pane tag), from the system. */
+    override fun shown(): Set<AgentPaneKey> = try {
+        manager.activeNotifications
+            .filter { it.id == NOTIFICATION_ID && it.notification.channelId == CHANNEL_ID }
+            .mapNotNullTo(mutableSetOf()) { shown -> shown.tag?.let(AgentPaneKey::fromTag) }
+    } catch (_: RuntimeException) {
+        emptySet()
+    }
+
     private fun build(alert: AgentAlert): Notification {
         val key = alert.key
         val open = PendingIntent.getActivity(
@@ -63,6 +72,7 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
         private const val EXTRA_SESSION = "io.github.code_akram.or2.extra.SESSION"
         private const val EXTRA_PANE_ID = "io.github.code_akram.or2.extra.PANE_ID"
         private const val EXTRA_TOKEN = "io.github.code_akram.or2.extra.TOKEN"
+        private const val EXTRA_TAP = "io.github.code_akram.or2.extra.TAP"
         private const val TOKEN_KEY = "agent_open_token"
 
         /** The `agents` channel ("Agents", high importance); creating it again is harmless. */
@@ -75,9 +85,13 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
 
         /**
          * The tap's intent: [MainActivity] (brought to the front when it runs) with the pane. Its data URI is the
-         * pane's tag, so each pane's pending intent is distinct whatever its request code.
+         * pane's tag, so each pane's pending intent is distinct whatever its request code. [tap] names this one tap (each
+         * post makes a new one, replacing the pane's pending intent's extras), so a recreation that hands the activity
+         * the same intent again is told from a new tap ([AgentTaps]).
          */
-        fun openIntent(context: Context, key: AgentPaneKey, token: String): Intent = Intent(context, MainActivity::class.java)
+        fun openIntent(
+            context: Context, key: AgentPaneKey, token: String, tap: String = UUID.randomUUID().toString(),
+        ): Intent = Intent(context, MainActivity::class.java)
             .setAction(ACTION_OPEN_AGENT)
             .setData(Uri.fromParts("or2-agent", key.tag, null))
             .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
@@ -85,6 +99,7 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
             .putExtra(EXTRA_SESSION, key.session)
             .putExtra(EXTRA_PANE_ID, key.paneId)
             .putExtra(EXTRA_TOKEN, token)
+            .putExtra(EXTRA_TAP, tap)
 
         /**
          * The pane a notification's tap names, or null for any other intent. The activity is exported (the launcher
@@ -97,6 +112,9 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
                 intent.getStringExtra(EXTRA_TOKEN), store.getString(TOKEN_KEY),
             )
         }
+
+        /** The id of the tap [intent] carries ([openIntent]), or null. */
+        fun tapOf(intent: Intent?): String? = intent?.getStringExtra(EXTRA_TAP)
 
         /** The app's token for its notification taps, made once. */
         fun token(store: PrefStore): String = store.getString(TOKEN_KEY) ?: UUID.randomUUID().toString().also { store.putString(TOKEN_KEY, it) }
