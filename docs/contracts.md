@@ -3520,7 +3520,7 @@ screen** (its terminal is the visible one and the app is resumed), **tap opens t
   does), `SINGLE_TOP | CLEAR_TOP`, action `io.github.code_akram.or2.action.OPEN_AGENT`. **Addition:**
   `MainActivity` is exported (the launcher), so the intent also carries a random token made once and
   kept in the app's prefs (`agent_open_token`); an intent without it is ignored, so another app cannot
-  drive or2 to a pane. `onCreate` (only without saved state, so a rotation does not repeat it) and
+  drive or2 to a pane. `onCreate` (whatever its saved state; see "Review fixes") and
   `onNewIntent` cancel the notification and hand the pane to `AgentOpenRequests`. `Or2App` takes it
   once the stored hosts are read and the launch's own recovery has run: connected → `launchOpenAgent`
   at once; connecting or waiting for a host-key decision → once connected; not connected → the usual
@@ -3553,6 +3553,37 @@ screen** (its terminal is the visible one and the app is resumed), **tap opens t
   `AgentNotificationsDeviceTest` (the service creates the channel; a Blocked edge posts one
   notification with its title, text, host, tap and auto-cancel, which opening cancels: skipped
   without the permission), and `HomeUiDeviceTest`'s card text.
+- **Review fixes (Codex v0.1.1 review, branch `v011/fix-notify`).**
+  - *A new process reconciles what an old one left up.* Notifications outlive the process, so the set
+    of panes with one up is no longer process-local: `AgentAlertSink.shown()` (new) reads it back from
+    `NotificationManager.getActiveNotifications()` (our id 2 on the `agents` channel, the tag parsed
+    by `AgentPaneKey.fromTag`, which only accepts a tag that round-trips; empty when the call fails),
+    and `AgentAlerts` starts from it. Its first views therefore cancel a pane that went back to
+    `Working` or disappeared while no process watched, though they still post nothing (baseline). A
+    pane seen `Working` by a watch for the first time (its baseline, or a new `state_change_seq`)
+    cancels unconditionally, known or not; a repeat of the same view (same seq, so still `Working`)
+    cancels only what this process posted since, so a steady `Working` pane costs no call per view.
+    The off switch cancels this process's set and whatever `shown()` lists. Decision: rebuild from the
+    system rather than persist the set (the system is the truth; the user may also swipe one away).
+  - *A tap is never discarded by a restore.* `onCreate` always inspects its intent: Android may create
+    the activity, with the killed one's saved state, for a new tap (no live activity gets
+    `onNewIntent`), and a non-null bundle no longer means "old intent". Each tap's intent carries its
+    own id (extra `io.github.code_akram.or2.extra.TAP`, a fresh UUID per post, replacing the pane's
+    pending intent's extras), and `AgentTaps` (plain JVM) keeps the ids taken as the activity's saved
+    state (`agent_taps`): a recreation handing back a taken tap (rotation, restore) does nothing, a new
+    one opens its pane. It keeps the first id and the newest, 16 in all (the first may be the intent
+    that created the activity, which a restore hands back). A tap relaunched from Recents
+    (`FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY`, the task's old intent) is not a new tap; an intent without
+    a tap id is not a tap.
+  - Tests (`AgentAlertsTest`, each failed before the fix): `aNewProcessReconcilesTheNotificationsTheOldOneLeftUp`
+    (a second `AgentAlerts` over a sink that keeps the first's notifications: its baseline cancels the
+    pane back at `Working` and the gone one, keeps the Blocked one, and its off switch takes the rest),
+    `aPaneSeenWorkingIsCancelledEvenWhenWhatIsUpCannotBeRead` (unconditional `Working` cancel; the
+    switch asks the system), `aTapOpensWhateverTheSavedStateAndARecreationNeverRepeatsOne` (a non-null
+    saved state with a fresh tap opens it; a replay of a taken one does not; Recents; the bound), and
+    the tag round trip in `eachPaneHasItsOwnTagAndItSurvivesAsSavedState`. The test sink now behaves
+    like the system (what is up survives the instance; a cancel removes only what is up). Device:
+    `AgentNotificationsDeviceTest` also checks the tap id and that `shown()` lists the posted pane.
 
 ## Wheel-aware scrolling (lane Scroll)
 

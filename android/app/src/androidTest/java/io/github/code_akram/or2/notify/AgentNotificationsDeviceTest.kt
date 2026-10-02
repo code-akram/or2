@@ -85,8 +85,11 @@ class AgentNotificationsDeviceTest {
         assertNotNull(shown.contentIntent)
         assertTrue(shown.flags and Notification.FLAG_AUTO_CANCEL != 0)
         // The tap's intent carries the pane and the app's token, and is honoured.
-        val intent = AgentNotifications.openIntent(context, key, AgentNotifications.token(store))
+        val intent = AgentNotifications.openIntent(context, key, AgentNotifications.token(store), tap = "tap-1")
         assertEquals(key, AgentNotifications.paneOf(intent, store))
+        assertEquals("tap-1", AgentNotifications.tapOf(intent))
+        // A new process (another sink) finds it among what the system shows.
+        assertTrue(key in AgentNotifications(context, store).shown())
         alerts.opened(key)
         await("the notification to go") { posted() == null }
     }

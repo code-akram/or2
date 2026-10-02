@@ -35,6 +35,26 @@ data class AgentPaneKey(val hostId: Long, val session: String?, val paneId: Stri
     fun toParts(): Array<String> = arrayOf(hostId.toString(), session?.let { "s$it" } ?: "d", paneId)
 
     companion object {
+        /** The pane a notification's [tag] names, or null when it is not one of ours (round trip only). */
+        fun fromTag(tag: String): AgentPaneKey? {
+            val rest = tag.removePrefix("agent:").takeIf { it.length < tag.length } ?: return null
+            val hostEnd = rest.indexOf(':').takeIf { it > 0 } ?: return null
+            val hostId = rest.substring(0, hostEnd).toLongOrNull() ?: return null
+            val tail = rest.substring(hostEnd + 1)
+            val (session, paneId) = when {
+                tail.startsWith("d:") -> null to tail.substring(2)
+                tail.startsWith("s") -> {
+                    val lengthEnd = tail.indexOf(':').takeIf { it > 1 } ?: return null
+                    val length = tail.substring(1, lengthEnd).toIntOrNull()?.takeIf { it >= 0 } ?: return null
+                    val start = lengthEnd + 1
+                    if (tail.length < start + length + 1 || tail[start + length] != ':') return null
+                    tail.substring(start, start + length) to tail.substring(start + length + 1)
+                }
+                else -> return null
+            }
+            return AgentPaneKey(hostId, session, paneId).takeIf { it.tag == tag }
+        }
+
         fun fromParts(parts: Array<String>): AgentPaneKey? {
             if (parts.size != 3) return null
             val hostId = parts[0].toLongOrNull() ?: return null
@@ -56,7 +76,14 @@ interface AgentAlertSink {
     /** Posts [alert], replacing the pane's earlier one. */
     fun post(alert: AgentAlert)
 
+    /** Cancels the pane's notification; nothing happens when none is up. */
     fun cancel(key: AgentPaneKey)
+
+    /**
+     * The panes whose notification is up now, whichever process posted it (notifications outlive the process that
+     * posted them); empty when that cannot be read.
+     */
+    fun shown(): Set<AgentPaneKey>
 }
 
 /** The terminal on screen in a resumed app: the host and the target it runs. */
@@ -82,6 +109,11 @@ fun alertText(status: AgentStatus): String? = when (status) {
  * - A pane's notification is cancelled when the pane goes back to `Working`, disappears from its session's view, is
  *   shown on screen ([screenChanged]) or opened from the notification ([opened]); all are cancelled when the alerts
  *   are switched off ([enabledChanged]).
+ * - What is up survives the process (Android keeps notifications), so a new process starts from the system's list
+ *   ([AgentAlertSink.shown]): its first views cancel what went back to `Working` or disappeared meanwhile, and the
+ *   switch takes those away too. A pane seen `Working` for the first time by a watch (its baseline, or a new
+ *   `state_change_seq`) is cancelled whether or not this process knows of a notification; a repeat of that view
+ *   (same seq, so still `Working`) cancels only one this process posted since.
  *
  * "On screen" is the visible terminal of a resumed app running herdr for the pane's host and session, whose
  * shown pane is the session's focused one (herdr's focus is shared state; a terminal opened for one pane shows
@@ -93,7 +125,8 @@ class AgentAlerts(private val sink: AgentAlertSink, private val enabled: () -> B
 
     /** The focused pane of every live session view, by host id and session. */
     private val focused = mutableMapOf<Pair<Long, String?>, String?>()
-    private val posted = mutableSetOf<AgentPaneKey>()
+    /** The panes with a notification up: at first what the system still shows from an earlier process. */
+    private val posted: MutableSet<AgentPaneKey> = sink.shown().toMutableSet()
     private var screen: OnScreen? = null
 
     /** The panes with a notification up, for tests and diagnostics. */
@@ -118,7 +151,12 @@ class AgentAlerts(private val sink: AgentAlertSink, private val enabled: () -> B
         for (agent in view.agents) {
             val key = AgentPaneKey(hostId, session, agent.paneId)
             if (agent.status == AgentStatus.WORKING) {
-                cancel(key)
+                if (previous?.get(agent.paneId) == agent.stateChangeSeq) {
+                    cancel(key)
+                } else {
+                    posted -= key
+                    sink.cancel(key)
+                }
                 continue
             }
             val text = alertText(agent.status) ?: continue
@@ -153,9 +191,11 @@ class AgentAlerts(private val sink: AgentAlertSink, private val enabled: () -> B
         sink.cancel(key)
     }
 
-    /** The setting changed: switched off, every notification goes. */
+    /** The setting changed: switched off, every agent notification goes, this process's and any the system still shows. */
     fun enabledChanged() {
-        if (!enabled()) posted.toList().forEach(::cancel)
+        if (enabled()) return
+        (posted + sink.shown()).forEach(sink::cancel)
+        posted.clear()
     }
 
     private fun isOnScreen(key: AgentPaneKey): Boolean {
@@ -202,6 +242,35 @@ class AgentOpenRequests {
 
     /** Takes the pending request (null when there is none). */
     fun take(): AgentPaneKey? = mutableRequest.value.also { mutableRequest.value = null }
+}
+
+/**
+ * The notification taps one activity (and its recreations) has acted on. Every intent the activity gets is inspected,
+ * in `onCreate` whatever its saved state as well as in `onNewIntent`: Android may create the activity, with the saved
+ * state of the one it killed, for a new tap (there is no live activity to get `onNewIntent`), and that tap must open
+ * its pane. A recreation that hands the same intent again (a rotation, a restore) must not, so each tap carries its
+ * own id ([AgentNotifications.openIntent]) and the ids taken are the activity's saved state ([saved]). A tap
+ * relaunched from Recents (the task's old intent) is not a new one either.
+ */
+class AgentTaps(saved: Array<String>?) {
+    private val taken = ArrayDeque(saved.orEmpty().toList())
+
+    /** The pane to open for this intent's tap ([pane] and [tapId] from it), or null: not a tap, or one already taken. */
+    fun take(pane: AgentPaneKey?, tapId: String?, fromHistory: Boolean): AgentPaneKey? {
+        if (pane == null || tapId.isNullOrEmpty() || fromHistory || tapId in taken) return null
+        taken.addLast(tapId)
+        // The first stays: it may be the intent that created the activity, which a restore hands back.
+        while (taken.size > LIMIT) taken.removeAt(1)
+        return pane
+    }
+
+    /** The ids taken, for the activity's saved state: the first and the newest, [LIMIT] in all. */
+    fun saved(): Array<String> = taken.toTypedArray()
+
+    private companion object {
+        /** More than an activity's intents can replay: its own and the last few delivered to it. */
+        const val LIMIT = 16
+    }
 }
 
 /** What a notification's tap does first, given its host's connection. */
