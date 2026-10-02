@@ -211,6 +211,12 @@ pub enum Command {
     Submit(String),
     Key(KeyInput),
     Scroll(ViewportScroll),
+    /// A tap while the program tracks the mouse: a left-button press and release at the
+    /// viewport cell (`column`, `row`), in the terminal's mouse format; nothing without tracking.
+    MouseClick {
+        column: u16,
+        row: u16,
+    },
     /// The renderer lost its grid: publish a full frame.
     FullFrame,
     /// The network changed: a mosh driver opens a new socket now; every other driver ignores it.
@@ -382,6 +388,14 @@ impl SessionHandle {
     pub fn scroll(&self, scroll: ViewportScroll) -> Result<(), SessionError> {
         self.require_connected()?;
         self.send(Command::Scroll(scroll))
+    }
+
+    /// A left click at the viewport cell (`column`, `row`, clamped to the grid) while the
+    /// program tracks the mouse, encoded with the terminal's own mouse format; nothing is
+    /// sent when it does not.
+    pub fn mouse_click(&self, column: u16, row: u16) -> Result<(), SessionError> {
+        self.require_connected()?;
+        self.send(Command::MouseClick { column, row })
     }
 
     pub fn request_full_frame(&self) -> Result<(), SessionError> {

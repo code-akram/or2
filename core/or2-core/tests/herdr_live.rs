@@ -935,3 +935,166 @@ async fn navigation_moves_between_tabs_panes_and_workspaces_of_an_isolated_sessi
     nav(None, TargetNav::NextWindow).await.unwrap();
     assert_eq!(focus_of(&herdr).await.0, b);
 }
+
+fn tmux_binary() -> Option<PathBuf> {
+    ["/usr/bin/tmux", "/usr/local/bin/tmux", "/bin/tmux"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+}
+
+/// A herdr client attached to the isolated session inside a private tmux server (its own
+/// socket, no config), so the test can type into the client as the terminal it runs in
+/// would. Dropping kills that tmux server only.
+struct Client {
+    tmux: PathBuf,
+    socket: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl Client {
+    fn attach(herdr: &Isolated, tmux: PathBuf) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("tmux.sock");
+        let client = Self {
+            tmux,
+            socket,
+            _dir: dir,
+        };
+        let status = client
+            .command()
+            .args([
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-x",
+                "100",
+                "-y",
+                "30",
+            ])
+            .arg(herdr.herdr())
+            .args(["--session", &herdr.name])
+            .status()
+            .unwrap();
+        assert!(status.success(), "the private tmux server started");
+        client
+    }
+
+    /// tmux on the private socket, without the `HERDR_*` variables of a pane the tests may
+    /// run in (the client must reach only the isolated session) or an outer `TMUX`.
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.tmux);
+        for (name, _) in std::env::vars_os() {
+            let text = name.to_string_lossy();
+            if text.starts_with("HERDR_") || text == "TMUX" {
+                command.env_remove(&name);
+            }
+        }
+        command.arg("-S").arg(&self.socket).stdin(Stdio::null());
+        command
+    }
+
+    /// Bytes typed into the herdr client, as its terminal would send them.
+    fn type_bytes(&self, bytes: &[u8]) {
+        let status = self
+            .command()
+            .args(["send-keys", "-H"])
+            .args(bytes.iter().map(|b| format!("{b:02x}")))
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    /// What the herdr client shows.
+    fn screen(&self) -> String {
+        let output = self
+            .command()
+            .args(["capture-pane", "-p"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        let _ = self.command().arg("kill-server").output();
+    }
+}
+
+/// The phone's route 1: herdr tracks the mouse, so a swipe reaches its client as wheel events
+/// and herdr scrolls the pane itself. `TargetScroll::Bottom` (`pane.scroll` to offset 0) must
+/// bring that pane, and what the client shows, back to the live screen.
+#[tokio::test]
+async fn bottom_returns_a_pane_herdr_scrolled_by_wheel_events_to_live() {
+    use or2_core::herdr::generated::request::PaneListParams;
+    use or2_core::herdr::{ScrollOffsets, scroll_pane_in};
+    use or2_core::host::TargetScroll;
+    let Some(mut herdr) = Isolated::new() else {
+        return;
+    };
+    let Some(tmux) = tmux_binary() else {
+        eprintln!("skipping: tmux is absent (it hosts the herdr client)");
+        return;
+    };
+    herdr.start();
+    let client = Client::attach(&herdr, tmux);
+    // The attaching client creates the session's first workspace.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let pane = loop {
+        let panes = herdr
+            .call(RequestBody::PaneList(PaneListParams::default()))
+            .await;
+        if let Some(pane) = panes.pointer("/panes/0/pane_id").and_then(Value::as_str) {
+            break pane.to_owned();
+        }
+        assert!(Instant::now() < deadline, "no pane: {panes}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    herdr
+        .call(RequestBody::PaneSendText(PaneSendTextParams {
+            pane_id: pane.clone(),
+            text: "seq 1 500\n".into(),
+        }))
+        .await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !client.screen().contains("500") {
+        assert!(Instant::now() < deadline, "no output: {}", client.screen());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Wheel up over the pane (SGR; 1-based column 60, row 10, right of herdr's sidebar) until
+    // the whole viewport is in the history.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while offset_from_bottom(&herdr, &pane).await < 40 {
+        assert!(Instant::now() < deadline, "the wheel did not scroll herdr");
+        client.type_bytes(&b"\x1b[<64;60;10M".repeat(5));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(!client.screen().contains("500"), "{}", client.screen());
+
+    // As the app sends it: the focused pane (no pane id), no offset kept for it.
+    let (host, directory, offsets) = (LocalHost::new(), Directory::new(), ScrollOffsets::new());
+    scroll_pane_in(
+        &host,
+        herdr.herdr(),
+        &directory,
+        &offsets,
+        Some(herdr.name.as_str()),
+        None,
+        TargetScroll::Bottom,
+    )
+    .await
+    .unwrap();
+    assert_eq!(offset_from_bottom(&herdr, &pane).await, 0);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !client.screen().contains("500") {
+        assert!(
+            Instant::now() < deadline,
+            "the client still shows history: {}",
+            client.screen()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}

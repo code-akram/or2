@@ -304,6 +304,82 @@ fn wheel_scrolls_use_the_x10_format_when_no_extended_format_is_on() {
 }
 
 #[test]
+fn a_click_is_a_left_press_and_release_at_the_tapped_cell_in_sgr() {
+    let mut terminal = engine(20, 6);
+    terminal.write(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h");
+    // Button 0 (left); press ends in M, release in m; coordinates are 1-based.
+    assert_eq!(
+        terminal.mouse_click(7, 3).unwrap(),
+        b"\x1b[<0;8;4M\x1b[<0;8;4m"
+    );
+    assert_eq!(
+        terminal.mouse_click(0, 0).unwrap(),
+        b"\x1b[<0;1;1M\x1b[<0;1;1m"
+    );
+    // A cell past the grid is its last cell.
+    assert_eq!(
+        terminal.mouse_click(99, 99).unwrap(),
+        b"\x1b[<0;20;6M\x1b[<0;20;6m"
+    );
+    // Button-event and any-event tracking report clicks the same way.
+    terminal.write(b"\x1b[?1000l\x1b[?1002h");
+    assert_eq!(
+        terminal.mouse_click(2, 1).unwrap(),
+        b"\x1b[<0;3;2M\x1b[<0;3;2m"
+    );
+    terminal.write(b"\x1b[?1002l\x1b[?1003h");
+    assert_eq!(
+        terminal.mouse_click(2, 1).unwrap(),
+        b"\x1b[<0;3;2M\x1b[<0;3;2m"
+    );
+}
+
+#[test]
+fn a_click_uses_the_x10_format_when_no_extended_format_is_on() {
+    let mut terminal = engine(20, 6);
+    terminal.write(b"\x1b[?1000h");
+    // ESC [ M, then 32 + button, 32 + column, 32 + row (1-based); a release is button 3.
+    assert_eq!(
+        terminal.mouse_click(4, 2).unwrap(),
+        [
+            0x1b,
+            b'[',
+            b'M',
+            32,
+            32 + 5,
+            32 + 3,
+            0x1b,
+            b'[',
+            b'M',
+            32 + 3,
+            32 + 5,
+            32 + 3
+        ]
+    );
+    // X10 tracking (DECSET 9) reports presses only.
+    terminal.write(b"\x1b[?1000l\x1b[?9h");
+    assert_eq!(
+        terminal.mouse_click(4, 2).unwrap(),
+        [0x1b, b'[', b'M', 32, 32 + 5, 32 + 3]
+    );
+}
+
+#[test]
+fn a_click_without_mouse_tracking_sends_nothing() {
+    let mut terminal = engine(20, 6);
+    assert!(terminal.mouse_click(3, 3).unwrap().is_empty());
+    terminal.write(b"\x1b[?1049h");
+    assert!(terminal.mouse_click(3, 3).unwrap().is_empty());
+    // The format alone is not tracking.
+    terminal.write(b"\x1b[?1006h");
+    assert!(terminal.mouse_click(3, 3).unwrap().is_empty());
+    terminal.write(b"\x1b[?1000h");
+    assert!(!terminal.mouse_click(3, 3).unwrap().is_empty());
+    terminal.write(b"\x1b[?1000l");
+    assert!(terminal.mouse_click(3, 3).unwrap().is_empty());
+}
+
+#[test]
 fn a_wheel_scroll_without_mouse_tracking_is_a_delta() {
     let mut terminal = engine(8, 3);
     terminal.write(b"L0\r\nL1\r\nL2\r\nL3\r\nL4");

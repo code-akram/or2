@@ -568,6 +568,38 @@ impl TerminalEngine {
         if rows == 0 || !self.terminal.is_mouse_tracking()? {
             return Ok(Vec::new());
         }
+        let button = if rows < 0 {
+            MouseButton::Four
+        } else {
+            MouseButton::Five
+        };
+        let one = self.mouse_bytes(MouseAction::Press, button, column, row)?;
+        let count = rows.unsigned_abs().min(u32::from(self.size.rows()));
+        Ok(one.repeat(count as usize))
+    }
+
+    /// A tap while the program tracks the mouse: a left-button press, then its release, at the
+    /// cell (`column`, `row`, clamped to the grid), in the terminal's mouse tracking mode and
+    /// format (a mode that reports no releases, X10 tracking, gets the press alone). Empty
+    /// when the program tracks nothing.
+    pub fn mouse_click(&mut self, column: u16, row: u16) -> Result<Vec<u8>, TerminalError> {
+        if !self.terminal.is_mouse_tracking()? {
+            return Ok(Vec::new());
+        }
+        let mut bytes = self.mouse_bytes(MouseAction::Press, MouseButton::Left, column, row)?;
+        bytes.extend(self.mouse_bytes(MouseAction::Release, MouseButton::Left, column, row)?);
+        Ok(bytes)
+    }
+
+    /// One mouse event at the centre of the cell (`column`, `row`, clamped to the grid), encoded
+    /// with the terminal's current tracking mode and format.
+    fn mouse_bytes(
+        &mut self,
+        action: MouseAction,
+        button: MouseButton,
+        column: u16,
+        row: u16,
+    ) -> Result<Vec<u8>, TerminalError> {
         // The encoder maps surface pixels to cells; a nominal cell size places the event at
         // the centre of the touched cell whatever the phone's real metrics are.
         const CELL: u32 = 10;
@@ -590,21 +622,16 @@ impl TerminalEngine {
         let centre =
             |cell: u16, cells: u16| (u32::from(cell.min(cells - 1)) * CELL + CELL / 2) as f32;
         self.mouse_event
-            .set_action(MouseAction::Press)
-            .set_button(Some(if rows < 0 {
-                MouseButton::Four
-            } else {
-                MouseButton::Five
-            }))
+            .set_action(action)
+            .set_button(Some(button))
             .set_mods(Mods::empty())
             .set_position(Position {
                 x: centre(column, columns),
                 y: centre(row, grid_rows),
             });
-        let mut one = Vec::new();
-        self.mouse.encode_to_vec(&self.mouse_event, &mut one)?;
-        let count = rows.unsigned_abs().min(u32::from(grid_rows));
-        Ok(one.repeat(count as usize))
+        let mut bytes = Vec::new();
+        self.mouse.encode_to_vec(&self.mouse_event, &mut bytes)?;
+        Ok(bytes)
     }
 }
 

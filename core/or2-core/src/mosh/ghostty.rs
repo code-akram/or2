@@ -318,6 +318,11 @@ mod tests {
             terminal.live().engine().scroll(wheel).unwrap(),
             b"\x1b[<64;4;2M"
         );
+        // A tap is a left click there, as over SSH.
+        assert_eq!(
+            terminal.live().engine().mouse_click(3, 1).unwrap(),
+            b"\x1b[<0;4;2M\x1b[<0;4;2m"
+        );
         terminal.apply_diff(2, 3, b"\x1b[?1002l", 0).unwrap();
         assert!(
             !terminal
@@ -327,6 +332,14 @@ mod tests {
                 .unwrap()
                 .modes()
                 .mouse_tracking
+        );
+        assert!(
+            terminal
+                .live()
+                .engine()
+                .mouse_click(3, 1)
+                .unwrap()
+                .is_empty()
         );
     }
 }

@@ -76,12 +76,16 @@ impl SubmitSequencer {
     }
 
     /// Hands back `command` when it may run now. While an Enter is pending, input that writes
-    /// to the terminal (`Text`, `Key`, `Submit`, `Scroll`) is held until the Enter is out;
+    /// to the terminal (`Text`, `Key`, `Submit`, `Scroll`, `MouseClick`) is held until the Enter is out;
     /// everything else (resize, full frame) is independent of input order.
     pub fn admit(&mut self, command: Command) -> Option<Command> {
         let ordered = matches!(
             command,
-            Command::Text(_) | Command::Key(_) | Command::Submit(_) | Command::Scroll(_)
+            Command::Text(_)
+                | Command::Key(_)
+                | Command::Submit(_)
+                | Command::Scroll(_)
+                | Command::MouseClick { .. }
         );
         if self.due_at.is_some() && ordered {
             self.deferred.push_back(command);

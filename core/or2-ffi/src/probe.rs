@@ -214,6 +214,11 @@ async fn serve_terminal(
                 };
                 publish(&mut driver, screen.delta_without_rows());
             }
+            Command::MouseClick { column, row } => {
+                // The probe terminal tracks no mouse; it echoes the cell so the FFI is visible.
+                screen.key_echo = format!("click {column} {row}");
+                publish(&mut driver, screen.delta(3));
+            }
             Command::FullFrame => publish(&mut driver, screen.full()),
             Command::Roam => {
                 if mosh {

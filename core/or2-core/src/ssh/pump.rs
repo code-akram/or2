@@ -261,6 +261,12 @@ impl TerminalPump {
                 }
                 self.publish(driver)?;
             }
+            Command::MouseClick { column, row } => {
+                let bytes = self.terminal.mouse_click(column, row).map_err(internal)?;
+                if !bytes.is_empty() {
+                    let _ = self.writes.send(Write::Bytes(bytes));
+                }
+            }
             Command::FullFrame => {
                 self.terminal.request_full_frame();
                 self.publish(driver)?;
@@ -474,6 +480,28 @@ mod tests {
         pump.terminal.write(b"\x1b[?2004l");
         pump.command(&mut driver, submit()).unwrap();
         assert_eq!(bytes(writes.try_recv().ok()), b"hi\rthere");
+    }
+
+    #[test]
+    fn a_click_is_written_only_while_the_program_tracks_the_mouse() {
+        let (mut pump, mut driver, mut writes) = pump();
+        let click = || Command::MouseClick { column: 4, row: 2 };
+        pump.command(&mut driver, click()).unwrap();
+        assert!(writes.try_recv().is_err(), "no tracking: nothing is sent");
+        pump.terminal.write(b"\x1b[?1000h\x1b[?1006h");
+        pump.command(&mut driver, click()).unwrap();
+        assert_eq!(drain(&mut writes), [b"\x1b[<0;5;3M\x1b[<0;5;3m".to_vec()]);
+        pump.terminal.write(b"\x1b[?1006l");
+        pump.command(&mut driver, click()).unwrap();
+        assert_eq!(
+            drain(&mut writes),
+            [vec![
+                0x1b, b'[', b'M', 32, 37, 35, 0x1b, b'[', b'M', 35, 37, 35
+            ]]
+        );
+        pump.terminal.write(b"\x1b[?1000l");
+        pump.command(&mut driver, click()).unwrap();
+        assert!(writes.try_recv().is_err());
     }
 
     #[test]

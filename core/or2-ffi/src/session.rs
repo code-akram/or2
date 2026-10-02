@@ -549,6 +549,14 @@ impl Session {
         Ok(self.handle.scroll(scroll.into())?)
     }
 
+    /// A tap while the program tracks the mouse (`TerminalModes.mouse_tracking`, API 15): a
+    /// left-button press and release at the viewport cell (`column`, `row`; clamped to the
+    /// grid), encoded with the terminal's own mouse format. Nothing is sent when the program
+    /// does not track the mouse. Both transports.
+    pub fn mouse_click(&self, column: u16, row: u16) -> Result<(), SessionError> {
+        Ok(self.handle.mouse_click(column, row)?)
+    }
+
     /// The renderer lost its grid (new view): the next frame will be full.
     pub fn request_full_frame(&self) -> Result<(), SessionError> {
         Ok(self.handle.request_full_frame()?)
@@ -627,6 +635,16 @@ mod tests {
         assert_eq!(
             ssh_driver.blocking_next_command(),
             Command::Text("b".into())
+        );
+    }
+
+    #[test]
+    fn a_mouse_click_reaches_the_driver_as_its_cell() {
+        let (session, mut driver) = open(TerminalTransport::Ssh);
+        session.mouse_click(7, 3).unwrap();
+        assert_eq!(
+            driver.blocking_next_command(),
+            Command::MouseClick { column: 7, row: 3 }
         );
     }
 

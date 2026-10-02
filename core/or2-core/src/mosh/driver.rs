@@ -507,6 +507,17 @@ fn apply_input(
             }
             publish(driver, session)?;
         }
+        Command::MouseClick { column, row } => {
+            let bytes = session
+                .terminal()
+                .live()
+                .engine()
+                .mouse_click(column, row)
+                .map_err(internal)?;
+            if !bytes.is_empty() {
+                session.send_input(&bytes);
+            }
+        }
         Command::FullFrame => {
             session.terminal().live().engine().request_full_frame();
             publish(driver, session)?;

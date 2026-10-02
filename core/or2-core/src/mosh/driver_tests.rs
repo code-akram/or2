@@ -560,6 +560,48 @@ async fn submit_sends_the_text_then_a_separate_enter_after_the_delay_in_order() 
         .await;
 }
 
+/// A tap reaches the server as a click only while the program tracks the mouse, as over SSH.
+#[tokio::test(start_paused = true)]
+async fn a_click_reaches_the_server_only_while_the_program_tracks_the_mouse() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (mut server, transport) = FakeServer::in_memory(KEY);
+            let (handle, states) = start_here(transport, KEY);
+            server
+                .hear_until(|heard| heard.iter().any(|h| !h.resizes.is_empty()))
+                .await;
+            server.say(b"$ ").await;
+            assert_eq!(state(&states).await, SessionState::Connected);
+
+            // No tracking: the click sends nothing; the text after it is all the server hears.
+            handle.mouse_click(3, 1).unwrap();
+            handle.send_text("a".into()).unwrap();
+            let heard = server
+                .hear_until(|heard| heard.last().is_some_and(|h| h.keys.ends_with(b"a")))
+                .await;
+            assert_eq!(heard.last().unwrap().keys, b"a");
+            server.say(b"x").await; // acknowledges everything heard
+
+            // Tracking with SGR: a press and a release at the cell (1-based).
+            server.say(b"\x1b[?1000h\x1b[?1006hM").await;
+            Grid::default().wait_for(&handle, "M").await;
+            handle.mouse_click(3, 1).unwrap();
+            let heard = server
+                .hear_until(|heard| heard.last().is_some_and(|h| h.keys.ends_with(b"m")))
+                .await;
+            assert!(
+                heard
+                    .last()
+                    .unwrap()
+                    .keys
+                    .ends_with(b"\x1b[<0;4;2M\x1b[<0;4;2m"),
+                "a press and a release"
+            );
+            handle.disconnect();
+        })
+        .await;
+}
+
 #[tokio::test]
 async fn disconnect_says_goodbye_to_the_server_and_closes() {
     let mut server = FakeServer::new(KEY).await;
