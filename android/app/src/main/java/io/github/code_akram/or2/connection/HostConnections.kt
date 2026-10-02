@@ -4,6 +4,7 @@ import io.github.code_akram.or2.app.TerminalActivations
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.data.TrustStore
+import io.github.code_akram.or2.ffi.AgentIdentity
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HerdrListener
 import io.github.code_akram.or2.ffi.HerdrState
@@ -114,11 +115,12 @@ interface HostPort : AutoCloseable {
     suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?)
 
     /**
-     * API 16: sends [text] to the agent in herdr pane [paneId] of [session] and submits it, with no terminal open:
-     * herdr's `agent.prompt`, or (the agent is blocked) the text typed then Enter. `PaneNotFound` when the pane or
-     * its agent is gone, `TooLarge` above 4 KiB. The text is never logged.
+     * API 16: sends [text] to [agent] in herdr pane [paneId] of [session] and submits it, with no terminal open:
+     * herdr's `agent.prompt`, or (the agent is blocked) the text and Enter typed in one request once the pane was
+     * checked to hold that agent in its foreground. `PaneNotFound` when the pane, or that agent, is gone, `TooLarge`
+     * above 4 KiB. The text is never logged.
      */
-    suspend fun replyToPane(session: String?, paneId: String, text: String): ReplyRoute
+    suspend fun replyToPane(session: String?, paneId: String, agent: AgentIdentity, text: String): ReplyRoute
 
     /**
      * API 16: writes [bytes] over SFTP to the host's `~/.cache/or2/images` and returns the file's absolute
@@ -147,7 +149,8 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
         connection.scrollTarget(target, paneId, scroll)
     override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) =
         connection.navigate(target, paneId, nav, clientId)
-    override suspend fun replyToPane(session: String?, paneId: String, text: String) = connection.replyToPane(session, paneId, text)
+    override suspend fun replyToPane(session: String?, paneId: String, agent: AgentIdentity, text: String) =
+        connection.replyToPane(session, paneId, agent, text)
     override suspend fun uploadImage(bytes: ByteArray, extension: String) = connection.uploadImage(bytes, extension)
     override fun close() = connection.close()
 }
@@ -880,15 +883,15 @@ class HostConnections(
     }
 
     /**
-     * A reply from an agent notification (API 16, `reply_to_pane`): sends [text] to the agent in herdr pane
+     * A reply from an agent notification (API 16, `reply_to_pane`): sends [text] to [agent] in herdr pane
      * [paneId] of [session] on [hostId]'s live connection and submits it. Only a connection that is up now is
      * used; nothing connects from here (a reply comes from the background). Throws [HostException.NotConnected]
      * when the host has none, and the reply's own [HostException] otherwise. The text is never logged.
      */
-    suspend fun replyToPane(hostId: Long, session: String?, paneId: String, text: String): ReplyRoute {
+    suspend fun replyToPane(hostId: Long, session: String?, paneId: String, agent: AgentIdentity, text: String): ReplyRoute {
         val current = mutableHosts.value[hostId]?.takeIf { it.isLive && !it.retired && it.state.value is HostState.Connected }
         val port = current?.mutablePort?.value ?: throw HostException.NotConnected()
-        return port.replyToPane(session, paneId, text)
+        return port.replyToPane(session, paneId, agent, text)
     }
 
     /**

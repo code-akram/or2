@@ -462,9 +462,16 @@ impl server::Handler for Server {
                 return Ok(());
             }
             session.data(channel, reply.as_bytes().to_vec())?;
-        } else if let Some(method) = ["agent.prompt", "pane.send_text", "pane.send_keys"]
-            .into_iter()
-            .find(|method| request.contains(&format!("\"method\":\"{method}\"")))
+        } else if let Some(method) = [
+            "agent.prompt",
+            "agent.get",
+            "pane.process_info",
+            "pane.send_input",
+            "pane.send_text",
+            "pane.send_keys",
+        ]
+        .into_iter()
+        .find(|method| request.contains(&format!("\"method\":\"{method}\"")))
         {
             let value: serde_json::Value =
                 serde_json::from_str(request.trim_end()).expect("one JSON request");
@@ -474,29 +481,47 @@ impl server::Handler for Server {
                 .or(params["pane_id"].as_str())
                 .unwrap_or("")
                 .to_owned();
+            let id = &value["id"];
             let error = |code: &str| {
                 format!(
-                    "{{\"id\":{},\"error\":{{\"code\":\"{code}\",\"message\":\"refused\"}}}}\n",
-                    value["id"]
+                    "{{\"id\":{id},\"error\":{{\"code\":\"{code}\",\"message\":\"refused\"}}}}\n"
                 )
             };
+            // `w1:p1` holds a blocked agent, `w1:p2` an idle one, each `claude` on terminal
+            // `term_<pane>` in the foreground; `w9:p9` has none.
+            let result = |result: serde_json::Value| {
+                serde_json::json!({"id": id, "result": result}).to_string() + "\n"
+            };
             let reply = match (method, pane.as_str()) {
+                (_, "w9:p9") if method.starts_with("agent.") => error("agent_not_found"),
                 ("agent.prompt", "w1:p1") => error("agent_blocked"),
-                ("agent.prompt", "w9:p9") => error("agent_not_found"),
-                _ => format!(
-                    "{{\"id\":{},\"result\":{{\"type\":\"ok\"}}}}\n",
-                    value["id"]
-                ),
+                ("agent.get", _) => result(serde_json::json!({"type": "agent_info", "agent": {
+                    "agent": "claude", "agent_status": "blocked", "focused": false,
+                    "pane_id": pane, "revision": 0, "tab_id": "w1:t1",
+                    "terminal_id": format!("term_{pane}"), "workspace_id": "w1",
+                }})),
+                ("pane.process_info", _) => result(serde_json::json!({
+                    "type": "pane_process_info", "process_info": {
+                        "pane_id": pane, "shell_pid": 100, "foreground_process_group_id": 200,
+                        "foreground_processes": [{"pid": 200, "name": "claude"}],
+                    }
+                })),
+                _ => result(serde_json::json!({"type": "ok"})),
             };
             let detail = match method {
                 "pane.send_keys" => params["keys"].to_string(),
+                "pane.send_input" => format!(
+                    "{} {}",
+                    params["text"].as_str().unwrap_or(""),
+                    params["keys"]
+                ),
                 _ => params["text"].as_str().unwrap_or("").to_owned(),
             };
             self.shared
                 .replies
                 .lock()
                 .unwrap()
-                .push(format!("{method} {pane} {detail}"));
+                .push(format!("{method} {pane} {detail}").trim_end().to_owned());
             session.data(channel, reply.into_bytes())?;
         } else if request.contains("session.snapshot") {
             session.data(
@@ -1903,31 +1928,47 @@ fn focusing_a_herdr_pane_needs_herdr() {
 }
 
 #[test]
-fn a_reply_goes_through_the_probed_herdr_prompted_or_typed_then_enter() {
+fn a_reply_goes_through_the_probed_herdr_prompted_or_typed_with_its_enter() {
     let fixture = Fixture::connected_with(Duration::from_secs(5), PROBE_WITH_HERDR);
     let reply = |pane: &str, text: &str| {
         runtime().block_on(fixture.handle.reply_to_pane(
             Some("work".into()),
             pane.to_owned(),
+            herdr::AgentIdentity {
+                terminal_id: format!("term_{pane}"),
+                agent: Some("claude".into()),
+            },
             text.to_owned(),
         ))
     };
     assert_eq!(reply("w1:p2", "go on"), Ok(herdr::ReplyRoute::Prompted));
-    // The blocked agent: refused as a prompt, so typed, then Enter on its own.
+    // The blocked agent: refused as a prompt, so checked, then typed with its Enter at once.
     assert_eq!(
         reply("w1:p1", "yes\nand more"),
         Ok(herdr::ReplyRoute::Typed)
     );
-    // Gone: nothing is typed.
+    // Gone: nothing is sent.
     assert_eq!(reply("w9:p9", "hello"), Err(HostError::PaneNotFound));
+    let replies = fixture.shared.replies.lock().unwrap().clone();
+    assert_eq!(replies.len(), 8, "{replies:?}");
     assert_eq!(
-        *fixture.shared.replies.lock().unwrap(),
+        replies[..4],
         [
+            "agent.get w1:p2",
             "agent.prompt w1:p2 go on",
+            "agent.get w1:p1",
             "agent.prompt w1:p1 yes\nand more",
-            "pane.send_text w1:p1 yes\nand more",
-            "pane.send_keys w1:p1 [\"Enter\"]",
-            "agent.prompt w9:p9 hello",
+        ]
+    );
+    // The checks run together, in either order.
+    let mut checks = replies[4..6].to_vec();
+    checks.sort();
+    assert_eq!(checks, ["agent.get w1:p1", "pane.process_info w1:p1"]);
+    assert_eq!(
+        replies[6..],
+        [
+            "pane.send_input w1:p1 yes\nand more [\"Enter\"]",
+            "agent.get w9:p9",
         ]
     );
     fixture.handle.disconnect();
@@ -1939,11 +1980,15 @@ fn a_reply_goes_through_the_probed_herdr_prompted_or_typed_then_enter() {
 fn a_reply_needs_herdr() {
     let fixture = Fixture::connected(Duration::from_secs(5));
     assert_eq!(
-        runtime().block_on(
-            fixture
-                .handle
-                .reply_to_pane(None, "w1:p1".into(), "hi".into())
-        ),
+        runtime().block_on(fixture.handle.reply_to_pane(
+            None,
+            "w1:p1".into(),
+            herdr::AgentIdentity {
+                terminal_id: "term_w1:p1".into(),
+                agent: None,
+            },
+            "hi".into()
+        )),
         Err(HostError::NotInstalled {
             program: "herdr".into()
         })

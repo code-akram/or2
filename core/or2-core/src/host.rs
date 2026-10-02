@@ -231,6 +231,12 @@ pub fn is_valid_herdr_pane_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-'))
 }
 
+/// An agent's kind as herdr names it (`claude`): 1 to 128 bytes, no control characters. It is
+/// only compared with herdr's answer, never sent.
+fn is_valid_agent_kind(kind: &str) -> bool {
+    (1..=128).contains(&kind.len()) && !kind.chars().any(char::is_control)
+}
+
 impl TerminalTarget {
     pub fn validate(&self) -> Result<(), HostError> {
         let valid = match self {
@@ -423,14 +429,19 @@ pub enum HostCommand {
         nav: TargetNav,
         reply: oneshot::Sender<Result<(), HostError>>,
     },
-    /// Send `text` to the agent in herdr pane `pane_id` of `session` and submit it
+    /// Send `text` to `agent` in herdr pane `pane_id` of `session` and submit it
     /// ([`HostHandle::reply_to_pane`], [`herdr::reply_in`]) with the probed herdr path. Names and
-    /// text are validated. Reply `NotInstalled` without herdr, `PaneNotFound` when the pane or its
-    /// agent is gone, `CommandFailed` for other failures. `text` is never logged.
+    /// text are validated. Reply `NotInstalled` without herdr, `PaneNotFound` when the pane or that
+    /// agent is gone, `CommandFailed` for other failures. `text` is never logged. The caller stops
+    /// waiting at `deadline`, or earlier by dropping `reply`: the worker then sends nothing more
+    /// (it never abandons a request that sends, and starts one only while it can end before
+    /// `deadline`).
     ReplyToPane {
         session: Option<String>,
         pane_id: String,
+        agent: herdr::AgentIdentity,
         text: String,
+        deadline: tokio::time::Instant,
         reply: oneshot::Sender<Result<herdr::ReplyRoute, HostError>>,
     },
     /// Write `bytes` over SFTP to the host's image directory (contracts.md, "Image paste"):
@@ -773,24 +784,30 @@ impl HostHandle {
         await_reply(response, QUERY_TIMEOUT).await
     }
 
-    /// Sends `text` to the agent in herdr pane `pane_id` of `session` (`None` is the default
+    /// Sends `text` to `agent` in herdr pane `pane_id` of `session` (`None` is the default
     /// session) and submits it, with no terminal open (contracts.md, "Reply from a
     /// notification"): through herdr's `agent.prompt` ([`herdr::ReplyRoute::Prompted`]), or, when
     /// herdr refuses that because the agent is blocked or not driven by herdr, typed into the pane
-    /// and followed by Enter after the composer's pause ([`herdr::ReplyRoute::Typed`]). Several
-    /// lines are sent as they are. Names are validated like [`TerminalTarget`]'s, and an empty text
-    /// is `InvalidName` (Enter alone could answer a dialog); a text over
-    /// [`herdr::MAX_REPLY_BYTES`] is [`HostError::TooLarge`]. A host without herdr is
-    /// `NotInstalled`; a pane that is gone, or no longer has an agent, `PaneNotFound`. Bounded by
-    /// [`QUERY_TIMEOUT`]. The text is never logged.
+    /// with its Enter in one request, once the pane was checked to hold that agent in its
+    /// foreground ([`herdr::ReplyRoute::Typed`]). Several lines are sent as they are. Names are
+    /// validated like [`TerminalTarget`]'s (the terminal id like a pane id, the agent's kind at
+    /// most 128 bytes without control characters), and an empty text is `InvalidName` (Enter
+    /// alone could answer a dialog); a text over [`herdr::MAX_REPLY_BYTES`] is
+    /// [`HostError::TooLarge`]. A host without herdr is `NotInstalled`; a pane that is gone, holds
+    /// no agent or another one, or whose shell has its foreground, `PaneNotFound`. Bounded by
+    /// [`QUERY_TIMEOUT`]; dropping the future, or that timeout, stops the reply before anything
+    /// more is sent. The text is never logged.
     pub async fn reply_to_pane(
         &self,
         session: Option<String>,
         pane_id: String,
+        agent: herdr::AgentIdentity,
         text: String,
     ) -> Result<herdr::ReplyRoute, HostError> {
         if !session.as_deref().is_none_or(is_valid_herdr_session_name)
             || !is_valid_herdr_pane_id(&pane_id)
+            || !is_valid_herdr_pane_id(&agent.terminal_id)
+            || !agent.agent.as_deref().is_none_or(is_valid_agent_kind)
             || text.is_empty()
         {
             return Err(HostError::InvalidName);
@@ -803,7 +820,9 @@ impl HostHandle {
         self.send(HostCommand::ReplyToPane {
             session,
             pane_id,
+            agent,
             text,
+            deadline: tokio::time::Instant::now() + QUERY_TIMEOUT,
             reply,
         })?;
         await_reply(response, QUERY_TIMEOUT).await
@@ -1453,32 +1472,59 @@ mod tests {
         drop(answers.join().unwrap());
     }
 
+    fn claude(terminal: &str) -> herdr::AgentIdentity {
+        herdr::AgentIdentity {
+            terminal_id: terminal.into(),
+            agent: Some("claude".into()),
+        }
+    }
+
     #[tokio::test]
     async fn a_reply_is_validated_and_answered_through_its_reply() {
         let (_recorder, handle, mut driver) = setup(false);
-        let reply = |session: Option<&str>, pane: &str, text: String| {
-            handle.reply_to_pane(session.map(str::to_owned), pane.to_owned(), text)
+        let reply = |session: Option<&str>, pane: &str, agent, text: String| {
+            handle.reply_to_pane(session.map(str::to_owned), pane.to_owned(), agent, text)
         };
-        // Refused before anything is sent, connected or not: names, an empty and an over-long text.
+        // Refused before anything is sent, connected or not: names, the agent, an empty and an
+        // over-long text.
         let at_limit = "é".repeat(herdr::MAX_REPLY_BYTES / 2);
+        let agent = || claude("term_1");
         assert_eq!(
-            reply(Some("a b"), "w1:p1", "hi".into()).await,
+            reply(Some("a b"), "w1:p1", agent(), "hi".into()).await,
             Err(HostError::InvalidName)
         );
         assert_eq!(
-            reply(None, "w1 p1", "hi".into()).await,
+            reply(None, "w1 p1", agent(), "hi".into()).await,
+            Err(HostError::InvalidName)
+        );
+        for bad in [
+            claude(""),
+            claude("term 1"),
+            herdr::AgentIdentity {
+                terminal_id: "term_1".into(),
+                agent: Some(String::new()),
+            },
+            herdr::AgentIdentity {
+                terminal_id: "term_1".into(),
+                agent: Some("claude\n".into()),
+            },
+        ] {
+            assert_eq!(
+                reply(None, "w1:p1", bad.clone(), "hi".into()).await,
+                Err(HostError::InvalidName),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            reply(None, "w1:p1", agent(), String::new()).await,
             Err(HostError::InvalidName)
         );
         assert_eq!(
-            reply(None, "w1:p1", String::new()).await,
-            Err(HostError::InvalidName)
-        );
-        assert_eq!(
-            reply(None, "w1:p1", format!("{at_limit}x")).await,
+            reply(None, "w1:p1", agent(), format!("{at_limit}x")).await,
             Err(HostError::TooLarge)
         );
         assert_eq!(
-            reply(None, "w1:p1", "hi".into()).await,
+            reply(None, "w1:p1", agent(), "hi".into()).await,
             Err(HostError::NotConnected)
         );
         connect(&mut driver);
@@ -1491,7 +1537,9 @@ mod tests {
                 let HostCommand::ReplyToPane {
                     session,
                     pane_id,
+                    agent,
                     text,
+                    deadline,
                     reply,
                 } = driver.blocking_next_command()
                 else {
@@ -1499,16 +1547,24 @@ mod tests {
                 };
                 assert_eq!(session.as_deref(), Some("work"));
                 assert_eq!(pane_id, "w1:p2");
+                assert_eq!(agent, claude("term_1"));
                 assert_eq!(
                     text.len(),
                     herdr::MAX_REPLY_BYTES,
                     "4 KiB exactly is allowed"
                 );
+                // The worker learns when its caller stops waiting.
+                let left = deadline - tokio::time::Instant::now();
+                assert!(
+                    left <= QUERY_TIMEOUT
+                        && left > QUERY_TIMEOUT - std::time::Duration::from_secs(5),
+                    "{left:?}"
+                );
                 reply.send(answer).unwrap();
             }
             driver
         });
-        let send = || reply(Some("work"), "w1:p2", at_limit.clone());
+        let send = || reply(Some("work"), "w1:p2", agent(), at_limit.clone());
         assert_eq!(send().await, Ok(herdr::ReplyRoute::Prompted));
         assert_eq!(send().await, Ok(herdr::ReplyRoute::Typed));
         assert_eq!(send().await, Err(HostError::PaneNotFound));

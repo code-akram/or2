@@ -1,5 +1,6 @@
 package io.github.code_akram.or2
 
+import io.github.code_akram.or2.ffi.AgentIdentity
 import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HerdrListener
@@ -383,6 +384,8 @@ class HostContractTest {
         assertEquals(listOf(AgentStatus.WORKING, AgentStatus.WORKING, AgentStatus.IDLE), update.statuses())
         assertTrue(update.agents[0].stateChangeSeq > first.agents[0].stateChangeSeq)
         assertEquals(listOf("w1:p1", "w1:p2", "w2:p1"), first.agents.map { it.paneId })
+        // Each agent's terminal crosses (API 16): what a notification's reply names.
+        assertEquals(listOf("term_w1:p1", "term_w1:p2", "term_w2:p1"), first.agents.map { it.terminalId })
         assertEquals(first.agents.map { it.paneId }, first.panes.map { it.paneId })
         assertEquals(AgentStatus.BLOCKED, first.workspaces[0].agentStatus)
         assertEquals(AgentStatus.WORKING, update.workspaces[0].agentStatus)
@@ -513,16 +516,21 @@ class HostContractTest {
         val host = connectedHost()
         runBlocking {
             // The probe's blocked agent is typed into; the working and idle ones are prompted.
-            assertEquals(ReplyRoute.TYPED, host.replyToPane(null, "w1:p1", "yes, go on"))
-            assertEquals(ReplyRoute.PROMPTED, host.replyToPane("work", "w1:p2", "and then\nthe tests"))
-            assertEquals(ReplyRoute.PROMPTED, host.replyToPane(null, "w2:p1", "x".repeat(4096)))
+            assertEquals(ReplyRoute.TYPED, host.replyToPane(null, "w1:p1", AgentIdentity("term_w1:p1", null), "yes, go on"))
+            assertEquals(ReplyRoute.PROMPTED, host.replyToPane("work", "w1:p2", AgentIdentity("term_w1:p2", null), "and then\nthe tests"))
+            assertEquals(ReplyRoute.PROMPTED, host.replyToPane(null, "w2:p1", AgentIdentity("term_w2:p1", null), "x".repeat(4096)))
         }
-        assertThrows(HostException.PaneNotFound::class.java) { runBlocking { host.replyToPane(null, "w9:p9", "hello") } }
+        assertThrows(HostException.PaneNotFound::class.java) { runBlocking { host.replyToPane(null, "w9:p9", AgentIdentity("term_w9:p9", null), "hello") } }
         // 4 KiB of UTF-8 at most, checked by Rust before anything is sent.
-        assertThrows(HostException.TooLarge::class.java) { runBlocking { host.replyToPane(null, "w1:p1", "é".repeat(2049)) } }
-        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.replyToPane(null, "w1:p1", "") } }
-        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.replyToPane("a b", "w1:p1", "hello") } }
-        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.replyToPane(null, "w1 p1", "hello") } }
+        assertThrows(HostException.TooLarge::class.java) { runBlocking { host.replyToPane(null, "w1:p1", AgentIdentity("term_w1:p1", null), "é".repeat(2049)) } }
+        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.replyToPane(null, "w1:p1", AgentIdentity("term_w1:p1", null), "") } }
+        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.replyToPane("a b", "w1:p1", AgentIdentity("term_w1:p1", null), "hello") } }
+        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.replyToPane(null, "w1 p1", AgentIdentity("term_w1:p1", null), "hello") } }
+        // The agent crosses too: a malformed one is refused, and one that is not the pane's finds none.
+        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.replyToPane(null, "w1:p1", AgentIdentity("term 1", null), "hello") } }
+        assertThrows(HostException.PaneNotFound::class.java) {
+            runBlocking { host.replyToPane(null, "w1:p1", AgentIdentity("term_w2:p1", "claude"), "hello") }
+        }
         assertEquals(HostState.Connected(0u), host.state())
         host.disconnect()
         host.close()
@@ -561,7 +569,7 @@ class HostContractTest {
         }
         assertThrows(HostException.Closed::class.java) { host.watchHerdr(null, HerdrRecorder()) }
         assertThrows(HostException.Closed::class.java) { runBlocking { host.focusHerdrPane(null, "w1:p1") } }
-        assertThrows(HostException.Closed::class.java) { runBlocking { host.replyToPane(null, "w1:p1", "late") } }
+        assertThrows(HostException.Closed::class.java) { runBlocking { host.replyToPane(null, "w1:p1", AgentIdentity("term_w1:p1", null), "late") } }
         assertThrows(HostException.Closed::class.java) { host.rejectHostKey() }
         host.disconnect() // Idempotent.
         recorder.assertQuiet()

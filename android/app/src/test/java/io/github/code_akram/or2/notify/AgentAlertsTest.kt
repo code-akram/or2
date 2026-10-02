@@ -5,6 +5,7 @@ import io.github.code_akram.or2.connection.FakePort
 import io.github.code_akram.or2.connection.FakeTrust
 import io.github.code_akram.or2.connection.HostConnections
 import io.github.code_akram.or2.connection.testHost
+import io.github.code_akram.or2.ffi.AgentIdentity
 import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HerdrAgent
@@ -58,8 +59,8 @@ class AgentAlertsTest {
     private val alerts = AgentAlerts(sink) { on }
     private val watch = Any()
 
-    private fun agent(pane: String, status: AgentStatus, seq: ULong, name: String? = "Claude Code") =
-        HerdrAgent(pane, "w1:t1", "w1", name, "claude", name, status, "/work", "title", false, seq)
+    private fun agent(pane: String, status: AgentStatus, seq: ULong, name: String? = "Claude Code", terminal: String = "term_$pane") =
+        HerdrAgent(pane, "w1:t1", "w1", name, "claude", name, status, "/work", "title", false, seq, terminal)
 
     private fun view(vararg agents: HerdrAgent, focused: String? = null) =
         HerdrView(1uL, 22u, focused, emptyList(), emptyList(), emptyList(), agents.toList())
@@ -104,7 +105,13 @@ class AgentAlertsTest {
     fun theNotificationSaysWhoAndWhatAndWhereNothingFromTheOutput() {
         deliver(view(agent("w1:p1", AgentStatus.WORKING, 1u, name = "Codex")))
         deliver(view(agent("w1:p1", AgentStatus.BLOCKED, 2u, name = "Codex")))
-        assertEquals(AgentAlert(AgentPaneKey(1, null, "w1:p1"), "Codex", "Needs input", "Workstation"), sink.posted.single())
+        val posted = sink.posted.single()
+        assertEquals(
+            AgentAlert(AgentPaneKey(1, null, "w1:p1"), "Codex", "Needs input", "Workstation", agent = AgentIdentity("term_w1:p1", "claude")),
+            posted.copy(nonce = null),
+        )
+        // Each post carries its own Reply capability.
+        assertTrue(!posted.nonce.isNullOrEmpty())
         // Unnamed agents read as the inbox shows them.
         deliver(view(agent("w1:p1", AgentStatus.WORKING, 3u, name = null)))
         deliver(view(agent("w1:p1", AgentStatus.DONE, 4u, name = null)))
@@ -393,6 +400,63 @@ class AgentAlertsTest {
         assertEquals(AgentPaneKey(1, null, "w1:p2"), requests.take())
         assertNull(requests.take())
         assertNull(requests.request.value)
+    }
+
+    @Test
+    fun aPaneThatNowHoldsAnotherAgentLosesItsNotification() {
+        val key = AgentPaneKey(1, null, "w1:p1")
+        deliver(view(agent("w1:p1", AgentStatus.WORKING, 1u, terminal = "term_a")))
+        deliver(view(agent("w1:p1", AgentStatus.BLOCKED, 2u, terminal = "term_a")))
+        assertEquals(AgentIdentity("term_a", "claude"), sink.posted.single().agent)
+        // The same pane id, a new terminal (herdr restarted and numbered its panes again), still blocked with no new
+        // edge: the notification was about an agent that is gone.
+        deliver(view(agent("w1:p1", AgentStatus.BLOCKED, 2u, terminal = "term_b")))
+        assertFalse(key in sink.up)
+        assertEquals(listOf("post w1:p1 Needs input", "cancel w1:p1"), sink.events)
+        // Another kind of agent in the same terminal goes the same way; the same agent keeps its notification.
+        deliver(view(agent("w1:p1", AgentStatus.DONE, 3u, terminal = "term_b")))
+        deliver(view(agent("w1:p1", AgentStatus.DONE, 3u, terminal = "term_b")))
+        assertTrue(key in sink.up)
+        deliver(view(HerdrAgent("w1:p1", "w1:t1", "w1", "Codex", "codex", "Codex", AgentStatus.DONE, "/work", null, false, 3u, "term_b")))
+        assertFalse(key in sink.up)
+    }
+
+    @Test
+    fun aReplyCapabilityIsTakenOnceOnlyWhileItsNotificationIsUpAndNeverAfterANewerPost() {
+        val nonces = ReplyNonces(MemoryPrefStore())
+        val alerts = AgentAlerts(sink, nonces) { on }
+        val key = AgentPaneKey(1, null, "w1:p1")
+        fun deliver(view: HerdrView) = alerts.viewChanged(watch, 1, "Workstation", null, view)
+        deliver(view(agent("w1:p1", AgentStatus.WORKING, 1u)))
+        deliver(view(agent("w1:p1", AgentStatus.BLOCKED, 2u)))
+        val first = sink.posted.last().nonce
+        assertTrue(alerts.admitReply(key, first))
+        // Replayed: refused, and so is no capability at all, or another pane's.
+        assertFalse(alerts.admitReply(key, first))
+        assertFalse(alerts.admitReply(key, null))
+        // The outcome re-posts with a new capability; the old one stays dead.
+        alerts.replied(sink.posted.last().copy(outcome = "Not sent: the agent is gone", nonce = null))
+        val second = sink.posted.last().nonce
+        assertNotEquals(first, second)
+        assertFalse(alerts.admitReply(key, first))
+        assertFalse(alerts.admitReply(AgentPaneKey(1, null, "w1:p2"), second))
+        // A newer edge replaces it again.
+        deliver(view(agent("w1:p1", AgentStatus.WORKING, 3u)))
+        deliver(view(agent("w1:p1", AgentStatus.DONE, 4u)))
+        val third = sink.posted.last().nonce
+        assertFalse(alerts.admitReply(key, second))
+        // A notification no longer up (dismissed by the user, so no cancel reached the app) takes no reply.
+        sink.up -= key
+        assertFalse(alerts.admitReply(key, third))
+        // Cancelled by an edge: the capability is revoked, even if the notification were shown again.
+        sink.up += key
+        deliver(view(agent("w1:p1", AgentStatus.WORKING, 5u)))
+        sink.up += key
+        assertFalse(alerts.admitReply(key, third))
+        // A new process keeps the capability of a notification the system still shows (the store outlives it).
+        deliver(view(agent("w1:p1", AgentStatus.BLOCKED, 6u)))
+        val fourth = sink.posted.last().nonce
+        assertTrue(AgentAlerts(sink, nonces) { on }.admitReply(key, fourth))
     }
 
     @Test

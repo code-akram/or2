@@ -85,13 +85,15 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
 
     /**
      * The Reply action: a RemoteInput (`Reply to <agent>`) whose text reaches [AgentReplyReceiver]. RemoteInput needs a
-     * mutable PendingIntent; it is explicit (the receiver's component, not exported) and names the pane in its data,
-     * which a fill-in cannot change, so nothing but the RemoteInput's text is taken from the fill-in.
+     * mutable PendingIntent; it is explicit (the receiver's component, not exported) and names the pane and this post's
+     * Reply capability in its data, which a fill-in cannot change, so nothing but the RemoteInput's text is taken from
+     * the fill-in. The capability (a nonce, [ReplyNonces]) makes each post's PendingIntent distinct and is taken once
+     * by the app; `FLAG_ONE_SHOT` lets the system send it once too.
      */
     private fun replyAction(alert: AgentAlert): Notification.Action {
         val reply = PendingIntent.getBroadcast(
             context, alert.key.tag.hashCode(), replyIntent(context, alert),
-            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_ONE_SHOT,
         )
         val input = RemoteInput.Builder(KEY_REPLY).setLabel("Reply to ${alert.title}").build()
         return Notification.Action.Builder(Icon.createWithResource(context, R.drawable.ic_stat_or2), "Reply", reply)
@@ -121,24 +123,31 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
         private const val EXTRA_TITLE = "io.github.code_akram.or2.extra.TITLE"
         private const val EXTRA_TEXT = "io.github.code_akram.or2.extra.TEXT"
         private const val EXTRA_HOST = "io.github.code_akram.or2.extra.HOST"
+        private const val EXTRA_TERMINAL = "io.github.code_akram.or2.extra.TERMINAL"
+        private const val EXTRA_AGENT = "io.github.code_akram.or2.extra.AGENT"
         private const val YOU = "You"
 
         /**
-         * The Reply action's intent: explicitly [AgentReplyReceiver], the pane's tag as its data (each pane's pending
-         * intent distinct), and what the notification showed (title, `Needs input`/`Done`, host), for the update.
+         * The Reply action's intent: explicitly [AgentReplyReceiver]; its data is the pane's tag with this post's Reply
+         * capability as the fragment (each post's pending intent distinct); the agent it is for (terminal and kind,
+         * always set, so a fill-in's extras never replace them); and what the notification showed (title,
+         * `Needs input`/`Done`, host), for the update.
          */
         fun replyIntent(context: Context, alert: AgentAlert): Intent = Intent(ACTION_REPLY)
             .setComponent(ComponentName(context, AgentReplyReceiver::class.java))
-            .setData(Uri.fromParts(REPLY_SCHEME, alert.key.tag, null))
+            .setData(Uri.fromParts(REPLY_SCHEME, alert.key.tag, alert.nonce))
+            .putExtra(EXTRA_TERMINAL, alert.agent?.terminalId)
+            .putExtra(EXTRA_AGENT, alert.agent?.agent)
             .putExtra(EXTRA_TITLE, alert.title)
             .putExtra(EXTRA_TEXT, alert.text)
             .putExtra(EXTRA_HOST, alert.subText)
 
-        /** The alert a Reply intent is about ([replyIntent]), or null for any other intent. */
+        /** The alert a Reply intent is about ([replyIntent]), with its Reply capability, or null for any other intent. */
         fun replyOf(intent: Intent?): AgentAlert? {
             if (intent?.data?.scheme != REPLY_SCHEME) return null
             return agentReplyFrom(
-                intent.action, intent.data?.schemeSpecificPart,
+                intent.action, intent.data?.schemeSpecificPart, intent.data?.fragment,
+                intent.getStringExtra(EXTRA_TERMINAL), intent.getStringExtra(EXTRA_AGENT),
                 intent.getStringExtra(EXTRA_TITLE), intent.getStringExtra(EXTRA_TEXT), intent.getStringExtra(EXTRA_HOST),
             )
         }

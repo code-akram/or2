@@ -115,6 +115,7 @@ pub fn project(snapshot: &SessionSnapshot) -> HerdrView {
                 title: agent.title.clone(),
                 focused: agent.focused,
                 state_change_seq: agent.state_change_seq,
+                terminal_id: agent.terminal_id.clone(),
             })
             .collect(),
     }
@@ -227,7 +228,8 @@ mod tests {
                     cwd: Some("/work/project".into()),
                     title: Some("fix the build".into()),
                     focused: true,
-                    state_change_seq: 7
+                    state_change_seq: 7,
+                    terminal_id: "term_a".into(),
                 },
                 Agent {
                     pane_id: "w1:p2".into(),
@@ -240,7 +242,8 @@ mod tests {
                     cwd: None,
                     title: None,
                     focused: false,
-                    state_change_seq: 0
+                    state_change_seq: 0,
+                    terminal_id: "term_b".into(),
                 }
             ]
         );

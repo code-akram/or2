@@ -1130,27 +1130,19 @@ async fn shows(herdr: &Isolated, pane: &str, marker: &str, times: usize) {
     }
 }
 
-/// A reply from a notification reaches the agent pane's input and is submitted: herdr refuses
-/// `agent.prompt` for a blocked agent (and for one it does not drive, as every reported agent),
-/// so the text is typed and Enter follows. `cat` in the pane echoes the typed line and prints it
-/// again once Enter arrives. A pane without an agent, or one that is gone, gets nothing.
-#[tokio::test]
-async fn a_reply_reaches_an_agent_panes_input_and_is_submitted() {
-    use or2_core::herdr::{ReplyRoute, reply_in};
-    let Some(mut herdr) = Isolated::new() else {
-        return;
-    };
-    herdr.start();
+/// A workspace whose pane runs `cat` (a foreground process keeps an agent report, and shows what
+/// reaches it), and its terminal id.
+async fn cat_pane(herdr: &Isolated, label: &str) -> (String, String) {
     let created = herdr
         .call(RequestBody::WorkspaceCreate(WorkspaceCreateParams {
             cwd: Some("/tmp".into()),
-            label: Some("or2-reply".into()),
+            label: Some(label.into()),
             focus: true,
             ..WorkspaceCreateParams::default()
         }))
         .await;
     let pane = str_at(&created, "/root_pane/pane_id").to_owned();
-    // A foreground process keeps the agent report, and shows what reaches it.
+    let terminal = str_at(&created, "/root_pane/terminal_id").to_owned();
     herdr
         .call(RequestBody::PaneSendText(PaneSendTextParams {
             pane_id: pane.clone(),
@@ -1158,40 +1150,102 @@ async fn a_reply_reaches_an_agent_panes_input_and_is_submitted() {
         }))
         .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let report = |seq: u64, state: PaneAgentState| {
-        RequestBody::PaneReportAgent(PaneReportAgentParams {
-            agent: "or2-test-agent".into(),
-            agent_session_id: None,
-            agent_session_path: None,
-            message: None,
-            pane_id: pane.clone(),
-            resume_argv: None,
-            seq: Some(seq),
-            source: "or2-test".into(),
-            state,
-        })
+    (pane, terminal)
+}
+
+/// The reported agent `or2-test-agent` of `pane` is now in `state`.
+fn report(pane: &str, seq: u64, state: PaneAgentState) -> RequestBody {
+    RequestBody::PaneReportAgent(PaneReportAgentParams {
+        agent: "or2-test-agent".into(),
+        agent_session_id: None,
+        agent_session_path: None,
+        message: None,
+        pane_id: pane.to_owned(),
+        resume_argv: None,
+        seq: Some(seq),
+        source: "or2-test".into(),
+        state,
+    })
+}
+
+/// One reply with no cancellation and the query timeout's deadline.
+async fn reply_to(
+    herdr: &Isolated,
+    directory: &Directory,
+    pane: &str,
+    agent: &or2_core::herdr::AgentIdentity,
+    text: &str,
+) -> Result<or2_core::herdr::ReplyRoute, HerdrError> {
+    let reply = or2_core::herdr::Reply {
+        session: Some(herdr.name.as_str()),
+        pane_id: pane,
+        agent,
+        text,
     };
-    let (host, directory) = (LocalHost::new(), Directory::new());
-    let session = Some(herdr.name.as_str());
-    let reply = async |pane: &str, text: &str| {
-        reply_in(&host, herdr.herdr(), &directory, session, pane, text).await
+    or2_core::herdr::reply_in(
+        &LocalHost::new(),
+        herdr.herdr(),
+        directory,
+        reply,
+        tokio::time::Instant::now() + Duration::from_secs(30),
+        std::future::pending(),
+    )
+    .await
+}
+
+/// A reply from a notification reaches the agent pane's input and is submitted: herdr refuses
+/// `agent.prompt` for a blocked agent (and for one it does not drive, as every reported agent),
+/// so the text and Enter are typed in one request. `cat` in the pane echoes the typed line and
+/// prints it again once Enter arrives. A pane without an agent, one that is gone, and a reply
+/// meant for another agent or terminal get nothing.
+#[tokio::test]
+async fn a_reply_reaches_an_agent_panes_input_and_is_submitted() {
+    use or2_core::herdr::{AgentIdentity, ReplyRoute};
+    let Some(mut herdr) = Isolated::new() else {
+        return;
+    };
+    herdr.start();
+    let (pane, terminal) = cat_pane(&herdr, "or2-reply").await;
+    let directory = Directory::new();
+    let agent = AgentIdentity {
+        terminal_id: terminal.clone(),
+        agent: Some("or2-test-agent".into()),
     };
 
-    herdr.call(report(1, PaneAgentState::Blocked)).await;
+    herdr.call(report(&pane, 1, PaneAgentState::Blocked)).await;
     assert_eq!(
-        reply(&pane, "or2-reply-blocked").await,
+        reply_to(&herdr, &directory, &pane, &agent, "or2-reply-blocked").await,
         Ok(ReplyRoute::Typed)
     );
     // Typed (echoed by the terminal) and submitted (printed again by `cat`).
     shows(&herdr, &pane, "or2-reply-blocked", 2).await;
 
-    herdr.call(report(2, PaneAgentState::Working)).await;
+    herdr.call(report(&pane, 2, PaneAgentState::Working)).await;
     assert_eq!(
-        reply(&pane, "or2-reply-working").await,
+        reply_to(&herdr, &directory, &pane, &agent, "or2-reply-working").await,
         Ok(ReplyRoute::Typed),
         "herdr does not drive a reported agent: agent_not_ready, so typed"
     );
     shows(&herdr, &pane, "or2-reply-working", 2).await;
+
+    // A stale notification: another terminal under the same pane id, or another kind of agent.
+    for stale in [
+        AgentIdentity {
+            terminal_id: "term_0".into(),
+            agent: agent.agent.clone(),
+        },
+        AgentIdentity {
+            terminal_id: terminal.clone(),
+            agent: Some("codex".into()),
+        },
+    ] {
+        assert_eq!(
+            reply_to(&herdr, &directory, &pane, &stale, "or2-reply-stale").await,
+            Err(HerdrError::PaneNotFound)
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!screen_of(&herdr, &pane).await.contains("or2-reply-stale"));
 
     // A shell pane without an agent: nothing is typed, so a reply never runs as a command.
     let split = herdr
@@ -1207,15 +1261,116 @@ async fn a_reply_reaches_an_agent_panes_input_and_is_submitted() {
         }))
         .await;
     let shell = str_at(&split, "/pane/pane_id").to_owned();
+    let shell_agent = AgentIdentity {
+        terminal_id: str_at(&split, "/pane/terminal_id").to_owned(),
+        agent: None,
+    };
     assert_eq!(
-        reply(&shell, "or2-reply-shell").await,
+        reply_to(&herdr, &directory, &shell, &shell_agent, "or2-reply-shell").await,
         Err(HerdrError::PaneNotFound)
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!screen_of(&herdr, &shell).await.contains("or2-reply-shell"));
     // A pane that does not exist.
     assert_eq!(
-        reply("w9:p9", "or2-reply-gone").await,
+        reply_to(&herdr, &directory, "w9:p9", &agent, "or2-reply-gone").await,
         Err(HerdrError::PaneNotFound)
     );
+}
+
+/// The agent exits and its pane's shell has the foreground again, while herdr still reports the
+/// agent (herdr 0.9.3 does for about half a second): a reply must not run as a shell command. Its
+/// prompt is refused (`agent_not_ready`), and the typed path's foreground check refuses the rest.
+#[tokio::test]
+async fn a_reply_never_runs_in_the_shell_after_the_agent_exits() {
+    use or2_core::herdr::AgentIdentity;
+    use or2_core::herdr::generated::request::{
+        AgentTarget, PaneProcessInfoParams, PaneSendKeysParams,
+    };
+    let Some(mut herdr) = Isolated::new() else {
+        return;
+    };
+    herdr.start();
+    let socket = herdr.socket().expect("running");
+    let call = async |body: RequestBody| {
+        wire::call(
+            &LocalHost::new(),
+            &socket,
+            "test",
+            &body,
+            Duration::from_secs(10),
+        )
+        .await
+    };
+    // How long herdr keeps an agent varies (its detection polls): an attempt whose reply came after
+    // herdr had dropped the agent did not test the window, so another pane tries again.
+    for attempt in 0..8 {
+        let (pane, terminal) = cat_pane(&herdr, &format!("or2-reply-exit-{attempt}")).await;
+        herdr.call(report(&pane, 1, PaneAgentState::Blocked)).await;
+        let agent = AgentIdentity {
+            terminal_id: terminal,
+            agent: Some("or2-test-agent".into()),
+        };
+        // The reply's directory knows the socket already (a reply for another agent: nothing
+        // sent), and every request below goes straight to it: the window is short.
+        let directory = Directory::new();
+        let stale = AgentIdentity {
+            terminal_id: "term_0".into(),
+            agent: None,
+        };
+        assert_eq!(
+            reply_to(&herdr, &directory, &pane, &stale, "or2-reply-stale").await,
+            Err(HerdrError::PaneNotFound)
+        );
+        // The agent exits; wait until the shell leads the foreground again.
+        call(RequestBody::PaneSendKeys(PaneSendKeysParams {
+            keys: vec!["ctrl+c".into()],
+            pane_id: pane.clone(),
+        }))
+        .await
+        .expect("ctrl+c");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let info = call(RequestBody::PaneProcessInfo(PaneProcessInfoParams {
+                pane_id: Some(pane.clone()),
+            }))
+            .await
+            .expect("process info");
+            let info = &info["process_info"];
+            if info["foreground_process_group_id"] == info["shell_pid"] {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the shell never got the foreground"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let result = reply_to(
+            &herdr,
+            &directory,
+            &pane,
+            &agent,
+            "echo or2-ran-in-the-shell-$((6*7))",
+        )
+        .await;
+        // herdr still reported the agent after the reply, so the reply saw it too.
+        let reported = call(RequestBody::AgentGet(AgentTarget {
+            target: pane.clone(),
+        }))
+        .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let screen = screen_of(&herdr, &pane).await;
+        assert!(
+            !screen.contains("or2-ran-in-the-shell"),
+            "the reply reached the shell ({result:?}):\n{screen}"
+        );
+        assert_eq!(result, Err(HerdrError::PaneNotFound));
+        if reported.is_ok() {
+            return;
+        }
+        eprintln!("attempt {attempt}: herdr dropped the agent before the reply ended; again");
+    }
+    panic!("herdr never still reported the exited agent when the reply ran");
 }

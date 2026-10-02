@@ -438,10 +438,18 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                     _ => Ok(()),
                 });
             }
-            HostCommand::ReplyToPane { pane_id, reply, .. } => {
-                // As herdr would: the blocked agent's reply is typed, the others' prompted. The
-                // text is not echoed anywhere.
+            HostCommand::ReplyToPane {
+                pane_id,
+                agent,
+                reply,
+                ..
+            } => {
+                // As herdr would: the blocked agent's reply is typed, the others' prompted. A
+                // reply for another agent than the view's (its terminal `term_<pane>`) finds none.
+                // The text is not echoed anywhere.
+                let theirs = agent.terminal_id == format!("term_{pane_id}");
                 let _ = reply.send(match pane_id.as_str() {
+                    _ if !theirs => Err(core_host::HostError::PaneNotFound),
                     PROBE_BLOCKED_PANE => Ok(ReplyRoute::Typed),
                     pane if PROBE_PANES.contains(&pane) => Ok(ReplyRoute::Prompted),
                     _ => Err(core_host::HostError::PaneNotFound),
@@ -535,6 +543,7 @@ fn probe_view(label: &str, version: u64, resolved: bool, focus: &str) -> HerdrVi
             title: None,
             focused: pane == focus,
             state_change_seq: seq,
+            terminal_id: format!("term_{pane}"),
         }
     };
     let pane = |a: &Agent| Pane {

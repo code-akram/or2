@@ -41,7 +41,7 @@ pub(crate) use discovery::parse_listing;
 pub use discovery::{Directory, DiscoveryError, SessionEntry, list_sessions};
 pub use focus::{FocusGate, focus_pane_in};
 pub use navigate::navigate_in;
-pub use reply::{MAX_REPLY_BYTES, ReplyRoute, reply_in};
+pub use reply::{AgentIdentity, MAX_REPLY_BYTES, Reply, ReplyRoute, reply_in};
 pub use scroll::{ScrollOffsets, next_offset, scroll_pane_in};
 pub use view::{Agent, AgentStatus, HerdrView, Pane, Tab, Workspace};
 /// The watch's intervals, for integration tests that cannot wait for the production ones.

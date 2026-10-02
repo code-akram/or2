@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.code_akram.or2.app.MemoryPrefStore
+import io.github.code_akram.or2.ffi.AgentIdentity
 import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.HerdrAgent
 import io.github.code_akram.or2.ffi.HerdrView
@@ -15,6 +16,7 @@ import io.github.code_akram.or2.service.ServiceRunState
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -52,7 +54,7 @@ class AgentNotificationsDeviceTest {
 
     private fun view(status: AgentStatus, seq: ULong) = HerdrView(
         1uL, 22u, null, emptyList(), emptyList(), emptyList(),
-        listOf(HerdrAgent(key.paneId, "w1:t1", "w1", "Claude Code", "claude", "Claude Code", status, "/work", null, false, seq)),
+        listOf(HerdrAgent(key.paneId, "w1:t1", "w1", "Claude Code", "claude", "Claude Code", status, "/work", null, false, seq, "term_1")),
     )
 
     @Test
@@ -70,7 +72,7 @@ class AgentNotificationsDeviceTest {
     @Test
     fun everyAgentNotificationHasAReplyActionWithARemoteInput() {
         val notifications = AgentNotifications(context, MemoryPrefStore())
-        val alert = AgentAlert(key, "Claude Code", "Needs input", "Device fixture")
+        val alert = AgentAlert(key, "Claude Code", "Needs input", "Device fixture", agent = AgentIdentity("term_1", "claude"), nonce = "n1")
         for (shown in listOf(alert, alert.copy(outcome = "Not sent: Device fixture is not connected"), alert.copy(outcome = "Sent", reply = "go on"))) {
             val built = notifications.build(shown)
             val reply = built.actions.orEmpty().single()
@@ -85,10 +87,16 @@ class AgentNotificationsDeviceTest {
             assertFalse(reply.actionIntent.isImmutable)
             assertEquals(context.packageName, reply.actionIntent.creatorPackage)
         }
-        // The intent names the pane in its data and is honoured; anything else is not.
+        // The intent names the pane and the capability in its data, the agent in its extras, and is honoured;
+        // anything else is not.
         val intent = AgentNotifications.replyIntent(context, alert)
         assertEquals(AgentReplyReceiver::class.java.name, intent.component?.className)
         assertEquals(alert, AgentNotifications.replyOf(intent))
+        assertEquals("n1", intent.data?.fragment)
+        // Each post's capability makes its own PendingIntent.
+        val first = notifications.build(alert).actions.single().actionIntent
+        val second = notifications.build(alert.copy(nonce = "n2")).actions.single().actionIntent
+        assertNotEquals(first, second)
         assertNull(AgentNotifications.replyOf(AgentNotifications.openIntent(context, key, "token")))
         // After a reply the notification does not alert again, and a sent one quotes the reply.
         val sent = notifications.build(alert.copy(outcome = "Sent", reply = "go on"))

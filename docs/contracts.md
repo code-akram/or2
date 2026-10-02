@@ -4438,8 +4438,9 @@ notification and pasting images to an agent. One FFI bump, **`API_VERSION` = 16*
 
 | Export | Lane |
 |---|---|
-| `HostConnection.reply_to_pane(session: Option<String>, pane_id: String, text: String) async -> Result<ReplyRoute, HostError>`: send `text` to a herdr pane and submit it, with no terminal open | Reply |
+| `HostConnection.reply_to_pane(session: Option<String>, pane_id: String, agent: AgentIdentity, text: String) async -> Result<ReplyRoute, HostError>`: send `text` to that agent in a herdr pane and submit it, with no terminal open (`agent` added by the review fix, see "Fix: a reply reaches only its agent, never a shell") | Reply |
 | `ReplyRoute { Prompted, Typed }`: which herdr path carried it (below) | Reply |
+| `AgentIdentity { terminal_id: String, agent: Option<String> }` and `HerdrAgent.terminal_id: String`: the agent a notification is about (review fix) | Reply |
 | `HostConnection.upload_image(bytes: Vec<u8>, extension: String) async -> Result<String, HostError>`: write the bytes over SFTP to the host's image directory and return the remote absolute path | Paste |
 
 `HostError` gains what each path needs (e.g. `SftpUnavailable` when the server has no SFTP subsystem, and
@@ -4457,7 +4458,8 @@ timeout.
   - herdr refuses `agent.prompt` while the agent is **blocked** (`agent_blocked`), and blocked is the usual
     case for a notification. Then the text is typed into the pane (`pane.send_text`), then, after the same
     short pause the composer's `submit_text` uses, Enter (`pane.send_keys`, `Enter`): `Typed`. This is the
-    composer's submit, through herdr instead of a terminal.
+    composer's submit, through herdr instead of a terminal. *(Superseded: the pane is checked, then the text and
+    Enter go in one `pane.send_input`; see "Fix: a reply reaches only its agent, never a shell".)*
   - A text with several lines is sent as typed (no confirmation is possible from a notification). The text
     is limited to 4 KiB.
 - **The path in Kotlin:**
@@ -4479,9 +4481,11 @@ timeout.
 
 **Implemented (lane Reply).**
 
-- **Rust.** `herdr::reply_in` (`core/or2-core/src/herdr/reply.rs`) sends `agent.prompt` (target: the pane id, no
-  wait) and returns `Prompted`. On `agent_blocked` **or `agent_not_ready`** it sends `pane.send_text`, sleeps
-  `submit::SUBMIT_ENTER_DELAY` (100 ms, the composer's), then `pane.send_keys ["Enter"]`: `Typed`. On
+- **Rust** *(the typed path, the PendingIntent and the receiver below are superseded by "Fix: a reply reaches
+  only its agent, never a shell")*. `herdr::reply_in` (`core/or2-core/src/herdr/reply.rs`) sends `agent.prompt`
+  (target: the pane id, no wait) and returns `Prompted`. On `agent_blocked` **or `agent_not_ready`** it sends
+  `pane.send_text`, sleeps `submit::SUBMIT_ENTER_DELAY` (100 ms, the composer's), then `pane.send_keys
+  ["Enter"]`: `Typed`. On
   `agent_not_found` it is `PaneNotFound` and nothing is typed. Every request uses the connection's `Directory`
   and the scroll module's one-request helper (now `call`/`call_raw`), so a stale cached socket is rediscovered
   once. `HostHandle::reply_to_pane` validates first: names as for terminal targets, an empty text is
@@ -4540,6 +4544,119 @@ timeout.
   - Device (compile), `AgentNotificationsDeviceTest`: the alert, a failure and a sent update each have one Reply
     action with the RemoteInput and a mutable broadcast PendingIntent of the app. The intent round-trips. A sent
     update is only-alert-once and quotes two messages.
+**Fix: a reply reaches only its agent, never a shell (Codex v0.1.2 review P1 #1, P2 #3, P2 #4; Fable v0.1.2
+review P1 and P2; branch `v012/fix-reply`).** This supersedes the typed path above (text, the pause, then Enter
+as its own request) and the PendingIntent described in "Implemented (lane Reply)".
+
+- **What herdr 0.9.3 offers, measured against an isolated session.**
+  - `agent.send_keys` takes key names only. A single character is a key (`h`, `é`), a space is `space`, and a
+    longer string is `invalid_key`, so there is no newline and no bracketed paste: herdr writes the keys as one
+    unbracketed burst, which an agent's TUI can take as a paste (Enter included). Like `agent.prompt`, it refuses
+    every agent herdr did not start (`agent_not_ready`, "not an active named agent", also after
+    `agent.rename`), and a pane without an agent (`agent_not_found`). It does reach a blocked agent herdr
+    started.
+  - `agent.prompt` refuses a herdr-started agent that left the pane's foreground (`agent_not_ready`, "no longer the
+    pane foreground process"). The old fallback typed into the pane on exactly that answer.
+  - No other agent request carries input, so no request ties text to a reported agent (Claude Code through its
+    hooks, the common case).
+  - herdr keeps reporting an agent for about 0.5 to 0.75 s after its process exits, while `pane.process_info`
+    already shows the shell's own process group in the foreground. Reproduced against the old code: a reported,
+    blocked agent exits, a reply is `Typed`, and the shell runs it (`echo ...$((6*7))` printed `42`).
+  - `pane.send_input { text, keys: ["Enter"] }` is one request: herdr writes the text as a bracketed paste when
+    the program enabled mode 2004, then Enter, as `agent.prompt` does. `pane.send_text` is never bracketed.
+  - Each socket connection answers one request and is then closed by herdr.
+- **The reply names its agent.**
+  - `AgentIdentity { terminal_id, agent }` is the `HerdrAgent` that raised the notification: herdr's terminal id
+    and the agent's kind. `HerdrAgent` gains `terminal_id` (API 16 changes shape, unreleased).
+  - `reply_to_pane(session, pane_id, agent, text)` first asks `agent.get` for the pane. A different pane,
+    terminal or kind (a kind the reply names must match; one it does not name matches any) is `PaneNotFound`
+    with nothing sent, as is no agent (`agent_not_found`).
+  - So a stale notification never reaches another agent under a reused pane id (herdr restarted and numbered its
+    panes again) or another kind of agent in the same terminal. Two agents of the same kind, one after the other
+    in the same terminal, cannot be told apart: herdr gives no per-instance id.
+  - The terminal id is validated like a pane id and the kind is at most 128 bytes without control characters,
+    else `InvalidName`.
+- **The typed path is one request, checked right before.**
+  - `agent.prompt` is tried first, as before. On `agent_blocked` or `agent_not_ready`, three streams are opened
+    together: `agent.get` and `pane.process_info` run at once, then one `pane.send_input` with the text and
+    `["Enter"]`.
+  - It is sent only when herdr still reports the same agent, and the pane's foreground process group is neither
+    the shell's own (`foreground_process_group_id == shell_pid`) nor led by a shell (`sh`, `bash`, `zsh`, `fish`,
+    ..., a leading `-` ignored). The second case is an agent started from a nested shell that exited.
+  - A pane whose foreground herdr cannot tell (no `shell_pid`, no foreground group, or no leader listed) is
+    refused (`CommandFailed`: "herdr cannot tell what runs in the pane"). The foreground is the pane's shell:
+    `PaneNotFound`.
+  - The text and its Enter can never be split. `SUBMIT_ENTER_DELAY` is no longer used here.
+- **Narrowed guarantee: "a reply never runs in a shell" holds except within one round trip.** An agent that exits
+  after the checks and before herdr receives the `pane.send_input` (the checks' answers travel to the phone and the
+  send travels back, about one network round trip, its stream already open) still gets the reply typed into its
+  shell. Before the fix that window was the whole agent-exit lag above plus three requests and the 100 ms pause.
+  herdr would need one request that types only while a given agent holds the pane's foreground to close it.
+- **Cancellation (Codex P2 #4).**
+  - `HostCommand::ReplyToPane` carries the caller's `deadline` (`QUERY_TIMEOUT` from the call). The worker
+    watches `reply.closed()`, as the upload does.
+  - A caller that stops waiting (the coroutine cancelled, or the timeout) stops the reply at once during a
+    check, and before any request that sends.
+  - A request that sends (`agent.prompt`, `pane.send_input`) is never cut short, and starts only while its own
+    bound (the 10 s request bound plus 1 s) ends before the deadline. Otherwise the reply is `CommandFailed` ("no
+    time was left to send the reply").
+  - So nothing is sent after the caller timed out, and there is no partial submit. Narrowed: a reply whose one
+    sending request timed out on its own (10 s, herdr not answering) may still have been applied; it is reported
+    as failed.
+- **One Reply capability per post (Codex P2 #3).**
+  - Each post of an agent notification gets a random nonce (`ReplyNonces`, app-private prefs, so a notification
+    the system still shows after the process died stays answerable). It is put in the Reply PendingIntent's data
+    (`or2-agent-reply:<tag>#<nonce>`, so each post's PendingIntent is distinct), and the PendingIntent is
+    `FLAG_MUTABLE | FLAG_ONE_SHOT`.
+  - A reply is taken only while the pane's notification is up (the system's list) and with the pane's current
+    nonce, which `AgentAlerts.admitReply` uses up on the main thread before anything is sent.
+  - A replayed, older or cancelled one does nothing at all. Every cancel (Working, opened, gone, on screen,
+    switched off, another agent) revokes the nonce, and a re-post (the reply's outcome, a failure kept
+    retryable) issues a new one.
+  - The agent's identity travels in extras the intent always sets, so a fill-in cannot replace them.
+    `AgentAlert.toString()` leaves the nonce out.
+- **No broadcast is held (Fable P1).**
+  - `AgentReplyReceiver` no longer uses `goAsync`: it hands the reply to `AgentReplies.launch` on the
+    application's scope (`Dispatchers.Main.immediate`) and returns.
+  - The capability is taken and the send started before `onReceive` returns, and a host that is not connected
+    fails before it returns too.
+  - A reply goes only over a live connection, and `ConnectionService` runs in the foreground while any is open,
+    so the process lives until the reply ends (Rust 30 s, Kotlin's bound 45 s). A held broadcast could not have
+    waited that long under Android's broadcast timeout. Chosen over capping the hold below 10 s, which would cut
+    replies short on a slow host.
+- **Stale notifications go (Fable P2).** `AgentAlerts` remembers the agent of each notification it posted and
+  cancels it when the pane's view shows another one (another terminal, as after herdr restarts, or another kind).
+  A notification left by a dead process is not known that way, but its reply is still checked in Rust.
+- **Tests (each written to fail before the fix).**
+  - Rust, herdr fake (now serving `agent.get`, `pane.process_info`, `pane.send_input`, agents that leave the
+    foreground, and held answers), `herdr::reply`:
+    - an agent that left the foreground behind an `agent_not_ready` gets nothing typed (the old code typed);
+    - one that exits after the prompt's refusal gets nothing typed;
+    - a shell leading the foreground (`bash`, `-zsh`, `fish`) gets nothing typed, while a shell the agent runs
+      under it does not count;
+    - a foreground herdr cannot tell is refused;
+    - another terminal or kind gets nothing, also when it changes between the refusal and the typing;
+    - the typed path is the checks then one `pane.send_input` with `["Enter"]`, its stream opened with the
+      checks';
+    - a caller that gives up during either check stops everything that sends;
+    - a reply out of time sends nothing (paused clock).
+  - Rust, `host`: the agent's validation and the deadline the worker gets. `ssh::connection` (in-process
+    server): the order `agent.get`, prompt, both checks, one `pane.send_input`.
+  - Live herdr: `a_reply_never_runs_in_the_shell_after_the_agent_exits` makes the agent exit, waits for the
+    shell to lead the foreground, and replies while herdr still reports the agent (checked after the reply; an
+    attempt that missed it tries again in a new pane, up to eight): `PaneNotFound`, nothing on the screen. Its
+    first form failed on the old code with `Ok(Typed)` and the shell printing `42`; with the foreground check
+    removed it fails the same way. The live reply test also refuses a stale terminal and a stale kind.
+  - JVM: `AgentAlertsTest` (a pane that now holds another agent loses its notification; a capability taken
+    once, refused after a newer post, a cancel, or once the notification is gone, and kept across a new
+    process), `AgentRepliesTest` (a replayed or stale reply sends nothing; no agent, not sent; `launch` takes
+    the capability and starts the send before it returns; the intent parse), `HostConnectionsReplyTest` and
+    `HostContractTest` (the agent crosses the FFI; a malformed one is `InvalidName`, another pane's
+    `PaneNotFound`; `HerdrAgent.terminal_id` crosses). With the two `AgentAlerts` guards undone, the three
+    JVM capability and identity tests fail.
+  - Device (compile): each post's PendingIntent is distinct, and the intent round-trips the capability and the
+    agent.
+
 
 ## Image paste (lane Paste)
 

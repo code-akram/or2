@@ -58,6 +58,9 @@ pub struct Agent {
     pub focused: bool,
     /// herdr's counter of status transitions for this pane.
     pub state_change_seq: u64,
+    /// herdr's id of the pane's terminal: a pane id reused for a new terminal (herdr
+    /// restarted) is a new pane. With the agent's kind, what a reply names ([`super::AgentIdentity`]).
+    pub terminal_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

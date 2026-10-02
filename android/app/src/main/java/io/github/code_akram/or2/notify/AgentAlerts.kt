@@ -3,8 +3,11 @@ package io.github.code_akram.or2.notify
 import io.github.code_akram.or2.app.PrefStore
 import io.github.code_akram.or2.connection.HerdrObserver
 import io.github.code_akram.or2.connection.HerdrSessionWatch
+import io.github.code_akram.or2.app.MemoryPrefStore
 import io.github.code_akram.or2.data.Host
+import io.github.code_akram.or2.ffi.AgentIdentity
 import io.github.code_akram.or2.ffi.AgentStatus
+import io.github.code_akram.or2.ffi.HerdrAgent
 import io.github.code_akram.or2.ffi.HerdrState
 import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HostState
@@ -13,6 +16,7 @@ import io.github.code_akram.or2.inbox.agentName
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.UUID
 import java.util.WeakHashMap
 
 /*
@@ -83,10 +87,52 @@ data class AgentAlert(
     val outcome: String? = null,
     /** The reply that was sent, quoted as the notification's reply history (MessagingStyle); null when none was. */
     val reply: String? = null,
+    /**
+     * The agent the alert is about (its pane's terminal and its kind, from the view that raised it): a reply names it,
+     * and Rust refuses one that would reach another agent in the same pane id. Null when unknown: such a reply is not
+     * sent.
+     */
+    val agent: AgentIdentity? = null,
+    /**
+     * This post's Reply capability ([ReplyNonces]): the Reply action's PendingIntent carries it, and a reply is taken
+     * only with the pane's current one, once. Set by [AgentAlerts] when it posts; null otherwise.
+     */
+    val nonce: String? = null,
 ) {
-    /** Never the reply's text: nothing a reply says is logged. */
+    /** Never the reply's text, nor the Reply capability: nothing a reply says is logged. */
     override fun toString() =
-        "AgentAlert(key=$key, title=$title, text=$text, subText=$subText, outcome=$outcome, reply=${if (reply == null) "null" else "…"})"
+        "AgentAlert(key=$key, title=$title, text=$text, subText=$subText, outcome=$outcome, " +
+            "reply=${if (reply == null) "null" else "…"}, agent=$agent, nonce=${if (nonce == null) "null" else "…"})"
+}
+
+/**
+ * The current Reply capability of each pane's notification (Codex v0.1.2 P2 #3): a random nonce per post, put in the
+ * Reply action's PendingIntent (its data, so each post's PendingIntent is distinct, and `FLAG_ONE_SHOT`). A reply is
+ * taken only with the pane's current nonce, which it consumes before anything is sent ([consume]); a cancelled
+ * notification's nonce is revoked. So a PendingIntent kept by someone else (a notification listener) cannot be
+ * replayed: not after it was used, not after a newer post, not after its notification went. Kept in [store] (app
+ * private) so a notification the system still shows after the process died stays answerable.
+ */
+class ReplyNonces(private val store: PrefStore, private val random: () -> String = { UUID.randomUUID().toString() }) {
+    /** A new nonce for [key]'s next post, replacing its current one. */
+    fun issue(key: AgentPaneKey): String = random().also { store.putString(name(key), it) }
+
+    /** Whether [nonce] is [key]'s current one; if so it is used up, at once (on the caller's thread). */
+    fun consume(key: AgentPaneKey, nonce: String?): Boolean {
+        val current = store.getString(name(key))
+        if (nonce.isNullOrEmpty() || current != nonce) return false
+        store.putString(name(key), null)
+        return true
+    }
+
+    /** [key]'s notification went: no reply is taken for it any more. */
+    fun revoke(key: AgentPaneKey) = store.putString(name(key), null)
+
+    private fun name(key: AgentPaneKey) = PREFIX + key.tag
+
+    private companion object {
+        const val PREFIX = "agent_reply_nonce:"
+    }
 }
 
 /** Where alerts go: the system's notifications in the app, a list in tests. */
@@ -127,17 +173,26 @@ fun alertText(status: AgentStatus): String? = when (status) {
  * - A pane's notification is cancelled when the pane goes back to `Working`, disappears from its session's view, is
  *   shown on screen ([screenChanged]) or opened from the notification ([opened]); all are cancelled when the alerts
  *   are switched off ([enabledChanged]).
+ * - A notification this process posted is cancelled too when its pane now holds another agent: another terminal
+ *   under the same pane id (herdr restarted and numbered its panes again) or another kind of agent. Its Reply would
+ *   be refused anyway (Rust checks the agent); this takes the stale notification away.
  * - What is up survives the process (Android keeps notifications), so a new process starts from the system's list
  *   ([AgentAlertSink.shown]): its first views cancel what went back to `Working` or disappeared meanwhile, and the
  *   switch takes those away too. A pane seen `Working` for the first time by a watch (its baseline, or a new
  *   `state_change_seq`) is cancelled whether or not this process knows of a notification; a repeat of that view
  *   (same seq, so still `Working`) cancels only one this process posted since.
  *
+ * Every post carries a fresh Reply capability ([nonces]); every cancel revokes it, and [admitReply] takes it once.
+ *
  * "On screen" is the visible terminal of a resumed app running herdr for the pane's host and session, whose
  * shown pane is the session's focused one (herdr's focus is shared state; a terminal opened for one pane shows
  * whichever is focused) or, before herdr reported a focus, the pane it was opened for.
  */
-class AgentAlerts(private val sink: AgentAlertSink, private val enabled: () -> Boolean = { true }) : HerdrObserver {
+class AgentAlerts(
+    private val sink: AgentAlertSink,
+    private val nonces: ReplyNonces = ReplyNonces(MemoryPrefStore()),
+    private val enabled: () -> Boolean = { true },
+) : HerdrObserver {
     /** Per watch object (a new connection makes new ones): each pane's last seen sequence number. */
     private val baselines = WeakHashMap<Any, Map<String, ULong>>()
 
@@ -145,6 +200,8 @@ class AgentAlerts(private val sink: AgentAlertSink, private val enabled: () -> B
     private val focused = mutableMapOf<Pair<Long, String?>, String?>()
     /** The panes with a notification up: at first what the system still shows from an earlier process. */
     private val posted: MutableSet<AgentPaneKey> = sink.shown().toMutableSet()
+    /** The agent each notification this process posted is about. */
+    private val agents = mutableMapOf<AgentPaneKey, AgentIdentity>()
     private var screen: OnScreen? = null
 
     /** The panes with a notification up, for tests and diagnostics. */
@@ -168,11 +225,13 @@ class AgentAlerts(private val sink: AgentAlertSink, private val enabled: () -> B
         baselines[watch] = seen
         for (agent in view.agents) {
             val key = AgentPaneKey(hostId, session, agent.paneId)
+            // Another agent in this pane id now: the notification was about one that is gone.
+            if (agents[key]?.let { !sameAgent(it, identity(agent)) } == true) cancel(key)
             if (agent.status == AgentStatus.WORKING) {
                 if (previous?.get(agent.paneId) == agent.stateChangeSeq) {
                     cancel(key)
                 } else {
-                    posted -= key
+                    forget(key)
                     sink.cancel(key)
                 }
                 continue
@@ -182,10 +241,7 @@ class AgentAlerts(private val sink: AgentAlertSink, private val enabled: () -> B
             if (agent.stateChangeSeq <= before) continue
             when {
                 isOnScreen(key) -> cancel(key)
-                enabled() -> {
-                    posted += key
-                    sink.post(AgentAlert(key, agentName(agent), text, hostLabel))
-                }
+                enabled() -> post(AgentAlert(key, agentName(agent), text, hostLabel, agent = identity(agent)))
             }
         }
         // Gone from the session: nothing left to open.
@@ -205,27 +261,44 @@ class AgentAlerts(private val sink: AgentAlertSink, private val enabled: () -> B
      * process that died).
      */
     fun opened(key: AgentPaneKey) {
-        posted -= key
+        forget(key)
         sink.cancel(key)
     }
 
     /**
+     * A reply arrived from [key]'s notification with the Reply capability [nonce]: whether to take it. Only while the
+     * notification is up (the system shows it) and only with its current nonce, which this uses up at once, so a
+     * PendingIntent is answered once and never after a newer post or a cancel. Call it before anything is sent, on the
+     * main thread.
+     */
+    fun admitReply(key: AgentPaneKey, nonce: String?): Boolean = key in sink.shown() && nonces.consume(key, nonce)
+
+    /**
      * A reply's outcome for its pane ([alert] with [AgentAlert.outcome] set, [AgentReplies]): replaces the pane's
-     * notification, without alerting, while it is still up (this process's, or one the system still shows). One the
-     * pane's own edges took away meanwhile (it went back to `Working`, was opened, disappeared) stays away: the next
-     * Blocked or Done edge posts a fresh alert, as before.
+     * notification, without alerting, while it is still up (this process's, or one the system still shows), with a new
+     * Reply capability (the one used was spent). One the pane's own edges took away meanwhile (it went back to
+     * `Working`, was opened, disappeared) stays away: the next Blocked or Done edge posts a fresh alert, as before.
      */
     fun replied(alert: AgentAlert) {
         if (alert.key !in posted && alert.key !in sink.shown()) return
-        posted += alert.key
-        sink.post(alert)
+        post(alert)
     }
 
     /** The setting changed: switched off, every agent notification goes, this process's and any the system still shows. */
     fun enabledChanged() {
         if (enabled()) return
-        (posted + sink.shown()).forEach(sink::cancel)
+        (posted + sink.shown()).forEach { key ->
+            nonces.revoke(key)
+            sink.cancel(key)
+        }
         posted.clear()
+        agents.clear()
+    }
+
+    private fun post(alert: AgentAlert) {
+        posted += alert.key
+        alert.agent?.let { agents[alert.key] = it }
+        sink.post(alert.copy(nonce = nonces.issue(alert.key)))
     }
 
     private fun isOnScreen(key: AgentPaneKey): Boolean {
@@ -236,9 +309,30 @@ class AgentAlerts(private val sink: AgentAlertSink, private val enabled: () -> B
     }
 
     private fun cancel(key: AgentPaneKey) {
-        if (posted.remove(key)) sink.cancel(key)
+        if (posted.remove(key)) {
+            forget(key)
+            sink.cancel(key)
+        }
+    }
+
+    /** No notification of [key]'s is up any more: nothing more is known of it, and no reply is taken for it. */
+    private fun forget(key: AgentPaneKey) {
+        posted -= key
+        agents -= key
+        nonces.revoke(key)
     }
 }
+
+/** The agent a view reports in a pane, as a reply names it. */
+fun identity(agent: HerdrAgent) = AgentIdentity(agent.terminalId, agent.agent)
+
+/**
+ * Whether [now] is still the agent [was] names, as Rust decides for a reply: the same terminal, and the same kind
+ * when [was] knew one.
+ */
+fun sameAgent(was: AgentIdentity, now: AgentIdentity) =
+    was.terminalId == now.terminalId && (was.agent == null || was.agent == now.agent)
+
 
 /**
  * The `Agent notifications` switch in Settings: on by default (zero configuration), so the stored flag is the

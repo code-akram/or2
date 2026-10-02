@@ -279,7 +279,7 @@ class UiGalleryActivity : ComponentActivity() {
     )
 
     private fun agent(pane: String, status: AgentStatus, name: String, cwd: String, tab: String = "w1:t1", workspace: String = "w1") =
-        HerdrAgent(pane, tab, workspace, name, "claude", name, status, cwd, null, false, 1uL)
+        HerdrAgent(pane, tab, workspace, name, "claude", name, status, cwd, null, false, 1uL, "term_$pane")
 
     private fun view(vararg agents: HerdrAgent) = HerdrView(
         1uL, 22u, null,

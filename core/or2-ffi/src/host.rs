@@ -11,7 +11,7 @@ use or2_core::term::TerminalSize;
 use or2_core::transport::EndpointError;
 use zeroize::Zeroizing;
 
-use crate::herdr::{HerdrListener, HerdrListenerObserver, HerdrWatch};
+use crate::herdr::{AgentIdentity, HerdrListener, HerdrListenerObserver, HerdrWatch};
 use crate::keys::PublicKeyInfo;
 use crate::session::{CloseReason, Session, SessionListener, TerminalTransport};
 
@@ -196,7 +196,7 @@ pub enum ReplyRoute {
     /// herdr's `agent.prompt` submitted it like the agent's own input.
     Prompted,
     /// herdr refused the prompt (the agent is blocked, or herdr does not drive it): the text was
-    /// typed into the pane, then Enter after the composer's pause.
+    /// typed into the pane with its Enter, in one request.
     Typed,
 }
 
@@ -574,26 +574,30 @@ impl HostConnection {
             .await?)
     }
 
-    /// Sends `text` to the agent in herdr pane `pane_id` of `session` (`None` is the default
+    /// Sends `text` to `agent` in herdr pane `pane_id` of `session` (`None` is the default
     /// session) and submits it, with no terminal open (API 16; contracts.md, "Reply from a
-    /// notification"). herdr's `agent.prompt` first (`Prompted`); when herdr refuses it because
-    /// the agent is blocked at a dialog (`agent_blocked`) or is not one herdr drives
-    /// (`agent_not_ready`), the text is typed into the pane (`pane.send_text`) and Enter follows
-    /// after the composer's pause (`Typed`). Several lines are sent as they are. Runs on this
-    /// connection, bounded by the query timeout. `InvalidName` for a malformed session or pane id
-    /// or an empty text, `TooLarge` above 4 KiB of UTF-8, `NotInstalled` without herdr,
-    /// `PaneNotFound` when the pane or its agent is gone (nothing is typed), `NotConnected` /
-    /// `Closed` without a live connection, `CommandFailed` otherwise. The text is never logged.
-    /// Cancelling the coroutine drops the reply only.
+    /// notification"). herdr must still report `agent` (its terminal and kind) in the pane, else
+    /// `PaneNotFound` and nothing is sent. herdr's `agent.prompt` first (`Prompted`); when herdr
+    /// refuses it because the agent is blocked at a dialog (`agent_blocked`) or is not one herdr
+    /// drives (`agent_not_ready`), the pane is checked again (that agent, and a foreground that is
+    /// not its shell) and the text is typed with its Enter in one `pane.send_input` (`Typed`).
+    /// Several lines are sent as they are. Runs on this connection, bounded by the query timeout.
+    /// `InvalidName` for a malformed session, pane id or agent, or an empty text, `TooLarge` above
+    /// 4 KiB of UTF-8, `NotInstalled` without herdr, `PaneNotFound` when the pane, or that agent in
+    /// its foreground, is gone (nothing is typed), `NotConnected` / `Closed` without a live
+    /// connection, `CommandFailed` otherwise. The text is never logged. Cancelling the coroutine
+    /// (or the timeout) stops the reply before anything more is sent: a request that sends is never
+    /// cut short, and one starts only while it can end before the timeout.
     pub async fn reply_to_pane(
         &self,
         session: Option<String>,
         pane_id: String,
+        agent: AgentIdentity,
         text: String,
     ) -> Result<ReplyRoute, HostError> {
         Ok(self
             .handle
-            .reply_to_pane(session, pane_id, text)
+            .reply_to_pane(session, pane_id, agent.into(), text)
             .await?
             .into())
     }

@@ -33,7 +33,7 @@ import org.junit.Test
 class InboxModelTest {
     private fun agent(pane: String, status: AgentStatus, workspace: String = "w1", tab: String = "w1:t1", name: String? = "Claude Code",
         cwd: String? = "/work/$pane") =
-        HerdrAgent(pane, tab, workspace, name, "claude", name, status, cwd, null, false, 1uL)
+        HerdrAgent(pane, tab, workspace, name, "claude", name, status, cwd, null, false, 1uL, "term_$pane")
 
     private fun view(vararg agents: HerdrAgent) = HerdrView(
         1uL, 22u, null,
@@ -98,7 +98,7 @@ class InboxModelTest {
     @Test
     fun agentNamePrefersTheDisplayNameThenNameThenAgentThenAPlaceholder() {
         fun named(display: String?, name: String?, kind: String?) =
-            HerdrAgent("p", "t", "w", name, kind, display, AgentStatus.IDLE, null, null, false, 0uL)
+            HerdrAgent("p", "t", "w", name, kind, display, AgentStatus.IDLE, null, null, false, 0uL, "term_p")
         assertEquals("Display", agentName(named("Display", "name", "kind")))
         assertEquals("name", agentName(named(null, "name", "kind")))
         assertEquals("kind", agentName(named(null, null, "kind")))

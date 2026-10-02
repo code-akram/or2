@@ -27,6 +27,7 @@ import io.github.code_akram.or2.notify.AgentAlerts
 import io.github.code_akram.or2.notify.AgentNotifications
 import io.github.code_akram.or2.notify.AgentOpenRequests
 import io.github.code_akram.or2.notify.AgentReplies
+import io.github.code_akram.or2.notify.ReplyNonces
 import io.github.code_akram.or2.ffi.networkChanged
 import io.github.code_akram.or2.service.ConnectionService
 import io.github.code_akram.or2.service.NetworkChanges
@@ -59,16 +60,19 @@ class Or2Application : Application() {
     val agentAlertSettings by lazy { AgentAlertSettings(prefs) }
 
     /** Agent notifications: one per Blocked or Done edge a live herdr watch sees, none for the pane on screen. */
-    val agentAlerts by lazy { AgentAlerts(AgentNotifications(this, prefs)) { agentAlertSettings.enabled.value } }
+    val agentAlerts by lazy {
+        AgentAlerts(AgentNotifications(this, prefs), ReplyNonces(prefs)) { agentAlertSettings.enabled.value }
+    }
 
     /**
-     * A notification's Reply ([AgentReplyReceiver]): over the host's live connection only, on the main dispatcher
-     * like the connections it uses.
+     * A notification's Reply ([AgentReplyReceiver]): over the host's live connection only, on the application's own
+     * scope (the broadcast does not wait for it) and the main dispatcher like the connections it uses.
      */
     val agentReplies by lazy {
         AgentReplies(
             CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
-            send = { key, text -> connections.replyToPane(key.hostId, key.session, key.paneId, text) },
+            admit = agentAlerts::admitReply,
+            send = { key, agent, text -> connections.replyToPane(key.hostId, key.session, key.paneId, agent, text) },
             post = agentAlerts::replied,
         )
     }

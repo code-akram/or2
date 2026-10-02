@@ -48,6 +48,25 @@ pub struct HerdrPane {
     pub focused: bool,
 }
 
+/// The agent a notification's reply is for (API 16; `HostConnection.reply_to_pane`), from the
+/// [`HerdrAgent`] that raised the notification: its `terminal_id` and its kind (`agent`). herdr
+/// must still report that agent in the pane, else the reply is `PaneNotFound` and nothing is
+/// sent. A `None` kind matches any.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AgentIdentity {
+    pub terminal_id: String,
+    pub agent: Option<String>,
+}
+
+impl From<AgentIdentity> for core::AgentIdentity {
+    fn from(identity: AgentIdentity) -> Self {
+        Self {
+            terminal_id: identity.terminal_id,
+            agent: identity.agent,
+        }
+    }
+}
+
 /// A pane running an agent.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct HerdrAgent {
@@ -62,6 +81,9 @@ pub struct HerdrAgent {
     pub title: Option<String>,
     pub focused: bool,
     pub state_change_seq: u64,
+    /// herdr's id of the pane's terminal (API 16): a pane id reused for a new terminal (herdr
+    /// restarted) is a new pane. A reply names it ([`AgentIdentity`]).
+    pub terminal_id: String,
 }
 
 /// or2's projection of one herdr session, delivered whole.
@@ -168,6 +190,7 @@ impl From<core::Agent> for HerdrAgent {
             title: a.title,
             focused: a.focused,
             state_change_seq: a.state_change_seq,
+            terminal_id: a.terminal_id,
         }
     }
 }
@@ -302,6 +325,7 @@ mod tests {
                 title: Some("t".into()),
                 focused: true,
                 state_change_seq: u64::MAX,
+                terminal_id: "term_1".into(),
             }],
         };
         let HerdrState::Live { view: mapped } = core::HerdrState::Live { view }.into() else {

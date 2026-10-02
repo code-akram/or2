@@ -33,7 +33,7 @@ class InboxUiDeviceTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
 
     private fun agent(pane: String, status: AgentStatus, name: String = "Claude Code", cwd: String? = "/work/$pane") =
-        HerdrAgent(pane, "w1:t1", "w1", name, "claude", name, status, cwd, null, false, 1uL)
+        HerdrAgent(pane, "w1:t1", "w1", name, "claude", name, status, cwd, null, false, 1uL, "term_$pane")
 
     private val view = HerdrView(
         1uL, 22u, null,

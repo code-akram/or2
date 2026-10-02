@@ -41,19 +41,85 @@ pub(super) enum Served {
         target: String,
         text: String,
     },
-    /// `pane.send_text` of `text` to `pane_id`, received `at` (tokio's clock).
-    SendText {
-        pane_id: String,
-        text: String,
-        at: Instant,
+    /// `agent.get` of `target`.
+    AgentGet {
+        target: String,
     },
-    /// `pane.send_keys` of `keys` to `pane_id`, received `at` (tokio's clock).
-    SendKeys {
+    /// `pane.process_info` of `pane_id`.
+    ProcessInfo {
         pane_id: String,
+    },
+    /// `pane.send_input` of `text` and `keys` to `pane_id`, received `at` (tokio's clock).
+    SendInput {
+        pane_id: String,
+        text: Option<String>,
         keys: Vec<String>,
         at: Instant,
     },
     Other(String),
+}
+
+/// What the fake herdr reports of one pane through `agent.get` and `pane.process_info`.
+#[derive(Debug, Clone)]
+pub(super) struct FakeAgent {
+    /// The agent's terminal and kind; `None`: no agent in the pane (`agent_not_found`).
+    pub agent: Option<(String, Option<String>)>,
+    pub shell_pid: Option<u32>,
+    pub foreground_group: Option<u32>,
+    /// The foreground group's processes, as `(pid, name)`.
+    pub foreground: Vec<(u32, String)>,
+}
+
+impl FakeAgent {
+    /// The shell's pid, and its own process group.
+    pub const SHELL: u32 = 100;
+
+    /// A `claude` agent in the foreground, on terminal `term_<pane>`.
+    pub fn default_for(pane: &str) -> Self {
+        Self::running(&format!("term_{pane}"), Some("claude"), "claude")
+    }
+
+    /// An agent of `kind` on `terminal`, its process `process` leading the foreground group.
+    pub fn running(terminal: &str, kind: Option<&str>, process: &str) -> Self {
+        Self {
+            agent: Some((terminal.to_owned(), kind.map(str::to_owned))),
+            shell_pid: Some(Self::SHELL),
+            foreground_group: Some(200),
+            foreground: vec![(200, process.to_owned())],
+        }
+    }
+
+    /// The agent left: the shell has the foreground again, though herdr may still report it.
+    pub fn at_shell(self) -> Self {
+        Self {
+            foreground_group: Some(Self::SHELL),
+            foreground: vec![(Self::SHELL, "zsh".to_owned())],
+            ..self
+        }
+    }
+
+    /// `agent.get`'s agent, trimmed to what this build reads plus herdr's required fields.
+    fn info(&self, pane: &str) -> Value {
+        let (terminal, kind) = self.agent.clone().unwrap_or_default();
+        serde_json::json!({
+            "agent": kind, "agent_status": "blocked", "focused": false, "pane_id": pane,
+            "revision": 0, "state_change_seq": 1, "tab_id": "w1:t1", "terminal_id": terminal,
+            "workspace_id": "w1",
+        })
+    }
+
+    fn process_info(&self, pane: &str) -> Value {
+        let processes: Vec<Value> = self
+            .foreground
+            .iter()
+            .map(|(pid, name)| serde_json::json!({"pid": pid, "name": name}))
+            .collect();
+        serde_json::json!({
+            "pane_id": pane, "shell_pid": self.shell_pid,
+            "foreground_process_group_id": self.foreground_group,
+            "foreground_processes": processes,
+        })
+    }
 }
 
 /// One scripted `session.snapshot` answer.
@@ -103,8 +169,19 @@ struct State {
     pane_offsets: HashMap<String, u64>,
     /// `agent.prompt` answers with this error from now on.
     prompt_error: Option<(String, String)>,
-    /// `pane.send_text` answers with this error from now on.
-    send_text_error: Option<(String, String)>,
+    /// `pane.send_input` answers with this error from now on.
+    send_input_error: Option<(String, String)>,
+    /// What `agent.get` and `pane.process_info` report of each pane; a pane not here has an agent
+    /// ([`FakeAgent::default_for`]).
+    agents: HashMap<String, FakeAgent>,
+    /// Once a request of this method was served, every pane's agent leaves the foreground to
+    /// the shell (herdr still reports it for a while, as herdr 0.9.3 does).
+    exit_after: Option<String>,
+    /// The agents left the foreground ([`Self::exit_after`]).
+    exited: bool,
+    /// Holds the answer to the next request of this method: `entered` is notified once herdr
+    /// recorded it, and the answer goes when `release` is.
+    hold: Option<(String, Arc<Notify>, Arc<Notify>)>,
     streams: Vec<mpsc::UnboundedSender<Command>>,
     served: Vec<Served>,
 }
@@ -138,7 +215,11 @@ impl FakeHost {
                 current: ("w1:p1".into(), 0),
                 pane_offsets: HashMap::new(),
                 prompt_error: None,
-                send_text_error: None,
+                send_input_error: None,
+                agents: HashMap::new(),
+                exit_after: None,
+                exited: false,
+                hold: None,
                 streams: Vec::new(),
                 served: Vec::new(),
             })),
@@ -238,9 +319,25 @@ impl FakeHost {
         lock(&self.state).prompt_error = Some((code.to_owned(), message.to_owned()));
     }
 
-    /// `pane.send_text` answers with this error from now on.
-    pub fn fail_send_text(&self, code: &str, message: &str) {
-        lock(&self.state).send_text_error = Some((code.to_owned(), message.to_owned()));
+    /// `pane.send_input` answers with this error from now on.
+    pub fn fail_send_input(&self, code: &str, message: &str) {
+        lock(&self.state).send_input_error = Some((code.to_owned(), message.to_owned()));
+    }
+
+    /// What herdr reports of `pane_id` from now on.
+    pub fn set_agent(&self, pane_id: &str, agent: FakeAgent) {
+        lock(&self.state).agents.insert(pane_id.to_owned(), agent);
+    }
+
+    /// Once a request of `method` was served, every agent leaves the foreground to its shell.
+    pub fn exit_agents_after(&self, method: &str) {
+        lock(&self.state).exit_after = Some(method.to_owned());
+    }
+
+    /// Holds the answer to the next request of `method`: `entered` is notified once it was
+    /// recorded, and it is answered when `release` is.
+    pub fn hold_next(&self, method: &str, entered: Arc<Notify>, release: Arc<Notify>) {
+        lock(&self.state).hold = Some((method.to_owned(), entered, release));
     }
 
     /// `pane_id` is now `offset` rows above its bottom, as new output moves a scrolled pane.
@@ -476,56 +573,96 @@ async fn serve(state: Arc<Mutex<State>>, stream: DuplexStream) {
             let _ = conn.send(reply.as_bytes()).await;
         }
         // Shaped like herdr 0.9.3's answers (captured from an isolated session): `agent.prompt`
-        // with `agent_prompted`, the pane writes with `ok`.
-        "agent.prompt" | "pane.send_text" | "pane.send_keys" => {
+        // with `agent_prompted`, `agent.get` with `agent_info`, `pane.process_info` with
+        // `pane_process_info`, `pane.send_input` with `ok`. A pane without an agent is
+        // `agent_not_found` to the agent requests, as in herdr.
+        "agent.prompt" | "agent.get" | "pane.process_info" | "pane.send_input" => {
             let params = &request["params"];
             let string = |name: &str| params[name].as_str().unwrap_or("").to_owned();
-            let reply = {
+            let pane = match method.as_str() {
+                "agent.prompt" | "agent.get" => string("target"),
+                _ => string("pane_id"),
+            };
+            let (reply, gate) = {
                 let mut state = lock(&state);
+                let fake = state
+                    .agents
+                    .get(&pane)
+                    .cloned()
+                    .unwrap_or_else(|| FakeAgent::default_for(&pane));
+                let fake = if state.exited { fake.at_shell() } else { fake };
+                let no_agent = || {
+                    Some((
+                        "agent_not_found".to_owned(),
+                        format!("agent target {pane} not found"),
+                    ))
+                };
                 let (served, failure, result) = match method.as_str() {
                     "agent.prompt" => (
                         Served::Prompt {
-                            target: string("target"),
+                            target: pane.clone(),
                             text: string("text"),
                         },
-                        state.prompt_error.clone(),
-                        serde_json::json!({"type": "agent_prompted", "agent": {
-                            "agent": "claude", "agent_status": "working",
-                            "pane_id": string("target"), "revision": 0, "state_change_seq": 1,
-                            "tab_id": "w1:t1", "terminal_id": "term_1", "workspace_id": "w1",
-                            "focused": false,
-                        }}),
-                    ),
-                    "pane.send_text" => (
-                        Served::SendText {
-                            pane_id: string("pane_id"),
-                            text: string("text"),
-                            at: Instant::now(),
+                        match &fake.agent {
+                            None => no_agent(),
+                            Some(_) => state.prompt_error.clone(),
                         },
-                        state.send_text_error.clone(),
-                        serde_json::json!({"type": "ok"}),
+                        serde_json::json!({"type": "agent_prompted", "agent": fake.info(&pane)}),
                     ),
-                    _ => (
-                        Served::SendKeys {
-                            pane_id: string("pane_id"),
-                            keys: params["keys"]
-                                .as_array()
-                                .expect("keys")
-                                .iter()
-                                .map(|key| key.as_str().expect("a key name").to_owned())
-                                .collect(),
-                            at: Instant::now(),
+                    "agent.get" => (
+                        Served::AgentGet {
+                            target: pane.clone(),
+                        },
+                        fake.agent.is_none().then(no_agent).flatten(),
+                        serde_json::json!({"type": "agent_info", "agent": fake.info(&pane)}),
+                    ),
+                    "pane.process_info" => (
+                        Served::ProcessInfo {
+                            pane_id: pane.clone(),
                         },
                         None,
+                        serde_json::json!({"type": "pane_process_info",
+                            "process_info": fake.process_info(&pane)}),
+                    ),
+                    _ => (
+                        Served::SendInput {
+                            pane_id: pane.clone(),
+                            text: params["text"].as_str().map(str::to_owned),
+                            keys: params["keys"]
+                                .as_array()
+                                .map(|keys| {
+                                    keys.iter()
+                                        .map(|key| key.as_str().expect("a key name").to_owned())
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            at: Instant::now(),
+                        },
+                        state.send_input_error.clone(),
                         serde_json::json!({"type": "ok"}),
                     ),
                 };
                 state.served.push(served);
-                match failure {
+                if state.exit_after.as_deref() == Some(method.as_str()) {
+                    state.exited = true;
+                }
+                let gate = match state.hold.take() {
+                    Some((held, entered, release)) if held == method => Some((entered, release)),
+                    other => {
+                        state.hold = other;
+                        None
+                    }
+                };
+                let reply = match failure {
                     Some((code, message)) => error(&code, &message),
                     None => serde_json::json!({"id": id, "result": result}).to_string() + "\n",
-                }
+                };
+                (reply, gate)
             };
+            if let Some((entered, release)) = gate {
+                entered.notify_one();
+                release.notified().await;
+            }
             let _ = conn.send(reply.as_bytes()).await;
         }
         other => {

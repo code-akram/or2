@@ -1178,16 +1178,33 @@ fn dispatch<D: DatagramTransport>(
         HostCommand::ReplyToPane {
             session,
             pane_id,
+            agent,
             text,
-            reply,
+            deadline,
+            mut reply,
         } => {
             let host = Arc::clone(host);
             let (mut closing, tracker) = (closing.clone(), tracker.clone());
             runtime().spawn(async move {
                 let _tracker = tracker;
-                tokio::select! {
-                    result = reply_to_pane(&host, session, pane_id, text) => { let _ = reply.send(result); }
-                    _ = closed_reason(&mut closing) => {}
+                // A caller that stopped waiting (cancelled, timed out) closes `reply`: the reply
+                // sends nothing more (a request that sends is never cut short). A host that
+                // closes drops it mid-way.
+                let result = {
+                    let target = herdr::Reply {
+                        session: session.as_deref(),
+                        pane_id: &pane_id,
+                        agent: &agent,
+                        text: &text,
+                    };
+                    let cancelled = reply.closed();
+                    tokio::select! {
+                        result = reply_to_pane(&host, target, deadline, cancelled) => Some(result),
+                        _ = closed_reason(&mut closing) => None,
+                    }
+                };
+                if let Some(result) = result {
+                    let _ = reply.send(result);
                 }
             });
         }
@@ -1340,13 +1357,14 @@ async fn focus_herdr_pane(
         })
 }
 
-/// `HostHandle::reply_to_pane`: `agent.prompt`, or the text typed and Enter, through the probed
-/// herdr path. Waits for the program probe only, never for herdr's session listing.
+/// `HostHandle::reply_to_pane`: `agent.prompt`, or the text and Enter typed in one request,
+/// through the probed herdr path. Waits for the program probe only, never for herdr's session
+/// listing. `cancelled` resolves when the caller stops waiting.
 async fn reply_to_pane(
     host: &Arc<SshHost>,
-    session: Option<String>,
-    pane_id: String,
-    text: String,
+    reply: herdr::Reply<'_>,
+    deadline: tokio::time::Instant,
+    cancelled: impl std::future::Future<Output = ()>,
 ) -> Result<herdr::ReplyRoute, HostError> {
     let capabilities = host.programs().await.map_err(host_error)?;
     let Some(path) = &capabilities.herdr else {
@@ -1358,9 +1376,9 @@ async fn reply_to_pane(
         &**host,
         path,
         host.sessions.directory(),
-        session.as_deref(),
-        &pane_id,
-        &text,
+        reply,
+        deadline,
+        cancelled,
     )
     .await
     .map_err(|error| match error {
