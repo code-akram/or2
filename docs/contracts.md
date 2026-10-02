@@ -4984,12 +4984,30 @@ stays green.
   check, a cancel, the timeout) removes the temporary file, the image, or both while a rename's answer
   is pending (2 s, best effort). A name that already existed (an exclusive create or a rename refused)
   is never removed. The image stays the host driver's until its path is delivered: `upload::deliver`
-  removes it when the caller's reply is gone. **Narrowed:** once the path is delivered to the app, an
-  image no one inserts (the app cancelled in that instant) is left for the 7-day sweep; a server stalled
-  longer than the 2 s cleanup keeps the file for the sweep too. Tests:
+  removes it when the caller's reply is gone. *(The narrowing that stood here, a path sent but not taken
+  left for the sweep, is closed by "Delivery is acknowledged" below.)* Tests:
   `a_failed_realpath_removes_the_renamed_image`,
   `an_upload_cancelled_while_its_path_resolves_removes_the_renamed_image` (a delayed `realpath`),
   `an_image_whose_caller_stopped_waiting_as_it_was_done_is_removed`.
+- **Fix: delivery is acknowledged (Codex v0.1.2 fix-check P2; branch `v012/fix-3`).** A successful
+  `reply.send` only queued the path: a caller whose timeout or cancel became ready together with the
+  send dropped it unread, and the image stayed. Delivery is now two steps:
+  - The host task sends `host::UploadedImage { path, taken }` (`HostCommand::UploadImage`'s reply; no
+    FFI change).
+  - `HostHandle::upload_image` acknowledges on `taken` in the same step that receives the path (no
+    await in between), then returns it.
+  - `upload::deliver` waits for that acknowledgement, at most 30 s (`ACK_TIMEOUT`). A caller always
+    acknowledges or drops the path at once, so the bound only covers a caller that never runs again.
+    Without the acknowledgement it removes the image (2 s, best effort).
+  - **Narrowed:** once Kotlin has the path, an image no one inserts (the terminal closed in that
+    instant) is left for the 7-day sweep. A server stalled longer than the 2 s cleanup keeps the file for
+    the sweep too.
+  - Tests: `an_image_whose_path_was_sent_but_never_taken_is_removed` (in-process SFTP server: the path
+    is sent into an open reply and dropped unread; with the old rule the image was left on the host),
+    `a_path_sent_as_its_caller_gives_up_is_never_acknowledged`,
+    `a_path_sent_at_its_callers_deadline_is_kept_only_if_returned` (paused clock: the host's answer and
+    the caller's deadline fall due together, and the image is kept exactly when the caller got its path),
+    `an_uploaded_path_is_acknowledged_as_its_caller_takes_it`.
 - **Fix: a path that arrives under the multi-line confirmation (Codex P2 #9).** Confirming clears only
   the text that was sent (`TerminalChromeState.composerSent`, `composerAfterSend`): an image's path
   inserted while the dialog was open stays in the composer. Test: JVM `ComposerSendTest`.
