@@ -1210,7 +1210,7 @@ fn dispatch<D: DatagramTransport>(
                     }
                 };
                 if let Some(result) = result {
-                    let _ = reply.send(result);
+                    upload::deliver(reply, result).await;
                 }
             });
         }
