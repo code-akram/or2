@@ -35,7 +35,8 @@ class PairMessagesTest {
         )
         assertEquals("The host presented a different key than the code. Nothing was sent.", message(PairException.HostKeyMismatch()))
         assertEquals(
-            "The host didn't accept this phone's code. Check the code typed into or2-pair, or run it again.",
+            "The host didn't accept the pairing key. The code typed into or2-pair may differ, or2-pair may have stopped, " +
+                "or sshd may not read ~/.ssh/authorized_keys. Run or2-pair again.",
             message(PairException.BootstrapRefused()),
         )
         assertEquals("Something other than or2-pair answered on the host. Pair manually.", message(PairException.NotOr2Pair()))

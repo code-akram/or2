@@ -144,7 +144,8 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   new code), are one `danger` line under the card. The review is a form: name and user
   fields (the user read-only when the code carries a pairing id), the addresses as numbered mono rows in a
   grouped card, the host key's fingerprint in a `MonoBlock`
-  with one muted sentence, a radio group of keys (existing keys with their short fingerprints, then **New key**),
+  with one muted sentence, a radio group of keys (existing keys with their short fingerprints, then **New key**;
+  disabled, with a muted note, when the host already took a key and only saving is left),
   a `danger` line for the last failure and the full-width **Pair** pill (**Add host** for a `--manual` code)
   with a muted footnote.
   Progress is a centred 32 dp spinner, a 15 sp light **Pairing with <name>…** and a **Cancel** pill; nothing modal.

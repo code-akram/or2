@@ -44,8 +44,9 @@ or2-pair
 ```
 
 It runs its checks (sshd and its version, `authorized_keys`, your `sshd_config`, your login shell), then asks
-`Code shown on your phone:`. Type the code (capitals or not, with or without the hyphens). A typo is caught and
-asked again; an empty line cancels with nothing changed. It then prints this host's name, user, host key and
+`Code shown on your phone:`. Type the code (capitals or not, with or without the hyphens; codes never contain
+`Z`, `U`, `I`, `L` or `O`, and an `I` or `L` is read as `1`, an `O` as `0`). A typo is caught and asked again; an
+empty line cancels with nothing changed. It then prints this host's name, user, host key and
 addresses (overlay networks such as ZeroTier or Tailscale first, then LAN, then public IPv4 and IPv6, then
 `<hostname>.local`), a **QR code** and the same pairing code as text, and waits for up to 5 minutes.
 
@@ -53,7 +54,9 @@ On the phone, scan the QR (allow the camera when it asks; it is used only to rea
 **Paste pairing code**. Check that the host key's fingerprint matches what `or2-pair` printed, pick an
 existing key or **New key**, and tap **Pair**. A second or two later the host is saved with its key already
 trusted and or2 connects: there is no first-use host-key prompt. `or2-pair` prints
-`Paired "<phone>" (…) as <user>`, which line it added to `authorized_keys` if you want to undo it, and exits.
+`Paired "<phone>" (…) as <user>`, which line it added to `authorized_keys` if you want to undo it, and exits. In the
+rare case that the host took the key but the phone could not save the host, the review says so and keeps that key
+(the key choice is locked): **Pair** then only saves the host, without pairing again.
 
 ### What happens, and what it writes
 
@@ -106,11 +109,12 @@ directory or `~/.ssh` is writable by others (sshd would ignore the file: `chmod 
 chmod 600 ~/.ssh/authorized_keys`), your login shell is `nologin` or `false`, or `or2-pair` is installed in a path
 that needs quoting. Fix it and run again, or use `--manual`.
 
-### "The host didn't accept this phone's code"
+### "The host didn't accept the pairing key"
 
-The code typed on the host was different from the one on the phone (the phone's screen shows a new code after
-every attempt that reached the host), the run ended or timed out, or sshd ignores `~/.ssh/authorized_keys` (next
-section). Run `or2-pair` again and type the code the phone shows now.
+sshd refused the temporary key the phone derived from its code. The phone cannot tell which of three causes it
+was: the code typed into `or2-pair` differs from the one on the phone (the phone's screen shows a new code after
+every attempt that reached the host), `or2-pair` has stopped or timed out, or sshd does not read
+`~/.ssh/authorized_keys` (next section). Run `or2-pair` again and type the code the phone shows now.
 
 ### sshd configurations that ignore `authorized_keys`
 
@@ -169,7 +173,7 @@ firewalld, and on macOS you allow `mosh-server` in System Settings > Network > F
 - The phone trusts the host key from the scan and accepts no other, so someone in the middle sees nothing it could
   use. The temporary key can only start `or2-pair enroll`, which refuses unless the run is live and within its 5
   minutes, and the first phone to use it wins.
-- The honest limit: the code is 55 bits. Someone who reads it off your phone and can reach the host's SSH port could
-  enrol a key within the window; after it, the temporary key is gone and the code is worthless. Guessing it online
-  goes through sshd's own authentication limits (`MaxAuthTries`, `MaxStartups`, fail2ban).
+- The honest limit: the code is about 54.5 bits. Someone who reads it off your phone and can reach the host's SSH
+  port could enrol a key within the window; after it, the temporary key is gone and the code is worthless. Guessing
+  it online goes through sshd's own authentication limits (`MaxAuthTries`, `MaxStartups`, fail2ban).
 - Details and the wire format are in [contracts: Easy pair](contracts.md#easy-pair-qr-onboarding).

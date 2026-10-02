@@ -2338,20 +2338,26 @@ gone.
 
 ## The pairing code `K` (phone)
 
-- 12 characters of Crockford base32 (`0-9`, `A-Z` without `I`, `L`, `O`, `U`), shown as three groups of
-  four (`7KQ4-M2XD-9PTM`): 11 random characters from the OS CSPRNG (55 bits) and a check character,
-  `c = (Σ i·vᵢ for i = 1..11) mod 31`, where `vᵢ` is the value of the i-th character (its index in
-  `0123456789ABCDEFGHJKMNPQRSTVWXYZ`: `0`-`9` are 0-9, `A` is 10, `B` 11, `C` 12, `D` 13, `E` 14, `F` 15,
-  `G` 16, `H` 17, `J` 18, `K` 19, `M` 20, `N` 21, `P` 22, `Q` 23, `R` 24, `S` 25, `T` 26, `V` 27, `W` 28,
-  `X` 29, `Y` 30, `Z` 31), and `c` is the character with value `c` (never `Z`). Weights 1 to 11 modulo
-  the prime 31 catch every single wrong character and every swap of two neighbours, with one
-  exception that is accepted: `Z` has value 31, which is 0 modulo 31, so a `0` typed for a `Z` (or the
-  reverse) passes the check. The derived key is then wrong and the host refuses the phone
-  (`BootstrapRefused`) with nothing spent. Both crates test these vectors (data characters → check
+- 12 characters of Crockford base32 **without `Z`** (`0-9`, `A-Y` without `I`, `L`, `O`, `U`: 31
+  symbols), shown as three groups of four (`7KQ4-M2XD-9PTM`): 11 random data characters from the OS
+  CSPRNG (11·log₂ 31 ≈ 54.5 bits) and a check character, `c = (Σ i·vᵢ for i = 1..11) mod 31`, where
+  `vᵢ` is the value of the i-th character (its index in `0123456789ABCDEFGHJKMNPQRSTVWXY`: `0`-`9` are
+  0-9, `A` is 10, `B` 11, `C` 12, `D` 13, `E` 14, `F` 15, `G` 16, `H` 17, `J` 18, `K` 19, `M` 20, `N` 21,
+  `P` 22, `Q` 23, `R` 24, `S` 25, `T` 26, `V` 27, `W` 28, `X` 29, `Y` 30), and `c` (0 to 30) is the
+  character with value `c`. Every value is below the prime 31, so the 31 characters are distinct modulo
+  31 and weights 1 to 11 catch every single wrong character and every swap of two different neighbours,
+  without exception. (Crockford's `Z`, value 31, would be 0 modulo 31: a `0` typed for a `Z` would
+  pass the check. That is why `Z` is not used.) Both crates test these vectors (data characters → check
   character): `7KQ4M2XD9PT` → `M` (1136 = 36·31 + 20; so the code is `7KQ4-M2XD-9PTM`), `00000000000` →
-  `0`, `ZZZZZZZZZZZ` → `0`, `11111111111` → `4`, `0123456789A` → `6`.
+  `0`, `YYYYYYYYYYY` → `V` (30·66 = 1980 = 63·31 + 27), `11111111111` → `4`, `0123456789A` → `6`.
+- **Drawing.** Each data character comes from one random byte: a byte below 248 (8·31) gives the value
+  `byte mod 31`, so every symbol is equally likely; a byte of 248 or more is dropped and another byte is
+  drawn (rejection sampling, never folding).
 - Typed input is read leniently: case-insensitive, hyphens and spaces ignored, `I`/`L` read as `1`, `O`
-  as `0`. A failed check re-prompts on the host ("That code has a typo") without spending anything.
+  as `0`. `Z` (like `U` or punctuation) is a character codes never use: refused as invalid (the host
+  re-prompts as for any typo; the phone's `PairCode::parse_typed` returns `Character`), never read as
+  another character. A failed check re-prompts on the host ("That code has a typo") without spending
+  anything.
 - Generated in Rust (`PairCode`, zeroized on drop). A new `K` is drawn each time the Easy pair screen
   opens and after every pairing that reached the host, successful or not. It is never logged or saved.
 
@@ -2409,7 +2415,7 @@ The OpenSSH line is the key's wire form (`0000000b "ssh-ed25519" 00000020 <publi
 test client that derives the same bytes by an independent route (its own HKDF and Ed25519 library)
 confirms both ends; the host crate also checks them against a real `sshd` (`tests/sshd.rs`).
 
-**Why 55 bits is enough.** Recovering `K` offline needs the bootstrap public key, a signature made with
+**Why about 54.5 bits is enough.** Recovering `K` offline needs the bootstrap public key, a signature made with
 it, or the fingerprint sshd logs. The phone authenticates only after the handshake presented the pinned
 `hk`, so a man in the middle sees none of them, and it cannot relay the phone's signature (it covers the
 session id). Only the account itself, root and readers of sshd's log see the fingerprint, and `K` is
@@ -2695,13 +2701,16 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
   reuses it). The button is **Pair**; then **Pairing with <name>…** (1 to 3 s).
 - **After `ok`**: the host, its addresses (the offer's port on each), user, key and the trusted `hk` are
   saved in one Room transaction (`AppDao.saveHostWithTrust`), then the usual connect runs. If saving
-  fails after the host installed the key, the retry saves without pairing again.
-- **Messages** (one line each):
+  fails after the host installed the key, the retry is **bound to that key** (its stored key id and
+  fingerprint): key selection and **New key** are disabled on the review, and the retry repeats only
+  the atomic host and trust save, never `pair_enroll` (the host's run is spent).
+- **Messages** (one line each, wrapped on screen like every message):
   - `Unreachable`: "Couldn't reach <name> on port <p>. Pairing uses the same SSH port as connecting:
     the phone must reach it (same network, ZeroTier or Tailscale, or a public address)."
   - `HostKeyMismatch`: "The host presented a different key than the code. Nothing was sent."
-  - `BootstrapRefused`: "The host didn't accept this phone's code. Check the code typed into or2-pair,
-    or run it again."
+  - `BootstrapRefused`: "The host didn't accept the pairing key. The code typed into or2-pair may
+    differ, or2-pair may have stopped, or sshd may not read ~/.ssh/authorized_keys. Run or2-pair again."
+    (sshd refused the derived key; the phone cannot tell these three causes apart.)
   - `NotOr2Pair`: "Something other than or2-pair answered on the host. Pair manually."
   - `Expired`: "or2-pair has stopped or timed out on the host. Run it again."
   - `Gone`: "Another device already used this pairing."
@@ -2730,7 +2739,14 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
 - **Saving.** After `ok` the host is saved with `AppDao.saveHostWithTrust` (the user is the offer's
   `user`, read-only when the code has a pairing id; the result's `fingerprint` was checked against the
   phone's key by the core). If saving fails, the review shows "The host accepted the key, but this phone
-  could not save the host. Try again." and the retry saves without a second `pair_enroll`.
+  could not save the host. Try again." and records the key as `PairReview.accepted` (`AcceptedKey`: the
+  key's id and fingerprint; a key made by **New key** is already stored, so this is its id). From then
+  on the review's key choice is locked (`PairFlow.edit` ignores a choice; the key rows and **New key** are
+  disabled, and the key's note reads "The host added this key already; only saving the host is left."),
+  no key is generated, and **Pair** repeats only `saveHostWithTrust` with that key, never `pair_enroll`.
+  If the stored keys no longer hold a key with that id and fingerprint (deleted meanwhile), nothing is
+  enrolled or saved: the flow returns to the Easy pair screen with a new `K` and "The key the host
+  accepted is no longer on this phone. Run or2-pair again."
 - **Messages not named above.** `TimedOut`: "<name> did not answer in time. Run or2-pair again and
   retry."; `ConnectionLost`: "The connection to the host ended early. Run or2-pair again and retry.";
   `Protocol`: "The host did not understand the request. Update or2-pair on the host and try again.";
@@ -2761,9 +2777,13 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
   reads the QR line the host printed (and agrees with the host crate's reference reader), `pair_enroll`
   pairs, and a different `K`, a different host key and an ended run give `BootstrapRefused`,
   `HostKeyMismatch` and `BootstrapRefused`.
-- **`or2_core::pair`**: `PairCode` (alphabet, check character and the five shared check vectors,
-  uniformity bounds), the parser table, the derivation vector, the client against a scripted exchange and every error mapping.
-- **Kotlin**: `PairFlowTest` (fakes), `PairMessagesTest`, `PairEndToEndTest` (`or2-pair-testhost`
-  behind a disposable sshd with `K` from the flow written to its stdin, then a real `connect_host` with
-  the paired key and pinned host key), and `PairUiDeviceTest` with the new screen (screenshots of the
-  Easy pair, review and pairing screens).
+- **`or2_core::pair`**: `PairCode` (the 31-symbol alphabet and `Z` refused as invalid, the check
+  character with no exception and the five shared check vectors, rejection sampling and uniformity
+  bounds), the parser table, the derivation vector, the client against a scripted exchange and every
+  error mapping.
+- **Kotlin**: `PairFlowTest` (fakes; among them that changing the key after a save failure starts no
+  second enrolment, `changingTheKeyAfterASaveFailureAttemptsASecondEnrolment`), `PairMessagesTest`,
+  `PairEndToEndTest` (`or2-pair-testhost` behind a disposable sshd with `K` from the flow written to its
+  stdin, then a real `connect_host` with the paired key and pinned host key), and `PairUiDeviceTest`
+  with the new screen (screenshots of the Easy pair, review and pairing screens; the locked key choice
+  of a save retry).

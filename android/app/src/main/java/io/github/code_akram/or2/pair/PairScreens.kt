@@ -279,17 +279,22 @@ fun PairReviewScreen(
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Key to authorize", style = Or2Type.Body, color = Or2Colors.Text)
                 Text(
-                    if (review.enrolls) "Its public half is added to authorized_keys on the host."
-                    else "This code was made with --manual, so you add its public half to authorized_keys yourself afterwards.",
-                    style = Or2Type.Secondary, color = Or2Colors.TextMuted,
+                    when {
+                        // The host installed this key: a retry only saves the host, so the key cannot change.
+                        review.keyLocked -> "The host added this key already; only saving the host is left."
+                        review.enrolls -> "Its public half is added to authorized_keys on the host."
+                        else -> "This code was made with --manual, so you add its public half to authorized_keys yourself afterwards."
+                    },
+                    style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.testTag("pair-key-note"),
                 )
+                val keysEnabled = !review.working && !review.keyLocked
                 GroupCard(Modifier.selectableGroup()) {
                     keys.forEach { key ->
                         val selected = review.choice == KeyChoice.Existing(key.id)
                         ListRow(
                             key.label, subtitle = shortFingerprint(key.fingerprint), subtitleMono = true, icon = Or2Icons.Key,
                             modifier = Modifier.testTag("pair-key:${key.id}").semantics(mergeDescendants = true) {}
-                                .selectable(selected, enabled = !review.working, role = Role.RadioButton) { edit(null, null, KeyChoice.Existing(key.id)) },
+                                .selectable(selected, enabled = keysEnabled, role = Role.RadioButton) { edit(null, null, KeyChoice.Existing(key.id)) },
                             trailing = if (selected) ({ Icon(Or2Icons.Check, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Accent) }) else null,
                         )
                         GroupDivider(inset = 44.dp)
@@ -298,7 +303,7 @@ fun PairReviewScreen(
                     ListRow(
                         "New key", subtitle = "Ed25519, generated on this phone. Asks for your biometric to save it.", icon = Or2Icons.Plus,
                         modifier = Modifier.testTag("pair-key-new").semantics(mergeDescendants = true) {}
-                            .selectable(newSelected, enabled = !review.working, role = Role.RadioButton) { edit(null, null, KeyChoice.New) },
+                            .selectable(newSelected, enabled = keysEnabled, role = Role.RadioButton) { edit(null, null, KeyChoice.New) },
                         trailing = if (newSelected) ({ Icon(Or2Icons.Check, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Accent) }) else null,
                     )
                 }

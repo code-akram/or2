@@ -25,8 +25,10 @@ fun pairErrorMessage(error: PairException, name: String, port: Int): String = wh
         "Couldn't reach $name on port $port. Pairing uses the same SSH port as connecting: the phone must reach it " +
             "(same network, ZeroTier or Tailscale, or a public address)."
     is PairException.HostKeyMismatch -> "The host presented a different key than the code. Nothing was sent."
+    // sshd refused the key derived from the code: the three causes, none of which the phone can tell apart.
     is PairException.BootstrapRefused ->
-        "The host didn't accept this phone's code. Check the code typed into or2-pair, or run it again."
+        "The host didn't accept the pairing key. The code typed into or2-pair may differ, or2-pair may have stopped, " +
+            "or sshd may not read ~/.ssh/authorized_keys. Run or2-pair again."
     is PairException.NotOr2Pair -> "Something other than or2-pair answered on the host. Pair manually."
     is PairException.Expired -> "or2-pair has stopped or timed out on the host. Run it again."
     is PairException.Gone -> "Another device already used this pairing."

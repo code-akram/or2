@@ -37,9 +37,11 @@ fn the_check_character_is_the_weighted_sum_mod_31() {
 }
 
 #[test]
-fn the_alphabet_is_crockford_base32() {
-    assert_eq!(ALPHABET.len(), 32);
-    for excluded in *b"ILOU" {
+fn the_alphabet_is_crockford_base32_without_z() {
+    // 31 symbols, one per value modulo the prime 31: no two characters share a check value.
+    assert_eq!(ALPHABET.len(), 31);
+    assert_eq!(ALPHABET.len(), CHECK_MODULUS as usize);
+    for excluded in *b"ILOUZ" {
         assert!(!ALPHABET.contains(&excluded));
     }
     let mut sorted = *ALPHABET;
@@ -48,39 +50,69 @@ fn the_alphabet_is_crockford_base32() {
 }
 
 #[test]
+fn z_is_not_a_code_character() {
+    // `Z` was value 31, the same as `0` modulo 31; codes never contain it and typing it is refused
+    // like any other character codes never use, wherever it stands.
+    for text in [
+        "ZZZZ-ZZZZ-ZZZ0",
+        "7KQ4-M2XD-9PTZ",
+        "Z000-0000-0000",
+        "7kq4-m2xd-9ptz",
+    ] {
+        assert_eq!(
+            PairCode::parse_typed(text).unwrap_err(),
+            PairCodeError::Character,
+            "{text:?}"
+        );
+    }
+    assert!(PairCodeError::Character.to_string().contains('Z'));
+}
+
+#[test]
 fn every_single_wrong_character_and_every_neighbour_swap_fails_the_check() {
-    let code = PairCode::parse_typed(CODE_TEXT).unwrap();
-    let plain: Vec<u8> = code.0.to_vec();
-    let typed = |values: &[u8]| -> String {
-        values
-            .iter()
-            .map(|v| char::from(ALPHABET[usize::from(*v)]))
-            .collect()
-    };
-    for position in 0..CODE_CHARS {
-        for value in 0..32u8 {
-            if value == plain[position] {
+    // With 31 symbols, one per value modulo 31, there is no exception: every substitution of one
+    // character by another code character, in any position (the check character included), and
+    // every swap of two different neighbours is a typo.
+    for text in [
+        CODE_TEXT,
+        "0000-0000-0000",
+        "YYYY-YYYY-YYYV",
+        "0123-4567-89A6",
+    ] {
+        let code = PairCode::parse_typed(text).unwrap();
+        let plain: Vec<u8> = code.0.to_vec();
+        let typed = |values: &[u8]| -> String {
+            values
+                .iter()
+                .map(|v| char::from(ALPHABET[usize::from(*v)]))
+                .collect()
+        };
+        for position in 0..CODE_CHARS {
+            for value in 0..ALPHABET.len() as u8 {
+                if value == plain[position] {
+                    continue;
+                }
+                let mut changed = plain.clone();
+                changed[position] = value;
+                assert_eq!(
+                    PairCode::parse_typed(&typed(&changed)).unwrap_err(),
+                    PairCodeError::Check,
+                    "{text}: position {position} value {value}"
+                );
+            }
+        }
+        for position in 0..CODE_CHARS - 1 {
+            if plain[position] == plain[position + 1] {
                 continue;
             }
-            let mut changed = plain.clone();
-            changed[position] = value;
-            assert!(
-                PairCode::parse_typed(&typed(&changed)).is_err(),
-                "position {position} value {value}"
+            let mut swapped = plain.clone();
+            swapped.swap(position, position + 1);
+            assert_eq!(
+                PairCode::parse_typed(&typed(&swapped)).unwrap_err(),
+                PairCodeError::Check,
+                "{text}: swap at {position}"
             );
         }
-    }
-    for position in 0..CODE_CHARS - 1 {
-        if plain[position] == plain[position + 1] {
-            continue;
-        }
-        let mut swapped = plain.clone();
-        swapped.swap(position, position + 1);
-        assert_eq!(
-            PairCode::parse_typed(&typed(&swapped)).unwrap_err(),
-            PairCodeError::Check,
-            "swap at {position}"
-        );
     }
 }
 
@@ -153,11 +185,12 @@ fn a_generated_code_is_well_formed_and_differs_each_time() {
 fn the_check_character_matches_the_vectors_the_host_crate_tests() {
     // The same five vectors as `or2-pair`'s `code` tests (contract: "The pairing code"). For
     // 7KQ4M2XD9PT: 7 + 2*19 + 3*23 + 4*4 + 5*20 + 6*2 + 7*29 + 8*13 + 9*9 + 10*22 + 11*26 = 1136
-    // = 36*31 + 20, and value 20 is `M`. `Z` (31) is 0 modulo 31, so the check is never `Z`.
+    // = 36*31 + 20, and value 20 is `M`. For YYYYYYYYYYY (`Y`, the last symbol, is 30):
+    // 30 * 66 = 1980 = 63*31 + 27, and value 27 is `V`.
     for (data, check) in [
         ("7KQ4M2XD9PT", 'M'),
         ("00000000000", '0'),
-        ("ZZZZZZZZZZZ", '0'),
+        ("YYYYYYYYYYY", 'V'),
         ("11111111111", '4'),
         ("0123456789A", '6'),
     ] {
@@ -171,29 +204,58 @@ fn the_check_character_matches_the_vectors_the_host_crate_tests() {
 }
 
 #[test]
-fn each_byte_value_maps_uniformly_onto_the_32_symbols() {
-    // 256 is a multiple of 32: masking the low five bits gives every symbol the same share.
-    let mut counts = [0usize; 32];
+fn each_byte_value_maps_uniformly_onto_the_31_symbols() {
+    // 248 = 8 * 31: the bytes below it give every symbol the same share (8 each); the 8 above
+    // are dropped, never folded onto some symbols.
+    let mut counts = [0usize; 31];
+    let mut dropped = 0;
     for byte in 0..=255u8 {
-        let code = PairCode::from_random(&[byte; DATA_CHARS]);
-        counts[usize::from(code.0[0])] += 1;
+        match random_value(byte) {
+            Some(value) => counts[usize::from(value)] += 1,
+            None => dropped += 1,
+        }
     }
     assert!(counts.iter().all(|count| *count == 8), "{counts:?}");
+    assert_eq!(dropped, 8);
+    assert_eq!(random_value(247), Some(30));
+    assert_eq!(random_value(248), None);
 }
 
 #[test]
-fn generated_characters_are_statistically_uniform() {
-    // 20 000 codes x 11 characters over 32 symbols: 6875 expected each, sigma about 82. A bound
-    // of 6 sigma (500) fails only for a broken generator.
-    let mut counts = [0usize; 32];
+fn dropped_bytes_are_replaced_by_more_random_bytes() {
+    // The first fill is all dropped bytes, the second alternates dropped and kept ones: the code
+    // is made from the kept bytes only, in order, after as many fills as it takes.
+    let mut fills = 0;
+    let code = PairCode::from_random(|pool| {
+        fills += 1;
+        for (index, byte) in pool.iter_mut().enumerate() {
+            *byte = match (fills, index % 2) {
+                (1, _) | (_, 0) => 248 + (index % 8) as u8,
+                // 31 + v is v modulo 31: the kept bytes are 31, 32, 33, …
+                _ => 31 + (index / 2) as u8,
+            };
+        }
+    });
+    assert_eq!(fills, 2);
+    assert_eq!(&code.data()[..], b"0123456789A");
+    assert_eq!(code.display(), "0123-4567-89A6");
+}
+
+#[test]
+fn generated_characters_are_statistically_uniform_and_never_z() {
+    // 20 000 codes x 11 characters over 31 symbols: about 7097 expected each, sigma about 83. A
+    // bound of 6 sigma (500) fails only for a broken generator.
+    let mut counts = [0usize; 31];
     for _ in 0..20_000 {
         let code = PairCode::generate();
+        assert!(!code.display().contains('Z'));
         for value in &code.0[..DATA_CHARS] {
             counts[usize::from(*value)] += 1;
         }
     }
+    let expected = 20_000 * DATA_CHARS / 31;
     for (symbol, count) in counts.iter().enumerate() {
-        assert!(count.abs_diff(6875) < 500, "symbol {symbol}: {count}");
+        assert!(count.abs_diff(expected) < 500, "symbol {symbol}: {count}");
     }
 }
 
