@@ -109,11 +109,10 @@ pub enum Dialect {
     /// notes, 2022-10-04: such times "may be suffixed with a "Z" character to cause them to be
     /// interpreted in UTC"), so sshd's time zone and this process's cannot disagree.
     ExpiryUtc,
-    /// OpenSSH 7.7 up to 9.0 (`expiry-time`: OpenSSH 7.7 release notes, 2018-04-02): local time
-    /// without a suffix, which sshd reads in its own time zone.
-    Expiry,
-    /// OpenSSH 7.2 up to 7.7 (`restrict`: OpenSSH 7.2 release notes, 2016-02-29), and 7.7 up to
-    /// 9.0 when `TZ` is set for this process (see [`dialect_for`]).
+    /// OpenSSH 7.2 up to 9.0 (`restrict`: OpenSSH 7.2 release notes, 2016-02-29), without
+    /// `expiry-time`. From 7.7 these know the option, but read it only in sshd's own local time
+    /// zone, which this process cannot know for sure; the run's lock on its state file and the
+    /// deadline are the boundary, and the expiry is only hygiene, so none is written.
     Restrict,
     /// Older OpenSSH.
     Legacy,
@@ -158,8 +157,6 @@ pub fn dialect(banner: Option<&str>) -> Result<Dialect, DialectError> {
     let (major, minor) = openssh_version(banner.ok_or(DialectError::NoBanner)?)?;
     Ok(if (major, minor) >= (9, 1) {
         Dialect::ExpiryUtc
-    } else if (major, minor) >= (7, 7) {
-        Dialect::Expiry
     } else if (major, minor) >= (7, 2) {
         Dialect::Restrict
     } else {
@@ -167,23 +164,8 @@ pub fn dialect(banner: Option<&str>) -> Result<Dialect, DialectError> {
     })
 }
 
-/// The options to write for that sshd from this process. `tz_set`: `TZ` is set in this
-/// process's environment. An sshd from 7.7 up to 9.0 reads `expiry-time` only as its own local
-/// time, which this process cannot know when its own time zone comes from `TZ` (sshd does not
-/// see it): the line is then written without an expiry ([`Dialect::Restrict`]); the run's lock on
-/// its state file and the deadline are the boundary anyway.
-pub fn dialect_for(banner: Option<&str>, tz_set: bool) -> Result<Dialect, DialectError> {
-    Ok(match dialect(banner)? {
-        Dialect::Expiry if tz_set => Dialect::Restrict,
-        other => other,
-    })
-}
-
-/// What to tell the person when the file cannot expire the key (an sshd older than 7.7).
-pub const OLD_SSHD_NOTE: &str = "This sshd is older than OpenSSH 7.7 and cannot expire the key in the file: or2-pair removes it when it ends, and the pairing command itself stops answering after 5 minutes.";
-
-/// The same for an sshd from 7.7 up to 9.0 while `TZ` is set (see [`dialect_for`]).
-pub const TZ_NOTE: &str = "TZ is set for or2-pair, and this sshd (before OpenSSH 9.1) reads the key's expiry-time in its own time zone, which may differ, so the key is written without an expiry in the file: or2-pair removes it when it ends, and the pairing command itself stops answering after 5 minutes.";
+/// What to tell the person when the key is written without an expiry (an sshd older than 9.1).
+pub const OLD_SSHD_NOTE: &str = "This sshd is older than OpenSSH 9.1, the first that reads an expiry time in UTC, so the key is written without an expiry in the file: or2-pair removes it when it ends, and the pairing command itself stops answering after 5 minutes.";
 
 // --- the command sshd runs, and who runs it ------------------------------------------------
 
@@ -242,24 +224,17 @@ pub fn check_login_shell(shell: Option<&str>) -> Result<(), ShellError> {
 }
 
 /// The `expiry-time` value for a run whose forced command stops at `deadline` (Unix seconds):
-/// the deadline plus [`EXPIRY_SLACK`], in UTC with `Z` for [`Dialect::ExpiryUtc`], else in this
-/// host's local time without a suffix.
-pub fn expiry(dialect: Dialect, deadline: i64) -> String {
+/// the deadline plus [`EXPIRY_SLACK`], in UTC with `Z` ([`Dialect::ExpiryUtc`] only).
+pub fn expiry(deadline: i64) -> String {
     let at = deadline + i64::try_from(EXPIRY_SLACK.as_secs()).unwrap_or(600);
-    match dialect {
-        Dialect::ExpiryUtc => format!("{}Z", DateTime::from_unix(at).compact_minutes()),
-        _ => DateTime::local_from_unix(at).compact_minutes(),
-    }
+    format!("{}Z", DateTime::from_unix(at).compact_minutes())
 }
 
 /// The one `authorized_keys` line of a run whose forced command stops at `deadline`.
 pub fn line(dialect: Dialect, exe: &str, id: &PairingId, key: &KeyLine, deadline: i64) -> String {
     let command = format!("command=\"{exe} enroll {id}\"");
     let options = match dialect {
-        Dialect::ExpiryUtc | Dialect::Expiry => format!(
-            "restrict,{command},expiry-time=\"{}\"",
-            expiry(dialect, deadline)
-        ),
+        Dialect::ExpiryUtc => format!("restrict,{command},expiry-time=\"{}\"", expiry(deadline)),
         Dialect::Restrict => format!("restrict,{command}"),
         Dialect::Legacy => format!(
             "{command},no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-user-rc"
@@ -383,47 +358,31 @@ mod tests {
             ("SSH-2.0-OpenSSH_10.5", Dialect::ExpiryUtc),
             ("SSH-2.0-OpenSSH_9.8p1", Dialect::ExpiryUtc),
             ("SSH-2.0-OpenSSH_9.1", Dialect::ExpiryUtc),
-            ("SSH-2.0-OpenSSH_9.0p1", Dialect::Expiry),
-            ("SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10", Dialect::Expiry),
-            ("SSH-2.0-OpenSSH_7.7", Dialect::Expiry),
-            ("SSH-2.0-OpenSSH_7.7p1", Dialect::Expiry),
+            // Fix check of the v2 fixes: 7.7 up to 9.0 read `expiry-time` only in sshd's own
+            // local time, which this process cannot know for sure (TZ set for one and not the
+            // other, a service with another zone): no expiry is written for them.
+            ("SSH-2.0-OpenSSH_9.0p1", Dialect::Restrict),
+            (
+                "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10",
+                Dialect::Restrict,
+            ),
+            ("SSH-2.0-OpenSSH_7.7", Dialect::Restrict),
+            ("SSH-2.0-OpenSSH_7.7p1", Dialect::Restrict),
             ("SSH-2.0-OpenSSH_7.6p1", Dialect::Restrict),
             ("SSH-2.0-OpenSSH_7.2", Dialect::Restrict),
             ("SSH-2.0-OpenSSH_7.1p2", Dialect::Legacy),
             ("SSH-2.0-OpenSSH_6.6.1p1", Dialect::Legacy),
         ] {
             assert_eq!(dialect(Some(banner)), Ok(expected), "{banner}");
-            // Without TZ the choice stands.
-            assert_eq!(dialect_for(Some(banner), false), Ok(expected), "{banner}");
         }
         assert_eq!(dialect(None), Err(DialectError::NoBanner));
         assert!(dialect(Some("SSH-2.0-dropbear_2022.83")).is_err());
     }
 
     #[test]
-    fn with_tz_set_a_local_time_expiry_is_not_written() {
-        // An sshd that reads expiry-time in its own local time cannot be given one by a process
-        // whose time zone comes from TZ; one that takes UTC can.
-        for (banner, expected) in [
-            ("SSH-2.0-OpenSSH_10.5", Dialect::ExpiryUtc),
-            ("SSH-2.0-OpenSSH_9.1", Dialect::ExpiryUtc),
-            ("SSH-2.0-OpenSSH_9.0p1", Dialect::Restrict),
-            ("SSH-2.0-OpenSSH_7.7", Dialect::Restrict),
-            ("SSH-2.0-OpenSSH_7.4", Dialect::Restrict),
-            ("SSH-2.0-OpenSSH_6.6", Dialect::Legacy),
-        ] {
-            assert_eq!(dialect_for(Some(banner), true), Ok(expected), "{banner}");
-        }
-    }
-
-    #[test]
-    fn the_expiry_is_utc_with_z_where_sshd_takes_it() {
+    fn the_expiry_is_utc_with_z() {
         let deadline = 1_782_867_661 - 600;
-        assert_eq!(expiry(Dialect::ExpiryUtc, deadline), "202607010101Z");
-        assert_eq!(
-            expiry(Dialect::Expiry, deadline),
-            DateTime::local_from_unix(1_782_867_661).compact_minutes()
-        );
+        assert_eq!(expiry(deadline), "202607010101Z");
     }
 
     #[test]
@@ -438,13 +397,6 @@ mod tests {
             line(Dialect::ExpiryUtc, exe, &id, &key, deadline),
             format!(
                 "restrict,command=\"{exe} enroll abcdefghijklm\",expiry-time=\"202607010101Z\" {tail}"
-            )
-        );
-        let local = DateTime::local_from_unix(1_782_867_661).compact_minutes();
-        assert_eq!(
-            line(Dialect::Expiry, exe, &id, &key, deadline),
-            format!(
-                "restrict,command=\"{exe} enroll abcdefghijklm\",expiry-time=\"{local}\" {tail}"
             )
         );
         assert_eq!(

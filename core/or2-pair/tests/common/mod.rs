@@ -228,8 +228,6 @@ pub struct Setup {
     pub install_keys: bool,
     pub platform: Platform,
     pub shell: Option<String>,
-    /// Whether `TZ` is set for the run.
-    pub tz_set: bool,
 }
 
 impl Default for Setup {
@@ -243,7 +241,6 @@ impl Default for Setup {
             install_keys: true,
             platform: Platform::Linux,
             shell: Some("/bin/bash".into()),
-            tz_set: false,
         }
     }
 }
@@ -289,7 +286,6 @@ pub fn pair<R>(
                 net: &net,
                 keyscan: &NoKeyscan,
                 shell: &FakeShell,
-                tz_set: setup.tz_set,
                 exe: setup.exe.clone(),
                 prompt: script,
                 can_ask: setup.can_ask,

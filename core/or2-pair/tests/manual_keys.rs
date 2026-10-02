@@ -34,7 +34,6 @@ fn manual(
         net: &net,
         keyscan: &NoKeyscan,
         shell: &FakeShell,
-        tz_set: false,
         exe: Ok(EXE.into()),
         prompt: &script,
         can_ask: true,

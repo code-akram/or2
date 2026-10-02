@@ -100,8 +100,6 @@ pub struct CheckInput<'a> {
     pub version: &'a str,
     /// Runs the login shell for the shell check.
     pub shell: &'a dyn ShellProbe,
-    /// Whether `TZ` is set in this process's environment (see `bootstrap::dialect_for`).
-    pub tz_set: bool,
 }
 
 /// Runs `<shell> -c <command>` and returns its standard output if it exits 0, or why not. The
@@ -315,17 +313,6 @@ fn sshd(input: &CheckInput<'_>, blocking: Level) -> Check {
                 Ok(Dialect::ExpiryUtc) => check(
                     Level::Ok,
                     format!("sshd is answering on port {port} ({what})"),
-                ),
-                Ok(Dialect::Expiry) if !input.tz_set => check(
-                    Level::Ok,
-                    format!("sshd is answering on port {port} ({what})"),
-                ),
-                Ok(Dialect::Expiry) => check(
-                    Level::Warn,
-                    format!(
-                        "sshd is answering on port {port} ({what}); {}",
-                        bootstrap::TZ_NOTE
-                    ),
                 ),
                 Ok(_) => check(
                     Level::Warn,
@@ -950,7 +937,6 @@ mod tests {
         pairing: bool,
         account_shell: Option<String>,
         shell_says: Result<&'static str, &'static str>,
-        tz_set: bool,
     }
 
     impl Setup {
@@ -965,7 +951,6 @@ mod tests {
                 pairing: true,
                 account_shell: Some("/bin/bash".into()),
                 shell_says: Ok("or2-pair test\n"),
-                tz_set: false,
             }
         }
 
@@ -985,7 +970,6 @@ mod tests {
                 stale: &[],
                 version: "test",
                 shell: &FakeShell(self.shell_says),
-                tz_set: self.tz_set,
             })
         }
 
@@ -1083,14 +1067,22 @@ mod tests {
         let dropbear = Setup::new(banner("SSH-2.0-dropbear_2022.83")).run();
         assert_eq!(dropbear[0].level, Level::Fail);
         assert!(dropbear[0].text.contains("not OpenSSH") && dropbear[0].text.contains("--manual"));
-        let old = Setup::new(banner("SSH-2.0-OpenSSH_7.4p1 Debian-10")).run();
-        assert_eq!(old[0].level, Level::Warn);
-        assert!(
-            old[0].text.contains("OpenSSH_7.4p1") && old[0].text.contains("cannot expire"),
-            "{}",
-            old[0].text
-        );
-        let current = Setup::new(banner("SSH-2.0-OpenSSH_7.7p1")).run();
+        // Below 9.1 the key is written without an expiry, and the note says so (from 7.7 up to
+        // 9.0 too: those read an expiry only in sshd's own time zone).
+        for (old, version) in [
+            ("SSH-2.0-OpenSSH_7.4p1 Debian-10", "OpenSSH_7.4p1"),
+            ("SSH-2.0-OpenSSH_8.9p1 Ubuntu-3", "OpenSSH_8.9p1"),
+            ("SSH-2.0-OpenSSH_9.0", "OpenSSH_9.0"),
+        ] {
+            let checks = Setup::new(banner(old)).run();
+            assert_eq!(checks[0].level, Level::Warn, "{old}");
+            assert!(
+                checks[0].text.contains(version) && checks[0].text.contains("without an expiry"),
+                "{}",
+                checks[0].text
+            );
+        }
+        let current = Setup::new(banner("SSH-2.0-OpenSSH_9.1p1")).run();
         assert_eq!(current[0].level, Level::Ok);
     }
 
@@ -1114,7 +1106,6 @@ mod tests {
             stale: &[],
             version: "test",
             shell: &FakeShell(Ok("or2-pair test")),
-            tz_set: false,
         });
         assert!(
             checks
@@ -1248,7 +1239,6 @@ mod tests {
             stale: &stale,
             version: "test",
             shell: &FakeShell(Ok("or2-pair test")),
-            tz_set: false,
         });
         assert!(
             checks
@@ -1552,20 +1542,6 @@ mod tests {
             let words: Vec<String> = criteria.split_whitespace().map(str::to_owned).collect();
             assert_eq!(applies(&words, user), expected, "{criteria}");
         }
-    }
-
-    #[test]
-    fn tz_with_an_sshd_that_reads_local_time_is_a_warning() {
-        let mut setup = Setup::new(banner("SSH-2.0-OpenSSH_8.9p1 Ubuntu-3"));
-        assert_eq!(setup.run()[0].level, Level::Ok);
-        setup.tz_set = true;
-        let checks = setup.run();
-        assert_eq!(checks[0].level, Level::Warn);
-        assert!(checks[0].text.contains("TZ is set"), "{}", checks[0].text);
-        // An sshd that takes UTC does not care.
-        let mut current = Setup::new(banner("SSH-2.0-OpenSSH_9.9"));
-        current.tz_set = true;
-        assert_eq!(current.run()[0].level, Level::Ok);
     }
 
     #[test]

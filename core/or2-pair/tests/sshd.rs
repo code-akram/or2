@@ -1081,44 +1081,6 @@ fn the_checks_read_enumerated_values_ignoring_case_as_sshd_does() {
 }
 
 #[test]
-fn sshd_honours_the_expiry_time_option_this_tool_writes() {
-    // The contract says `expiry-time` is OpenSSH 7.7 or newer and in local time: a key whose
-    // expiry has passed is refused, one that has not is accepted. (The success tests above cover
-    // the second half with the line the tool writes.)
-    if !sshd_ready() {
-        return;
-    }
-    let sshd = Sshd::start(Layout::Explicit, "", false);
-    let code = new_code();
-    let id = PairingId::parse("abcdefghijklm").unwrap();
-    let key = bootstrap::public_key(&code, &id);
-    let offer = Offer {
-        user: current_user(),
-        port: sshd.port,
-        address: "127.0.0.1".into(),
-        host_key: sshd.host_key.clone(),
-        id: id.clone(),
-    };
-    let rt = runtime();
-    for (expiry, accepted) in [("202001010000", false), ("209901010000", true)] {
-        fs::write(
-            sshd.keys(),
-            format!(
-                "restrict,command=\"/bin/echo hi\",expiry-time=\"{expiry}\" {} x\n",
-                key.openssh()
-            ),
-        )
-        .unwrap();
-        let result = rt.block_on(Phone::open(sshd.address(), &offer, &code));
-        match (accepted, result) {
-            (true, Ok(phone)) => rt.block_on(phone.close()),
-            (false, Err(PhoneError::BootstrapRefused)) => {}
-            (_, other) => panic!("expiry {expiry}: {:?}", other.err()),
-        }
-    }
-}
-
-#[test]
 fn a_host_whose_time_zone_differs_from_sshds_still_pairs() {
     // Review of the v2 integration: with sshd under TZ=UTC and the host under TZ=Etc/GMT+5, the
     // expiry written in the host's local time was read by sshd as UTC, five hours in the past,
@@ -1168,7 +1130,7 @@ fn sshd_reads_the_utc_expiry_this_tool_writes() {
     // One hour ago in UTC (still in the future in sshd's zone, were it read as local time),
     // and 20 minutes ahead.
     for (deadline, accepted) in [(now - 3_600 - 600, false), (now + 1_200 - 600, true)] {
-        let expiry = bootstrap::expiry(bootstrap::Dialect::ExpiryUtc, deadline);
+        let expiry = bootstrap::expiry(deadline);
         fs::write(
             sshd.keys(),
             format!(

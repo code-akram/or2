@@ -574,50 +574,28 @@ fn check_reports_leftovers_and_changes_nothing() {
 
 #[test]
 fn the_options_follow_the_sshd_version() {
-    // (banner, TZ set, expiry-time written, ends in Z, restrict, the note printed)
-    for (banner, tz_set, expiry, utc, restrict, note) in [
-        ("SSH-2.0-OpenSSH_9.9", false, true, true, true, None),
-        ("SSH-2.0-OpenSSH_9.9", true, true, true, true, None),
-        (
-            "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3",
-            false,
-            true,
-            false,
-            true,
-            None,
-        ),
-        // Review of the v2 integration: with TZ set, sshd read the local time in another zone
-        // and the key had expired before the phone used it.
-        (
-            "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3",
-            true,
-            false,
-            false,
-            true,
-            Some("TZ is set"),
-        ),
-        (
-            "SSH-2.0-OpenSSH_7.4p1 Debian-10",
-            false,
-            false,
-            false,
-            true,
-            Some("cannot expire the key in the file"),
-        ),
+    // (banner, expiry-time written, ends in Z, restrict, the note printed)
+    const NOTE: Option<&str> = Some("written without an expiry in the file");
+    for (banner, expiry, utc, restrict, note) in [
+        ("SSH-2.0-OpenSSH_9.9", true, true, true, None),
+        ("SSH-2.0-OpenSSH_9.1", true, true, true, None),
+        // Review of the v2 integration: sshd read a local time in another zone and the key had
+        // expired before the phone used it. Fix check of the v2 fixes: no local time at all.
+        ("SSH-2.0-OpenSSH_9.0p1", false, false, true, NOTE),
+        ("SSH-2.0-OpenSSH_8.9p1 Ubuntu-3", false, false, true, NOTE),
+        ("SSH-2.0-OpenSSH_7.4p1 Debian-10", false, false, true, NOTE),
         (
             "SSH-2.0-OpenSSH_6.6.1p1 Ubuntu-2",
             false,
             false,
             false,
-            false,
-            Some("cannot expire the key in the file"),
+            NOTE,
         ),
     ] {
         let world = World::new();
         let setup = Setup {
             banner: Ok(banner.into()),
             window: Duration::from_secs(1),
-            tz_set,
             ..Setup::default()
         };
         let result = pair(

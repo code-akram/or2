@@ -80,9 +80,6 @@ pub struct Env<'a> {
     pub keyscan: &'a dyn Keyscan,
     /// Runs the login shell for the checks ([`checks::SystemShell`]).
     pub shell: &'a dyn checks::ShellProbe,
-    /// Whether `TZ` is set in this process's environment (an sshd from OpenSSH 7.7 up to 9.0
-    /// then gets no `expiry-time`: see `bootstrap::dialect_for`).
-    pub tz_set: bool,
     /// This program's canonical path (what sshd is told to run), or why it is unknown.
     pub exe: Result<PathBuf, String>,
     /// Where the code is typed.
@@ -249,7 +246,6 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
         stale: &stale,
         version: env.version,
         shell: env.shell,
-        tz_set: env.tz_set,
     });
     for check in &found {
         writeln!(out, "  {}  {}", check.level.tag(), check.text)?;
@@ -328,7 +324,7 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
     #[cfg(unix)]
     {
         // The checks already refused everything that fails here; these are the values.
-        let dialect = bootstrap::dialect_for(probe.as_ref().ok().map(String::as_str), env.tz_set)
+        let dialect = bootstrap::dialect(probe.as_ref().ok().map(String::as_str))
             .map_err(|_| RunError::Blocked)?;
         let exe = env
             .exe
