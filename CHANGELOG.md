@@ -20,6 +20,9 @@ Each release's notes are in [docs/releases/](docs/releases/).
 - Gestures: swipe for the next or previous tmux window or herdr tab, two fingers for panes and sessions.
 - Hardware keyboard shortcuts: Ctrl+Shift+1..9, W, V, C, Enter and / (a shortcuts sheet).
 - A Settings screen on Home.
+- A redesigned terminal header: the minimise and sessions discs as a pair, the title centred (host, then the
+  target), a slim drag handle, and the transport pill, which also shows how long a quiet mosh link has been
+  silent. Status lines under it are one compact strip that never covers the terminal.
 - `or2-pair` on macOS detects the application firewall blocking `mosh-server` and prints the commands that
   allow it.
 
@@ -31,6 +34,8 @@ Each release's notes are in [docs/releases/](docs/releases/).
   per connection (the 24-hour memory is gone), and a host whose UDP is blocked says so once on its screen.
 - The Android native library build now always remaps the repository and cargo home paths, and fails if a
   build-machine path is left in `libor2_ffi.so` (v0.1.0 applied the remap by hand).
+- The arrow pad floats over the terminal with no panel behind it.
+- The session picker's "Skip" is now "Shell" (it opens a plain login shell).
 - FFI API 14.
 
 ### Fixed
