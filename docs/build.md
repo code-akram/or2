@@ -84,15 +84,27 @@ but is not linked into the app library, so it never appears in the licence data.
 with the rest of the workspace.
 
 `core/or2-pair` (the Easy pair host CLI, a workspace crate that does not depend on `or2-core` at run
-time) has unit tests next to the code and `tests/e2e.rs`: the whole CLI flow in a thread against the
-`or2-core` client over loopback, in a temporary home and a temporary `/etc/ssh` with made-up interfaces
-(nothing of the user's `~/.ssh`, sshd, tmux or herdr is read; its sshd probe asks a port nobody listens on).
-The confirmation is a test double (`Auto`) that only exists in the tests; the shipped binary has no such
-flag. An independent QR decoder (`rqrr`, dev-only) reads the drawn code back. `cargo build -p or2-pair
---release` builds the tool for the host (`target/release/or2-pair`); `cargo install --path core/or2-pair
---locked` installs it, and `packaging/homebrew/or2-pair.rb` builds it from source for Homebrew. The
-`or2-pair-testhost` binary (feature `test-support`, so never part of an install) is the same flow with an
-automatic yes, for the Kotlin end-to-end test below.
+time) has unit tests next to the code and four integration suites. `tests/flow.rs`: the whole CLI flow in
+a thread, in a temporary home and a temporary `/etc/ssh` with made-up interfaces, a scripted terminal and a
+pretend sshd banner (nothing of the user's `~/.ssh`, sshd, tmux or herdr is read), the phone played by a
+direct call of the forced command's code. `tests/cli.rs`: the built binary (usage, the removed `--bind` and
+`--pair-port`, `enroll`, and the cleanup on SIGINT, SIGTERM, SIGHUP and the timeout). `tests/manual_keys.rs`:
+the no-key-installation (Windows) behaviour. `tests/sshd.rs`: the end to end suite against a **disposable
+`sshd`** (its own host key, config and `authorized_keys`, a loopback port, run as the current user): the built
+`or2-pair-testhost` pairs with a test-only russh phone (derives the bootstrap key, pins the host key,
+authenticates, runs the exchange through the forced command, then logs in with the key it handed over), plus
+a different code, a run that ended, a host key mismatch, a second phone (`gone`), rc-file noise, a
+`ForceCommand`, and `expiry-time`. Like the other sshd tests it skips (printing `SKIP`) without
+`/usr/bin/sshd` and `ssh-keygen`, unless `OR2_REQUIRE_SSHD` is set, which fails instead; set it in the full
+gate (`cargo test -p or2-pair --all-features`). The code is typed through a `CodePrompt` the tests
+script; the shipped binary reads a terminal only. An independent QR decoder (`rqrr`, dev-only) reads the
+drawn code back. `cargo build -p or2-pair --release` builds the tool for the host
+(`target/release/or2-pair`); `cargo install --path core/or2-pair --locked` installs it, and
+`packaging/homebrew/or2-pair.rb` builds it from source for Homebrew. The `or2-pair-testhost` binary (feature
+`test-support`, so never part of an install) reads the code from standard input, for the tests above and the
+Kotlin end-to-end test below. `cargo clippy -p or2-pair --lib --bins --all-features --target
+x86_64-pc-windows-gnu` cross-checks the non-Unix build (the dev-dependency `russh` needs a C toolchain for
+that target, so the tests are not cross-checked).
 
 Rust integration tests (`core/or2-core/tests/`): `host.rs` runs host connections against a
 disposable loopback `sshd` (trust, address racing, probe, exec caps and timeout, streamlocal (missing socket, forbidden
@@ -372,11 +384,12 @@ resize and remount snapshots; `TerminalVisualDeviceTest` captures renderer fixtu
 frame timings.
 
 Manual phone checks still required:
-- Easy pair: run `or2-pair` on a host, Add host, Easy pair with QR; the camera permission dialog appears
-  once, the preview reads the QR off the monitor (light and dark terminals), a pasted code works, a denied
-  camera leaves the paste field; the review shows the host key fingerprint the host printed; Pair and add host
-  shows "Confirm on the host" with the phone key's fingerprint; answering `y` saves the host and connects with
-  no first-use prompt; `n` leaves nothing saved; `--no-listen` shows the key line to install.
+- Easy pair: Add host, Easy pair shows the code `K`; run `or2-pair` on a host and type it; the camera permission
+  dialog appears once, the preview reads the QR off the monitor (light and dark terminals), a pasted code
+  works, a denied camera leaves the paste field; the review shows the host key fingerprint the host printed;
+  Pair saves the host and connects with no first-use prompt, and `or2-pair` prints the pairing; a mistyped code
+  on the host is asked again; Ctrl-C on the host removes its temporary key (the phone then says the host
+  stopped); `--manual` shows the key line to install. Over a host's public address with only port 22 open.
 - Upgrade: install the M1 build, add a key and a host, trust its key, then install the M2 build
   over it. The host, key and trusted key must all survive (the key must still unlock), and the
   host must reconnect without a new host-key prompt.

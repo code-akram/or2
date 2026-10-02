@@ -1,45 +1,64 @@
 //! `or2-pair`: pair a phone with this host in one command and one QR scan.
 //!
 //! A host-side tool, deliberately separate from `or2-core` (which carries the app's SSH, mosh
-//! and terminal stack and needs none of it here). See `docs/contracts.md`, "Easy pair", and
-//! `docs/pairing.md`.
+//! and terminal stack and needs none of it here). Pairing runs over the host's own sshd: the
+//! person types the code `K` shown on the phone, `or2-pair` adds a temporary key derived from it
+//! to `~/.ssh/authorized_keys`, prints a QR with nothing secret in it, and the phone logs in with
+//! the temporary key and hands over its own public key. See `docs/contracts.md`, "Easy pair",
+//! and `docs/pairing.md`.
 //!
-//! - [`checks`]: report sshd, `authorized_keys`, tmux/herdr/mosh-server and firewall hints,
+//! - [`checks`]: report sshd (and its version), `authorized_keys`, `sshd_config`, the login shell
+//!   and the program's path, tmux/herdr/mosh-server and firewall hints,
 //! - [`addresses`], [`hostkey`]: what the phone needs to reach and recognise this host,
-//! - [`payload`], [`qr`]: the pairing code and its terminal QR,
-//! - [`exchange`], [`authorized_keys`], [`confirm`]: the one-shot listener, the on-host
-//!   confirmation and the append,
-//! - [`net`]: every socket, behind a small trait,
+//! - [`payload`], [`qr`]: the pairing code (QR text) and its terminal drawing,
+//! - [`code`], [`bootstrap`], [`prompt`]: the code `K`, the key and `authorized_keys` line derived
+//!   from it, and where it is typed,
+//! - [`authorized_keys`], [`state`], [`safefs`]: the checked-handle file access (Unix),
+//! - [`pairing`], [`exchange`], [`signals`]: the live run and the forced command `or2-pair enroll`
+//!   (Unix),
+//! - [`net`]: the one socket, behind a small trait,
 //! - [`run`]: the whole flow, with its environment injected.
 
 pub mod account;
 pub mod addresses;
 pub mod args;
 pub mod authorized_keys;
+pub mod bootstrap;
 pub mod checks;
-pub mod confirm;
+pub mod code;
 pub mod date;
+#[cfg(unix)]
 pub mod exchange;
 pub mod hostkey;
 pub mod keyline;
 pub mod net;
+#[cfg(unix)]
+pub mod pairing;
 pub mod payload;
+pub mod prompt;
 pub mod qr;
 pub mod run;
+#[cfg(unix)]
+pub mod safefs;
+#[cfg(unix)]
+pub mod signals;
+#[cfg(unix)]
+pub mod state;
 
 use std::ffi::OsString;
-use std::io::IsTerminal;
+use std::process::ExitCode;
 
 use crate::account::{Account, AccountError};
 use crate::addresses::Iface;
 use crate::checks::Platform;
-use crate::confirm::StdinConfirm;
 use crate::date::DateTime;
 use crate::hostkey::SystemKeyscan;
 use crate::net::StdNet;
-use crate::run::{Env, Exit, RunError};
+use crate::prompt::Stdin;
+use crate::run::{Env, Exit, OsSignals, RunError};
 
-/// The operating system's interface addresses (IPv4 only is used downstream).
+/// The operating system's interface addresses (IPv4 and IPv6; the classification is in
+/// [`addresses`]).
 pub fn system_interfaces() -> Vec<Iface> {
     if_addrs::get_if_addrs()
         .unwrap_or_default()
@@ -51,19 +70,33 @@ pub fn system_interfaces() -> Vec<Iface> {
         .collect()
 }
 
+/// What a `test-support` build (never the installed binary) reads from the environment so that
+/// the tests of the built binary can point it at throwaway files: `OR2_PAIR_TEST_HOME` and
+/// `OR2_PAIR_TEST_USER` (the account), `OR2_PAIR_TEST_AUTHORIZED_KEYS` (a key file elsewhere than
+/// `<home>/.ssh/authorized_keys`: a disposable sshd's `AuthorizedKeysFile`),
+/// `OR2_PAIR_TEST_ETC_SSH` (where the host key and `sshd_config` are read) and
+/// `OR2_PAIR_TEST_WINDOW_SECS` (the pairing window).
+#[cfg(feature = "test-support")]
+fn test_var(name: &str) -> Option<OsString> {
+    std::env::var_os(name).filter(|value| !value.is_empty())
+}
+
 /// Who this process pairs for: the effective user, from the account database (Unix). A build
-/// with the `test-support` feature (never the installed binary) lets the tests of the built
-/// binary point it at a throwaway account with `OR2_PAIR_TEST_USER` and `OR2_PAIR_TEST_HOME`.
+/// with the `test-support` feature lets the tests point it at a throwaway account.
 ///
 /// Elsewhere there is no account lookup (no key is installed there): the login is the one given
 /// with `--user`, and nothing else about the account is guessed.
 fn resolve_account(options: &args::Options) -> Result<Account, AccountError> {
     #[cfg(feature = "test-support")]
     if let (Some(user), Some(home)) = (
-        std::env::var_os("OR2_PAIR_TEST_USER"),
-        std::env::var_os("OR2_PAIR_TEST_HOME"),
+        test_var("OR2_PAIR_TEST_USER"),
+        test_var("OR2_PAIR_TEST_HOME"),
     ) {
-        return Ok(Account::new(user.to_string_lossy(), home));
+        let account = Account::new(user.to_string_lossy(), home);
+        return Ok(match test_var("OR2_PAIR_TEST_AUTHORIZED_KEYS") {
+            Some(file) => account.with_keys_file(file),
+            None => account,
+        });
     }
     #[cfg(unix)]
     {
@@ -85,11 +118,13 @@ fn resolve_account(options: &args::Options) -> Result<Account, AccountError> {
 }
 
 /// Runs the tool for real: this process's environment, the system's sockets, the terminal.
-pub fn run_main(options: &args::Options) -> Result<Exit, RunError> {
+/// `code_from_stdin` (the `test-support` host only) takes the code from a pipe instead of
+/// insisting on a terminal.
+pub fn run_main(options: &args::Options, code_from_stdin: bool) -> Result<Exit, RunError> {
     let account = resolve_account(options)?;
     let path: Option<OsString> = std::env::var_os("PATH");
     let hostname = gethostname::gethostname().to_string_lossy().into_owned();
-    let color = std::io::stdout().is_terminal()
+    let color = std::io::IsTerminal::is_terminal(&std::io::stdout())
         && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
         && std::env::var("TERM").map_or(true, |term| term != "dumb");
     let random = |buf: &mut [u8]| {
@@ -97,24 +132,107 @@ pub fn run_main(options: &args::Options) -> Result<Exit, RunError> {
         rand::rng().fill_bytes(buf);
     };
     let now = DateTime::now;
+    #[allow(unused_mut)]
+    let mut etc_ssh = hostkey::default_etc_ssh();
+    #[allow(unused_mut)]
+    let mut window = bootstrap::WINDOW;
+    #[cfg(feature = "test-support")]
+    {
+        if let Some(dir) = test_var("OR2_PAIR_TEST_ETC_SSH") {
+            etc_ssh = dir.into();
+        }
+        if let Some(seconds) = test_var("OR2_PAIR_TEST_WINDOW_SECS")
+            .and_then(|value| value.to_str().and_then(|text| text.parse::<u64>().ok()))
+        {
+            window = std::time::Duration::from_secs(seconds);
+        }
+    }
+    let exe = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .map_err(|error| error.to_string());
     let env = Env {
         version: env!("CARGO_PKG_VERSION"),
         program_dirs: checks::program_dirs(path.as_deref(), &account.home),
         account,
         hostname: Some(hostname),
-        etc_ssh: hostkey::default_etc_ssh(),
+        etc_ssh,
         interfaces: system_interfaces(),
         platform: Platform::current(),
         net: &StdNet,
         keyscan: &SystemKeyscan,
-        confirm: &StdinConfirm,
-        can_ask: StdinConfirm::available(),
+        exe,
+        prompt: &Stdin,
+        can_ask: code_from_stdin || Stdin::available(),
         color,
         random: &random,
         now: &now,
-        window: exchange::WINDOW,
+        signals: &OsSignals,
+        window,
+        poll: run::POLL,
         on_ready: None,
         install_keys: cfg!(unix),
     };
     run::run(options, &env, &mut std::io::stdout().lock())
+}
+
+/// The forced command: `or2-pair enroll <id>`, with the phone's exec channel as standard input
+/// and output. Exit 0 when the phone's key was installed, 1 otherwise.
+#[cfg(unix)]
+pub fn enroll_main(id: &bootstrap::PairingId) -> ExitCode {
+    let account = match resolve_account(&args::Options::default()) {
+        Ok(account) => account,
+        Err(error) => {
+            eprintln!("or2-pair: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let now = DateTime::now;
+    let env = exchange::Enroll {
+        account: &account,
+        now: &now,
+        request_timeout: exchange::REQUEST_TIMEOUT,
+    };
+    let outcome = exchange::enroll(
+        id,
+        &env,
+        Box::new(std::io::stdin()),
+        &mut std::io::stdout().lock(),
+    );
+    match outcome {
+        exchange::Outcome::Installed { .. } => ExitCode::SUCCESS,
+        _ => ExitCode::FAILURE,
+    }
+}
+
+/// The whole command line, for both binaries (`or2-pair` and the `test-support` host).
+pub fn cli(args: impl IntoIterator<Item = String>, code_from_stdin: bool) -> ExitCode {
+    let options = match args::parse(args) {
+        Ok(args::Parsed::Run(options)) => options,
+        Ok(args::Parsed::Help) => {
+            print!("{}", args::HELP);
+            return ExitCode::SUCCESS;
+        }
+        Ok(args::Parsed::Version) => {
+            println!("or2-pair {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        #[cfg(unix)]
+        Ok(args::Parsed::Enroll(id)) => return enroll_main(&id),
+        #[cfg(not(unix))]
+        Ok(args::Parsed::Enroll(_)) => {
+            eprintln!("or2-pair: enroll is not available on this platform");
+            return ExitCode::from(2);
+        }
+        Err(error) => {
+            eprintln!("or2-pair: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    match run_main(&options, code_from_stdin) {
+        Ok(exit) => ExitCode::from(u8::try_from(exit.code()).unwrap_or(1)),
+        Err(error) => {
+            eprintln!("\nor2-pair: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }

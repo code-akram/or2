@@ -1,27 +1,27 @@
 # Pair a host
 
-Easy pair adds a host to or2 with one command on the host and one scan on the phone. It does not
-weaken the trust model: the host key is trusted because you scanned it from your own screen, and
-the phone's SSH key reaches `authorized_keys` only after you confirm it at the host's keyboard.
-Prefer to type everything yourself? See [Set up a host manually](manual-setup.md).
+Easy pair adds a host to or2 with one command on the host and one scan on the phone. It needs exactly
+what SSH needs: the phone must be able to reach the host's SSH port, the one you connect to anyway. No
+other port is opened, so there is no firewall rule to add. Prefer to type everything yourself? See
+[Set up a host manually](manual-setup.md).
 
-Works for a Mac or a Linux box. On Windows (with OpenSSH Server) `or2-pair` prints the code but does
-**not** listen or change any file: you add the phone's key by hand (see
-[Windows](#windows-add-the-key-by-hand)). The phone and the host
-must reach each other: the same Wi-Fi or LAN, or a shared overlay network such as ZeroTier or
-Tailscale. If they cannot, see [Phone not on the same network](#the-phone-is-not-on-the-same-network).
+Works for a Mac or a Linux box. On Windows (with OpenSSH Server) `or2-pair` prints the code but changes no
+file: you add the phone's key by hand (see [Windows](#windows-add-the-key-by-hand)).
 
 ## 1. Install `or2-pair` on the host
 
-You need `sshd` running on the host (macOS: System Settings > General > Sharing > Remote Login;
-Linux: `sudo systemctl enable --now sshd`, or `ssh` on Debian and Ubuntu; Windows: the OpenSSH
-Server optional feature). `or2-pair` checks this for you and says what to do.
+You need `sshd` running on the host (macOS: System Settings > General > Sharing > Remote Login; Linux:
+`sudo systemctl enable --now sshd`, or `ssh` on Debian and Ubuntu; Windows: the OpenSSH Server optional
+feature). `or2-pair` checks this for you and says what to do.
 
 From a checkout of this repository, with a Rust toolchain:
 
 ```sh
 cargo install --path core/or2-pair --locked
 ```
+
+Install it in a path without spaces or shell characters (`~/.cargo/bin` and `~/.local/bin` are fine):
+sshd runs it through your login shell, and `or2-pair` refuses a path that shell could misread.
 
 On macOS with Homebrew, building from source. The formula is
 [`packaging/homebrew/or2-pair.rb`](../packaging/homebrew/or2-pair.rb); there is no public tap yet, so put it
@@ -33,56 +33,48 @@ cp packaging/homebrew/or2-pair.rb "$(brew --repository you/or2)/Formula/"
 brew install --HEAD you/or2/or2-pair
 ```
 
-Release binaries come later.
+## 2. Pair
 
-## 2. Run it
+On the phone: Home, **+** (Add host), **Easy pair**. The screen shows a code such as `7KQ4-M2XD-9PTM`.
+
+On the host, in a terminal:
 
 ```sh
 or2-pair
 ```
 
-It prints, in this order:
+It runs its checks (sshd and its version, `authorized_keys`, your `sshd_config`, your login shell), then asks
+`Code shown on your phone:`. Type the code (capitals or not, with or without the hyphens). A typo is caught and
+asked again; an empty line cancels with nothing changed. It then prints this host's name, user, host key and
+addresses (overlay networks such as ZeroTier or Tailscale first, then LAN, then public IPv4 and IPv6, then
+`<hostname>.local`), a **QR code** and the same pairing code as text, and waits for up to 5 minutes.
 
-1. **Checks.** sshd answering on its port, `~/.ssh/authorized_keys` writable (and whether `sshd`
-   would honour it), whether tmux, herdr and mosh-server are installed, and a firewall hint for
-   mosh's UDP ports 60000-61000. They only look; nothing is changed.
-2. **This host.** The name, your user, the SSH port, the host's public key fingerprint and every
-   address it found, in the order the phone will try them: overlay addresses (ZeroTier `zt*`,
-   Tailscale `tailscale*`, 100.64.0.0/10) first, then public addresses, then LAN addresses, then
-   `<hostname>.local`. Overlay and public addresses work from every network, so they come first;
-   mosh keeps to the address SSH reached.
-3. **A QR code** and, below it, the same pairing code as text.
-4. **A listener**, open for 120 seconds, on this host's LAN and overlay addresses only.
+On the phone, scan the QR (allow the camera when it asks; it is used only to read the code), or tap
+**Paste pairing code**. Check that the host key's fingerprint matches what `or2-pair` printed, pick an
+existing key or **New key**, and tap **Pair**. A second or two later the host is saved with its key already
+trusted and or2 connects: there is no first-use host-key prompt. `or2-pair` prints
+`Paired "<phone>" (…) as <user>`, which line it added to `authorized_keys` if you want to undo it, and exits.
 
-On the phone: Home, **+** (Add host), **Easy pair with QR**. Allow the camera when it asks (it is
-used only to read the code), and scan. Or tap **Paste pairing code** and paste the text. Then:
+### What happens, and what it writes
 
-1. Review the screen: the host's name and user, its addresses, the host key's fingerprint
-   (compare it with what `or2-pair` printed), and which key to authorize. Pick an existing key or
-   **New key**.
-2. Tap **Pair and add host**. The phone shows **Confirm on the host** and the key's fingerprint.
-3. At the host, `or2-pair` shows the phone's name and the key's fingerprint and asks
-   `Authorize this key for <user>? [y/N]`. Check the fingerprints match, then type `y`.
-4. The key is added to `~/.ssh/authorized_keys`, the host is saved on the phone with its host key
-   already trusted, and or2 connects. There is no first-use host-key prompt.
-
-If you answer `n`, or nothing within 120 seconds, nothing is changed. A different host key
-presented on a later connection is the usual warning, never accepted automatically.
-
-### What it writes
-
-`or2-pair` appends one line to the `~/.ssh/authorized_keys` of the account that runs it (the home
-comes from the system's account database, not `$HOME`, so `sudo or2-pair` pairs root, never the
-user who typed `sudo`; the prompt names the account and the file):
+`or2-pair` adds one **temporary key** to `~/.ssh/authorized_keys`, derived from the code you typed, allowed to
+do exactly one thing (run `or2-pair enroll`) and valid for 5 minutes. The phone derives the same key from the
+code it shows, logs in with it on your SSH port (having checked the host key from the QR) and hands over its own
+public key. The host replaces the temporary key with the phone's in one write:
 
 ```text
 no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA… or2-Pixel-8-2026-10-01
 ```
 
-It creates `~/.ssh` (mode 700) and the file (mode 600) if they are missing, saves the previous file
-as `authorized_keys.or2-backup-<date>-<time>` first, and does nothing at all if the key is already
-there. The comment is `or2-<phone name>-<date>` (the date is UTC), with the name reduced to
-letters, digits, `.`, `_` and `-`.
+The home comes from the system's account database, not `$HOME`, so `sudo or2-pair` pairs root, never the user who
+typed `sudo`. `~/.ssh` (mode 700) and the file (mode 600) are created if missing, the previous file is saved as
+`authorized_keys.or2-backup-<date>-<time>` once before the first change, and the state of a live run is kept in
+`~/.ssh/or2-pair/` while it runs. The label is `or2-<phone name>-<date>` (UTC), reduced to letters, digits, `.`, `_`
+and `-`.
+
+The temporary key is removed whenever the run ends: when the phone has paired, after 5 minutes, on Ctrl-C,
+SIGTERM or SIGHUP (closing the terminal), or if `or2-pair` crashes. If a removal ever fails it prints the exact line
+to delete, and the next `or2-pair` run removes it. Even before that, the key cannot be used after the run is over.
 
 ### Options
 
@@ -92,96 +84,92 @@ letters, digits, `.`, `_` and `-`.
 | `--user <user>` | Must be the account you are running as (the default). Keys are only authorized for the current user, in that user's own `~/.ssh`; to pair for another user, run `or2-pair` as that user |
 | `--ssh-port <port>` | sshd's port (default: `Port` in `/etc/ssh/sshd_config`, else 22) |
 | `--address <host>` | An extra address for the phone to try first, e.g. a DNS name that works from anywhere (repeatable) |
-| `--bind <ip>` | Listen only here (repeatable). Public addresses and `0.0.0.0` are allowed, with a warning |
-| `--pair-port <port>` | The listener's port (default: a random free one) |
-| `--no-listen` | Print the code without a listener; see below |
-| `--check` | Run the checks and stop |
+| `--manual` | Print the code without pairing: asks for no code and changes nothing (alias `--no-listen`); see below |
+| `--check` | Run the checks and stop; also reports leftover temporary keys |
 | `--ascii`, `--invert`, `--no-color` | How the QR is drawn |
 
-By default the listener binds only addresses that are not public: the private ranges 10/8,
-172.16/12 and 192.168/16, carrier-grade NAT 100.64/10, link-local, and anything on a ZeroTier or
-Tailscale interface. It never listens on a public interface unless you name one with `--bind`.
+`--bind` and `--pair-port` are gone: pairing uses the SSH port now.
 
 ## Troubleshooting
 
-### The phone is not on the same network
+### "Couldn't reach <host> on port <p>"
 
-The phone cannot reach the listener (the screen says it could not reach the host), or you do not
-want a listener at all. Use:
+Pairing needs the same thing connecting does: the phone must reach the SSH port. Put it on the same network, on a
+shared ZeroTier or Tailscale network, or use a public address (`--address workstation.example.org`, put first in the
+list). If you can't `ssh` to the host from the phone's network, pairing can't work either; use `--manual`.
+
+### `or2-pair` says "fail" and stops
+
+Each `fail` line says why automatic pairing can't work here: sshd isn't answering (it prints how to start it; on a
+non-standard port pass `--ssh-port`), the SSH server isn't OpenSSH, `authorized_keys` can't be written, the home
+directory or `~/.ssh` is writable by others (sshd would ignore the file: `chmod go-w ~ && chmod 700 ~/.ssh &&
+chmod 600 ~/.ssh/authorized_keys`), your login shell is `nologin` or `false`, or `or2-pair` is installed in a path
+that needs quoting. Fix it and run again, or use `--manual`.
+
+### "The host didn't accept this phone's code"
+
+The code typed on the host was different from the one on the phone (the phone's screen shows a new code after
+every attempt that reached the host), the run ended or timed out, or sshd ignores `~/.ssh/authorized_keys` (next
+section). Run `or2-pair` again and type the code the phone shows now.
+
+### sshd configurations that ignore `authorized_keys`
+
+`or2-pair` reads `/etc/ssh/sshd_config` and the files it includes, when it can, and warns and suggests `--manual`
+for: `PubkeyAuthentication no`, an `AuthorizedKeysFile` that doesn't include `.ssh/authorized_keys`, an
+`AuthorizedKeysCommand`, a `ForceCommand` (it would run instead of the pairing command; the phone says "something
+other than or2-pair answered"), and `AuthenticationMethods` that need more than a key. `Match` blocks are
+ignored (they apply to other users). If you can't read `sshd_config` (not root), these are only discovered when the
+phone is refused.
+
+### An old sshd
+
+Before OpenSSH 7.7 `authorized_keys` can't expire a key, so the temporary key is only removed when `or2-pair` ends
+(it says so); the pairing command still stops answering after 5 minutes. Before 7.2 the options are written the
+old, longer way. A server that is not OpenSSH (Dropbear, for instance) can't be paired automatically.
+
+### `--manual`: pair without the temporary key
 
 ```sh
-or2-pair --no-listen
+or2-pair --manual
 ```
 
-It prints the QR and the text without opening any port. Scan it as before: the phone saves the
-host, trusts its key, and then shows its **public key** with Copy and Share. Add that line to
-`~/.ssh/authorized_keys` on the host yourself (`echo '<the line>' >> ~/.ssh/authorized_keys`), then
-connect from Home. Put the overlay or public address first (`--address`) if the phone will be away
-from the LAN.
-
-### A firewall blocks the pairing port
-
-The listener uses a random port on your LAN address. If a host firewall drops it, either allow it
-for the minute it is open (`or2-pair --pair-port 52000`, then allow TCP 52000), or use
-`--no-listen`. mosh needs UDP 60000-61000 open for terminals that survive network changes; the
-checks print the command for ufw or firewalld, and on macOS you allow `mosh-server` in System
-Settings > Network > Firewall.
-
-### sshd is not answering
-
-`or2-pair` prints how to start it for your system. On a non-standard port, pass `--ssh-port`.
-
-### The key was added but the phone is refused
-
-`sshd` ignores `authorized_keys` when your home directory, `~/.ssh` or the file is writable by
-group or others (StrictModes). `or2-pair` warns in its checks and, rather than add a key sshd
-would ignore, refuses at the prompt (the phone says the host could not add the key) with the
-path, the mode and the fix: `chmod go-w ~ && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys`.
-Fix it and run `or2-pair` again.
+It prints the QR and the text with no pairing id, asks for no code and changes nothing. Scan it: the phone saves the
+host, trusts its key, and shows its **public key** with Copy and Share. Add that line to `~/.ssh/authorized_keys`
+yourself (`echo '<the line>' >> ~/.ssh/authorized_keys`), then connect from Home.
 
 ### Windows: add the key by hand
 
-`or2-pair` on Windows needs `--user <your login>` (it does not look the account up), prints the pairing
-code and then says what to do, because it has no safe way yet to check the key file's owner, links and
-permissions there. It never listens and never changes a file. Scan the code (or paste it), let the app show
-its public key, and add that one line yourself:
+`or2-pair` on Windows needs `--user <your login>` (it does not look the account up), prints the pairing code and then
+says what to do, because it has no safe way yet to check the key file's owner, links and permissions there. It never
+changes a file. Scan the code (or paste it), let the app show its public key, and add that one line yourself:
 
-- an ordinary account: `C:\Users\<login>\.ssh\authorized_keys` (create the `.ssh` folder and the file if
-  they are missing);
-- a member of the Administrators group: `C:\ProgramData\ssh\administrators_authorized_keys` instead,
-  because OpenSSH for Windows ignores the per-user file for administrators. Then restrict it:
+- an ordinary account: `C:\Users\<login>\.ssh\authorized_keys` (create the `.ssh` folder and the file if they are
+  missing);
+- a member of the Administrators group: `C:\ProgramData\ssh\administrators_authorized_keys` instead, because
+  OpenSSH for Windows ignores the per-user file for administrators. Then restrict it:
   `icacls "C:\ProgramData\ssh\administrators_authorized_keys" /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F"`.
-
-### "The host's answer could not be verified"
-
-The phone only believes an answer that proves the host knows the one-time code. It cannot prove
-that when the code is old (an earlier run, a screenshot, a restart of `or2-pair`), when it is for
-another host, or when something else answered. Run `or2-pair` again and scan the new code; the
-phone's code is not used up, and `or2-pair` stays open and counts the refused connection. An
-older `or2-pair` or app (pairing protocol 1 or 2; the current one is 3) is refused the same way: update both.
 
 ### The host has no ED25519 key
 
-`or2-pair` reads `/etc/ssh/ssh_host_ed25519_key.pub`, then asks `ssh-keyscan localhost`. Only if
-the host has no ED25519 key at all does it fall back to ECDSA and then RSA. A host with only an
-RSA 4096 key may produce a code that is large; addresses are dropped from the end to keep it within the phone's limits (at most eight addresses and
-1 KB), and `or2-pair` says so.
+`or2-pair` reads `/etc/ssh/ssh_host_ed25519_key.pub`, then asks `ssh-keyscan localhost`. Only if the host has no
+ED25519 key at all does it fall back to ECDSA and then RSA. A host with only an RSA 4096 key may produce a large
+code; addresses are dropped from the end to keep it within the phone's limits (at most eight addresses and 1 KB), and
+`or2-pair` says so.
+
+### mosh
+
+mosh needs UDP 60000-61000 open for terminals that survive network changes; the checks print the command for ufw or
+firewalld, and on macOS you allow `mosh-server` in System Settings > Network > Firewall. Pairing itself does not need it.
 
 ## How it stays safe
 
-- The QR carries the host's public key, so the phone trusts it from the scan; it also carries a
-  one-time password that never crosses the network. The phone proves it knows the password with
-  an HMAC over the host's fresh nonce and its key; the host checks that in constant time and
-  refuses a replay. The host's answer carries an HMAC of its own (over the nonce, the verdict and
-  the key's fingerprint), which the phone verifies before it saves the host or believes a refusal,
-  so someone on the network who does not know the code cannot make the phone trust a host that
-  never confirmed anything.
-- The listener serves one attempt, then closes (or after 120 seconds). An attempt is a request
-  whose proof verifies, which only the phone that scanned the code can make. A port scan, a stray
-  byte or a wrong code is refused and does not end your pairing (`or2-pair` counts them in its
-  final message); each connection has 8 seconds to say its piece, and an address that keeps being refused
-  is slowed down for a couple of seconds at a time (never banned; it never costs you the code).
-- The phone never writes to `authorized_keys` on its own: you confirm the key's fingerprint at the
-  host's keyboard. Without a terminal to ask in (standard input is not a TTY), `or2-pair` refuses
-  to listen.
+- The QR carries only public things (addresses, port, the host's public key, a random pairing id), so a screenshot
+  or a glance over your shoulder gives nobody anything. The one secret is the code on the phone, which you type on
+  the host: `or2-pair` never prints, stores or logs it. Typing it is your approval; there is no `y` to skip past.
+- The phone trusts the host key from the scan and accepts no other, so someone in the middle sees nothing it could
+  use. The temporary key can only start `or2-pair enroll`, which refuses unless the run is live and within its 5
+  minutes, and the first phone to use it wins.
+- The honest limit: the code is 55 bits. Someone who reads it off your phone and can reach the host's SSH port could
+  enrol a key within the window; after it, the temporary key is gone and the code is worthless. Guessing it online
+  goes through sshd's own authentication limits (`MaxAuthTries`, `MaxStartups`, fail2ban).
 - Details and the wire format are in [contracts: Easy pair](contracts.md#easy-pair-qr-onboarding).

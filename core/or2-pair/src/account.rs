@@ -23,6 +23,13 @@ pub struct Account {
     /// The numeric user id files in the home must belong to (0 where the platform has none; no
     /// file is written there).
     pub uid: u32,
+    /// The login shell from the account database: sshd runs a forced command through it. `None`
+    /// when unknown (tests, targets without an account database).
+    pub shell: Option<String>,
+    /// A key file elsewhere than `<home>/.ssh/authorized_keys`: only set by the `test-support`
+    /// build, so a disposable sshd's `AuthorizedKeysFile` can be the one written. The state
+    /// directory then lives beside it.
+    pub keys_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -39,7 +46,39 @@ impl Account {
             name: name.into(),
             home: home.into(),
             uid: effective_uid(),
+            shell: None,
+            keys_file: None,
         }
+    }
+
+    /// The same account with its key file somewhere else (see [`Account::keys_file`]).
+    pub fn with_keys_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.keys_file = Some(path.into());
+        self
+    }
+
+    /// `~/.ssh`: where `authorized_keys` and the `or2-pair` state directory live.
+    pub fn ssh_dir(&self) -> PathBuf {
+        match &self.keys_file {
+            Some(file) => file.parent().map(PathBuf::from).unwrap_or_default(),
+            None => self.home.join(".ssh"),
+        }
+    }
+
+    /// The file name of the key file inside [`Account::ssh_dir`].
+    pub fn keys_name(&self) -> String {
+        match &self.keys_file {
+            Some(file) => file
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            None => "authorized_keys".to_owned(),
+        }
+    }
+
+    /// `~/.ssh/authorized_keys`.
+    pub fn keys_path(&self) -> PathBuf {
+        self.ssh_dir().join(self.keys_name())
     }
 
     /// The account of the effective user, from the account database.
@@ -75,10 +114,12 @@ impl Account {
                 )));
             }
             // SAFETY: both pointers are non-null, NUL-terminated strings inside `buffer`.
-            let (name, dir) = unsafe {
+            let (name, dir, shell) = unsafe {
                 (
                     CStr::from_ptr(passwd.pw_name).to_bytes().to_vec(),
                     CStr::from_ptr(passwd.pw_dir).to_bytes().to_vec(),
+                    (!passwd.pw_shell.is_null())
+                        .then(|| CStr::from_ptr(passwd.pw_shell).to_bytes().to_vec()),
                 )
             };
             let name = String::from_utf8(name)
@@ -92,6 +133,11 @@ impl Account {
                 name,
                 home: PathBuf::from(std::ffi::OsString::from_vec(dir)),
                 uid,
+                // An empty shell field means /bin/sh in the account database.
+                shell: shell
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .filter(|shell| !shell.is_empty()),
+                keys_file: None,
             });
         }
     }
@@ -105,6 +151,8 @@ impl Account {
             name: name.into(),
             home: PathBuf::new(),
             uid: effective_uid(),
+            shell: None,
+            keys_file: None,
         }
     }
 

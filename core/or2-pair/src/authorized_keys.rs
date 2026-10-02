@@ -1,26 +1,39 @@
-//! `~/.ssh/authorized_keys`: where a confirmed key is appended, and the care taken doing it.
+//! `~/.ssh/authorized_keys`: the bootstrap entry of a run, its replacement by the phone's key,
+//! its removal and the sweep of old ones, and the care taken doing it.
 //!
-//! - the home directory is opened once and everything else is done relative to the directory
-//!   handles that were checked, never by path again: `~/.ssh` and the file are opened with
-//!   `O_NOFOLLOW` (a symbolic link is refused, not followed), their owner must be the account,
-//!   the file must be a regular file with no other hard link, and the read, the backup and the
-//!   append all go through those same handles, so a path swapped in between changes nothing,
-//! - **only on Unix.** There is no implementation for any other target: [`add`] always fails
+//! - everything goes through the checked handles of [`crate::safefs`] (no links followed, owner
+//!   and StrictModes checked, one regular file with one name, an exclusive `flock`),
+//! - **only on Unix.** There is no implementation for any other target: the changes always fail
 //!   there and [`writable`] always says no, so `or2-pair` never writes a key file where it cannot
 //!   check owners, links and permissions with handles (see `run::Env::install_keys`),
 //! - `~/.ssh` is created with mode 0700 and the file with 0600 when missing,
-//! - the file is backed up before it is touched (`authorized_keys.or2-backup-<stamp>`, mode
-//!   0600), once per run, only when it exists and is not empty,
-//! - a key already present (same algorithm and key data, whatever its options or comment) is
-//!   not added again, and then nothing is changed at all, not even a backup,
-//! - the line is `no-agent-forwarding,no-X11-forwarding <algorithm> <key> or2-<device>-<date>`,
-//!   rebuilt from the validated key, so nothing from the phone but the key itself is written,
-//! - a missing final newline is repaired first, so the new line never joins the last one.
+//! - the file is backed up before the first change of a run (`authorized_keys.or2-backup-<stamp>`,
+//!   mode 0600), once per run, only when it exists and is not empty,
+//! - every change is **one locked operation** that reads the file again, computes the whole new
+//!   contents and rewrites the file in place (`ftruncate` and write on the same descriptor, so the
+//!   inode, mode, owner and SELinux label stay): append the bootstrap line; remove it; replace
+//!   it with the phone's key; sweep old bootstrap entries,
+//! - entries are matched by their parsed key (key type and key data), whatever options precede
+//!   them and whatever comment follows, exactly as sshd reads the file; every other line is kept
+//!   byte for byte,
+//! - the phone's line is `no-agent-forwarding,no-X11-forwarding <algorithm> <key>
+//!   or2-<device>-<date>`, rebuilt from the validated key, so nothing from the phone but the key
+//!   itself is written,
+//! - a missing final newline is repaired first, so a new line never joins the last one.
 
+#[cfg(unix)]
+use std::cell::{Cell, RefCell};
+#[cfg(unix)]
 use std::io;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+use sha2::{Digest, Sha256};
+
 use crate::account::Account;
+#[cfg(unix)]
 use crate::date::DateTime;
 use crate::keyline::KeyLine;
 
@@ -29,25 +42,6 @@ pub const OPTIONS: &str = "no-agent-forwarding,no-X11-forwarding";
 
 /// An `authorized_keys` larger than this is not read into memory (nobody's real one is).
 pub const MAX_FILE_BYTES: u64 = 8 << 20;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Added {
-    /// The line was appended. `backup` is the copy of the previous file, if there was one.
-    Added {
-        created: bool,
-        backup: Option<PathBuf>,
-    },
-    /// The key was already authorized; the file is untouched.
-    AlreadyPresent,
-}
-
-pub fn ssh_dir(home: &Path) -> PathBuf {
-    home.join(".ssh")
-}
-
-pub fn path(home: &Path) -> PathBuf {
-    ssh_dir(home).join("authorized_keys")
-}
 
 /// A device label as it appears in the key's comment and on screen: ASCII letters, digits,
 /// `.`, `_` and `-` only (anything else becomes `-`, runs collapse), at most 32 characters.
@@ -70,9 +64,14 @@ pub fn sanitize_device(raw: &str) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
-/// The line that is appended.
+/// The phone's line.
 pub fn line_for(key: &KeyLine, device: &str, date: &str) -> String {
     format!("{OPTIONS} {} or2-{device}-{date}", key.openssh())
+}
+
+/// `SHA256:…` of key data, as `ssh-keygen -l` prints it.
+pub fn fingerprint_of(blob: &[u8]) -> String {
+    format!("SHA256:{}", STANDARD_NO_PAD.encode(Sha256::digest(blob)))
 }
 
 /// Whether some entry of `contents` authorizes `key`: its parsed key type and key data equal
@@ -82,8 +81,8 @@ pub fn line_for(key: &KeyLine, device: &str, date: &str) -> String {
 pub fn contains(contents: &[u8], key: &KeyLine) -> bool {
     contents
         .split(|byte| *byte == b'\n')
-        .filter_map(|line| entry_key(&String::from_utf8_lossy(line)))
-        .any(|(algorithm, blob)| algorithm == key.algorithm() && blob == key.blob())
+        .filter_map(|line| entry(&String::from_utf8_lossy(line)))
+        .any(|entry| entry.algorithm == key.algorithm() && entry.blob == key.blob())
 }
 
 /// Whether `token` names a public key type (sshd tells the key from the options this way: an
@@ -95,17 +94,24 @@ fn is_key_type(token: &str) -> bool {
         || token.ends_with("-cert-v01@openssh.com")
 }
 
-/// The key type and decoded key data of one `authorized_keys` line, or `None` for a blank line,
-/// a comment, or a line that is not a well-formed entry (an unterminated quote in the options,
-/// no key data, key data that is not base64).
+/// One well-formed `authorized_keys` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    pub algorithm: String,
+    /// The decoded key data.
+    pub blob: Vec<u8>,
+    /// The first word of the comment ("" when there is none).
+    pub comment: String,
+}
+
+/// The key type, decoded key data and comment of one `authorized_keys` line, or `None` for a
+/// blank line, a comment, or a line that is not a well-formed entry (an unterminated quote in
+/// the options, no key data, key data that is not base64).
 ///
 /// A line is `[options] keytype base64 [comment]`. The options are comma-separated and may
 /// contain whitespace inside double quotes (with `\"` for a quote inside quotes); the field ends
 /// at the first whitespace outside quotes.
-fn entry_key(line: &str) -> Option<(String, Vec<u8>)> {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-
+pub fn entry(line: &str) -> Option<Entry> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
         return None;
@@ -135,42 +141,84 @@ fn entry_key(line: &str) -> Option<(String, Vec<u8>)> {
     let mut fields = rest.split_whitespace();
     let algorithm = fields.next().filter(|token| is_key_type(token))?;
     let blob = STANDARD.decode(fields.next()?.as_bytes()).ok()?;
-    Some((algorithm.to_owned(), blob))
+    Some(Entry {
+        algorithm: algorithm.to_owned(),
+        blob,
+        comment: fields.next().unwrap_or_default().to_owned(),
+    })
 }
 
-fn refuse(message: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, message.into())
-}
-
-/// The line to append, with a newline first when the file does not end in one.
+/// `contents` without every line for which `drop` is true (lines are kept byte for byte), and how
+/// many lines were dropped.
 #[cfg(unix)]
-fn text_to_append(existing: &[u8], key: &KeyLine, device: &str, now: DateTime) -> String {
-    let mut text = String::new();
-    if existing.last().is_some_and(|last| *last != b'\n') {
-        text.push('\n');
+fn without(contents: &[u8], drop: impl Fn(&Entry) -> bool) -> (Vec<u8>, usize) {
+    let mut kept = Vec::with_capacity(contents.len());
+    let mut dropped = 0;
+    for line in contents.split_inclusive(|byte| *byte == b'\n') {
+        let parsed = entry(&String::from_utf8_lossy(line));
+        if parsed.as_ref().is_some_and(&drop) {
+            dropped += 1;
+        } else {
+            kept.extend_from_slice(line);
+        }
     }
-    text.push_str(&line_for(key, device, &now.date()));
-    text.push('\n');
-    text
+    (kept, dropped)
+}
+
+/// `contents` with `line` appended, after a newline when the file does not end in one.
+#[cfg(unix)]
+fn with_line(contents: &[u8], line: &str) -> Vec<u8> {
+    let mut out = contents.to_vec();
+    if out.last().is_some_and(|last| *last != b'\n') {
+        out.push(b'\n');
+    }
+    out.extend_from_slice(line.as_bytes());
+    out.push(b'\n');
+    out
+}
+
+/// The backup of a run: made before the first change, once, and only of a non-empty file.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct Backup {
+    now: DateTime,
+    used: Cell<bool>,
+    path: RefCell<Option<PathBuf>>,
 }
 
 #[cfg(unix)]
-fn backup_name(now: DateTime, attempt: u32) -> String {
-    let suffix = if attempt == 0 {
-        String::new()
-    } else {
-        format!("-{attempt}")
-    };
-    format!("authorized_keys.or2-backup-{}{suffix}", now.stamp())
+impl Backup {
+    pub fn new(now: DateTime) -> Self {
+        Self {
+            now,
+            used: Cell::new(false),
+            path: RefCell::new(None),
+        }
+    }
+
+    /// Where the previous file was saved, if it was.
+    pub fn path(&self) -> Option<PathBuf> {
+        self.path.borrow().clone()
+    }
 }
 
-/// Appends the key to the account's `authorized_keys`, as the module docs describe.
-pub fn add(account: &Account, key: &KeyLine, device: &str, now: DateTime) -> io::Result<Added> {
-    // An account whose home is unknown (`Account::login_only`) has nothing to write to.
-    if account.home.as_os_str().is_empty() {
-        return Err(refuse("the account has no known home directory"));
-    }
-    add_hooked(account, key, device, now, &|| {})
+/// What a change did besides its own result.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Modified<T> {
+    pub value: T,
+    /// The file did not exist and was created (mode 0600).
+    pub created: bool,
+}
+
+/// What [`replace`] came to.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Replaced {
+    /// The bootstrap entry is replaced; `added` is false when the phone's key was already there.
+    Done { added: bool },
+    /// There was no bootstrap entry any more (removed, or another phone took it first).
+    Gone,
 }
 
 /// Whether the key could be added right now, without adding it.
@@ -182,18 +230,11 @@ pub enum Writable {
 }
 
 #[cfg(unix)]
-use unix::add_hooked;
-#[cfg(unix)]
-pub use unix::writable;
+pub use unix::{append, modify, remove, replace, stale, sweep, writable};
 
 /// Why nothing is written on a target without the Unix implementation.
 #[cfg(not(unix))]
 pub const UNSUPPORTED: &str = "or2-pair does not write authorized_keys on this platform: it cannot check the file's owner, links and permissions safely here";
-
-#[cfg(not(unix))]
-fn add_hooked(_: &Account, _: &KeyLine, _: &str, _: DateTime, _: &dyn Fn()) -> io::Result<Added> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, UNSUPPORTED))
-}
 
 /// Never writable where there is no implementation: nothing is opened or looked at.
 #[cfg(not(unix))]
@@ -203,330 +244,21 @@ pub fn writable(_: &Account) -> Writable {
 
 #[cfg(unix)]
 mod unix {
-    use std::ffi::CString;
     use std::fs::File;
-    use std::io::{Read, Write};
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-    use std::os::unix::ffi::OsStrExt;
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::os::fd::{AsRawFd, OwnedFd};
 
     use super::*;
+    use crate::bootstrap::{COMMENT_PREFIX, PairingId};
+    use crate::safefs::*;
 
-    fn c_name(name: &str) -> CString {
-        CString::new(name).expect("a file name without NUL")
-    }
-
-    fn retry<T: PartialEq + Copy>(bad: T, mut call: impl FnMut() -> T) -> io::Result<T> {
-        loop {
-            let value = call();
-            if value != bad {
-                return Ok(value);
-            }
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
-            }
-        }
-    }
-
-    /// Opens the home directory by its path. The path itself may pass through links (the
-    /// account database says where the home is); everything below it never does.
-    fn open_home(home: &Path) -> io::Result<OwnedFd> {
-        let path = CString::new(home.as_os_str().as_bytes())
-            .map_err(|_| refuse("the home directory path contains a NUL byte"))?;
-        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
-        // SAFETY: `path` is a valid NUL-terminated string.
-        let fd = retry(-1, || unsafe { libc::open(path.as_ptr(), flags) })?;
-        // SAFETY: `fd` is a freshly opened descriptor that nothing else owns.
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-    }
-
-    fn openat(
-        dir: RawFd,
-        name: &str,
-        flags: libc::c_int,
-        mode: libc::mode_t,
-    ) -> io::Result<OwnedFd> {
-        let name = c_name(name);
-        let flags = flags | libc::O_CLOEXEC;
-        // SAFETY: `name` is a valid NUL-terminated string and `dir` an open directory.
-        let fd = retry(-1, || unsafe {
-            libc::openat(dir, name.as_ptr(), flags, libc::c_uint::from(mode))
-        })?;
-        // SAFETY: `fd` is a freshly opened descriptor that nothing else owns.
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-    }
-
-    fn fstat(fd: RawFd) -> io::Result<libc::stat> {
-        // SAFETY: `stat` is plain old data and `fstat` fills it.
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        retry(-1, || unsafe { libc::fstat(fd, &mut stat) })?;
-        Ok(stat)
-    }
-
-    /// What `name` is inside `dir`, without following it, when it is a symbolic link.
-    fn is_symlink_at(dir: RawFd, name: &str) -> bool {
-        let name = c_name(name);
-        // SAFETY: as above.
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        let done =
-            unsafe { libc::fstatat(dir, name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) };
-        done == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFLNK
-    }
-
-    fn mkdirat(dir: RawFd, name: &str, mode: libc::mode_t) -> io::Result<()> {
-        let name = c_name(name);
-        // SAFETY: as above.
-        retry(-1, || unsafe { libc::mkdirat(dir, name.as_ptr(), mode) }).map(|_| ())
-    }
-
-    fn fchmod(fd: RawFd, mode: libc::mode_t) -> io::Result<()> {
-        // SAFETY: `fd` is open.
-        retry(-1, || unsafe { libc::fchmod(fd, mode) }).map(|_| ())
-    }
-
-    fn lock(fd: RawFd) -> io::Result<()> {
-        // SAFETY: `fd` is open.
-        let done = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-        if done == 0 {
-            return Ok(());
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::WouldBlock {
-            Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "another program has authorized_keys locked; try again in a moment",
-            ))
+    fn backup_name(now: DateTime, attempt: u32) -> String {
+        let suffix = if attempt == 0 {
+            String::new()
         } else {
-            Err(error)
-        }
-    }
-
-    fn writable_by_us(dir: RawFd) -> bool {
-        // SAFETY: `dir` is open and "." is a valid string.
-        unsafe { libc::faccessat(dir, c".".as_ptr(), libc::W_OK, 0) == 0 }
-    }
-
-    /// Opens `name` below `dir` without following links; a refusal says what was in the way.
-    fn open_nofollow(
-        dir: RawFd,
-        name: &str,
-        full: &Path,
-        flags: libc::c_int,
-        mode: libc::mode_t,
-    ) -> io::Result<OwnedFd> {
-        openat(dir, name, flags | libc::O_NOFOLLOW, mode).map_err(|error| {
-            if is_symlink_at(dir, name) {
-                refuse(format!(
-                    "{} is a symbolic link; or2-pair will not follow it (replace it with a real {} and run again)",
-                    full.display(),
-                    if flags & libc::O_DIRECTORY != 0 { "directory" } else { "file" }
-                ))
-            } else if error.raw_os_error() == Some(libc::ENOTDIR) && flags & libc::O_DIRECTORY != 0 {
-                refuse(format!("{} is not a directory", full.display()))
-            } else {
-                error
-            }
-        })
-    }
-
-    /// Opens an existing or new *file* below `dir` for `check_file` to judge: never following a
-    /// link and never blocking on what it finds. A FIFO opened for writing would block until a
-    /// reader turned up (and a device or socket can fail oddly), so the open is non-blocking, the
-    /// descriptor is `fstat`ed, and anything that is not a regular file is refused *before* the
-    /// non-blocking flag is cleared and the handle used. Only the verified descriptor is kept.
-    fn open_file(
-        dir: RawFd,
-        name: &str,
-        full: &Path,
-        flags: libc::c_int,
-        mode: libc::mode_t,
-    ) -> io::Result<OwnedFd> {
-        let not_regular = || refuse(format!("{} is not a regular file", full.display()));
-        let fd = match open_nofollow(dir, name, full, flags | libc::O_NONBLOCK, mode) {
-            Ok(fd) => fd,
-            // Opening a FIFO for writing with no reader, or a socket or device, fails with ENXIO:
-            // say what it is rather than the errno.
-            Err(error) if error.raw_os_error() == Some(libc::ENXIO) => return Err(not_regular()),
-            Err(error) => return Err(error),
+            format!("-{attempt}")
         };
-        if kind(&fstat(fd.as_raw_fd())?) != libc::S_IFREG {
-            return Err(not_regular());
-        }
-        // A regular file: ordinary blocking I/O from here.
-        // SAFETY: `fd` is open.
-        let status = retry(-1, || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) })?;
-        retry(-1, || unsafe {
-            libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, status & !libc::O_NONBLOCK)
-        })?;
-        Ok(fd)
-    }
-
-    fn kind(stat: &libc::stat) -> libc::mode_t {
-        stat.st_mode & libc::S_IFMT
-    }
-
-    /// What sshd's StrictModes refuses: the home directory, `~/.ssh` and `authorized_keys`
-    /// writable by group or others. Appending to such a file would "work" and the phone would
-    /// still be turned away, so it is refused here, with the command that fixes it. Nothing is
-    /// changed behind the person's back.
-    fn check_strict_modes(stat: &libc::stat, path: &Path, what: &str) -> io::Result<()> {
-        // `st_mode` is 16 bits wide on macOS and 32 on Linux.
-        #[allow(clippy::useless_conversion)]
-        let mode = u32::from(stat.st_mode) & 0o7777;
-        if mode & 0o022 != 0 {
-            return Err(refuse(format!(
-                "{} ({what}) is writable by other users (mode {mode:04o}): sshd (StrictModes) ignores authorized_keys when it, ~/.ssh or the home directory can be written by group or others, so a key added now would still be refused. Run `chmod go-w {}` and pair again",
-                path.display(),
-                path.display()
-            )));
-        }
-        Ok(())
-    }
-
-    /// The home directory must be a directory of the account (or root's, as sshd allows).
-    fn check_home(stat: &libc::stat, uid: u32, home: &Path) -> io::Result<()> {
-        if stat.st_uid != uid && stat.st_uid != 0 {
-            return Err(refuse(format!(
-                "{} belongs to another user (user id {}); or2-pair only changes the home directory of the account it runs as",
-                home.display(),
-                stat.st_uid
-            )));
-        }
-        check_strict_modes(stat, home, "the home directory")
-    }
-
-    fn check_ssh_dir(stat: &libc::stat, uid: u32, dir: &Path) -> io::Result<()> {
-        if stat.st_uid != uid {
-            return Err(refuse(format!(
-                "{} belongs to another user (user id {}), not to the account or2-pair runs as; sshd would not use it",
-                dir.display(),
-                stat.st_uid
-            )));
-        }
-        check_strict_modes(stat, dir, "the SSH directory")
-    }
-
-    fn check_file(stat: &libc::stat, uid: u32, file: &Path) -> io::Result<()> {
-        if kind(stat) != libc::S_IFREG {
-            return Err(refuse(format!("{} is not a regular file", file.display())));
-        }
-        if stat.st_uid != uid {
-            return Err(refuse(format!(
-                "{} belongs to another user (user id {}), not to the account or2-pair runs as",
-                file.display(),
-                stat.st_uid
-            )));
-        }
-        check_strict_modes(stat, file, "the key file")?;
-        if stat.st_nlink > 1 {
-            return Err(refuse(format!(
-                "{} has another hard link ({} names for one file); appending would change the other name too. Replace it with a plain copy and run again",
-                file.display(),
-                stat.st_nlink
-            )));
-        }
-        Ok(())
-    }
-
-    /// Opens `~/.ssh`, creating it (mode 0700) when `create` and it is missing.
-    fn open_ssh(
-        home: &OwnedFd,
-        dir_path: &Path,
-        uid: u32,
-        create: bool,
-    ) -> io::Result<Option<OwnedFd>> {
-        let flags = libc::O_RDONLY | libc::O_DIRECTORY;
-        let opened = match open_nofollow(home.as_raw_fd(), ".ssh", dir_path, flags, 0) {
-            Ok(fd) => fd,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                if !create {
-                    return Ok(None);
-                }
-                match mkdirat(home.as_raw_fd(), ".ssh", 0o700) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                    Err(error) => return Err(error),
-                }
-                let fd = open_nofollow(home.as_raw_fd(), ".ssh", dir_path, flags, 0)?;
-                // The mode asked of `mkdirat` is cut by the umask; the directory is ours, set it.
-                if fstat(fd.as_raw_fd())?.st_uid == uid {
-                    fchmod(fd.as_raw_fd(), 0o700)?;
-                }
-                fd
-            }
-            Err(error) => return Err(error),
-        };
-        check_ssh_dir(&fstat(opened.as_raw_fd())?, uid, dir_path)?;
-        Ok(Some(opened))
-    }
-
-    pub(super) fn add_hooked(
-        account: &Account,
-        key: &KeyLine,
-        device: &str,
-        now: DateTime,
-        after_open: &dyn Fn(),
-    ) -> io::Result<Added> {
-        let uid = account.uid;
-        let dir_path = ssh_dir(&account.home);
-        let file_path = path(&account.home);
-        let home = open_home(&account.home)?;
-        check_home(&fstat(home.as_raw_fd())?, uid, &account.home)?;
-        let dir = open_ssh(&home, &dir_path, uid, true)?
-            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-
-        // The file: an existing one is opened as it is; a missing one is created exclusively, so
-        // a path planted in between is refused rather than written through.
-        let append = libc::O_RDWR | libc::O_APPEND;
-        let (file, created) =
-            match open_file(dir.as_raw_fd(), "authorized_keys", &file_path, append, 0) {
-                Ok(fd) => (fd, false),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    let make = append | libc::O_CREAT | libc::O_EXCL;
-                    let fd =
-                        open_file(dir.as_raw_fd(), "authorized_keys", &file_path, make, 0o600)?;
-                    fchmod(fd.as_raw_fd(), 0o600)?;
-                    (fd, true)
-                }
-                Err(error) => return Err(error),
-            };
-        check_file(&fstat(file.as_raw_fd())?, uid, &file_path)?;
-        lock(file.as_raw_fd())?;
-        let mut file = File::from(file);
-
-        let mut existing = Vec::new();
-        (&file)
-            .take(MAX_FILE_BYTES + 1)
-            .read_to_end(&mut existing)?;
-        if existing.len() as u64 > MAX_FILE_BYTES {
-            return Err(refuse(format!(
-                "{} is larger than {} MiB; not touching it",
-                file_path.display(),
-                MAX_FILE_BYTES >> 20
-            )));
-        }
-        after_open();
-        if contains(&existing, key) {
-            return Ok(Added::AlreadyPresent);
-        }
-
-        let backup = if existing.is_empty() {
-            None
-        } else {
-            Some(write_backup(&dir, &dir_path, &existing, now)?)
-        };
-
-        let text = text_to_append(&existing, key, device, now);
-        let length = existing.len() as u64;
-        if let Err(error) = file
-            .write_all(text.as_bytes())
-            .and_then(|()| file.sync_all())
-        {
-            // Leave the file as it was found, not with half a line.
-            let _ = file.set_len(length);
-            return Err(error);
-        }
-        Ok(Added::Added { created, backup })
+        format!("authorized_keys.or2-backup-{}{suffix}", now.stamp())
     }
 
     fn write_backup(
@@ -552,82 +284,232 @@ mod unix {
         Err(io::Error::other("could not find a free backup name"))
     }
 
-    /// Checks that `authorized_keys` (or, when it does not exist, `~/.ssh` or `~`) can be
-    /// written and that sshd (StrictModes) would honour it: the same checks `add` makes,
-    /// changing nothing. A refusal says what to fix.
-    pub fn writable(account: &Account) -> Writable {
-        inspect(account)
+    /// Rewrites the file in place: the new contents over the start, then the length cut. A
+    /// failure puts the old contents back (the backup holds them too).
+    fn rewrite(file: &mut File, old: &[u8], new: &[u8]) -> io::Result<()> {
+        let write = |file: &mut File, bytes: &[u8]| -> io::Result<()> {
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(bytes)?;
+            file.set_len(bytes.len() as u64)?;
+            file.sync_all()
+        };
+        write(file, new).inspect_err(|_| {
+            let _ = write(file, old);
+        })
     }
 
-    fn inspect(account: &Account) -> Writable {
-        let uid = account.uid;
-        let dir_path = ssh_dir(&account.home);
-        let file_path = path(&account.home);
-        let result = (|| -> io::Result<Writable> {
-            let home = open_home(&account.home).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!(
-                        "{} is not writable: it cannot be opened ({error})",
-                        account.home.display()
-                    ),
-                )
-            })?;
-            check_home(&fstat(home.as_raw_fd())?, uid, &account.home)?;
-            let Some(dir) = open_ssh(&home, &dir_path, uid, false)? else {
-                return Ok(if writable_by_us(home.as_raw_fd()) {
-                    Writable::Yes
-                } else {
-                    Writable::No(format!("{} is not writable", account.home.display()))
-                });
-            };
-            match open_file(
-                dir.as_raw_fd(),
-                "authorized_keys",
-                &file_path,
-                libc::O_WRONLY | libc::O_APPEND,
-                0,
-            ) {
-                Ok(file) => {
-                    check_file(&fstat(file.as_raw_fd())?, uid, &file_path)?;
-                    Ok(Writable::Yes)
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    Ok(if writable_by_us(dir.as_raw_fd()) {
-                        Writable::Yes
-                    } else {
-                        Writable::No(format!("{} is not writable", dir_path.display()))
-                    })
-                }
-                Err(error)
-                    if error.kind() == io::ErrorKind::PermissionDenied
-                        && error.raw_os_error().is_some() =>
-                {
-                    Ok(Writable::No(format!(
-                        "{} is not writable ({error})",
-                        file_path.display()
-                    )))
-                }
-                Err(error) => Err(error),
-            }
-        })();
-        result.unwrap_or_else(|error| Writable::No(error.to_string()))
-    }
-
-    #[cfg(test)]
-    pub(super) fn add_as(
-        uid: u32,
+    /// The one locked operation: opens the checked handles, locks, reads the file, lets `change`
+    /// compute the new contents (`None`: no change) and rewrites the file in place. `create`
+    /// makes a missing `~/.ssh` and file; without it a missing file is `NotFound`. `backup` is
+    /// the run's backup, made before the first change. `after_open` is called once the file is
+    /// read (tests swap paths there).
+    pub fn modify<T>(
         account: &Account,
-        key: &KeyLine,
+        create: bool,
+        backup: Option<&Backup>,
+        after_open: &dyn Fn(),
+        change: impl FnOnce(&[u8]) -> io::Result<(Option<Vec<u8>>, T)>,
+    ) -> io::Result<Modified<T>> {
+        let dir_path = account.ssh_dir();
+        let file_path = account.keys_path();
+        let name = account.keys_name();
+        let dir = open_ssh_dir(account, create)?
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+
+        // The file: an existing one is opened as it is; a missing one is created exclusively,
+        // so a path planted in between is refused rather than written through.
+        let flags = libc::O_RDWR;
+        let (file, created) = match open_file(dir.as_raw_fd(), &name, &file_path, flags, 0) {
+            Ok(fd) => (fd, false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound && create => {
+                let make = flags | libc::O_CREAT | libc::O_EXCL;
+                let fd = open_file(dir.as_raw_fd(), &name, &file_path, make, 0o600)?;
+                fchmod(fd.as_raw_fd(), 0o600)?;
+                (fd, true)
+            }
+            Err(error) => return Err(error),
+        };
+        check_file(&fstat(file.as_raw_fd())?, account.uid, &file_path)?;
+        lock(file.as_raw_fd())?;
+        let mut file = File::from(file);
+
+        let mut existing = Vec::new();
+        (&file)
+            .take(MAX_FILE_BYTES + 1)
+            .read_to_end(&mut existing)?;
+        if existing.len() as u64 > MAX_FILE_BYTES {
+            return Err(refuse(format!(
+                "{} is larger than {} MiB; not touching it",
+                file_path.display(),
+                MAX_FILE_BYTES >> 20
+            )));
+        }
+        after_open();
+        let (new, value) = change(&existing)?;
+        if let Some(new) = new {
+            if let Some(backup) = backup
+                && !backup.used.replace(true)
+                && !existing.is_empty()
+            {
+                let path = write_backup(&dir, &dir_path, &existing, backup.now)?;
+                *backup.path.borrow_mut() = Some(path);
+            }
+            rewrite(&mut file, &existing, &new)?;
+        }
+        Ok(Modified { value, created })
+    }
+
+    /// Appends the bootstrap line.
+    pub fn append(account: &Account, backup: &Backup, line: &str) -> io::Result<Modified<()>> {
+        modify(account, true, Some(backup), &|| {}, |existing| {
+            Ok((Some(with_line(existing, line)), ()))
+        })
+    }
+
+    /// Removes every entry whose key has this fingerprint (any options, any comment). A missing
+    /// file has none. Returns how many entries were dropped.
+    pub fn remove(
+        account: &Account,
+        fingerprint: &str,
+        backup: Option<&Backup>,
+    ) -> io::Result<usize> {
+        let done = modify(account, false, backup, &|| {}, |existing| {
+            let (kept, dropped) = without(existing, |e| fingerprint_of(&e.blob) == fingerprint);
+            Ok(((dropped > 0).then_some(kept), dropped))
+        });
+        match done {
+            Ok(done) => Ok(done.value),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// In one write: drops the bootstrap entry (by fingerprint) and appends the phone's line (a
+    /// key already present only loses the bootstrap entry). `Gone` when the entry is not there.
+    pub fn replace(
+        account: &Account,
+        bootstrap: &str,
+        phone: &KeyLine,
         device: &str,
         now: DateTime,
-        after_open: &dyn Fn(),
-    ) -> io::Result<Added> {
-        let account = Account {
-            uid,
-            ..account.clone()
+    ) -> io::Result<Replaced> {
+        let done = modify(account, false, None, &|| {}, |existing| {
+            let (kept, dropped) = without(existing, |e| fingerprint_of(&e.blob) == bootstrap);
+            if dropped == 0 {
+                return Ok((None, Replaced::Gone));
+            }
+            if contains(&kept, phone) {
+                return Ok((Some(kept), Replaced::Done { added: false }));
+            }
+            let line = line_for(phone, device, &now.date());
+            Ok((
+                Some(with_line(&kept, &line)),
+                Replaced::Done { added: true },
+            ))
+        });
+        match done {
+            Ok(done) => Ok(done.value),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Replaced::Gone),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Removes `or2-pair-bootstrap-<id>` entries for which `live(id)` is false. Returns the ids
+    /// of the dropped entries (the caller removes their state files).
+    pub fn sweep(
+        account: &Account,
+        backup: Option<&Backup>,
+        live: &dyn Fn(&PairingId) -> bool,
+    ) -> io::Result<Vec<PairingId>> {
+        let done = modify(account, false, backup, &|| {}, |existing| {
+            let ids = dead_ids(existing, live);
+            let (kept, dropped) = without(existing, |e| dead_id(e, live).is_some());
+            Ok(((dropped > 0).then_some(kept), ids))
+        });
+        match done {
+            Ok(done) => Ok(done.value),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// What [`sweep`] would remove, changing nothing (for `--check`).
+    pub fn stale(
+        account: &Account,
+        live: &dyn Fn(&PairingId) -> bool,
+    ) -> io::Result<Vec<PairingId>> {
+        match modify(account, false, None, &|| {}, |existing| {
+            Ok((None, dead_ids(existing, live)))
+        }) {
+            Ok(done) => Ok(done.value),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn dead_id(entry: &Entry, live: &dyn Fn(&PairingId) -> bool) -> Option<PairingId> {
+        entry
+            .comment
+            .strip_prefix(COMMENT_PREFIX)
+            .and_then(|id| PairingId::parse(id).ok())
+            .filter(|id| !live(id))
+    }
+
+    fn dead_ids(existing: &[u8], live: &dyn Fn(&PairingId) -> bool) -> Vec<PairingId> {
+        existing
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| entry(&String::from_utf8_lossy(line)))
+            .filter_map(|e| dead_id(&e, live))
+            .collect()
+    }
+
+    /// Checks that `authorized_keys` (or, when it does not exist, `~/.ssh` or `~`) can be
+    /// written and that sshd (StrictModes) would honour it: the same checks the changes make,
+    /// changing nothing. A refusal says what to fix.
+    pub fn writable(account: &Account) -> Writable {
+        inspect(account).unwrap_or_else(|error| Writable::No(error.to_string()))
+    }
+
+    fn inspect(account: &Account) -> io::Result<Writable> {
+        let dir_path = account.ssh_dir();
+        let file_path = account.keys_path();
+        let Some(dir) = open_ssh_dir(account, false)? else {
+            let home = open_dir_path(&account.home)?;
+            return Ok(if writable_by_us(home.as_raw_fd()) {
+                Writable::Yes
+            } else {
+                Writable::No(format!("{} is not writable", account.home.display()))
+            });
         };
-        add_hooked(&account, key, device, now, after_open)
+        match open_file(
+            dir.as_raw_fd(),
+            &account.keys_name(),
+            &file_path,
+            libc::O_WRONLY,
+            0,
+        ) {
+            Ok(file) => {
+                check_file(&fstat(file.as_raw_fd())?, account.uid, &file_path)?;
+                Ok(Writable::Yes)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Ok(if writable_by_us(dir.as_raw_fd()) {
+                    Writable::Yes
+                } else {
+                    Writable::No(format!("{} is not writable", dir_path.display()))
+                })
+            }
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && error.raw_os_error().is_some() =>
+            {
+                Ok(Writable::No(format!(
+                    "{} is not writable ({error})",
+                    file_path.display()
+                )))
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -635,22 +517,26 @@ mod unix {
 #[cfg(all(test, unix))]
 mod tests {
     use std::fs;
+    use std::os::unix::fs::MetadataExt;
 
     use super::*;
-
-    /// `add` for the account of a temporary home.
-    fn add(home: &Path, key: &KeyLine, device: &str, now: DateTime) -> io::Result<Added> {
-        super::add(&Account::new("tester", home), key, device, now)
-    }
-
-    fn writable(home: &Path) -> Writable {
-        super::writable(&Account::new("tester", home))
-    }
+    use crate::bootstrap::PairingId;
 
     const ED25519: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBCJz8goXA2qGjRTNHhOwsljhOuCXG/+2B/zTJH/brc5";
     const OTHER: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAc39XUWT33SvSLy6vA7I83+XgmwnHmYtMQRjLeaZ2U7";
+    const PHONE: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIALYvXruViE9G83T84ZJqbdJkEImlV0NRg9AC6Yw4NYo";
+    const ECDSA: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBJKzE3AhnQL0fsk77dWQaJJj+GHelMX7ge+TZ2xgJ/Y3O5aMMlnH6Hn/tnucj94OezBBvEj2VIcJGu8ABqUkhFA=";
+
+    fn ssh_dir(home: &Path) -> PathBuf {
+        home.join(".ssh")
+    }
+
+    fn path(home: &Path) -> PathBuf {
+        ssh_dir(home).join("authorized_keys")
+    }
 
     fn key(line: &str) -> KeyLine {
         KeyLine::parse(line).unwrap()
@@ -660,9 +546,60 @@ mod tests {
         DateTime::from_unix(1_782_867_661)
     }
 
-    // --- Finding 2: no symlinks, no hard links, nothing that is not ours --------------------
+    fn account(home: &Path) -> Account {
+        Account::new("tester", home)
+    }
 
-    #[cfg(unix)]
+    /// The outcome of appending a phone's line the way the replace does, for the file-handling
+    /// tests below.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Added {
+        Added {
+            created: bool,
+            backup: Option<PathBuf>,
+        },
+        AlreadyPresent,
+    }
+
+    /// Appends the phone's line (a stand-in for the bootstrap append: the same handles).
+    fn add_as(
+        account: &Account,
+        key: &KeyLine,
+        device: &str,
+        hook: &dyn Fn(),
+    ) -> io::Result<Added> {
+        let backup = Backup::new(at());
+        let done = modify(account, true, Some(&backup), hook, |existing| {
+            if contains(existing, key) {
+                return Ok((None, false));
+            }
+            let line = line_for(key, device, &at().date());
+            Ok((Some(with_line(existing, &line)), true))
+        })?;
+        Ok(if done.value {
+            Added::Added {
+                created: done.created,
+                backup: backup.path(),
+            }
+        } else {
+            Added::AlreadyPresent
+        })
+    }
+
+    fn add(home: &Path, key: &KeyLine, device: &str) -> io::Result<Added> {
+        add_as(&account(home), key, device, &|| {})
+    }
+
+    fn writable(home: &Path) -> Writable {
+        super::writable(&account(home))
+    }
+
+    fn bootstrap_line(id: &str, blob_key: &str) -> String {
+        format!("restrict,command=\"/bin/or2-pair enroll {id}\" {blob_key} or2-pair-bootstrap-{id}")
+    }
+
+    // --- no symlinks, no hard links, nothing that is not ours ------------------------------
+
     #[test]
     fn a_symlinked_authorized_keys_is_refused_and_its_target_untouched() {
         let home = tempfile::tempdir().unwrap();
@@ -671,25 +608,23 @@ mod tests {
         fs::write(&target, format!("{OTHER}\n")).unwrap();
         fs::create_dir(ssh_dir(home.path())).unwrap();
         std::os::unix::fs::symlink(&target, path(home.path())).unwrap();
-        let error = add(home.path(), &key(ED25519), "phone", at()).unwrap_err();
+        let error = add(home.path(), &key(ED25519), "phone").unwrap_err();
         assert!(error.to_string().contains("symbolic link"), "{error}");
         assert_eq!(fs::read_to_string(&target).unwrap(), format!("{OTHER}\n"));
         let names: Vec<_> = fs::read_dir(ssh_dir(home.path())).unwrap().collect();
         assert_eq!(names.len(), 1, "no backup either");
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_symlinked_ssh_directory_is_refused_and_its_target_untouched() {
         let home = tempfile::tempdir().unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(elsewhere.path(), ssh_dir(home.path())).unwrap();
-        let error = add(home.path(), &key(ED25519), "phone", at()).unwrap_err();
+        let error = add(home.path(), &key(ED25519), "phone").unwrap_err();
         assert!(error.to_string().contains("symbolic link"), "{error}");
         assert_eq!(fs::read_dir(elsewhere.path()).unwrap().count(), 0);
     }
 
-    #[cfg(unix)]
     #[test]
     fn an_authorized_keys_with_another_hard_link_is_refused() {
         let home = tempfile::tempdir().unwrap();
@@ -698,7 +633,7 @@ mod tests {
         fs::create_dir(ssh_dir(home.path())).unwrap();
         fs::write(path(home.path()), format!("{OTHER}\n")).unwrap();
         fs::hard_link(path(home.path()), &other_name).unwrap();
-        let error = add(home.path(), &key(ED25519), "phone", at()).unwrap_err();
+        let error = add(home.path(), &key(ED25519), "phone").unwrap_err();
         assert!(error.to_string().contains("hard link"), "{error}");
         assert_eq!(
             fs::read_to_string(&other_name).unwrap(),
@@ -706,17 +641,19 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn files_that_belong_to_someone_else_are_refused() {
         // Pretend the account is another user: everything the test creates is then "foreign".
         let home = tempfile::tempdir().unwrap();
-        let account = Account::new("tester", home.path());
+        let account = account(home.path());
         let other = account.uid.wrapping_add(1);
         fs::create_dir(ssh_dir(home.path())).unwrap();
         fs::write(path(home.path()), format!("{OTHER}\n")).unwrap();
-        let error =
-            unix::add_as(other, &account, &key(ED25519), "phone", at(), &|| {}).unwrap_err();
+        let foreign = Account {
+            uid: other,
+            ..account
+        };
+        let error = add_as(&foreign, &key(ED25519), "phone", &|| {}).unwrap_err();
         assert!(
             error.to_string().contains("belongs to another user"),
             "{error}"
@@ -726,19 +663,15 @@ mod tests {
             format!("{OTHER}\n")
         );
         // The check reports the same thing without changing anything.
-        let result = super::writable(&Account {
-            uid: other,
-            ..account
-        });
+        let result = super::writable(&foreign);
         assert!(matches!(result, Writable::No(why) if why.contains("another user")));
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_path_swapped_in_after_the_checks_is_not_followed() {
-        // The race of finding 2: between opening the checked handles and writing, `~/.ssh` is
-        // replaced by a link to somewhere else. The backup and the append must still go through
-        // the handles that were checked.
+        // Between opening the checked handles and writing, `~/.ssh` is replaced by a link to
+        // somewhere else. The backup and the write must still go through the handles that were
+        // checked.
         let home = tempfile::tempdir().unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
         fs::create_dir(ssh_dir(home.path())).unwrap();
@@ -749,8 +682,7 @@ mod tests {
             fs::rename(ssh_dir(home.path()), &moved).unwrap();
             std::os::unix::fs::symlink(elsewhere.path(), ssh_dir(home.path())).unwrap();
         };
-        let account = Account::new("tester", home.path());
-        let added = unix::add_hooked(&account, &key(ED25519), "phone", at(), &swap).unwrap();
+        let added = add_as(&account(home.path()), &key(ED25519), "phone", &swap).unwrap();
         let Added::Added { backup, .. } = added else {
             panic!("{added:?}")
         };
@@ -767,17 +699,15 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn an_authorized_keys_that_is_not_a_regular_file_is_refused() {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(ssh_dir(home.path())).unwrap();
         fs::create_dir(path(home.path())).unwrap();
-        assert!(add(home.path(), &key(ED25519), "phone", at()).is_err());
+        assert!(add(home.path(), &key(ED25519), "phone").is_err());
     }
 
     /// A 0600 FIFO where `authorized_keys` should be, in a disposable home.
-    #[cfg(unix)]
     fn home_with_a_fifo() -> tempfile::TempDir {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(ssh_dir(home.path())).unwrap();
@@ -789,7 +719,6 @@ mod tests {
     }
 
     /// Runs `work` on its own thread and fails the test, instead of hanging it, when it blocks.
-    #[cfg(unix)]
     fn within_seconds<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
         let (send, receive) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -800,10 +729,9 @@ mod tests {
             .expect("the call blocked on a FIFO instead of refusing it")
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_fifo_as_authorized_keys_is_refused_by_the_check_without_blocking() {
-        // Review of 6afa42e: a blocking O_WRONLY open of a FIFO with no reader hung `--check`.
+        // A blocking O_WRONLY open of a FIFO with no reader once hung `--check`.
         let home = home_with_a_fifo();
         let root = home.path().to_owned();
         let result = within_seconds(move || writable(&root));
@@ -829,17 +757,15 @@ mod tests {
         drop(reader);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn a_fifo_as_authorized_keys_is_refused_by_add_without_blocking_or_writing() {
+    fn a_fifo_as_authorized_keys_is_refused_by_a_change_without_blocking_or_writing() {
         let home = home_with_a_fifo();
         let root = home.path().to_owned();
-        let error = within_seconds(move || add(&root, &key(ED25519), "phone", at())).unwrap_err();
+        let error = within_seconds(move || add(&root, &key(ED25519), "phone")).unwrap_err();
         assert!(error.to_string().contains("not a regular file"), "{error}");
         assert_eq!(fs::read_dir(ssh_dir(home.path())).unwrap().count(), 1);
     }
 
-    #[cfg(unix)]
     #[test]
     fn other_special_files_are_refused_too() {
         let home = tempfile::tempdir().unwrap();
@@ -848,13 +774,14 @@ mod tests {
         let root = home.path().to_owned();
         let result = within_seconds(move || writable(&root));
         assert!(matches!(result, Writable::No(_)), "{result:?}");
-        assert!(add(home.path(), &key(ED25519), "phone", at()).is_err());
+        assert!(add(home.path(), &key(ED25519), "phone").is_err());
     }
 
     #[test]
     fn creates_the_directory_and_file_with_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
         let home = tempfile::tempdir().unwrap();
-        let added = add(home.path(), &key(ED25519), "Pixel-8", at()).unwrap();
+        let added = add(home.path(), &key(ED25519), "Pixel-8").unwrap();
         assert_eq!(
             added,
             Added::Added {
@@ -867,22 +794,19 @@ mod tests {
             contents,
             format!("no-agent-forwarding,no-X11-forwarding {ED25519} or2-Pixel-8-2026-07-01\n")
         );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode(&ssh_dir(home.path())), 0o700);
-            assert_eq!(mode(&path(home.path())), 0o600);
-        }
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&ssh_dir(home.path())), 0o700);
+        assert_eq!(mode(&path(home.path())), 0o600);
     }
 
     #[test]
     fn appends_after_a_backup_and_keeps_what_was_there() {
+        use std::os::unix::fs::PermissionsExt;
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(ssh_dir(home.path())).unwrap();
         let before = format!("# mine\n{OTHER} me@laptop\n");
         fs::write(path(home.path()), &before).unwrap();
-        let added = add(home.path(), &key(ED25519), "phone", at()).unwrap();
+        let added = add(home.path(), &key(ED25519), "phone").unwrap();
         let Added::Added { created, backup } = added else {
             panic!("{added:?}")
         };
@@ -896,14 +820,10 @@ mod tests {
         let after = fs::read_to_string(path(home.path())).unwrap();
         assert!(after.starts_with(&before));
         assert_eq!(after.lines().count(), 3);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-        }
+        assert_eq!(
+            fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
@@ -911,7 +831,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(ssh_dir(home.path())).unwrap();
         fs::write(path(home.path()), OTHER).unwrap();
-        add(home.path(), &key(ED25519), "phone", at()).unwrap();
+        add(home.path(), &key(ED25519), "phone").unwrap();
         let after = fs::read_to_string(path(home.path())).unwrap();
         let lines: Vec<_> = after.lines().collect();
         assert_eq!(lines[0], OTHER);
@@ -924,28 +844,11 @@ mod tests {
         fs::create_dir(ssh_dir(home.path())).unwrap();
         let existing = format!("command=\"/bin/true\",no-pty {ED25519} old-comment\n");
         fs::write(path(home.path()), &existing).unwrap();
-        let added = add(home.path(), &key(ED25519), "phone", at()).unwrap();
+        let added = add(home.path(), &key(ED25519), "phone").unwrap();
         assert_eq!(added, Added::AlreadyPresent);
         assert_eq!(fs::read_to_string(path(home.path())).unwrap(), existing);
         let names: Vec<_> = fs::read_dir(ssh_dir(home.path())).unwrap().collect();
         assert_eq!(names.len(), 1, "no backup for a no-op");
-    }
-
-    #[test]
-    fn adding_twice_adds_once() {
-        let home = tempfile::tempdir().unwrap();
-        add(home.path(), &key(ED25519), "phone", at()).unwrap();
-        assert_eq!(
-            add(home.path(), &key(ED25519), "phone", at()).unwrap(),
-            Added::AlreadyPresent
-        );
-        assert_eq!(
-            fs::read_to_string(path(home.path()))
-                .unwrap()
-                .lines()
-                .count(),
-            1
-        );
     }
 
     #[test]
@@ -959,7 +862,7 @@ mod tests {
         assert!(!contains(format!("{OTHER}\n").as_bytes(), &key(ED25519)));
     }
 
-    // --- Finding 10: duplicates are the parsed key of an entry, not text anywhere on a line ---
+    // --- duplicates are the parsed key of an entry, not text anywhere on a line ---------------
 
     #[test]
     fn a_key_in_another_keys_comment_or_options_is_not_authorized() {
@@ -1020,12 +923,20 @@ mod tests {
     }
 
     #[test]
+    fn an_entrys_comment_is_its_first_word_after_the_key() {
+        let line =
+            format!("restrict,command=\"/x enroll abc\" {ED25519} or2-pair-bootstrap-abc more");
+        assert_eq!(entry(&line).unwrap().comment, "or2-pair-bootstrap-abc");
+        assert_eq!(entry(ED25519).unwrap().comment, "");
+    }
+
+    #[test]
     fn pairing_a_key_that_only_a_comment_mentions_adds_it() {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(ssh_dir(home.path())).unwrap();
         let before = format!("{ED25519} migrate to {OTHER} later\n");
         fs::write(path(home.path()), &before).unwrap();
-        let added = add(home.path(), &key(OTHER), "phone", at()).unwrap();
+        let added = add(home.path(), &key(OTHER), "phone").unwrap();
         assert!(
             matches!(
                 added,
@@ -1052,7 +963,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(ssh_dir(home.path())).unwrap();
         fs::write(path(home.path()), "").unwrap();
-        let added = add(home.path(), &key(ED25519), "phone", at()).unwrap();
+        let added = add(home.path(), &key(ED25519), "phone").unwrap();
         assert_eq!(
             added,
             Added::Added {
@@ -1064,21 +975,20 @@ mod tests {
 
     #[test]
     fn two_runs_in_one_second_do_not_overwrite_each_others_backup() {
-        const ECDSA: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBJKzE3AhnQL0fsk77dWQaJJj+GHelMX7ge+TZ2xgJ/Y3O5aMMlnH6Hn/tnucj94OezBBvEj2VIcJGu8ABqUkhFA=";
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(ssh_dir(home.path())).unwrap();
         fs::write(path(home.path()), format!("{OTHER}\n")).unwrap();
         let Added::Added {
             backup: Some(first),
             ..
-        } = add(home.path(), &key(ED25519), "a", at()).unwrap()
+        } = add(home.path(), &key(ED25519), "a").unwrap()
         else {
             panic!()
         };
         let Added::Added {
             backup: Some(second),
             ..
-        } = add(home.path(), &key(ECDSA), "b", at()).unwrap()
+        } = add(home.path(), &key(ECDSA), "b").unwrap()
         else {
             panic!()
         };
@@ -1108,15 +1018,13 @@ mod tests {
         assert_eq!(sanitize_device(&long).unwrap().len(), 32);
     }
 
-    // --- Finding 6: what sshd's StrictModes would ignore is refused, not appended to ---------
+    // --- what sshd's StrictModes would ignore is refused, not written to -----------------------
 
-    #[cfg(unix)]
     fn chmod(path: &Path, mode: u32) {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    #[cfg(unix)]
     fn existing_file(home: &Path, mode: u32) -> String {
         fs::create_dir_all(ssh_dir(home)).unwrap();
         let before = format!("{OTHER}\n");
@@ -1125,13 +1033,12 @@ mod tests {
         before
     }
 
-    #[cfg(unix)]
     #[test]
     fn an_authorized_keys_writable_by_group_or_others_is_refused_and_left_alone() {
         for mode in [0o664, 0o666, 0o662, 0o620] {
             let home = tempfile::tempdir().unwrap();
             let before = existing_file(home.path(), mode);
-            let error = add(home.path(), &key(ED25519), "phone", at()).unwrap_err();
+            let error = add(home.path(), &key(ED25519), "phone").unwrap_err();
             let text = error.to_string();
             assert!(
                 text.contains("writable by other users")
@@ -1154,15 +1061,14 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
-    fn modes_sshd_accepts_are_appended_to_and_keep_their_mode() {
+    fn modes_sshd_accepts_are_written_to_and_keep_their_mode() {
         use std::os::unix::fs::PermissionsExt;
         for mode in [0o600, 0o640, 0o644] {
             let home = tempfile::tempdir().unwrap();
             existing_file(home.path(), mode);
             assert!(matches!(
-                add(home.path(), &key(ED25519), "phone", at()),
+                add(home.path(), &key(ED25519), "phone"),
                 Ok(Added::Added { .. })
             ));
             let now = fs::metadata(path(home.path()))
@@ -1173,14 +1079,13 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn an_ssh_directory_or_home_writable_by_others_is_refused() {
         for mode in [0o775, 0o777, 0o770 | 0o002] {
             let home = tempfile::tempdir().unwrap();
             existing_file(home.path(), 0o600);
             chmod(&ssh_dir(home.path()), mode);
-            let error = add(home.path(), &key(ED25519), "phone", at()).unwrap_err();
+            let error = add(home.path(), &key(ED25519), "phone").unwrap_err();
             assert!(
                 error.to_string().contains("writable by other users")
                     && error.to_string().contains(".ssh"),
@@ -1189,47 +1094,236 @@ mod tests {
             chmod(&ssh_dir(home.path()), 0o700);
             // The home directory itself.
             chmod(home.path(), mode);
-            let error = add(home.path(), &key(ED25519), "phone", at()).unwrap_err();
+            let error = add(home.path(), &key(ED25519), "phone").unwrap_err();
             assert!(
                 error.to_string().contains("writable by other users"),
                 "{mode:o}: {error}"
             );
             chmod(home.path(), 0o755);
-            assert!(add(home.path(), &key(ED25519), "phone", at()).is_ok());
+            assert!(add(home.path(), &key(ED25519), "phone").is_ok());
         }
     }
 
     #[test]
     fn checks_report_writability_and_strict_modes_trouble() {
+        use std::os::unix::fs::PermissionsExt;
         let home = tempfile::tempdir().unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(home.path(), fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(writable(home.path()), Writable::Yes);
-        #[cfg(unix)]
+        // A home directory writable by group or others is a StrictModes refusal.
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(matches!(writable(home.path()), Writable::No(why) if why.contains("StrictModes")));
+        // A read-only existing file is reported, not changed.
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        fs::write(path(home.path()), "").unwrap();
+        fs::set_permissions(path(home.path()), fs::Permissions::from_mode(0o400)).unwrap();
+        let result = writable(home.path());
+        // Running as root can write a 0400 file; everyone else cannot.
+        if fs::OpenOptions::new()
+            .append(true)
+            .open(path(home.path()))
+            .is_err()
         {
-            use std::os::unix::fs::PermissionsExt;
-            // A home directory writable by group or others is a StrictModes refusal.
-            fs::set_permissions(home.path(), fs::Permissions::from_mode(0o775)).unwrap();
-            assert!(
-                matches!(writable(home.path()), Writable::No(why) if why.contains("StrictModes"))
-            );
-            // A read-only existing file is reported, not changed.
-            fs::set_permissions(home.path(), fs::Permissions::from_mode(0o755)).unwrap();
-            fs::create_dir(ssh_dir(home.path())).unwrap();
-            fs::write(path(home.path()), "").unwrap();
-            fs::set_permissions(path(home.path()), fs::Permissions::from_mode(0o400)).unwrap();
-            let result = writable(home.path());
-            // Running as root can write a 0400 file; everyone else cannot.
-            if !fs::OpenOptions::new()
-                .append(true)
-                .open(path(home.path()))
-                .is_ok()
-            {
-                assert!(matches!(result, Writable::No(_)));
-            }
+            assert!(matches!(result, Writable::No(_)));
         }
+    }
+
+    #[test]
+    fn an_explicit_key_file_is_opened_by_its_directory() {
+        // The test-support layout: a disposable sshd's AuthorizedKeysFile, outside any ~/.ssh.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("authorized");
+        fs::write(&file, format!("{OTHER}\n")).unwrap();
+        let account = Account::new("tester", dir.path().join("no-such-home")).with_keys_file(&file);
+        let added = add_as(&account, &key(ED25519), "phone", &|| {}).unwrap();
+        assert!(matches!(added, Added::Added { .. }));
+        assert!(fs::read_to_string(&file).unwrap().contains(ED25519));
+        assert_eq!(super::writable(&account), Writable::Yes);
+    }
+
+    // --- remove, replace, sweep ----------------------------------------------------------------
+
+    #[test]
+    fn remove_drops_the_entry_in_place_and_keeps_every_other_line_byte_for_byte() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        let boot = key(ED25519);
+        let mine = format!("# mine\r\n{OTHER}  me@laptop\n\n   {ECDSA}");
+        let contents = format!(
+            "{mine}\n{}\n{ED25519}\n",
+            bootstrap_line("abcdefghijklm", ED25519)
+        );
+        // Both the bootstrap line and a bare copy of the same key go (any options, any comment).
+        fs::write(path(home.path()), &contents).unwrap();
+        chmod(&path(home.path()), 0o640);
+        let inode = fs::metadata(path(home.path())).unwrap().ino();
+
+        let removed = remove(&account(home.path()), &boot.fingerprint(), None).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(
+            fs::read_to_string(path(home.path())).unwrap(),
+            format!("{mine}\n")
+        );
+        let meta = fs::metadata(path(home.path())).unwrap();
+        assert_eq!(meta.ino(), inode, "rewritten in place");
+        assert_eq!(meta.mode() & 0o777, 0o640, "mode kept");
+        // Nothing left to remove: no change, no error; a missing file is the same.
+        assert_eq!(
+            remove(&account(home.path()), &boot.fingerprint(), None).unwrap(),
+            0
+        );
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            remove(&account(empty.path()), &boot.fingerprint(), None).unwrap(),
+            0
+        );
+        assert!(
+            !ssh_dir(empty.path()).exists(),
+            "nothing is created to remove from"
+        );
+    }
+
+    #[test]
+    fn replace_swaps_the_bootstrap_entry_for_the_phones_key_in_one_write() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        let boot = key(ED25519);
+        let before = format!(
+            "{OTHER} me\n{}\n{ECDSA} other\n",
+            bootstrap_line("abcdefghijklm", ED25519)
+        );
+        fs::write(path(home.path()), &before).unwrap();
+        let inode = fs::metadata(path(home.path())).unwrap().ino();
+        let phone = key(PHONE);
+        let done = replace(
+            &account(home.path()),
+            &boot.fingerprint(),
+            &phone,
+            "Pixel-8",
+            at(),
+        )
+        .unwrap();
+        assert_eq!(done, Replaced::Done { added: true });
+        let after = fs::read_to_string(path(home.path())).unwrap();
+        assert_eq!(
+            after,
+            format!(
+                "{OTHER} me\n{ECDSA} other\n{OPTIONS} {} or2-Pixel-8-2026-07-01\n",
+                phone.openssh()
+            )
+        );
+        assert_eq!(fs::metadata(path(home.path())).unwrap().ino(), inode);
+        // The bootstrap entry is gone, so a second phone finds nothing to replace.
+        let again = replace(
+            &account(home.path()),
+            &boot.fingerprint(),
+            &key(ECDSA),
+            "b",
+            at(),
+        )
+        .unwrap();
+        assert_eq!(again, Replaced::Gone);
+        assert_eq!(fs::read_to_string(path(home.path())).unwrap(), after);
+        // And a file that does not exist at all is `Gone` too.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            replace(
+                &account(empty.path()),
+                &boot.fingerprint(),
+                &phone,
+                "x",
+                at()
+            )
+            .unwrap(),
+            Replaced::Gone
+        );
+    }
+
+    #[test]
+    fn replace_with_a_key_that_is_already_authorized_only_removes_the_bootstrap_entry() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        let boot = key(ED25519);
+        let before = format!(
+            "{}\n{OTHER} mine\n",
+            bootstrap_line("abcdefghijklm", ED25519)
+        );
+        fs::write(path(home.path()), &before).unwrap();
+        let done = replace(
+            &account(home.path()),
+            &boot.fingerprint(),
+            &key(OTHER),
+            "p",
+            at(),
+        )
+        .unwrap();
+        assert_eq!(done, Replaced::Done { added: false });
+        assert_eq!(
+            fs::read_to_string(path(home.path())).unwrap(),
+            format!("{OTHER} mine\n")
+        );
+    }
+
+    #[test]
+    fn a_run_makes_one_backup_before_its_first_change() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        let original = format!("{OTHER} me\n");
+        fs::write(path(home.path()), &original).unwrap();
+        let account = account(home.path());
+        let backup = Backup::new(at());
+        let line = bootstrap_line("abcdefghijklm", ED25519);
+        append(&account, &backup, &line).unwrap();
+        let saved = backup
+            .path()
+            .expect("the first change saves the file as it was");
+        assert_eq!(fs::read_to_string(&saved).unwrap(), original);
+        // The removal of the same run changes the file again, with no second backup.
+        remove(&account, &key(ED25519).fingerprint(), Some(&backup)).unwrap();
+        assert_eq!(fs::read_to_string(path(home.path())).unwrap(), original);
+        let backups = fs::read_dir(ssh_dir(home.path()))
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("or2-backup")
+            })
+            .count();
+        assert_eq!(backups, 1);
+    }
+
+    #[test]
+    fn sweep_drops_only_the_bootstrap_entries_that_are_not_live() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        let (dead, live, odd) = ("aaaaaaaaaaaaa", "bbbbbbbbbbbbb", "ccccccccccccc");
+        let contents = format!(
+            "{}\n{}\n{OTHER} or2-pair-bootstrap-not-an-id\n{}\n{ECDSA} keep\n",
+            bootstrap_line(dead, ED25519),
+            bootstrap_line(live, OTHER),
+            bootstrap_line(odd, ED25519),
+        );
+        fs::write(path(home.path()), &contents).unwrap();
+        let alive = |id: &PairingId| id.as_str() == live;
+        let dropped = sweep(&account(home.path()), None, &alive).unwrap();
+        let ids: Vec<&str> = dropped.iter().map(PairingId::as_str).collect();
+        assert_eq!(ids, [dead, odd]);
+        let after = fs::read_to_string(path(home.path())).unwrap();
+        assert_eq!(
+            after,
+            format!(
+                "{}\n{OTHER} or2-pair-bootstrap-not-an-id\n{ECDSA} keep\n",
+                bootstrap_line(live, OTHER)
+            )
+        );
+        // Nothing dead: no change.
+        assert!(
+            sweep(&account(home.path()), None, &alive)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

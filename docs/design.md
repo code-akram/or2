@@ -440,7 +440,7 @@ replaced before phone acceptance: on the first real host (a rented server reache
 address) the extra port was unreachable although SSH worked. Version 2 pairs over sshd itself
 ([contracts](contracts.md#easy-pair-qr-onboarding)).
 
-- [ ] `or2-pair` v2: the phone's code typed on the host, a bootstrap key with a forced command,
+- [x] `or2-pair` v2: the phone's code typed on the host, a bootstrap key with a forced command,
   `enroll` with a state file, removal on every ending and the sweep, sshd version gating, IPv6 addresses;
   v1 listener, bind policy and HMAC exchange removed. Unit tests and the end-to-end suite against a
   disposable sshd.
