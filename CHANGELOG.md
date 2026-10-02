@@ -8,13 +8,23 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+### Added
+
+- Reply from an agent notification: type a reply in the notification and it reaches the agent's pane through
+  herdr, submitted like the composer does, with no terminal open; the notification then shows what was sent.
+  A host that is not connected says so instead.
+- Image paste: send a picture to an agent from the composer's image button (the photo picker), from the
+  keyboard (an inserted image), or from any app's Share menu. or2 shrinks it, strips its metadata (location
+  included), uploads it over SFTP on the host's connection to `~/.cache/or2/images` (swept after seven days),
+  and inserts its path at the prompt without pressing Enter.
+
 ### Changed
 
 - The arrow pad's keys are blue (accent glyphs on a blue-tinted fill with a blue edge, Enter solid accent), so they
   stand apart from the terminal behind them; the extras row has accent labels.
 - A tap on a program that tracks the mouse (herdr, tmux with mouse on) is a click at that cell, so the program's own
   buttons work; a link still opens, and the keyboard key still opens the keyboard.
-- FFI API 15 (`Session.mouse_click`).
+- FFI API 16 (`Session.mouse_click`, `Session.paste_text`, `HostConnection.reply_to_pane`, `upload_image`).
 
 ### Fixed
 
