@@ -64,6 +64,35 @@ impl PackageManager {
             _ => "sshd",
         }
     }
+
+    /// Whether this manager's package database under `root` lists the OpenSSH server: `None`
+    /// when it cannot be read here (the RPM database is not a text format, Homebrew is not
+    /// asked).
+    fn has_openssh_server(self, root: &Path) -> Option<bool> {
+        match self {
+            // dpkg keeps a file list for every installed package (removed ones lose it).
+            Self::Apt => root
+                .join("var/lib/dpkg/info")
+                .is_dir()
+                .then(|| exists(&root.join("var/lib/dpkg/info/openssh-server.list"))),
+            // pacman: one directory per installed package, `<name>-<version>-<release>`.
+            Self::Pacman => {
+                let entries = std::fs::read_dir(root.join("var/lib/pacman/local")).ok()?;
+                Some(entries.flatten().any(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|name| name.strip_prefix("openssh-"))
+                        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+                }))
+            }
+            // apk: `P:<name>` starts each installed package's record.
+            Self::Apk => std::fs::read_to_string(root.join("lib/apk/db/installed"))
+                .ok()
+                .map(|text| text.lines().any(|line| line == "P:openssh-server")),
+            Self::Dnf | Self::Yum | Self::Zypper | Self::Brew => None,
+        }
+    }
 }
 
 /// What starts services on this host.
@@ -71,6 +100,14 @@ impl PackageManager {
 pub enum ServiceManager {
     Systemd,
     OpenRc,
+}
+
+/// A distribution configured by one system description, where packages and services are not
+/// added one by one and programs live outside the usual directories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Declarative {
+    NixOs,
+    Guix,
 }
 
 /// A host firewall that is on (or enabled to start).
@@ -89,8 +126,14 @@ pub struct HostFacts {
     pub service_manager: Option<ServiceManager>,
     /// The SSH server's systemd unit as installed (`ssh` or `sshd`), when a unit file was found.
     pub sshd_unit: Option<String>,
-    /// Whether an `sshd` program is installed; `None` when it was not looked for.
+    /// Whether an `sshd` program was found in the usual directories; `None` when it was not
+    /// looked for.
     pub sshd_installed: Option<bool>,
+    /// Whether the package database lists the OpenSSH server; `None` when it could not be read
+    /// (or there is none). Only with `Some(false)` here is "not installed" certain.
+    pub sshd_packaged: Option<bool>,
+    /// NixOS or Guix: sshd is switched on in the system's configuration.
+    pub declarative: Option<Declarative>,
     /// The firewall in front of mosh's UDP ports, the first found of ufw (enabled in its
     /// config), firewalld and nftables (their services enabled).
     pub firewall: Option<Firewall>,
@@ -143,6 +186,10 @@ impl HostFacts {
                     .find(|(program, _)| find_program(program, &dirs).is_some())
                     .map(|(_, manager)| *manager);
                 facts.sshd_installed = Some(find_program("sshd", &dirs).is_some());
+                facts.sshd_packaged = facts
+                    .package_manager
+                    .and_then(|manager| manager.has_openssh_server(root));
+                facts.declarative = declarative(root);
                 facts.service_manager = if root.join("run/systemd/system").is_dir() {
                     Some(ServiceManager::Systemd)
                 } else if root.join("run/openrc").is_dir() {
@@ -187,6 +234,23 @@ fn service_enabled(root: &Path, name: &str) -> bool {
         .any(|level| exists(&root.join(format!("etc/runlevels/{level}/{name}"))))
 }
 
+/// NixOS or Guix, by their marker file or the `ID` of `os-release`.
+fn declarative(root: &Path) -> Option<Declarative> {
+    if exists(&root.join("etc/NIXOS")) {
+        return Some(Declarative::NixOs);
+    }
+    let text = std::fs::read_to_string(root.join("etc/os-release"))
+        .or_else(|_| std::fs::read_to_string(root.join("usr/lib/os-release")))
+        .ok()?;
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("ID="))
+        .and_then(|id| match id.trim_matches(['"', '\'']) {
+            "nixos" => Some(Declarative::NixOs),
+            "guix" => Some(Declarative::Guix),
+            _ => None,
+        })
+}
+
 fn linux_firewall(root: &Path) -> Option<Firewall> {
     // ufw's service is enabled on every Ubuntu while ufw itself is off; its config says.
     let ufw = std::fs::read_to_string(root.join("etc/ufw/ufw.conf")).is_ok_and(|text| {
@@ -207,42 +271,74 @@ fn linux_firewall(root: &Path) -> Option<Firewall> {
     }
 }
 
+/// The end of every sshd hint: the answer may simply be on another port.
+const OTHER_PORT: &str = "; if sshd listens on another port, pass --ssh-port";
+
 /// What to do when sshd does not answer: the end of "sshd is not answering on port N: …".
 pub fn sshd(platform: Platform, facts: &HostFacts) -> String {
-    match platform {
-        Platform::MacOs => "turn on Remote Login (System Settings > General > Sharing > Remote Login), or run `sudo systemsetup -setremotelogin on` (that needs Full Disk Access for this terminal app, in System Settings > Privacy & Security); if sshd listens on another port, pass --ssh-port".to_owned(),
-        Platform::Linux => {
-            let sudo = facts.sudo();
-            let unit = facts
-                .sshd_unit
-                .as_deref()
-                .or_else(|| facts.package_manager.map(PackageManager::sshd_unit));
-            let start = match (facts.service_manager, unit) {
-                (Some(ServiceManager::OpenRc), _) => {
-                    format!("`{sudo}rc-update add sshd && {sudo}rc-service sshd start`")
-                }
-                (_, Some(unit)) => format!("`{sudo}systemctl enable --now {unit}`"),
-                (_, None) => format!(
-                    "`{sudo}systemctl enable --now sshd` (the unit is `ssh` on Debian and Ubuntu)"
-                ),
-            };
-            match (facts.sshd_installed, facts.package_manager) {
-                (Some(false), Some(manager)) => format!(
-                    "the OpenSSH server is not installed; install it with `{}`, then start it with {start}",
-                    manager.install(manager.openssh_server(), facts.superuser)
-                ),
-                (Some(false), None) => format!(
-                    "the OpenSSH server does not seem to be installed; install it with your package manager, then start it with {start}"
-                ),
-                _ => format!(
-                    "start it with {start}; if sshd listens on another port, pass --ssh-port"
-                ),
-            }
-        }
+    let hint = match platform {
+        Platform::MacOs => "turn on Remote Login (System Settings > General > Sharing > Remote Login), or run `sudo systemsetup -setremotelogin on` (that needs Full Disk Access for this terminal app, in System Settings > Privacy & Security)".to_owned(),
+        Platform::Linux => linux_sshd(facts),
         Platform::Windows => {
             "install and start OpenSSH Server (Settings > Optional features, then Start-Service sshd)".to_owned()
         }
         Platform::Other => "start your SSH server".to_owned(),
+    };
+    format!("{hint}{OTHER_PORT}")
+}
+
+fn linux_sshd(facts: &HostFacts) -> String {
+    let sudo = facts.sudo();
+    match facts.declarative {
+        // Neither installs or starts services by command: the system description does.
+        Some(Declarative::NixOs) => {
+            return format!(
+                "on NixOS, set `services.openssh.enable = true;` in /etc/nixos/configuration.nix, then run `{sudo}nixos-rebuild switch`"
+            );
+        }
+        Some(Declarative::Guix) => {
+            return format!(
+                "on Guix System, add `(service openssh-service-type)` to the services of your system configuration, then run `{sudo}guix system reconfigure` with it"
+            );
+        }
+        None => {}
+    }
+    let unit = facts
+        .sshd_unit
+        .as_deref()
+        .or_else(|| facts.package_manager.map(PackageManager::sshd_unit));
+    let start = match (facts.service_manager, unit) {
+        (Some(ServiceManager::OpenRc), _) => {
+            format!("start it with `{sudo}rc-update add sshd && {sudo}rc-service sshd start`")
+        }
+        (Some(ServiceManager::Systemd), Some(unit)) => {
+            format!("start it with `{sudo}systemctl enable --now {unit}`")
+        }
+        (Some(ServiceManager::Systemd), None) => format!(
+            "start it with `{sudo}systemctl enable --now sshd` (the unit is `ssh` on Debian and Ubuntu)"
+        ),
+        // runit, s6, a container, WSL without systemd: no command is guessed.
+        (None, _) => "start sshd with this host's service manager".to_owned(),
+    };
+    let install = facts
+        .package_manager
+        .map(|manager| {
+            format!(
+                "`{}`",
+                manager.install(manager.openssh_server(), facts.superuser)
+            )
+        })
+        .unwrap_or_else(|| "your package manager".to_owned());
+    match (facts.sshd_installed, facts.sshd_packaged) {
+        // Not found, and the package database agrees.
+        (Some(false), Some(false)) => {
+            format!("the OpenSSH server is not installed; install it with {install}, then {start}")
+        }
+        // Not found where it usually is, and nothing to confirm it.
+        (Some(false), _) => format!(
+            "the OpenSSH server does not seem to be installed (no sshd in the usual directories); if it is not, install it with {install}, then {start}"
+        ),
+        _ => start,
     }
 }
 
@@ -294,7 +390,7 @@ pub fn firewall(platform: Platform, facts: &HostFacts, mosh: bool) -> Option<Str
                 "{ports}; the nftables service is enabled: add a rule such as `{sudo}nft add rule inet filter input udp dport 60000-61000 accept` (with your ruleset's table and chain), and the same to /etc/nftables.conf to keep it"
             ),
             None => format!(
-                "{ports}; no active ufw, firewalld or nftables service was found, so only another firewall (a router's, a cloud provider's) could block them"
+                "{ports}; no enabled ufw, firewalld or nftables was found here, so if a firewall blocks them it is another one (on this host, a router's or a cloud provider's): open them there"
             ),
         },
         Platform::Windows | Platform::Other => return None,
@@ -497,6 +593,64 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_package_database_and_declarative_systems_are_read_from_the_tree() {
+        // Debian: dpkg's file list of openssh-server, or none.
+        let tree = Tree::new();
+        tree.program("usr/bin/apt-get").dir("var/lib/dpkg/info");
+        assert_eq!(tree.detect(Platform::Linux).sshd_packaged, Some(false));
+        tree.file("var/lib/dpkg/info/openssh-server.list", "/usr/sbin/sshd\n");
+        assert_eq!(tree.detect(Platform::Linux).sshd_packaged, Some(true));
+        // Arch: pacman's per-package directory (openssh-askpass is another package).
+        let tree = Tree::new();
+        tree.program("usr/bin/pacman")
+            .dir("var/lib/pacman/local/openssh-askpass-2.1.0-1");
+        assert_eq!(tree.detect(Platform::Linux).sshd_packaged, Some(false));
+        tree.dir("var/lib/pacman/local/openssh-10.0p1-1");
+        assert_eq!(tree.detect(Platform::Linux).sshd_packaged, Some(true));
+        // Alpine: apk's installed database.
+        let tree = Tree::new();
+        tree.program("sbin/apk").file(
+            "lib/apk/db/installed",
+            "P:openssh-client\nV:10.0\n\nP:tmux\n",
+        );
+        assert_eq!(tree.detect(Platform::Linux).sshd_packaged, Some(false));
+        tree.file("lib/apk/db/installed", "P:openssh-server\nV:10.0\n");
+        assert_eq!(tree.detect(Platform::Linux).sshd_packaged, Some(true));
+        // RPM's database is not read, and no database means nothing is known.
+        for tree in [Tree::new(), Tree::new()] {
+            tree.program("usr/bin/dnf");
+            assert_eq!(tree.detect(Platform::Linux).sshd_packaged, None);
+        }
+        let tree = Tree::new();
+        tree.program("usr/bin/apt-get");
+        assert_eq!(tree.detect(Platform::Linux).sshd_packaged, None);
+
+        // NixOS and Guix.
+        let tree = Tree::new();
+        assert_eq!(tree.detect(Platform::Linux).declarative, None);
+        tree.file("etc/os-release", "NAME=Debian\nID=debian\n");
+        assert_eq!(tree.detect(Platform::Linux).declarative, None);
+        tree.file("etc/os-release", "NAME=NixOS\nID=nixos\n");
+        assert_eq!(
+            tree.detect(Platform::Linux).declarative,
+            Some(Declarative::NixOs)
+        );
+        let tree = Tree::new();
+        tree.file("etc/NIXOS", "");
+        assert_eq!(
+            tree.detect(Platform::Linux).declarative,
+            Some(Declarative::NixOs)
+        );
+        let tree = Tree::new();
+        tree.file("usr/lib/os-release", "NAME=\"Guix System\"\nID=\"guix\"\n");
+        assert_eq!(
+            tree.detect(Platform::Linux).declarative,
+            Some(Declarative::Guix)
+        );
+    }
+
     #[test]
     fn sshd_hints_follow_the_os_and_the_unit() {
         let mac = sshd(Platform::MacOs, &HostFacts::default());
@@ -512,14 +666,14 @@ mod tests {
                     sshd_unit: Some("ssh".into()),
                     ..linux(Some(PackageManager::Apt))
                 },
-                "`sudo systemctl enable --now ssh`",
+                "start it with `sudo systemctl enable --now ssh`",
             ),
             (
                 HostFacts {
                     sshd_unit: Some("sshd".into()),
                     ..linux(Some(PackageManager::Pacman))
                 },
-                "`sudo systemctl enable --now sshd`",
+                "start it with `sudo systemctl enable --now sshd`",
             ),
             // No unit file found: the package manager's.
             (
@@ -530,9 +684,9 @@ mod tests {
                 linux(Some(PackageManager::Dnf)),
                 "`sudo systemctl enable --now sshd`",
             ),
-            // Nothing known: both names.
+            // systemd, and no unit or package manager known: both names.
             (
-                HostFacts::default(),
+                linux(None),
                 "`sudo systemctl enable --now sshd` (the unit is `ssh` on Debian and Ubuntu)",
             ),
             (
@@ -540,7 +694,7 @@ mod tests {
                     service_manager: Some(ServiceManager::OpenRc),
                     ..linux(Some(PackageManager::Apk))
                 },
-                "`sudo rc-update add sshd && sudo rc-service sshd start`",
+                "start it with `sudo rc-update add sshd && sudo rc-service sshd start`",
             ),
             // As root, no sudo.
             (
@@ -554,9 +708,32 @@ mod tests {
         ] {
             let hint = sshd(Platform::Linux, &facts);
             assert!(hint.contains(expected), "{facts:?}: {hint}");
-            assert!(hint.contains("--ssh-port"), "{hint}");
+            assert!(!hint.contains("installed"), "{hint}");
         }
-        // Not installed: install, then start.
+
+        // An unknown init system (runit, s6, a container, WSL without systemd), even with a
+        // unit file or a package manager found: no systemctl or rc-service guessed (external
+        // review: systemctl was printed for every host that is not OpenRC).
+        for facts in [
+            HostFacts::default(),
+            HostFacts {
+                service_manager: None,
+                sshd_unit: Some("sshd".into()),
+                ..linux(Some(PackageManager::Apt))
+            },
+        ] {
+            let hint = sshd(Platform::Linux, &facts);
+            assert!(
+                hint.starts_with("start sshd with this host's service manager"),
+                "{hint}"
+            );
+            assert!(
+                !hint.contains("systemctl") && !hint.contains("rc-service"),
+                "{hint}"
+            );
+        }
+
+        // Not found, and the package database says it is not installed: certain.
         for (manager, install, start) in [
             (
                 PackageManager::Apt,
@@ -564,33 +741,63 @@ mod tests {
                 "enable --now ssh`",
             ),
             (
-                PackageManager::Dnf,
-                "sudo dnf install openssh-server",
-                "enable --now sshd`",
-            ),
-            (
                 PackageManager::Pacman,
                 "sudo pacman -S openssh",
-                "enable --now sshd`",
-            ),
-            (
-                PackageManager::Zypper,
-                "sudo zypper install openssh-server",
                 "enable --now sshd`",
             ),
         ] {
             let facts = HostFacts {
                 sshd_installed: Some(false),
+                sshd_packaged: Some(false),
                 ..linux(Some(manager))
             };
             let hint = sshd(Platform::Linux, &facts);
             assert!(
-                hint.contains("not installed") && hint.contains(install) && hint.contains(start),
+                hint.starts_with("the OpenSSH server is not installed; install it with `")
+                    && hint.contains(install)
+                    && hint.contains(start),
                 "{hint}"
             );
         }
+        // Not found, and nothing to confirm it (RPM, no database, or the database lists it):
+        // hedged.
+        for (manager, packaged, install, start) in [
+            (
+                PackageManager::Dnf,
+                None,
+                "`sudo dnf install openssh-server`",
+                "enable --now sshd`",
+            ),
+            (
+                PackageManager::Zypper,
+                None,
+                "`sudo zypper install openssh-server`",
+                "enable --now sshd`",
+            ),
+            (
+                PackageManager::Apt,
+                Some(true),
+                "`sudo apt install openssh-server`",
+                "enable --now ssh`",
+            ),
+        ] {
+            let facts = HostFacts {
+                sshd_installed: Some(false),
+                sshd_packaged: packaged,
+                ..linux(Some(manager))
+            };
+            let hint = sshd(Platform::Linux, &facts);
+            assert!(
+                hint.starts_with("the OpenSSH server does not seem to be installed")
+                    && hint.contains(&format!("if it is not, install it with {install}"))
+                    && hint.contains(start),
+                "{hint}"
+            );
+            assert!(!hint.contains("is not installed"), "{hint}");
+        }
         let alpine = HostFacts {
             sshd_installed: Some(false),
+            sshd_packaged: Some(false),
             service_manager: Some(ServiceManager::OpenRc),
             ..linux(Some(PackageManager::Apk))
         };
@@ -602,7 +809,55 @@ mod tests {
             sshd_installed: Some(false),
             ..linux(None)
         };
-        assert!(sshd(Platform::Linux, &unknown).contains("with your package manager"));
+        let hint = sshd(Platform::Linux, &unknown);
+        assert!(
+            hint.contains("does not seem to be installed") && hint.contains("your package manager"),
+            "{hint}"
+        );
+
+        // NixOS and Guix: the system configuration, never a package manager or systemctl.
+        for (declarative, expected) in [
+            (
+                Declarative::NixOs,
+                "set `services.openssh.enable = true;` in /etc/nixos/configuration.nix, then run `sudo nixos-rebuild switch`",
+            ),
+            (Declarative::Guix, "add `(service openssh-service-type)`"),
+        ] {
+            let facts = HostFacts {
+                declarative: Some(declarative),
+                sshd_installed: Some(false),
+                ..linux(None)
+            };
+            let hint = sshd(Platform::Linux, &facts);
+            assert!(hint.contains(expected), "{hint}");
+            assert!(
+                !hint.contains("installed") && !hint.contains("systemctl"),
+                "{hint}"
+            );
+        }
+
+        // Every hint, on every system, ends with the --ssh-port advice.
+        let everything = [
+            sshd(Platform::MacOs, &HostFacts::default()),
+            sshd(Platform::Windows, &HostFacts::default()),
+            sshd(Platform::Other, &HostFacts::default()),
+            sshd(Platform::Linux, &HostFacts::default()),
+            sshd(Platform::Linux, &alpine),
+            sshd(Platform::Linux, &unknown),
+            sshd(
+                Platform::Linux,
+                &HostFacts {
+                    declarative: Some(Declarative::Guix),
+                    ..HostFacts::default()
+                },
+            ),
+        ];
+        for hint in everything {
+            assert!(
+                hint.ends_with("; if sshd listens on another port, pass --ssh-port"),
+                "{hint}"
+            );
+        }
         assert!(sshd(Platform::Windows, &HostFacts::default()).contains("OpenSSH Server"));
     }
 
@@ -694,7 +949,11 @@ mod tests {
                 Some(Firewall::Nftables),
                 "`sudo nft add rule inet filter input udp dport 60000-61000 accept`",
             ),
-            (None, "no active ufw, firewalld or nftables"),
+            // Nothing found is not "nothing there": another firewall may still be on.
+            (
+                None,
+                "no enabled ufw, firewalld or nftables was found here, so if a firewall blocks them it is another one (on this host, a router's or a cloud provider's): open them there",
+            ),
         ] {
             let hint = firewall(Platform::Linux, &with(active), true).unwrap();
             assert!(

@@ -109,8 +109,9 @@ impl Account {
             }
             if code != 0 || result.is_null() || passwd.pw_name.is_null() || passwd.pw_dir.is_null()
             {
-                return Err(AccountError::Unknown(format!(
-                    "user id {uid} has no entry in the account database"
+                return Err(AccountError::Unknown(no_entry(
+                    uid,
+                    cfg!(target_env = "musl"),
                 )));
             }
             // SAFETY: both pointers are non-null, NUL-terminated strings inside `buffer`.
@@ -166,6 +167,21 @@ impl Account {
     }
 }
 
+/// Why the account of `uid` is unknown. The released Linux binaries are static (musl), and musl
+/// looks accounts up in `/etc/passwd` only, not through the system's name service (LDAP, SSSD,
+/// systemd-homed and userdb accounts are not there): the message says so and how to get a build
+/// that asks the system.
+#[cfg(unix)]
+fn no_entry(uid: u32, static_build: bool) -> String {
+    if static_build {
+        format!(
+            "user id {uid} has no entry in /etc/passwd. This or2-pair is a static build, which reads accounts only from /etc/passwd, so an account from a directory service (LDAP, SSSD, systemd-homed) is not found. Build it from source instead, which uses this system's own account lookup: cargo install --git https://github.com/code-akram/or2 or2-pair --locked"
+        )
+    } else {
+        format!("user id {uid} has no entry in the account database")
+    }
+}
+
 #[cfg(unix)]
 pub fn effective_uid() -> u32 {
     // SAFETY: `geteuid` has no preconditions and cannot fail.
@@ -194,6 +210,27 @@ mod tests {
         {
             assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), account.name);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_static_build_says_why_an_account_is_missing_and_what_fixes_it() {
+        // Fable's review: on a host whose accounts come from LDAP or systemd-homed, the static
+        // release binary said only "no entry in the account database".
+        let message = no_entry(1234, true);
+        assert!(message.contains("user id 1234 has no entry in /etc/passwd"));
+        assert!(message.contains("static build, which reads accounts only from /etc/passwd"));
+        assert!(message.contains("LDAP, SSSD, systemd-homed"));
+        assert!(
+            message.contains(
+                "cargo install --git https://github.com/code-akram/or2 or2-pair --locked"
+            )
+        );
+        // A build that uses the system's lookup has nothing to explain.
+        assert_eq!(
+            no_entry(1234, false),
+            "user id 1234 has no entry in the account database"
+        );
     }
 
     #[test]

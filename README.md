@@ -3,14 +3,23 @@
 A free, open-source Android client for SSH and mosh, built for driving coding agents that run in
 tmux or herdr on your own machines.
 
-Status: M2 complete. One SSH connection per host carries terminals, tmux and a live herdr
-agent inbox across hosts; tap an agent to open its pane and answer from the composer. Mosh,
-background sessions and automatic reattach are M3.
+Status: v0.1.0, the first release (M1 to M3 and Easy pair). One SSH connection per host carries
+terminals, tmux and a live herdr agent inbox across hosts; tap an agent to open its pane and answer
+from the composer. Mosh terminals roam across networks, a foreground service keeps sessions open in
+the background, and the app reattaches to the last pane. What is not tested yet is listed in
+[the release notes](docs/releases/v0.1.0.md#known-shortcomings-and-untested-areas); changes are in the
+[changelog](CHANGELOG.md).
 See [the design](docs/design.md), [contracts](docs/contracts.md) and [build instructions](docs/build.md).
-To add a host, [pair it with one command and a QR scan](docs/pairing.md) (`or2-pair`), or
-[set it up manually](docs/manual-setup.md).
 
-Install `or2-pair` on a Linux or macOS host (into `~/.local/bin`, checksum verified, no sudo), then run it:
+## Install
+
+**The app:** download the APK from the [latest release](https://github.com/code-akram/or2/releases/latest)
+(Android 14 or later, arm64), check its SHA-256 against the release notes, and install it. It is signed
+with the or2 release key, so it cannot be installed over a development (debug) build.
+
+**On each host:** add it to or2 by [pairing it with one command and a QR scan](docs/pairing.md)
+(`or2-pair`), or [set it up manually](docs/manual-setup.md). Install `or2-pair` on a Linux or macOS
+host (into `~/.local/bin`, checksum verified, no sudo), then run it:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/code-akram/or2/main/scripts/install-or2-pair.sh | sh
@@ -19,9 +28,12 @@ or2-pair
 
 To read the script before it runs, download it first:
 `curl -fsSLO https://raw.githubusercontent.com/code-akram/or2/main/scripts/install-or2-pair.sh`, read
-`install-or2-pair.sh`, then `sh install-or2-pair.sh`. The binaries come from the
-[`or2-pair-v*` releases](https://github.com/code-akram/or2/releases); none is published yet, so until
-then build it from source (see [Pair a host](docs/pairing.md#1-install-or2-pair-on-the-host)).
+`install-or2-pair.sh`, then `sh install-or2-pair.sh`. It installs the binary for your host from the
+[latest release](https://github.com/code-akram/or2/releases/latest) (`--version vX.Y.Z` for another)
+and checks it against the release's `SHA256SUMS`. That check proves the download is intact, not who
+made it: both come from the same GitHub release (signed releases are a future item). To build it from
+source instead: `cargo install --git https://github.com/code-akram/or2 or2-pair --locked` (see
+[Pair a host](docs/pairing.md#1-install-or2-pair-on-the-host)).
 
 License: GPL-3.0-or-later.
 
@@ -33,7 +45,8 @@ or2 is built on other people's open-source work, and is better for every project
   or2 reaches through [libghostty-rs](https://github.com/Uzaaft/libghostty-rs), emulate the
   terminal; [Zig](https://ziglang.org) builds it.
 - [russh](https://github.com/Eugeny/russh) speaks SSH, on top of [tokio](https://tokio.rs) and
-  [aws-lc-rs](https://github.com/aws/aws-lc-rs).
+  [aws-lc-rs](https://github.com/aws/aws-lc-rs); [RustCrypto](https://github.com/RustCrypto) and
+  [dalek-cryptography](https://github.com/dalek-cryptography) provide the ciphers, hashes and keys.
 - [mosh](https://mosh.org) by Keith Winstein and contributors defined the protocol that keeps a
   session alive across networks, and [mosh-rs](https://github.com/wilsonglasser/mosh-rs) by
   Wilson Glasser is the Rust port or2's mosh client is derived from.
@@ -45,8 +58,15 @@ or2 is built on other people's open-source work, and is better for every project
   [Room](https://developer.android.com/training/data-storage/room),
   [AndroidX Biometric](https://developer.android.com/jetpack/androidx/releases/biometric),
   [Kotlin](https://kotlinlang.org) and [kotlinx.coroutines](https://github.com/Kotlin/kotlinx.coroutines)
-  make the app.
+  make the app; [CameraX](https://developer.android.com/media/camera/camerax) and
+  [ZXing](https://github.com/zxing/zxing) read Easy pair's QR code, and
+  [qrcode](https://github.com/kennytm/qrcode-rust) draws it on the host.
 - [Catppuccin](https://github.com/catppuccin/catppuccin) (Mocha) gives it its colours.
+
+**Moshi.** The [Moshi](https://getmoshi.app) app was the direct reference and inspiration for or2's
+onboarding, the Easy pair QR flow and the compact terminal UI. Thank you to its makers for showing how
+good a phone terminal for agents can be. No Moshi code is used in or2, and Moshi is a separate,
+independent product with no connection to this project.
 
 The complete list, with every licence text, is in the app (Home, About or2, Open source
 licenses) and is generated by `cargo xtask gen-licenses` from the locked Cargo and Gradle

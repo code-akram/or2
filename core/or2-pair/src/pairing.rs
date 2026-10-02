@@ -370,6 +370,32 @@ mod tests {
         }
     }
 
+    /// One signal from the start, a second one from look `n` on.
+    struct SecondSignalAt {
+        n: u32,
+        looked: AtomicU32,
+    }
+
+    impl SecondSignalAt {
+        fn look(n: u32) -> Self {
+            Self {
+                n,
+                looked: AtomicU32::new(0),
+            }
+        }
+    }
+
+    impl Signals for SecondSignalAt {
+        fn arm(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn count(&self) -> u32 {
+            let looked = self.looked.fetch_add(1, Ordering::SeqCst) + 1;
+            if looked >= self.n { 2 } else { 1 }
+        }
+    }
+
     impl Signals for Count {
         fn arm(&self) -> io::Result<()> {
             Ok(())
@@ -688,24 +714,23 @@ mod tests {
         let f = fixture();
         let backup = Backup::new(DateTime::now());
         let mut live = start(&f, &backup, Duration::from_secs(300));
-        // Another program holds the lock.
+        // Another program holds the lock. Taken with patience: a child process that another test
+        // of this binary is starting can still hold the lock `start` just let go of, through a
+        // descriptor it inherited between its fork and its exec (Fable's review saw this test
+        // fail 1 run in 4 under the whole suite).
         let dir = StateDir::open(&f.account, false).unwrap().unwrap();
-        let holder = dir.lock(Duration::ZERO, &|| false).unwrap();
-        let signals = Count::raised(1);
-        let ended = std::thread::scope(|scope| {
-            scope.spawn(|| {
-                // The run looks once in its wait, once as the cleanup starts and once after its
-                // first failed try of the lock: then the second signal comes.
-                signals.wait_for_looks(3);
-                signals.raised.fetch_add(1, Ordering::SeqCst);
-            });
-            live.wait(
-                &signals,
-                Duration::from_millis(20),
-                Duration::from_secs(60),
-                &DateTime::now,
-            )
-        });
+        let holder = dir.lock(Duration::from_secs(30), &|| false).unwrap();
+        // The run looks once in its wait, once as the cleanup starts and once after its first
+        // failed try of the lock: the second signal is there from that third look on, decided by
+        // the looks themselves rather than by a thread racing them.
+        let signals = SecondSignalAt::look(3);
+        let ended = live.wait(
+            &signals,
+            Duration::from_millis(20),
+            Duration::from_secs(60),
+            &DateTime::now,
+        );
+        assert_eq!(signals.looked.load(Ordering::SeqCst), 3);
         assert!(
             matches!(&ended, Ended::RemovalFailed(error) if error.kind() == io::ErrorKind::WouldBlock),
             "{ended:?}"

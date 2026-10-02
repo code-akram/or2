@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -55,6 +57,27 @@ val buildRustAndroid by tasks.registering(Exec::class) {
     outputs.dir(generatedLibraries)
 }
 
+// Release signing (docs/build.md, "Release signing"). The properties file named by OR2_SIGNING_PROPERTIES,
+// else $XDG_CONFIG_HOME/or2/signing.properties (~/.config/or2/signing.properties), gives storeFile (relative
+// to that file's directory, or absolute), storePassword, keyAlias and keyPassword. Without the file the release
+// build stays unsigned, as F-Droid builds it from source. No key or password is in the repository, and none of
+// the values is ever printed.
+class ReleaseSigning(val storeFile: File, val storePassword: String, val keyAlias: String, val keyPassword: String)
+
+val releaseSigning: ReleaseSigning? = run {
+    val named = providers.environmentVariable("OR2_SIGNING_PROPERTIES").orNull?.takeIf { it.isNotBlank() }
+    val configHome = providers.environmentVariable("XDG_CONFIG_HOME").orNull?.takeIf { it.isNotBlank() }
+        ?: "${System.getProperty("user.home")}/.config"
+    val file = File(named ?: "$configHome/or2/signing.properties")
+    if (!file.isFile) return@run null
+    val properties = Properties().apply { file.inputStream().use { stream -> load(stream) } }
+    fun value(key: String): String = properties.getProperty(key)?.takeIf { it.isNotEmpty() }
+        ?: throw GradleException("$file sets no $key (it needs storeFile, storePassword, keyAlias and keyPassword)")
+    val store = File(value("storeFile")).let { if (it.isAbsolute) it else file.parentFile.resolve(it) }
+    if (!store.isFile) throw GradleException("the keystore that $file names does not exist: $store")
+    ReleaseSigning(store, value("storePassword"), value("keyAlias"), value("keyPassword"))
+}
+
 android {
     namespace = "io.github.code_akram.or2"
     compileSdk = 36
@@ -78,6 +101,15 @@ android {
     // debug in every respect (the same signing, debug-only sources and dependencies) but installed as
     // io.github.code_akram.or2.devicetest, with its own data, Keystore and permissions. The debug
     // variant has no androidTest at all, so no task can install a test APK against the daily app.
+    releaseSigning?.let { signing ->
+        val config = signingConfigs.create("release") {
+            storeFile = signing.storeFile
+            storePassword = signing.storePassword
+            keyAlias = signing.keyAlias
+            keyPassword = signing.keyPassword
+        }
+        buildTypes.getByName("release").signingConfig = config
+    }
     buildTypes {
         create("deviceTest") {
             initWith(getByName("debug"))

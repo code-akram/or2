@@ -28,6 +28,9 @@ Rules for humans and agents working in this repo. Read `docs/design.md` first.
 - Repository tooling is Rust (the `xtask` crate, run as `cargo xtask <task>`) or POSIX `sh` for
   trivial glue. No Python, Node or other runtimes in the repo or the build; generated files are
   checked in and every generator has a `--check` mode.
+- User-facing install scripts (run on a host by its owner, such as `scripts/install-or2-pair.sh`)
+  may be POSIX `sh` of any size, provided they are ShellCheck-clean and tested from `xtask`
+  (`core/xtask/tests/`).
 
 ## Dependencies
 

@@ -355,7 +355,9 @@ Known M1 limitations:
   Ghostty fetch reproducible offline (F-Droid).
 
 Mosh, tmux/herdr integration and the foreground service remain M2/M3 work. Release signing is
-not configured by the scaffold; M1 development uses the debug APK.
+not configured by the scaffold; M1 development uses the debug APK. (Since v0.1.0 the release build is signed
+locally when the maintainer's signing file is present, and unsigned otherwise: see
+[build: Release signing](build.md#release-signing).)
 
 ### M2 implementation checklist
 
@@ -477,10 +479,18 @@ address) the extra port was unreachable although SSH worked. Version 2 pairs ove
   `scripts/install-or2-pair.sh` (POSIX `sh`, ShellCheck-clean) installs one with its checksum verified, tested
   against fixture releases (`install_or2_pair.rs`: checksum OK and mismatch, unsupported CPU and OS). The checks
   print the exact fix for the host (sshd unit, package manager, firewall), and systemd's userdb
-  `AuthorizedKeysCommand` snippet no longer warns ([contracts](contracts.md#host-cli)).
-- [ ] Installer, release: the macOS binaries are built only by `.github/workflows/or2-pair-release.yml` (on a
-  macOS runner), which has not run yet, and no `or2-pair-v*` release is published, so the one-liner has nothing to
-  install until the owner tags one.
+  `AuthorizedKeysCommand` snippet no longer warns ([contracts](contracts.md#host-cli)). External review (Codex:
+  a P1, four P2s, a P3; Fable) fixed: a manual workflow run can never publish; the installer calls no GitHub API
+  (GitHub's `latest/download`), is one function called on its last line, stages with `mktemp` in the destination
+  and runs the binary before replacing anything; unknown init systems get no `systemctl`; a later `Match` block
+  no longer reopens a decided setting. Tested in `install_or2_pair.rs` (truncation at every line, planted links,
+  a binary that does not run, `--version`, unsafe destinations) and the `or2-pair` unit tests.
+- [ ] Installer, release: one release stream, tagged `vX.Y.Z` (workspace version = app `versionName`, checked by
+  `dist --expect-version` and an xtask test). The first release, **v0.1.0** (the APK and the `or2-pair` binaries,
+  [notes](releases/v0.1.0.md)), is published by pushing the tag `v0.1.0`: `.github/workflows/release.yml` builds
+  the four binaries (the macOS ones only there, on a macOS runner) and creates the release; the APK is signed
+  locally and uploaded with `gh release upload`. Ticked once the workflow has run, the release exists, the
+  one-liner installs from it and the APK installs on the phone.
 
 ## Decisions
 

@@ -21,12 +21,23 @@ curl -fsSL https://raw.githubusercontent.com/code-akram/or2/main/scripts/install
 ```
 
 The script ([`scripts/install-or2-pair.sh`](../scripts/install-or2-pair.sh), POSIX `sh`) picks the binary for
-your OS and CPU from the newest `or2-pair-v*` [release](https://github.com/code-akram/or2/releases), downloads
-it and the release's `SHA256SUMS` (with `curl` or `wget`), refuses it unless the SHA-256 matches (`sha256sum`
-or `shasum -a 256`), and puts it in `~/.local/bin`, which it creates. It never uses `sudo` and changes nothing
-else: no shell startup file, nothing in `~/.ssh`. If `~/.local/bin` is not on your `PATH` it says so and shows
-the line to add; then it tells you to run `or2-pair`. Options: `--version 0.2.0` (or `v0.2.0`) installs that
-release, `--dir <directory>` (or `OR2_PAIR_INSTALL_DIR`) installs elsewhere.
+your OS and CPU from the [latest release](https://github.com/code-akram/or2/releases/latest) (GitHub's latest:
+never a draft or a prerelease; no GitHub API is called), downloads it and the release's `SHA256SUMS` (with
+`curl`, HTTPS only, or `wget`), refuses it unless the SHA-256 matches (`sha256sum` or `shasum -a 256`), runs it
+once (`--version`) and only then puts it in `~/.local/bin`, which it creates, in place of any older `or2-pair`
+there; a binary that does not run on your host replaces nothing. It never uses `sudo` and changes nothing else:
+no shell startup file, nothing in `~/.ssh`. If `~/.local/bin` is not on your `PATH` it says so and shows the line
+to add; then it tells you to run `or2-pair`. Options: `--version v0.1.0` (or `0.1.0`) installs that release (a
+version that does not exist is named as such), `--dir <directory>` (or `OR2_PAIR_INSTALL_DIR`) installs
+elsewhere. `OR2_PAIR_RELEASES_BASE` points it at a mirror laid out like
+`https://github.com/code-akram/or2/releases` (`latest/download/…` and `download/vX.Y.Z/…`). Run as root, it says
+that pairing from root's shell pairs the root account, and refuses a directory that is not root's or that group
+or others may write; for anyone, it refuses a directory that anyone can write. A download cut short runs
+nothing: the script is one function, called on its last line.
+
+The checksum proves the download is intact, not who made it: the binary and `SHA256SUMS` come from the same
+GitHub release, so whoever could change one could change both. Signed releases are a future item; until then,
+build from source (below) if that matters to you.
 
 Prefer to read it first? Download it, read it, then run it:
 
@@ -41,16 +52,16 @@ Or skip the script: download `or2-pair-<target>` and `SHA256SUMS` from the relea
 make the file executable and put it on your `PATH` as `or2-pair`. The targets are `x86_64-unknown-linux-musl`,
 `aarch64-unknown-linux-musl`, `x86_64-apple-darwin` and `aarch64-apple-darwin`.
 
-No release is published yet (the first is `or2-pair-v0.1.0` when it is tagged); until then, and on other systems,
-build it from source. The Linux binaries are static (musl), so they run on any distribution, but they find your
-account only in `/etc/passwd`: an account that exists only in a directory service (LDAP, SSSD, systemd-homed)
-needs the source build, which uses the system's own account lookup.
-
-From a checkout of this repository, with a Rust toolchain:
+On other systems, or to build it yourself, build it from source. The Linux release binaries are static (musl), so
+they run on any distribution, but they find your account only in `/etc/passwd`: an account that exists only in a
+directory service (LDAP, SSSD, systemd-homed) needs the source build, which uses the system's own account lookup
+(the static binary says so when it cannot find your account). With a Rust toolchain:
 
 ```sh
-cargo install --path core/or2-pair --locked
+cargo install --git https://github.com/code-akram/or2 or2-pair --locked
 ```
+
+or, from a checkout of this repository, `cargo install --path core/or2-pair --locked`.
 
 Install it in a path without spaces or shell characters (`~/.cargo/bin` and `~/.local/bin` are fine):
 sshd runs it through your login shell, and `or2-pair` refuses a path that shell could misread.
@@ -143,8 +154,11 @@ list). If you can't `ssh` to the host from the phone's network, pairing can't wo
 ### `or2-pair` says "fail" and stops
 
 Each `fail` line says why automatic pairing can't work here: sshd isn't answering (it prints the command for this
-host: on Linux `sudo systemctl enable --now ssh` or `sshd` by the unit your distribution installs, `rc-service` on
-OpenRC, and the install command of your package manager first when no OpenSSH server is installed; on macOS Remote
+host: on Linux with systemd `sudo systemctl enable --now ssh` or `sshd` by the unit your distribution installs,
+`rc-service` on OpenRC, "with this host's service manager" when it can't tell which one runs (runit, s6, a
+container), `services.openssh.enable` on NixOS and `openssh-service-type` on Guix System, and the install command
+of your package manager first when no `sshd` is found (it says the server "is not installed" only when the
+package database agrees, else that it "does not seem to be installed"); on macOS Remote
 Login in System Settings > General > Sharing, or `sudo systemsetup -setremotelogin on`, which needs Full Disk Access
 for the terminal app; on a non-standard port pass `--ssh-port`), the SSH server isn't OpenSSH, `authorized_keys` (or `~/.ssh`, where the new
 file is written) can't be written, the home directory or `~/.ssh` is writable by others (sshd would ignore the
@@ -220,7 +234,8 @@ mosh needs UDP 60000-61000 open for terminals that survive network changes. When
 checks print the rule for the firewall that is on: ufw (`sudo ufw allow 60000:61000/udp`, when `/etc/ufw/ufw.conf`
 says `ENABLED=yes`), firewalld (`sudo firewall-cmd --permanent --add-port=60000-61000/udp && sudo firewall-cmd
 --reload`) or nftables (an `nft add rule` example to adapt to your ruleset), found by their enabled services; with
-none of them it says only a router's or a cloud provider's firewall could block the ports. On macOS you allow
+none of them found it says that a firewall in the way would be another one (on the host, a router's or a cloud
+provider's), where the ports are to be opened. On macOS you allow
 `mosh-server` in System Settings > Network > Firewall. Pairing itself does not need it.
 
 ### Missing tmux, herdr or mosh-server

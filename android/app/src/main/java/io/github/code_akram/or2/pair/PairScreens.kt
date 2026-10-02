@@ -89,6 +89,9 @@ fun PairDestination(
 /** The command to run on the host; the one line a person copies from this screen. */
 const val PAIR_COMMAND = "or2-pair"
 
+/** Installs or2-pair on a Linux or macOS host from the latest release (scripts/install-or2-pair.sh). */
+const val INSTALL_COMMAND = "curl -fsSL https://raw.githubusercontent.com/code-akram/or2/main/scripts/install-or2-pair.sh | sh"
+
 /**
  * The pairing code to type on the host, then the camera (or a way to allow it) and a paste field: the two ways to hand
  * over the host's QR. [code] is the phone's `K` (`7KQ4-M2XD-9PTM`).
@@ -173,10 +176,23 @@ fun PairScanScreen(code: String, error: String?, access: CameraAccess, onCode: (
             } else {
                 PillButton("Paste pairing code", { pasting = true }, Modifier.fillMaxWidth().testTag("pair-paste"), icon = Or2Icons.Paste)
             }
-            Text(
-                "No or2-pair on the host yet? Install it with cargo install --path core/or2-pair, or follow the Pair a host guide (docs/pairing.md).",
-                style = Or2Type.Secondary, color = Or2Colors.TextMuted,
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    "No or2-pair on the host yet? On Linux or macOS, install it (checksum checked, no sudo):",
+                    style = Or2Type.Secondary, color = Or2Colors.TextMuted,
+                )
+                Row(
+                    Modifier.fillMaxWidth().clip(Or2Shapes.Field).background(Or2Colors.SurfaceRaisedRow).padding(start = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(INSTALL_COMMAND, style = Or2Type.MonoSmall, color = Or2Colors.Text, modifier = Modifier.weight(1f).padding(vertical = 6.dp).testTag("pair-install-command"))
+                    IconAction(Or2Icons.Copy, "Copy the install command", { copyText(context, "or2-pair install command", INSTALL_COMMAND) }, Modifier.testTag("pair-copy-install"))
+                }
+                Text(
+                    "Or build it from source: see the Pair a host guide (docs/pairing.md).",
+                    style = Or2Type.Secondary, color = Or2Colors.TextMuted,
+                )
+            }
             Spacer(Modifier.height(16.dp))
             BottomInsetSpacer()
         }

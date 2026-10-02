@@ -681,7 +681,7 @@ struct Resolved<T> {
     /// A `Match` block that may apply (it could not be evaluated) sets it before the value was
     /// found, or an `Include` could not be read: the value may be another.
     uncertain: bool,
-    /// The values set in `Match` blocks that may apply.
+    /// The values set in `Match` blocks that may apply, before a block that applies decided it.
     possible: Vec<T>,
 }
 
@@ -703,12 +703,14 @@ impl SshdConfig {
                     decided = true;
                 }
                 Some(_) => {}
-                None => {
-                    if !decided {
-                        resolved.uncertain = true;
-                    }
+                // Once a block that applies has decided the value, a later one cannot change
+                // it, whether it applies or not (external review: a later `Match Group` block
+                // made a decided `AuthorizedKeysFile` uncertain again).
+                None if !decided => {
+                    resolved.uncertain = true;
                     resolved.possible.push(value);
                 }
+                None => {}
             }
         }
         if !decided {
@@ -818,17 +820,20 @@ fn config(input: &CheckInput<'_>, blocking: Level) -> Vec<Check> {
             .or_else(|| files.possible.first())
             .map(|words| words.join(" "))
             .unwrap_or_default();
-        // An AuthorizedKeysCommand may read that file itself: not certain then.
-        let verdict = if command_verdict == Verdict::Fine {
-            excluded
-        } else {
-            Verdict::Maybe
+        // An AuthorizedKeysCommand may read that file itself: not certain then. Say which
+        // doubt it is: the setting itself is certain when only the command softens it.
+        let (verdict, why) = match (excluded, command_verdict) {
+            (_, Verdict::Fine) => (excluded, maybe(excluded)),
+            (Verdict::Certain, _) => (
+                Verdict::Maybe,
+                " (an AuthorizedKeysCommand is set too, which might read that file itself)",
+            ),
+            _ => (Verdict::Maybe, maybe(Verdict::Maybe)),
         };
         out.push(check(
             level(verdict),
             format!(
-                "sshd_config's AuthorizedKeysFile ({words}) does not include .ssh/authorized_keys{}: sshd would not read the temporary key there; use --manual",
-                maybe(verdict)
+                "sshd_config's AuthorizedKeysFile ({words}) does not include .ssh/authorized_keys{why}: sshd would not read the temporary key there; use --manual"
             ),
         ));
     }
@@ -1052,7 +1057,11 @@ mod tests {
     fn a_stopped_sshd_gets_a_platform_hint_and_blocks_pairing() {
         for (platform, word) in [
             (Platform::MacOs, "Remote Login"),
-            (Platform::Linux, "systemctl"),
+            // Nothing known of this Linux host: no systemctl guessed (external review).
+            (
+                Platform::Linux,
+                "start sshd with this host's service manager",
+            ),
             (Platform::Windows, "OpenSSH Server"),
         ] {
             let mut setup = Setup::new(Err(io::ErrorKind::ConnectionRefused.into()));
@@ -1078,6 +1087,8 @@ mod tests {
             service_manager: Some(hints::ServiceManager::Systemd),
             sshd_unit: Some("ssh".into()),
             sshd_installed: Some(true),
+            sshd_packaged: Some(true),
+            declarative: None,
             firewall: Some(hints::Firewall::Ufw),
             superuser: false,
         };
@@ -1528,6 +1539,63 @@ mod tests {
             warnings
                 .iter()
                 .any(|w| w.contains("AuthorizedKeysFile (/etc/ssh/keys/%u)")),
+            "{checks:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("AuthorizedKeysCommand") && w.contains("--manual")),
+            "{checks:?}"
+        );
+        // The file setting is certain there; only the command makes it a warning, and the
+        // warning says so rather than blaming a Match block (review: it said "in a Match block or
+        // an Include or2-pair cannot evaluate").
+        let excluded = warnings
+            .iter()
+            .find(|w| w.contains("AuthorizedKeysFile (/etc/ssh/keys/%u)"))
+            .unwrap();
+        assert!(
+            excluded.contains(
+                "(an AuthorizedKeysCommand is set too, which might read that file itself)"
+            ) && !excluded.contains("Match block"),
+            "{excluded}"
+        );
+
+        // A Match block that applies decides the value; a later block that cannot be evaluated
+        // does not make it uncertain again (external review: `Match Group wheel` after
+        // `Match User dev` revived the AuthorizedKeysCommand warnings).
+        let decided = "Include sshd_config.d/*.conf\nMatch User dev\n  AuthorizedKeysFile .ssh/authorized_keys\nMatch Group wheel\n  AuthorizedKeysFile none\n";
+        setup.config(decided);
+        let config = read_sshd_config(setup.etc.path()).unwrap();
+        let files = config.resolve("dev", |s| s.authorized_keys_file.clone());
+        assert_eq!(
+            files,
+            Resolved {
+                value: Some(vec![".ssh/authorized_keys".to_owned()]),
+                uncertain: false,
+                possible: Vec::new(),
+            }
+        );
+        let checks = setup.run();
+        assert!(
+            checks
+                .iter()
+                .filter(|c| matches!(c.level, Level::Warn | Level::Fail))
+                .all(|c| !c.text.contains("sshd_config")),
+            "{checks:?}"
+        );
+        // The other order: the block that cannot be evaluated comes first, so it may decide.
+        setup.config(
+            "Include sshd_config.d/*.conf\nMatch Group wheel\n  AuthorizedKeysFile none\nMatch User dev\n  AuthorizedKeysFile .ssh/authorized_keys\n",
+        );
+        let checks = setup.run();
+        let warnings = texts(&checks, Level::Warn);
+        assert!(texts(&checks, Level::Fail).is_empty(), "{checks:?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("AuthorizedKeysFile (none)")
+                    && w.contains("in a Match block or an Include")),
             "{checks:?}"
         );
         assert!(

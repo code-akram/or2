@@ -192,6 +192,42 @@ fn crate_version(core: &Path) -> Result<String> {
         .ok_or_else(|| "cargo metadata names no or2-pair version".to_owned())
 }
 
+/// The `versionName = "…"` of the app's build script.
+fn version_name(build_script: &str) -> Option<String> {
+    build_script.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("versionName")?.trim_start();
+        let value = value.strip_prefix('=')?.trim();
+        let value = value.strip_prefix('"')?.strip_suffix('"')?;
+        Some(value.to_owned())
+    })
+}
+
+/// The app's versionName, from `android/app/build.gradle.kts`. One release stream: it is the
+/// workspace version too.
+fn app_version_name(repo: &Path) -> Result<String> {
+    let path = repo.join("android/app/build.gradle.kts");
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    version_name(&text).ok_or_else(|| format!("{} sets no versionName", path.display()))
+}
+
+/// The `version = "…"` of `[workspace.package]` in `core/Cargo.toml`.
+#[cfg(test)]
+fn workspace_version(manifest: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_package = line == "[workspace.package]";
+        } else if in_package
+            && let Some(value) = line.strip_prefix("version")
+            && let Some(value) = value.trim_start().strip_prefix('=')
+        {
+            return Some(value.trim().trim_matches('"').to_owned());
+        }
+    }
+    None
+}
+
 pub fn run(args: &[String]) -> Result<()> {
     let options = parse(args)?;
     let host_os = std::env::consts::OS;
@@ -218,12 +254,18 @@ pub fn run(args: &[String]) -> Result<()> {
     let repo = repo_root();
     let core = repo.join("core");
     let version = crate_version(&core)?;
-    if let Some(expected) = &options.expect_version
-        && expected != &version
-    {
-        return fail(format!(
-            "or2-pair is version {version}, not {expected} (the tag and the workspace version must agree)"
-        ));
+    if let Some(expected) = &options.expect_version {
+        if expected != &version {
+            return fail(format!(
+                "or2-pair is version {version}, not {expected} (the tag, the workspace version and the app's versionName must agree)"
+            ));
+        }
+        let app = app_version_name(&repo)?;
+        if expected != &app {
+            return fail(format!(
+                "the app's versionName (android/app/build.gradle.kts) is {app}, not {expected} (the tag, the workspace version and the app's versionName must agree)"
+            ));
+        }
     }
     let cargo_home = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
@@ -397,6 +439,30 @@ mod tests {
                 "{env:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_workspace_version_and_the_apps_version_name_agree() {
+        // One release stream: a tag vX.Y.Z names both (the release workflow passes X.Y.Z to
+        // --expect-version, which checks both).
+        let repo = repo_root();
+        let manifest = std::fs::read_to_string(repo.join("core/Cargo.toml")).unwrap();
+        let workspace = workspace_version(&manifest).unwrap();
+        assert_eq!(app_version_name(&repo).unwrap(), workspace);
+        assert_eq!(workspace, env!("CARGO_PKG_VERSION"));
+
+        assert_eq!(
+            version_name("    versionCode = 3\n    versionName = \"1.2.3\"\n").as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(version_name("versionNameSuffix = \"-x\"\n"), None);
+        assert_eq!(
+            workspace_version(
+                "[package]\nversion = \"9\"\n[workspace.package]\nedition = \"2024\"\nversion = \"0.4.0\"\n"
+            )
+            .as_deref(),
+            Some("0.4.0")
+        );
     }
 
     #[test]

@@ -78,6 +78,10 @@ class PairUiDeviceTest {
         compose.onNodeWithTag("pair-copy-command").assertIsDisplayed().assertTouchTargetAtLeast().performClick()
         compose.onNodeWithTag("pair-camera").performScrollTo().assertIsDisplayed()
         shoot("easy-pair")
+        // No or2-pair yet: the installer one-liner, to copy.
+        compose.onNodeWithTag("pair-install-command").performScrollTo().assertIsDisplayed()
+            .assertTextEquals("curl -fsSL https://raw.githubusercontent.com/code-akram/or2/main/scripts/install-or2-pair.sh | sh")
+        compose.onNodeWithTag("pair-copy-install").performScrollTo().assertTouchTargetAtLeast().performClick()
     }
 
     @Test

@@ -1,0 +1,162 @@
+# The or2 release (see docs/build.md, "Releases").
+#
+# One release stream for the project: a tag vX.Y.Z, where X.Y.Z is both the Cargo workspace
+# version (core/Cargo.toml) and the app's versionName (android/app/build.gradle.kts). On such a
+# tag this builds the or2-pair host CLI with `cargo xtask dist` (static Linux binaries for
+# x86_64 and aarch64, macOS binaries for Intel and Apple silicon), joins their SHA256SUMS and
+# creates the GitHub release of the tag with those five files and docs/releases/vX.Y.Z.md as its
+# notes. scripts/install-or2-pair.sh installs from it.
+#
+# The app's APK is not built here: its signing key never leaves the maintainer's machine. It is
+# built and signed locally and added to the release afterwards with `gh release upload`.
+#
+# A manual run (workflow_dispatch) only builds: the binaries stay workflow artifacts and nothing
+# is published, whatever ref it runs on.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUSTUP_TOOLCHAIN: "1.98.1"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Static musl binaries linked with rust-lld; the x86_64 one is run once.
+          - os: linux
+            runner: ubuntu-24.04
+            targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+          # Apple silicon runner; Apple's toolchain links the Intel binary too.
+          - os: macos
+            runner: macos-15
+            targets: x86_64-apple-darwin,aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust ${{ env.RUSTUP_TOOLCHAIN }}
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target "${{ matrix.targets }}"
+
+      - name: Build with cargo xtask dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          set --
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/v* ]]; then
+            # The tag must name the version being built: the workspace's and the app's.
+            set -- --expect-version "${GITHUB_REF_NAME#v}"
+          fi
+          cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- dist --out dist "$@"
+
+      - name: Check the binaries' format and linking
+        shell: bash
+        env:
+          OS: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          check() {
+            local what
+            what="$(file -b "dist/or2-pair-$1")"
+            echo "or2-pair-$1: $what"
+            grep -Eq "$2" <<<"$what" || { echo "::error::or2-pair-$1 is not $3"; exit 1; }
+          }
+          if [[ "$OS" == linux ]]; then
+            check x86_64-unknown-linux-musl '^ELF 64-bit LSB .*x86-64.*(static-pie linked|statically linked).*stripped' "a static, stripped x86-64 ELF"
+            check aarch64-unknown-linux-musl '^ELF 64-bit LSB .*ARM aarch64.*(static-pie linked|statically linked).*stripped' "a static, stripped aarch64 ELF"
+          else
+            check x86_64-apple-darwin '^Mach-O 64-bit executable x86_64' "an x86_64 Mach-O executable"
+            check aarch64-apple-darwin '^Mach-O 64-bit executable arm64' "an arm64 Mach-O executable"
+          fi
+
+      - name: Check the release notes exist
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && matrix.os == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "docs/releases/$GITHUB_REF_NAME.md" || { echo "::error::docs/releases/$GITHUB_REF_NAME.md is missing"; exit 1; }
+          mkdir notes
+          cp "docs/releases/$GITHUB_REF_NAME.md" notes/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: or2-pair-${{ matrix.os }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && matrix.os == 'linux'
+        with:
+          name: release-notes
+          path: notes/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: publish the GitHub release
+    needs: build
+    # Only a pushed vX.Y.Z tag publishes; a manual run never does, even on a tag.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: or2-pair-*
+          path: artifacts
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-notes
+          path: notes
+
+      - name: Join the checksums and check every binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release
+          cp artifacts/*/or2-pair-* release/
+          cat artifacts/*/SHA256SUMS | sort -k 2 > release/SHA256SUMS
+          cd release
+          sha256sum --check --strict SHA256SUMS
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin; do
+            grep -q "  or2-pair-$target\$" SHA256SUMS || { echo "::error::missing or2-pair-$target"; exit 1; }
+          done
+          files=(*)
+          test "${#files[@]}" -eq 5
+          cat SHA256SUMS
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "or2 $GITHUB_REF_NAME" \
+            --notes-file "notes/$GITHUB_REF_NAME.md"

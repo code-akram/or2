@@ -75,6 +75,11 @@ cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- gen-licen
 android/gradlew -p android :app:assembleDebug :app:testDebugUnitTest :app:assembleDeviceTest :app:assembleDeviceTestAndroidTest :app:lintDebug :app:lintDeviceTest :app:assembleRelease
 ```
 
+`:app:assembleRelease` signs with the release key when the machine has a signing file (see "Release signing"
+below). A check that must not use the key (an agent's or a reviewer's gate run) sets `OR2_SIGNING_PROPERTIES` to
+a path that does not exist, which builds the unsigned release (a `-Duser.home` in `org.gradle.jvmargs` was seen
+not to hide `~/.config/or2` from the build).
+
 Repository tooling is the `core/xtask` crate (Rust; no scripts in other languages). Inside `core/` the
 cargo alias in `core/.cargo/config.toml` makes it `cargo xtask <task>`; from the repository root run the
 same task as `cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- <task>` (the form
@@ -140,21 +145,25 @@ not record the SDK version, and give a binary that cannot be run here to check i
 both Linux targets (`file`: x86-64 static-pie and aarch64 statically linked, both stripped); the aarch64 one is
 not run here (no qemu).
 
-`.github/workflows/or2-pair-release.yml` runs `dist` on an Ubuntu and a macOS runner (Rust 1.98.1) on a tag
-`or2-pair-v<version>` or by hand; on a tag a third job joins the two `SHA256SUMS`, checks every binary
-against it (`sha256sum --check --strict`, all four targets present) and creates the release of that tag with
-the five files (`gh release create --verify-tag`, `GITHUB_TOKEN` with `contents: write` in that job only; the
-build jobs read only). Actions are pinned to commit SHAs. A manual run on a branch only keeps the binaries
-as workflow artifacts.
+`--expect-version X.Y.Z` also fails unless the app's `versionName` (`android/app/build.gradle.kts`) is `X.Y.Z`,
+and the xtask unit test `the_workspace_version_and_the_apps_version_name_agree` keeps the two equal on every
+test run (one release stream; see "Releases" below).
 
-`scripts/install-or2-pair.sh` (POSIX `sh`, clean under ShellCheck 0.11) installs a release (see
-[Pair a host](pairing.md) and [contracts](contracts.md#host-cli), "Distribution").
-`core/xtask/tests/install_or2_pair.rs` runs it with `sh` against a fixture release in a temporary directory
-(`OR2_PAIR_DOWNLOAD_BASE` and `OR2_PAIR_RELEASES_URL` set to `file://` URLs, a fake `uname` first on `PATH`,
-`HOME` in the fixture): the newest `or2-pair-v*` tag among other tags, every OS and CPU spelling, the three
-`--version` spellings, `--dir`, `OR2_PAIR_INSTALL_DIR`, the `PATH` hint, a checksum mismatch and a missing
-`SHA256SUMS` line (nothing installed), a missing release, and an unsupported CPU or OS (refused before any
-download). It needs `curl` (`wget` cannot read `file://`) and skips, printing `SKIP`, without it.
+`scripts/install-or2-pair.sh` (POSIX `sh`, clean under ShellCheck 0.11; `AGENTS.md` allows user-facing install
+scripts in `sh` when they are tested from xtask) installs a release (see [Pair a host](pairing.md) and
+[contracts](contracts.md#host-cli), "Distribution"). `core/xtask/tests/install_or2_pair.rs` runs it with `sh`
+against `file://` fixtures in a temporary directory laid out like the GitHub release tree
+(`OR2_PAIR_RELEASES_BASE` pointing at `releases/` with `latest/download/` and `download/vX.Y.Z/`; a fake `uname`
+and a fake `id` first on `PATH`; `HOME` and `TMPDIR` in the fixture): every OS and CPU spelling, the latest and a
+named release in each `--version` spelling, a version that does not exist, strings that are not versions, a
+binary that is not the version it is filed under, no release at all, `--dir`, `OR2_PAIR_INSTALL_DIR`, the `PATH`
+hint, a checksum mismatch, a missing `SHA256SUMS` line and a missing asset (nothing installed), an unsupported CPU
+or OS and a non-HTTPS base (refused before any download), the script cut after every one of its lines and piped
+into `sh` (nothing installed, no staging file, nothing left in `TMPDIR`), links planted at staging-like names and
+at `or2-pair` (never followed; the victim file unchanged), a checked binary that fails `--version` (the old
+binary stays), a directory at the destination, a directory anyone can write, and a fake root with a directory
+that is not root's (the notice, then refused). It needs `curl` (`wget` cannot read `file://`) and skips,
+printing `SKIP`, without it.
 
 Rust integration tests (`core/or2-core/tests/`): `host.rs` runs host connections against a
 disposable loopback `sshd` (trust, address racing, probe, exec caps and timeout, streamlocal (missing socket, forbidden
@@ -313,6 +322,60 @@ The pinned libghostty-vt dependency builds the terminal engine with Zig 0.16.0 o
 for Android arm64. Install that Zig version on `PATH` for a fresh setup and check `zig version`
 before building. The dependency's Rust build script drives Zig; no checked-in terminal binary
 or Kotlin protocol implementation is used.
+
+## Releases
+
+One release stream for the whole project, tagged `vX.Y.Z`: the tag, the Cargo workspace version
+(`core/Cargo.toml`) and the app's `versionName` are the same `X.Y.Z`. A release contains the app's APK and the
+`or2-pair` binaries; its notes are `docs/releases/vX.Y.Z.md` and it gets a [changelog](../CHANGELOG.md) entry.
+
+`.github/workflows/release.yml` runs `dist` on an Ubuntu and a macOS runner (Rust 1.98.1), with
+`--expect-version X.Y.Z` on a tag, and checks each binary's `file` output (Linux: a static or static-pie,
+stripped ELF of its architecture; macOS: a Mach-O executable of its architecture), failing on a mismatch. On a
+pushed `v*` tag (`github.event_name == 'push'` and the tag ref: a manual run never publishes, even on a tag) the
+Linux job also checks that `docs/releases/<tag>.md` exists and hands it on as an artifact, and a third job joins
+the two `SHA256SUMS`, checks every binary against it (`sha256sum --check --strict`, all four targets present,
+exactly five files) and runs `gh release create <tag> --verify-tag --notes-file <the notes>` with the five files.
+That job has `contents: write` and checks nothing out; the build jobs read only. Actions are pinned to commit
+SHAs. `workflow_dispatch` builds the binaries as workflow artifacts and publishes nothing. ShellCheck 0.11 and
+actionlint 1.7 pass on the script and the workflow.
+
+The APK is **not** built in CI: the release signing key stays on the maintainer's machine. It is built and signed
+locally (next section) and added to the release afterwards with `gh release upload <tag> or2-<tag>.apk`; its
+SHA-256 goes into the notes.
+
+### Release signing
+
+`android/app/build.gradle.kts` signs the `release` build type when it finds a properties file: the path in
+`OR2_SIGNING_PROPERTIES`, else `$XDG_CONFIG_HOME/or2/signing.properties` (normally
+`~/.config/or2/signing.properties`). It holds four keys:
+
+```properties
+storeFile=or2-release.jks
+storePassword=<the keystore password>
+keyAlias=or2
+keyPassword=<the key password>
+```
+
+`storeFile` is absolute or relative to the properties file's directory. A keystore that JDK 17's `keytool`
+makes is PKCS12, whose key has the store's password: `keyPassword` is then the same as `storePassword` (a
+different one fails at `packageRelease` with "Get Key failed"). A missing key or keystore stops the build with the
+file's name and the key's name, never a value. Without the file the release build is unsigned
+(`app-release-unsigned.apk`), exactly as F-Droid builds it from source; with it, `app-release.apk`. To make the
+key once (a 4096-bit RSA key valid for about 27 years; keep the files mode 600):
+
+```sh
+mkdir -p ~/.config/or2 && chmod 700 ~/.config/or2
+keytool -genkeypair -keystore ~/.config/or2/or2-release.jks -alias or2 -keyalg RSA -keysize 4096 -validity 10000
+```
+
+**Back up the keystore and both passwords, offline and somewhere other than this machine.** Android installs an
+update only over an APK signed with the same key: with the key lost, no later or2 release can update an installed
+one, and every user would have to uninstall (losing their hosts and Keystore-bound SSH keys) to move on. No key,
+password or properties file is ever committed, and the build never prints them. Check a build with
+`apksigner verify --print-certs android/app/build/outputs/apk/release/app-release.apk` (build tools 35.0.0); an
+unsigned one fails `apksigner verify`. The release APK is signed by a different key than debug builds, so it
+cannot be installed over a debug build of `io.github.code_akram.or2`.
 
 ## Open-source licences
 
