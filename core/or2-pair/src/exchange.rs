@@ -22,7 +22,9 @@
 //! lock (2 s, then `failed`) and check the state again under it; still under the lock, publish
 //! `<id>.done` and then replace the bootstrap entry with the phone's key in one new file (`gone`
 //! when the entry is not there: another phone was first; a replacement that fails removes the
-//! `.done` again, `failed`); let the lock go; answer. **The security boundary is the state file,
+//! `.done` again, `failed`; a failure after the new file has its name, such as the directory
+//! sync, is no failure: the key is installed, the `.done` stays and gets the warning); let the
+//! lock go; answer. **The security boundary is the state file,
 //! its run's lock on it and its deadline, not the cleanup.**
 
 use std::io::{self, Read, Write};
@@ -36,7 +38,7 @@ use crate::authorized_keys::{self, Edit, Replaced};
 use crate::bootstrap::PairingId;
 use crate::date::DateTime;
 use crate::keyline::KeyLine;
-use crate::state::{Done, Held, State, StateDir};
+use crate::state::{Done, Held, State, StateDir, WARNING_CHARS};
 
 pub const VERSION: u32 = 2;
 /// The request line is at most this many bytes.
@@ -293,16 +295,26 @@ fn commit(
     ) else {
         return Ok(Replaced::Gone);
     };
-    dir.write_done(
-        id,
-        &Done {
-            device: device.to_owned(),
-            fingerprint: key.fingerprint(),
-        },
-    )?;
-    if let Err(error) = edit.commit(&new, None) {
-        let _ = dir.remove_done(id);
-        return Err(error);
+    let mut done = Done {
+        device: device.to_owned(),
+        fingerprint: key.fingerprint(),
+        warning: None,
+    };
+    dir.write_done(id, &done)?;
+    // An error from the commit means the key file did not change: the record goes again.
+    // Once the new file has its name the key is installed, whatever failed after that (the
+    // directory sync): the record stays, the phone is told `ok`, and the waiting run is told the
+    // rest through the record (best effort: the record as first written is right as it is).
+    let committed = match edit.commit(&new, None) {
+        Ok(committed) => committed,
+        Err(error) => {
+            let _ = dir.remove_done(id);
+            return Err(error);
+        }
+    };
+    if let Some(warning) = committed.warning {
+        done.warning = Some(warning.chars().take(WARNING_CHARS).collect());
+        let _ = dir.rewrite_done(id, &done);
     }
     Ok(replaced)
 }
@@ -441,7 +453,8 @@ mod tests {
             dir.read_done(&id).unwrap().unwrap(),
             Done {
                 device: "Pixel-8".into(),
-                fingerprint
+                fingerprint,
+                warning: None
             }
         );
     }
@@ -617,6 +630,39 @@ mod tests {
             Outcome::Installed { .. }
         ));
         assert!(dir.has_done(&PairingId::parse(ID).unwrap()));
+    }
+
+    #[test]
+    fn a_directory_sync_that_fails_after_the_rename_still_reports_the_pairing() {
+        // Review of the v2 fixes: the `fsync` of `~/.ssh` after the rename failed, and `enroll`
+        // took that for "nothing changed": it removed `.done` and told the phone `failed` while
+        // the phone's key was installed and the bootstrap entry gone.
+        use crate::safefs::fault::{self, Fault};
+        let f = Fixture::live(NOW + 300);
+        fault::arm(Fault::SyncAfterRename);
+        let (outcome, out) = f.run(&request(PHONE, "p"));
+        assert!(
+            !fault::fires(Fault::SyncAfterRename),
+            "the sync after the rename was reached"
+        );
+        let fingerprint = KeyLine::parse(PHONE).unwrap().fingerprint();
+        assert!(
+            matches!(&outcome, Outcome::Installed { fingerprint: f, .. } if *f == fingerprint),
+            "{outcome:?}"
+        );
+        assert!(lines(&out)[1].contains("\"ok\":true"), "{out}");
+        let keys = fs::read_to_string(f.keys()).unwrap();
+        assert!(keys.contains(PHONE) && !keys.contains(BOOT), "{keys}");
+        // The record stays, and carries what went wrong for the waiting run to say.
+        let dir = StateDir::open(&f.account, false).unwrap().unwrap();
+        let done = dir.read_done(&PairingId::parse(ID).unwrap()).unwrap();
+        let done = done.expect("the record of an installed key stays");
+        assert_eq!(done.fingerprint, fingerprint);
+        let warning = done.warning.expect("the record says what went wrong");
+        assert!(
+            warning.contains("could not be synced") && warning.contains("Input/output error"),
+            "{warning}"
+        );
     }
 
     #[test]

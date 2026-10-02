@@ -369,7 +369,7 @@ fn pair(
     dialect: bootstrap::Dialect,
     exe: &str,
 ) -> Result<Exit, RunError> {
-    use crate::pairing::{self, Ended, Live};
+    use crate::pairing::{self, Live};
 
     writeln!(out, "\nOpen or2 on your phone: Add host > Easy pair.")?;
     let mut mistakes = 0;
@@ -423,6 +423,9 @@ fn pair(
         env.window,
     )?;
     drop(code);
+    for warning in live.take_warnings() {
+        writeln!(out, "  warn  {warning}")?;
+    }
 
     print_host(out, host)?;
     let until = live.deadline_clock();
@@ -445,10 +448,46 @@ fn pair(
 
     let ended = live.wait(env.signals, env.poll, env.window, env.now);
     let line = live.line().to_owned();
+    let warnings = live.take_warnings();
     drop(live);
     let keys = env.account.keys_path();
-    let mut report = String::new();
-    // What happened to the temporary key, said only as far as it is known.
+    let (mut report, exit) = report_ending(
+        ended,
+        &Ending {
+            user: host.user,
+            keys: &keys,
+            line: &line,
+            today: (env.now)().date(),
+        },
+    );
+    for warning in warnings {
+        let _ = writeln!(report, "Warning: {warning}.");
+    }
+    if let Some(path) = backup.path() {
+        let _ = writeln!(report, "The previous file is saved as {}.", path.display());
+    }
+    writeln!(out)?;
+    out.write_all(report.as_bytes())?;
+    Ok(exit)
+}
+
+/// What the report of a run's end needs besides how it ended.
+#[cfg(unix)]
+struct Ending<'a> {
+    user: &'a str,
+    keys: &'a std::path::Path,
+    /// The bootstrap line (shown when it could not be removed).
+    line: &'a str,
+    /// Today's date, as in the phone's line.
+    today: String,
+}
+
+/// The report of how a pairing ended, and the exit. What happened to the temporary key is said
+/// only as far as it is known.
+#[cfg(unix)]
+fn report_ending(ended: crate::pairing::Ended, at: &Ending<'_>) -> (String, Exit) {
+    use crate::pairing::Ended;
+    let keys = at.keys.display();
     let key_fate = |removed: bool| {
         if removed {
             "The temporary key was removed."
@@ -456,23 +495,31 @@ fn pair(
             "The temporary key was already gone from authorized_keys; nothing was removed."
         }
     };
+    let not_removed = |error: &io::Error| {
+        format!(
+            "Could not remove the temporary pairing key: {error}\nIf a phone was pairing at this moment it may have finished: look in {keys} for its line. Delete this line from that file (it can no longer be used: the pairing command refuses once the run is over; the next or2-pair also removes it):\n{}",
+            at.line
+        )
+    };
+    let mut report = String::new();
     let exit = match ended {
         Ended::Paired(done) => {
             let _ = writeln!(
                 report,
                 "Paired \"{}\" ({}) as {}. The temporary key was replaced by the phone's key.",
-                done.device, done.fingerprint, host.user
+                done.device, done.fingerprint, at.user
             );
             let _ = writeln!(
                 report,
-                "To undo, delete the line ending or2-{}-{} in {}.",
-                done.device,
-                (env.now)().date(),
-                keys.display()
+                "To undo, delete the line ending or2-{}-{} in {keys}.",
+                done.device, at.today
             );
+            if let Some(warning) = done.warning {
+                let _ = writeln!(report, "Warning: {warning}.");
+            }
             Exit::Paired
         }
-        Ended::NotInstalled(done) => {
+        Ended::NotInstalled { done, removed } => {
             let what = done.map_or_else(
                 || "A phone's pairing was recorded".to_owned(),
                 |done| {
@@ -482,10 +529,13 @@ fn pair(
                     )
                 },
             );
+            let fate = match &removed {
+                Ok(removed) => format!("{} Run or2-pair again to retry.", key_fate(*removed)),
+                Err(error) => not_removed(error),
+            };
             let _ = writeln!(
                 report,
-                "{what}, but its key is not in {}: nothing was paired. The temporary key was removed. Run or2-pair again to retry.",
-                keys.display()
+                "{what}, but its key is not in {keys}: nothing was paired. {fate}"
             );
             Exit::Failed
         }
@@ -502,20 +552,11 @@ fn pair(
             Exit::Interrupted
         }
         Ended::RemovalFailed(error) => {
-            let _ = writeln!(
-                report,
-                "Could not remove the temporary pairing key: {error}\nIf a phone was pairing at this moment it may have finished: look in {} for its line. Delete this line from that file (it can no longer be used: the pairing command refuses once the run is over; the next or2-pair also removes it):\n{line}",
-                keys.display()
-            );
+            let _ = writeln!(report, "{}", not_removed(&error));
             Exit::Failed
         }
     };
-    if let Some(path) = backup.path() {
-        let _ = writeln!(report, "The previous file is saved as {}.", path.display());
-    }
-    writeln!(out)?;
-    out.write_all(report.as_bytes())?;
-    Ok(exit)
+    (report, exit)
 }
 
 fn print_host(out: &mut dyn Write, host: &Host<'_>) -> io::Result<()> {
@@ -630,6 +671,86 @@ mod tests {
         ] {
             assert_eq!(exit.code(), code, "{exit:?}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pairing_that_was_not_installed_says_what_became_of_the_temporary_key() {
+        // Fix check of the v2 fixes: this ending always said "The temporary key was removed".
+        use crate::pairing::Ended;
+        use crate::state::Done;
+        let keys = std::path::PathBuf::from("/home/dev/.ssh/authorized_keys");
+        let at = Ending {
+            user: "dev",
+            keys: &keys,
+            line: "restrict,command=\"x\" ssh-ed25519 AAAA or2-pair-bootstrap-abcdefghijklm",
+            today: "2026-07-01".into(),
+        };
+        let done = || {
+            Some(Done {
+                device: "Pixel-8".into(),
+                fingerprint: "SHA256:x".into(),
+                warning: None,
+            })
+        };
+        let (removed, exit) = report_ending(
+            Ended::NotInstalled {
+                done: done(),
+                removed: Ok(true),
+            },
+            &at,
+        );
+        assert_eq!(exit, Exit::Failed);
+        assert!(removed.contains("nothing was paired. The temporary key was removed."));
+        let (gone, _) = report_ending(
+            Ended::NotInstalled {
+                done: done(),
+                removed: Ok(false),
+            },
+            &at,
+        );
+        assert!(gone.contains("already gone") && !gone.contains("key was removed"));
+        let (failed, _) = report_ending(
+            Ended::NotInstalled {
+                done: None,
+                removed: Err(io::Error::other("the disk is full")),
+            },
+            &at,
+        );
+        assert!(
+            failed.contains("Could not remove the temporary pairing key: the disk is full")
+                && failed.contains(at.line)
+                && !failed.contains("key was removed"),
+            "{failed}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pairing_whose_record_carries_a_warning_says_it() {
+        use crate::pairing::Ended;
+        use crate::state::Done;
+        let keys = std::path::PathBuf::from("/home/dev/.ssh/authorized_keys");
+        let at = Ending {
+            user: "dev",
+            keys: &keys,
+            line: "x",
+            today: "2026-07-01".into(),
+        };
+        let (report, exit) = report_ending(
+            Ended::Paired(Done {
+                device: "Pixel-8".into(),
+                fingerprint: "SHA256:x".into(),
+                warning: Some("/home/dev/.ssh/authorized_keys was changed, but /home/dev/.ssh could not be synced to disk (EIO)".into()),
+            }),
+            &at,
+        );
+        assert_eq!(exit, Exit::Paired);
+        assert!(report.starts_with("Paired \"Pixel-8\""), "{report}");
+        assert!(
+            report.contains("Warning: /home/dev/.ssh/authorized_keys was changed, but"),
+            "{report}"
+        );
     }
 
     #[test]

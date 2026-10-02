@@ -235,9 +235,9 @@ fn get_xattr(fd: RawFd, name: &CString) -> io::Result<Option<Vec<u8>>> {
 
 /// Copies the extended attribute `name` of `from` to `to` when `from` has it and `to` has
 /// another value (Linux: the SELinux label `security.selinux`, so sshd may still read a replaced
-/// `authorized_keys`). A file system without extended attributes, or a file without this one,
-/// copies nothing. Setting it failing is an error (the caller decides whether that matters: see
-/// [`selinux_active`]).
+/// `authorized_keys`, and the POSIX access ACL `system.posix_acl_access`). A file system without
+/// extended attributes, or a file without this one, copies nothing. Setting it failing is an
+/// error (the caller decides whether that matters: see [`selinux_active`]).
 #[cfg(target_os = "linux")]
 pub fn copy_xattr(from: RawFd, to: RawFd, name: &str) -> io::Result<()> {
     let name = c_name(name);
@@ -246,6 +246,10 @@ pub fn copy_xattr(from: RawFd, to: RawFd, name: &str) -> io::Result<()> {
     };
     if get_xattr(to, &name)?.as_deref() == Some(&value[..]) {
         return Ok(());
+    }
+    #[cfg(test)]
+    if fault::fires(fault::Fault::SetAttribute) {
+        return Err(io::Error::from_raw_os_error(libc::EPERM));
     }
     // SAFETY: `value` is valid for its length; `name` is NUL-terminated.
     let done = unsafe { libc::fsetxattr(to, name.as_ptr(), value.as_ptr().cast(), value.len(), 0) };
@@ -448,4 +452,39 @@ pub fn open_ssh_dir(account: &Account, create: bool) -> io::Result<Option<OwnedF
     };
     check_ssh_dir(&fstat(opened.as_raw_fd())?, uid, &dir_path)?;
     Ok(Some(opened))
+}
+
+/// Faults the unit tests inject into one thread's file operations (test builds only): an armed
+/// fault fires once, at the next place that asks for it.
+#[cfg(test)]
+pub mod fault {
+    use std::cell::Cell;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Fault {
+        /// The `fsync` of the directory after a replacement's rename fails (`EIO`).
+        SyncAfterRename,
+        /// Setting an extended attribute on a replacement's new file fails (`EPERM`).
+        SetAttribute,
+    }
+
+    thread_local! {
+        static ARMED: Cell<Option<Fault>> = const { Cell::new(None) };
+    }
+
+    /// Makes the next `fault` on this thread fail.
+    pub fn arm(fault: Fault) {
+        ARMED.with(|armed| armed.set(Some(fault)));
+    }
+
+    /// Whether `fault` is armed on this thread; disarms it.
+    pub fn fires(fault: Fault) -> bool {
+        ARMED.with(|armed| {
+            let fires = armed.get() == Some(fault);
+            if fires {
+                armed.set(None);
+            }
+            fires
+        })
+    }
 }

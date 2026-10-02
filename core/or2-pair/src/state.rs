@@ -67,7 +67,15 @@ pub struct Done {
     pub device: String,
     /// `SHA256:…` of the phone's key.
     pub fingerprint: String,
+    /// What went wrong after the key file took its new contents (see
+    /// `authorized_keys::Committed`): the key is installed, and the waiting run says this too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
+
+/// A [`Done::warning`] is cut to this many characters, so the record stays well inside its
+/// size limit.
+pub const WARNING_CHARS: usize = 1024;
 
 /// The `or2-pair/lock` held exclusively: `authorized_keys` and the state may be changed. Dropping
 /// it releases the lock.
@@ -174,14 +182,16 @@ impl StateDir {
     /// Publishes `<id>.<extension>` complete: written to a temporary name, synced, linked to its
     /// name (which must not exist: `AlreadyExists`), the temporary name removed, the directory
     /// synced. With `hold` the file is locked (exclusive `flock`) before it gets its name, and the
-    /// locked descriptor is returned. `before_link` runs just before the name appears (tests look
-    /// there).
+    /// locked descriptor is returned. With `replace` it is renamed over the name instead (which
+    /// must exist: a reader sees the old file or the new one). `before_link` runs just before the
+    /// name appears (tests look there).
     fn publish<T: Serialize>(
         &self,
         id: &PairingId,
         extension: &str,
         value: &T,
         hold: bool,
+        replace: bool,
         before_link: &dyn Fn(),
     ) -> io::Result<OwnedFd> {
         let name = format!("{id}.{extension}");
@@ -202,7 +212,14 @@ impl StateDir {
             file.write_all(&bytes)?;
             file.sync_all()?;
             before_link();
-            linkat(dir, &temp, &name)
+            if replace {
+                if !exists_at(dir, &name) {
+                    return Err(io::Error::from(io::ErrorKind::NotFound));
+                }
+                renameat(dir, &temp, &name)
+            } else {
+                linkat(dir, &temp, &name)
+            }
         })();
         let _ = unlinkat(dir, &temp);
         result?;
@@ -241,7 +258,7 @@ impl StateDir {
 
     fn publish_state_with(&self, state: &State, before_link: &dyn Fn()) -> io::Result<Liveness> {
         let id = PairingId::parse(&state.id).map_err(io::Error::other)?;
-        self.publish(&id, "json", state, true, before_link)
+        self.publish(&id, "json", state, true, false, before_link)
             .map(|fd| Liveness { _fd: fd })
     }
 
@@ -268,7 +285,15 @@ impl StateDir {
     /// Records the phone's key as installed (complete, created once: `AlreadyExists` when it
     /// already was).
     pub fn write_done(&self, id: &PairingId, done: &Done) -> io::Result<()> {
-        self.publish(id, "done", done, false, &|| {}).map(drop)
+        self.publish(id, "done", done, false, false, &|| {})
+            .map(drop)
+    }
+
+    /// Replaces the published `<id>.done` with `done` (complete, renamed over it; `NotFound`
+    /// when there is none). Under the lock only: `enroll` adds a warning to its own record.
+    pub fn rewrite_done(&self, id: &PairingId, done: &Done) -> io::Result<()> {
+        self.publish(id, "done", done, false, true, &|| {})
+            .map(drop)
     }
 
     pub fn read_done(&self, id: &PairingId) -> io::Result<Option<Done>> {
@@ -404,6 +429,7 @@ mod tests {
         let done = Done {
             device: "Pixel-8".into(),
             fingerprint: "SHA256:xyz".into(),
+            warning: None,
         };
         dir.write_done(&live, &done).unwrap();
         assert!(dir.has_done(&live));

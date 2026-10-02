@@ -206,6 +206,16 @@ impl Backup {
     }
 }
 
+/// A change that was made: the new contents have the name.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
+pub struct Committed {
+    /// What went wrong after that (the directory could not be synced, so the change may not
+    /// survive a crash; a temporary name was left), for the output. The change stands.
+    pub warning: Option<String>,
+}
+
 /// What a change did besides its own result.
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +223,8 @@ pub struct Modified<T> {
     pub value: T,
     /// The file did not exist and was created (mode 0600).
     pub created: bool,
+    /// See [`Committed::warning`] (`None` when nothing was written).
+    pub warning: Option<String>,
 }
 
 /// What [`replace`] came to.
@@ -389,12 +401,38 @@ mod unix {
             }
         }
 
+        /// The old file's SELinux label and POSIX access ACL, when it has them, on the new file
+        /// (Linux). A label that cannot be set refuses the change only while SELinux is active
+        /// (see [`selinux_active`]); an ACL that cannot be set always refuses it. Nothing has the
+        /// name yet, so a refusal changes nothing.
+        #[cfg(target_os = "linux")]
+        fn copy_attributes(&self, old: libc::c_int, new: libc::c_int) -> io::Result<()> {
+            let path = self.path.display();
+            if let Err(error) = copy_xattr(old, new, "security.selinux")
+                && selinux_active()
+            {
+                return Err(refuse(format!(
+                    "the new {path} could not be given the SELinux label of the file it replaces ({error}), and sshd might not be allowed to read it without; nothing was changed. Run `restorecon -v {path}` and pair again, or use --manual"
+                )));
+            }
+            if let Err(error) = copy_xattr(old, new, "system.posix_acl_access") {
+                return Err(refuse(format!(
+                    "{path} has an access control list (ACL) that could not be copied to the new file ({error}); nothing was changed. Remove the ACL (`setfacl -b {path}`) and pair again, or use --manual"
+                )));
+            }
+            Ok(())
+        }
+
         /// Installs `new` crash-safely: a new file in the same directory (created exclusively,
         /// mode 0600), fully written and synced, given the old file's mode (and on Linux its
-        /// SELinux label), the old file checked again, then renamed over it and the directory
-        /// synced. A crash leaves either the old file or the new one, never a mix. `backup`: the
-        /// run's backup, made before its first change.
-        pub fn commit(self, new: &[u8], backup: Option<&Backup>) -> io::Result<()> {
+        /// SELinux label and ACL), the old file checked again, then renamed over it and the
+        /// directory synced. A crash leaves either the old file or the new one, never a mix.
+        /// `backup`: the run's backup, made before its first change.
+        ///
+        /// An error means nothing changed. Once the new file has the name the change is made,
+        /// whatever follows: a failure after that (the directory sync, removing the temporary
+        /// name of a created file) is [`Committed::warning`], not an error.
+        pub fn commit(self, new: &[u8], backup: Option<&Backup>) -> io::Result<Committed> {
             if let Some(backup) = backup
                 && !backup.used.replace(true)
                 && !self.contents.is_empty()
@@ -422,12 +460,7 @@ mod unix {
                             };
                         }
                         #[cfg(target_os = "linux")]
-                        if let Err(error) =
-                            copy_xattr(old.as_raw_fd(), fd.as_raw_fd(), "security.selinux")
-                            && selinux_active()
-                        {
-                            return Err(error);
-                        }
+                        self.copy_attributes(old.as_raw_fd(), fd.as_raw_fd())?;
                         #[cfg(not(target_os = "linux"))]
                         let _ = old;
                     }
@@ -450,16 +483,48 @@ mod unix {
                         } else {
                             error
                         }
-                    })?;
-                    unlinkat(dir, &temp)
+                    })
                 }
             })();
-            if installed.is_err() {
+            if let Err(error) = installed {
                 let _ = unlinkat(dir, &temp);
+                return Err(error);
             }
-            installed?;
-            fsync_dir(dir)
+            // The new contents have the name: the change is made. What follows makes it durable
+            // or tidies up; its failure is said, never taken for "nothing changed".
+            let mut trouble = Vec::new();
+            if self.file.is_none()
+                && let Err(error) = unlinkat(dir, &temp)
+            {
+                trouble.push(format!(
+                    "its temporary name {temp} could not be removed ({error}; the next run removes it)"
+                ));
+            }
+            if let Err(error) = sync_after_rename(dir) {
+                trouble.push(format!(
+                    "{} could not be synced to disk ({error}), so a crash before the system writes it may undo the change",
+                    self.dir_path.display()
+                ));
+            }
+            Ok(Committed {
+                warning: (!trouble.is_empty()).then(|| {
+                    format!(
+                        "{} was changed, but {}",
+                        self.path.display(),
+                        trouble.join(", and ")
+                    )
+                }),
+            })
         }
+    }
+
+    /// The `fsync` of `~/.ssh` that makes a rename (or a new name) durable.
+    fn sync_after_rename(dir: libc::c_int) -> io::Result<()> {
+        #[cfg(test)]
+        if crate::safefs::fault::fires(crate::safefs::fault::Fault::SyncAfterRename) {
+            return Err(io::Error::from_raw_os_error(libc::EIO));
+        }
+        fsync_dir(dir)
     }
 
     /// One change: [`Edit::open`], `change` computes the new contents from the old (`None`: no
@@ -477,10 +542,27 @@ mod unix {
         let created = edit.created();
         after_open();
         let (new, value) = change(edit.contents())?;
-        if let Some(new) = new {
-            edit.commit(&new, backup)?;
+        let warning = match new {
+            Some(new) => edit.commit(&new, backup)?.warning,
+            None => None,
+        };
+        Ok(Modified {
+            value,
+            created,
+            warning,
+        })
+    }
+
+    /// `modify`'s result, with a missing file taken as `missing` (nothing to change).
+    fn or_missing<T>(done: io::Result<Modified<T>>, missing: T) -> io::Result<Modified<T>> {
+        match done {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Modified {
+                value: missing,
+                created: false,
+                warning: None,
+            }),
+            other => other,
         }
-        Ok(Modified { value, created })
     }
 
     /// Appends the bootstrap line.
@@ -496,22 +578,18 @@ mod unix {
     }
 
     /// Removes every entry whose key has this fingerprint (any options, any comment). A missing
-    /// file has none. Returns how many entries were dropped.
+    /// file has none. The value is how many entries were dropped.
     pub fn remove(
         account: &Account,
         held: &Held,
         fingerprint: &str,
         backup: Option<&Backup>,
-    ) -> io::Result<usize> {
+    ) -> io::Result<Modified<usize>> {
         let done = modify(account, held, false, backup, &|| {}, |existing| {
             let (kept, dropped) = without(existing, |e| fingerprint_of(&e.blob) == fingerprint);
             Ok(((dropped > 0).then_some(kept), dropped))
         });
-        match done {
-            Ok(done) => Ok(done.value),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
-            Err(error) => Err(error),
-        }
+        or_missing(done, 0)
     }
 
     /// The new contents of a replacement: the bootstrap entry (by fingerprint) dropped and the
@@ -544,18 +622,14 @@ mod unix {
         phone: &KeyLine,
         device: &str,
         now: DateTime,
-    ) -> io::Result<Replaced> {
+    ) -> io::Result<Modified<Replaced>> {
         let done = modify(account, held, false, None, &|| {}, |existing| {
             Ok(match replaced(existing, bootstrap, phone, device, now) {
                 Some((new, result)) => (Some(new), result),
                 None => (None, Replaced::Gone),
             })
         });
-        match done {
-            Ok(done) => Ok(done.value),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Replaced::Gone),
-            Err(error) => Err(error),
-        }
+        or_missing(done, Replaced::Gone)
     }
 
     /// Whether the key file has an entry for the key with this fingerprint (read through the
@@ -601,14 +675,14 @@ mod unix {
     }
 
     /// Removes `or2-pair-bootstrap-<id>` entries for which `live(id)` is false, and the
-    /// temporary files a crashed replacement left next to the key file. Returns the ids of the
-    /// dropped entries (the caller removes their state files).
+    /// temporary files a crashed replacement left next to the key file. The value is the ids of
+    /// the dropped entries (the caller removes their state files).
     pub fn sweep(
         account: &Account,
         held: &Held,
         backup: Option<&Backup>,
         live: &dyn Fn(&PairingId) -> bool,
-    ) -> io::Result<Vec<PairingId>> {
+    ) -> io::Result<Modified<Vec<PairingId>>> {
         if let Some(dir) = open_ssh_dir(account, false)? {
             let prefix = temp_prefix(&account.keys_name());
             for name in list(dir.as_raw_fd())? {
@@ -622,11 +696,7 @@ mod unix {
             let (kept, dropped) = without(existing, |e| dead_id(e, live).is_some());
             Ok(((dropped > 0).then_some(kept), ids))
         });
-        match done {
-            Ok(done) => Ok(done.value),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(error) => Err(error),
-        }
+        or_missing(done, Vec::new())
     }
 
     /// What [`sweep`] would remove, changing nothing and taking no lock (for `--check`).
@@ -1015,6 +1085,168 @@ mod tests {
             matches!(&check, Writable::No(why) if why.contains("not writable")),
             "{check:?}"
         );
+    }
+
+    #[test]
+    fn a_sync_that_fails_after_the_rename_is_a_warning_and_the_change_stands() {
+        // Fix check of the v2 fixes: an error after the rename was returned as if nothing had
+        // changed. The new contents have the name by then.
+        use crate::safefs::fault::{self, Fault};
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        let boot = key(ED25519);
+        fs::write(
+            path(home.path()),
+            format!("{}\n{OTHER} me\n", bootstrap_line("abcdefghijklm", ED25519)),
+        )
+        .unwrap();
+        fault::arm(Fault::SyncAfterRename);
+        let removed = remove(&account(home.path()), &held(), &boot.fingerprint(), None).unwrap();
+        assert!(
+            !fault::fires(Fault::SyncAfterRename),
+            "the sync was reached"
+        );
+        assert_eq!(removed.value, 1);
+        let warning = removed.warning.expect("the failed sync is said");
+        assert!(
+            warning.contains("was changed, but") && warning.contains("could not be synced"),
+            "{warning}"
+        );
+        assert_eq!(
+            fs::read_to_string(path(home.path())).unwrap(),
+            format!("{OTHER} me\n")
+        );
+        assert_eq!(entries(home.path()), ["authorized_keys"]);
+
+        // The same when the file is created (linked to its name).
+        let empty = tempfile::tempdir().unwrap();
+        fault::arm(Fault::SyncAfterRename);
+        let line = bootstrap_line("abcdefghijklm", ED25519);
+        let appended = append(&account(empty.path()), &held(), &Backup::new(at()), &line).unwrap();
+        assert!(
+            appended.created && appended.warning.is_some(),
+            "{appended:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(path(empty.path())).unwrap(),
+            format!("{line}\n")
+        );
+        assert_eq!(entries(empty.path()), ["authorized_keys"]);
+    }
+
+    /// A POSIX access ACL (the `system.posix_acl_access` value): the owner `rw`, one more user
+    /// `r`, the owning group nothing, the mask `r`, others nothing.
+    #[cfg(target_os = "linux")]
+    fn acl() -> Vec<u8> {
+        const UNDEFINED: u32 = u32::MAX;
+        let mut value = 2u32.to_le_bytes().to_vec();
+        for (tag, perm, id) in [
+            (0x01u16, 6u16, UNDEFINED),
+            (0x02, 4, 54_321),
+            (0x04, 0, UNDEFINED),
+            (0x10, 4, UNDEFINED),
+            (0x20, 0, UNDEFINED),
+        ] {
+            value.extend_from_slice(&tag.to_le_bytes());
+            value.extend_from_slice(&perm.to_le_bytes());
+            value.extend_from_slice(&id.to_le_bytes());
+        }
+        value
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_acl(file: &Path) -> Option<Vec<u8>> {
+        use std::os::fd::AsRawFd;
+        let file = fs::File::open(file).unwrap();
+        let mut value = [0u8; 256];
+        // SAFETY: valid descriptor, name and buffer.
+        let size = unsafe {
+            libc::fgetxattr(
+                file.as_raw_fd(),
+                c"system.posix_acl_access".as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+            )
+        };
+        (size >= 0).then(|| value[..size as usize].to_vec())
+    }
+
+    /// A home whose `authorized_keys` has [`acl`]; `None` where the file system has no ACLs.
+    #[cfg(target_os = "linux")]
+    fn home_with_an_acl() -> Option<tempfile::TempDir> {
+        use std::os::fd::AsRawFd;
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(ssh_dir(home.path())).unwrap();
+        fs::write(path(home.path()), format!("{OTHER} me\n")).unwrap();
+        chmod(&path(home.path()), 0o600);
+        let file = fs::File::open(path(home.path())).unwrap();
+        let value = acl();
+        // SAFETY: valid descriptor, name and buffer.
+        let set = unsafe {
+            libc::fsetxattr(
+                file.as_raw_fd(),
+                c"system.posix_acl_access".as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+            )
+        };
+        (set == 0).then_some(home)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_acl_of_the_old_file_is_copied_to_the_new_one() {
+        // Fix check of the v2 fixes: the new file got the old one's mode and SELinux label but
+        // lost its ACL, and whatever that ACL let read the file could not any more.
+        let Some(home) = home_with_an_acl() else {
+            eprintln!("SKIP: this file system has no POSIX ACLs");
+            return;
+        };
+        let before = read_acl(&path(home.path())).expect("the ACL was set");
+        let mode = fs::metadata(path(home.path())).unwrap().mode() & 0o777;
+        let line = bootstrap_line("abcdefghijklm", ED25519);
+        append(&account(home.path()), &held(), &Backup::new(at()), &line).unwrap();
+        assert_eq!(read_acl(&path(home.path())), Some(before));
+        assert_eq!(
+            fs::metadata(path(home.path())).unwrap().mode() & 0o777,
+            mode
+        );
+        assert!(
+            fs::read_to_string(path(home.path()))
+                .unwrap()
+                .contains(&line)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_acl_that_cannot_be_copied_refuses_the_change_clearly_and_keeps_the_old_file() {
+        use crate::safefs::fault::{self, Fault};
+        let Some(home) = home_with_an_acl() else {
+            eprintln!("SKIP: this file system has no POSIX ACLs");
+            return;
+        };
+        let before = fs::read_to_string(path(home.path())).unwrap();
+        let inode = fs::metadata(path(home.path())).unwrap().ino();
+        fault::arm(Fault::SetAttribute);
+        let line = bootstrap_line("abcdefghijklm", ED25519);
+        let error = append(&account(home.path()), &held(), &Backup::new(at()), &line).unwrap_err();
+        assert!(!fault::fires(Fault::SetAttribute), "the fault was used");
+        let message = error.to_string();
+        assert!(
+            message.contains("access control list (ACL) that could not be copied")
+                && message.contains("nothing was changed")
+                && message.contains("setfacl -b"),
+            "{message}"
+        );
+        assert_eq!(fs::read_to_string(path(home.path())).unwrap(), before);
+        assert_eq!(fs::metadata(path(home.path())).unwrap().ino(), inode);
+        let names: Vec<String> = entries(home.path())
+            .into_iter()
+            .filter(|name| !name.contains("or2-backup"))
+            .collect();
+        assert_eq!(names, ["authorized_keys"], "no temporary file left");
     }
 
     #[test]
@@ -1532,7 +1764,9 @@ mod tests {
         chmod(&path(home.path()), 0o640);
         let inode = fs::metadata(path(home.path())).unwrap().ino();
 
-        let removed = remove(&account(home.path()), &held(), &boot.fingerprint(), None).unwrap();
+        let removed = remove(&account(home.path()), &held(), &boot.fingerprint(), None)
+            .unwrap()
+            .value;
         assert_eq!(removed, 2);
         assert_eq!(
             fs::read_to_string(path(home.path())).unwrap(),
@@ -1549,12 +1783,16 @@ mod tests {
         );
         // Nothing left to remove: no change, no error; a missing file is the same.
         assert_eq!(
-            remove(&account(home.path()), &held(), &boot.fingerprint(), None).unwrap(),
+            remove(&account(home.path()), &held(), &boot.fingerprint(), None)
+                .unwrap()
+                .value,
             0
         );
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(
-            remove(&account(empty.path()), &held(), &boot.fingerprint(), None).unwrap(),
+            remove(&account(empty.path()), &held(), &boot.fingerprint(), None)
+                .unwrap()
+                .value,
             0
         );
         assert!(
@@ -1583,7 +1821,8 @@ mod tests {
             "Pixel-8",
             at(),
         )
-        .unwrap();
+        .unwrap()
+        .value;
         assert_eq!(done, Replaced::Done { added: true });
         let after = fs::read_to_string(path(home.path())).unwrap();
         assert_eq!(
@@ -1603,7 +1842,8 @@ mod tests {
             "b",
             at(),
         )
-        .unwrap();
+        .unwrap()
+        .value;
         assert_eq!(again, Replaced::Gone);
         assert_eq!(fs::read_to_string(path(home.path())).unwrap(), after);
         // And a file that does not exist at all is `Gone` too.
@@ -1617,7 +1857,8 @@ mod tests {
                 "x",
                 at()
             )
-            .unwrap(),
+            .unwrap()
+            .value,
             Replaced::Gone
         );
     }
@@ -1640,7 +1881,8 @@ mod tests {
             "p",
             at(),
         )
-        .unwrap();
+        .unwrap()
+        .value;
         assert_eq!(done, Replaced::Done { added: false });
         assert_eq!(
             fs::read_to_string(path(home.path())).unwrap(),
@@ -1697,7 +1939,9 @@ mod tests {
         );
         fs::write(path(home.path()), &contents).unwrap();
         let alive = |id: &PairingId| id.as_str() == live;
-        let dropped = sweep(&account(home.path()), &held(), None, &alive).unwrap();
+        let dropped = sweep(&account(home.path()), &held(), None, &alive)
+            .unwrap()
+            .value;
         let ids: Vec<&str> = dropped.iter().map(PairingId::as_str).collect();
         assert_eq!(ids, [dead, odd]);
         let after = fs::read_to_string(path(home.path())).unwrap();
@@ -1712,6 +1956,7 @@ mod tests {
         assert!(
             sweep(&account(home.path()), &held(), None, &alive)
                 .unwrap()
+                .value
                 .is_empty()
         );
     }

@@ -34,8 +34,12 @@ pub enum Ended {
     /// A phone's key replaced the bootstrap entry, and it is in `authorized_keys`.
     Paired(Done),
     /// `enroll` recorded a pairing, but the phone's key is not in `authorized_keys` (or the
-    /// record could not be read): nothing is reported as paired; the bootstrap entry was removed.
-    NotInstalled(Option<Done>),
+    /// record could not be read): nothing is reported as paired. `removed`: what became of the
+    /// bootstrap entry (`Ok(false)`: it was already gone, so nothing was removed).
+    NotInstalled {
+        done: Option<Done>,
+        removed: io::Result<bool>,
+    },
     /// The window passed. `removed`: the bootstrap entry was found and removed (false: it was
     /// already gone, so nothing was removed).
     TimedOut { removed: bool },
@@ -66,6 +70,9 @@ pub struct Live<'a> {
     liveness: Option<Liveness>,
     /// How long an ending waits for the lock.
     patience: Duration,
+    /// What went wrong after a change of `authorized_keys` was made (see
+    /// `authorized_keys::Committed`), for the output.
+    warnings: Vec<String>,
 }
 
 /// The ids of runs that are over: reported by `--check` (no lock is taken), removed by every real
@@ -110,10 +117,11 @@ pub fn sweep(account: &Account, backup: &Backup, now_unix: i64) -> Vec<String> {
         }
     };
     let live = |id: &PairingId| is_live(&dir, id, now_unix);
-    if let Err(error) = authorized_keys::sweep(account, &held, Some(backup), &live) {
-        problems.push(format!(
+    match authorized_keys::sweep(account, &held, Some(backup), &live) {
+        Ok(swept) => problems.extend(swept.warning),
+        Err(error) => problems.push(format!(
             "could not remove old temporary pairing keys: {error}"
-        ));
+        )),
     }
     for id in dir.ids().unwrap_or_default() {
         if !live(&id) {
@@ -158,10 +166,13 @@ impl<'a> Live<'a> {
                 fingerprint: fingerprint.clone(),
             })
             .map_err(RunError::State)?;
-        if let Err(error) = authorized_keys::append(account, &held, backup, &line) {
-            let _ = state.remove(&id);
-            return Err(RunError::Install(error));
-        }
+        let appended = match authorized_keys::append(account, &held, backup, &line) {
+            Ok(appended) => appended,
+            Err(error) => {
+                let _ = state.remove(&id);
+                return Err(RunError::Install(error));
+            }
+        };
         drop(held);
         Ok(Self {
             account,
@@ -174,7 +185,22 @@ impl<'a> Live<'a> {
             started: Instant::now(),
             liveness: Some(liveness),
             patience: LOCK_PATIENCE,
+            warnings: appended.warning.into_iter().collect(),
         })
+    }
+
+    /// What went wrong after a change was made, since the last call (see
+    /// `authorized_keys::Committed`).
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
+    }
+
+    /// Removes the bootstrap entry: whether one was there, keeping a warning.
+    fn remove_entry(&mut self, held: &Held) -> io::Result<bool> {
+        let removed =
+            authorized_keys::remove(self.account, held, &self.fingerprint, Some(self.backup))?;
+        self.warnings.extend(removed.warning);
+        Ok(removed.value > 0)
     }
 
     /// The line that was appended (shown when it cannot be removed).
@@ -250,13 +276,12 @@ impl<'a> Live<'a> {
                 authorized_keys::has_fingerprint(self.account, &done.fingerprint).unwrap_or(false)
             });
             // The bootstrap entry is gone after a commit; if not, it goes now.
-            let _ =
-                authorized_keys::remove(self.account, held, &self.fingerprint, Some(self.backup));
+            let removed = self.remove_entry(held);
             let _ = self.state.remove(&self.id);
             self.liveness = None;
             return Some(match done {
                 Some(done) if installed => Ended::Paired(done),
-                other => Ended::NotInstalled(other),
+                done => Ended::NotInstalled { done, removed },
             });
         }
         if reason == Reason::Done {
@@ -264,14 +289,13 @@ impl<'a> Live<'a> {
         }
         // The boundary first: with the state file gone `enroll` refuses. Then the key.
         let _ = self.state.remove_state(&self.id);
-        let removed =
-            authorized_keys::remove(self.account, held, &self.fingerprint, Some(self.backup));
+        let removed = self.remove_entry(held);
         let _ = self.state.remove(&self.id);
         self.liveness = None;
         Some(match (removed, reason) {
             (Err(error), _) => Ended::RemovalFailed(error),
-            (Ok(count), Reason::Interrupted) => Ended::Interrupted { removed: count > 0 },
-            (Ok(count), _) => Ended::TimedOut { removed: count > 0 },
+            (Ok(removed), Reason::Interrupted) => Ended::Interrupted { removed },
+            (Ok(removed), _) => Ended::TimedOut { removed },
         })
     }
 }
@@ -290,6 +314,9 @@ impl Drop for Live<'_> {
             }
         };
         self.liveness = None;
+        for warning in self.take_warnings() {
+            eprintln!("or2-pair: {warning}");
+        }
         if let Some(Ended::RemovalFailed(error)) = ended {
             eprintln!(
                 "or2-pair: could not remove the temporary pairing key ({error}); delete this line from {}: {}",
@@ -499,6 +526,7 @@ mod tests {
             &Done {
                 device: "Pixel-8".into(),
                 fingerprint: phone_fingerprint(),
+                warning: None,
             },
         )
         .unwrap();
@@ -508,8 +536,84 @@ mod tests {
             Duration::from_secs(60),
             &DateTime::now,
         );
-        assert!(matches!(ended, Ended::NotInstalled(Some(_))), "{ended:?}");
+        assert!(
+            matches!(
+                ended,
+                Ended::NotInstalled {
+                    done: Some(_),
+                    removed: Ok(true)
+                }
+            ),
+            "{ended:?}"
+        );
         assert_eq!(keys(&f), f.original, "the bootstrap entry was removed");
+        assert_eq!(state_count(&f), 0);
+    }
+
+    #[test]
+    fn a_record_whose_key_and_bootstrap_entry_are_both_gone_removes_nothing() {
+        // Fix check of the v2 fixes: this ending was always reported as having removed the
+        // temporary key.
+        let f = fixture();
+        let backup = Backup::new(DateTime::now());
+        let mut live = start(&f, &backup, Duration::from_secs(300));
+        fs::write(f.account.keys_path(), &f.original).unwrap();
+        let dir = StateDir::open(&f.account, false).unwrap().unwrap();
+        dir.write_done(
+            &PairingId::parse(ID).unwrap(),
+            &Done {
+                device: "Pixel-8".into(),
+                fingerprint: phone_fingerprint(),
+                warning: None,
+            },
+        )
+        .unwrap();
+        let ended = live.wait(
+            &Count::default(),
+            Duration::from_millis(20),
+            Duration::from_secs(60),
+            &DateTime::now,
+        );
+        assert!(
+            matches!(
+                ended,
+                Ended::NotInstalled {
+                    done: Some(_),
+                    removed: Ok(false)
+                }
+            ),
+            "{ended:?}"
+        );
+        assert_eq!(keys(&f), f.original);
+        assert_eq!(state_count(&f), 0);
+    }
+
+    #[test]
+    fn a_pairing_whose_directory_sync_failed_is_reported_with_the_warning() {
+        // Fix check of the v2 fixes: the sync after the rename failed, and the installed key was
+        // reported as a failure. The pairing stands; the waiting run says what went wrong.
+        use crate::safefs::fault::{self, Fault};
+        let f = fixture();
+        let backup = Backup::new(DateTime::now());
+        let mut live = start(&f, &backup, Duration::from_secs(300));
+        fault::arm(Fault::SyncAfterRename);
+        assert!(matches!(enroll(&f, None), Outcome::Installed { .. }));
+        assert!(!fault::fires(Fault::SyncAfterRename), "the fault was used");
+        let ended = live.wait(
+            &Count::default(),
+            Duration::from_millis(20),
+            Duration::from_secs(60),
+            &DateTime::now,
+        );
+        match ended {
+            Ended::Paired(done) => {
+                assert_eq!(done.fingerprint, phone_fingerprint());
+                let warning = done.warning.unwrap_or_default();
+                assert!(warning.contains("could not be synced to disk"), "{warning}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(keys(&f).contains(PHONE));
         assert_eq!(state_count(&f), 0);
     }
 

@@ -478,6 +478,7 @@ fn old_runs_are_swept_and_live_ones_are_left_alone() {
         &or2_pair::state::Done {
             device: "x".into(),
             fingerprint: "SHA256:y".into(),
+            warning: None,
         },
     )
     .unwrap();
