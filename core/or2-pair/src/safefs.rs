@@ -105,6 +105,30 @@ pub fn fchmod(fd: RawFd, mode: libc::mode_t) -> io::Result<()> {
     retry(-1, || unsafe { libc::fchmod(fd, mode) }).map(|_| ())
 }
 
+/// Sets the mode of the file `name` of `dir` without opening it (a file whose mode does not let
+/// the owner open it), never following a link. Where the system cannot do that without
+/// following (`fchmodat` with `AT_SYMLINK_NOFOLLOW` unsupported) it follows: callers check
+/// first, with [`stat_at`], that the name is a regular file of the account.
+pub fn chmod_at(dir: RawFd, name: &str, mode: libc::mode_t) -> io::Result<()> {
+    let name = c_name(name);
+    // SAFETY: `name` is a valid NUL-terminated string and `dir` an open directory.
+    let call = |flags| {
+        retry(-1, || unsafe {
+            libc::fchmodat(dir, name.as_ptr(), mode, flags)
+        })
+    };
+    match call(libc::AT_SYMLINK_NOFOLLOW) {
+        Err(error)
+            if error.raw_os_error().is_some_and(|code| {
+                code == libc::ENOTSUP || code == libc::EOPNOTSUPP || code == libc::EINVAL
+            }) =>
+        {
+            call(0).map(|_| ())
+        }
+        other => other.map(|_| ()),
+    }
+}
+
 /// A non-blocking `flock` (exclusive or shared): `Ok(false)` when another open file holds a
 /// conflicting lock. `flock` locks belong to the open file description, so two opens of one file
 /// conflict even inside one process.

@@ -143,15 +143,7 @@ impl StateDir {
     /// is made and then the wait ends. A lock still taken is `WouldBlock`.
     pub fn lock(&self, patience: Duration, interrupted: &dyn Fn() -> bool) -> io::Result<Held> {
         let path = self.path.join(LOCK);
-        let fd = open_file(
-            self.fd.as_raw_fd(),
-            LOCK,
-            &path,
-            libc::O_RDWR | libc::O_CREAT,
-            0o600,
-        )?;
-        // Created with 0600 (less with the umask); an existing one is checked like any other.
-        check_file(&fstat(fd.as_raw_fd())?, self.uid, &path)?;
+        let fd = self.open_lock(&path)?;
         let started = Instant::now();
         let mut last_chance = false;
         loop {
@@ -173,6 +165,39 @@ impl StateDir {
                 std::thread::sleep(LOCK_RETRY);
             }
         }
+    }
+
+    /// Opens the lock file, creating it, checked like any other file, and readable and writable
+    /// by the account whatever the umask: a new one gets 0600 (the umask could leave it 000,
+    /// and then no later run could open it), and so does one of the account's own with another
+    /// mode, even one it cannot open. One that belongs to another account is refused.
+    fn open_lock(&self, path: &std::path::Path) -> io::Result<OwnedFd> {
+        let dir = self.fd.as_raw_fd();
+        let open = || open_file(dir, LOCK, path, libc::O_RDWR | libc::O_CREAT, 0o600);
+        let fd = match open() {
+            Ok(fd) => fd,
+            Err(error) if error.raw_os_error() == Some(libc::EACCES) => {
+                // It is there, and its mode does not let this account open it.
+                let stat = stat_at(dir, LOCK)?;
+                check_file(&stat, self.uid, path).map_err(|why| {
+                    refuse(format!(
+                        "or2-pair cannot open its lock file ({error}): {why}. Remove {} (it holds nothing) and run again",
+                        path.display()
+                    ))
+                })?;
+                chmod_at(dir, LOCK, 0o600)?;
+                open()?
+            }
+            Err(error) => return Err(error),
+        };
+        let stat = fstat(fd.as_raw_fd())?;
+        check_file(&stat, self.uid, path)?;
+        // `st_mode` is 16 bits wide on macOS and 32 on Linux.
+        #[allow(clippy::useless_conversion)]
+        if u32::from(stat.st_mode) & 0o7777 != 0o600 {
+            fchmod(fd.as_raw_fd(), 0o600)?;
+        }
+        Ok(fd)
     }
 
     fn file_path(&self, id: &PairingId, extension: &str) -> PathBuf {
@@ -605,5 +630,86 @@ mod tests {
         std::os::unix::fs::symlink(&target, ssh.join(DIR).join(LOCK)).unwrap();
         let error = dir.lock(Duration::ZERO, &|| false).unwrap_err();
         assert!(error.to_string().contains("symbolic link"), "{error}");
+    }
+
+    /// Set (to a home) only in the child process of
+    /// [`a_lock_created_under_a_restrictive_umask_stays_usable`].
+    const UMASK_CHILD: &str = "OR2_PAIR_TEST_UMASK_HOME";
+
+    /// The child's half: under umask 0777 (process-wide, hence its own process), takes the lock,
+    /// lets it go and takes it again, as one run's start and its ending do.
+    #[test]
+    fn lock_twice_under_umask_0777() {
+        let Some(home) = std::env::var_os(UMASK_CHILD) else {
+            return;
+        };
+        // SAFETY: `umask` has no preconditions; this process runs this one test.
+        unsafe { libc::umask(0o777) };
+        let account = Account::new("tester", std::path::PathBuf::from(&home));
+        let dir = StateDir::open(&account, false).unwrap().unwrap();
+        let first = dir.lock(Duration::ZERO, &|| false).unwrap();
+        let lock = std::path::Path::new(&home)
+            .join(".ssh")
+            .join(DIR)
+            .join(LOCK);
+        assert_eq!(
+            fs::metadata(&lock).unwrap().permissions().mode() & 0o7777,
+            0o600,
+            "a new lock file is 0600 at once"
+        );
+        drop(first);
+        drop(dir.lock(Duration::ZERO, &|| false).unwrap());
+    }
+
+    #[test]
+    fn a_lock_created_under_a_restrictive_umask_stays_usable() {
+        // Fix check of the v2 fixes: under umask 0777 the lock file was created mode 000, and
+        // the next lock (the same run's ending, and every later run) failed with EACCES.
+        let (home, account) = ssh_home();
+        drop(StateDir::open(&account, true).unwrap().unwrap());
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::tests::lock_twice_under_umask_0777",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(UMASK_CHILD, home.path())
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&child.stdout).contains("1 passed"),
+            "the child ran the test"
+        );
+        let lock = home.path().join(".ssh").join(DIR).join(LOCK);
+        assert_eq!(
+            fs::metadata(&lock).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn a_lock_of_the_account_with_an_unusable_mode_is_repaired() {
+        let (home, account) = ssh_home();
+        let dir = StateDir::open(&account, true).unwrap().unwrap();
+        let lock = home.path().join(".ssh").join(DIR).join(LOCK);
+        for mode in [0o000, 0o200, 0o400, 0o644] {
+            fs::write(&lock, "").unwrap();
+            fs::set_permissions(&lock, fs::Permissions::from_mode(mode)).unwrap();
+            let held = dir.lock(Duration::ZERO, &|| false);
+            assert!(held.is_ok(), "mode {mode:o}: {held:?}");
+            assert_eq!(
+                fs::metadata(&lock).unwrap().permissions().mode() & 0o7777,
+                0o600,
+                "mode {mode:o}"
+            );
+            fs::remove_file(&lock).unwrap();
+        }
     }
 }
