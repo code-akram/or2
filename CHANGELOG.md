@@ -25,6 +25,10 @@ Each release's notes are in [docs/releases/](docs/releases/).
   silent. Status lines under it are one compact strip that never covers the terminal.
 - `or2-pair` on macOS detects the application firewall blocking `mosh-server` and prints the commands that
   allow it.
+- `or2-pair` and its installer print one calm rail from start to finish (clack-style): a symbol and colour per
+  kind of line, fixes indented under their check, the code prompt and the QR on the rail, an explicit end
+  (`Paired`, `Done`, `Cancelled`). Colour only on a terminal (`NO_COLOR` respected), an ASCII rail outside a
+  UTF-8 locale.
 
 ### Changed
 
