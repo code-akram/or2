@@ -348,9 +348,9 @@ class PairFlowTest {
     }
 
     @Test
-    fun changingTheKeyAfterASaveFailureAttemptsASecondEnrolment() = runBlocking<Unit> {
-        // The name records the review's finding; the flow now refuses it: once the host accepted key a, the
-        // retry is bound to a, the key cannot be changed, and only the save is repeated.
+    fun afterASaveFailureTheKeyCannotBeChangedAndOnlyTheSaveIsRepeated() = runBlocking<Unit> {
+        // Review of the v2 integration: changing the key after a save failure started a second enrolment. Once
+        // the host accepted key a, the retry is bound to a, the key cannot be changed, and only the save is repeated.
         store.failures = 1
         flow.onCode(code(), keys)
         flow.submit(keys, "Pixel", generate)

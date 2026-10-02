@@ -2914,7 +2914,7 @@ To undo, delete the line ending or2-OnePlus-2026-10-02 in ~/.ssh/authorized_keys
   bounds, any white space ignored and the length checked first, as on the host), the parser table,
   the derivation vector, the client against a scripted exchange and every error mapping.
 - **Kotlin**: `PairFlowTest` (fakes; among them that changing the key after a save failure starts no
-  second enrolment, `changingTheKeyAfterASaveFailureAttemptsASecondEnrolment`), `PairMessagesTest`,
+  second enrolment, `afterASaveFailureTheKeyCannotBeChangedAndOnlyTheSaveIsRepeated`), `PairMessagesTest`,
   `PairEndToEndTest` (`or2-pair-testhost` behind a disposable sshd with `K` from the flow written to its
   stdin, then a real `connect_host` with the paired key and pinned host key), and `PairUiDeviceTest`
   with the new screen (screenshots of the Easy pair, review and pairing screens; the locked key choice
