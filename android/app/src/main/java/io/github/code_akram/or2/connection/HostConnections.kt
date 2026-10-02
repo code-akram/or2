@@ -273,6 +273,12 @@ class HostConnections(
 
     /** Told when the user (not the network) ends a host or terminal, so reattach forgets it. */
     var userClose: UserCloseListener? = null
+
+    /**
+     * Told on the main dispatcher when a terminal's program sets the clipboard (OSC 52, OSC 1337 Copy):
+     * the terminal's id and the text. Only the terminal's current session speaks for it.
+     */
+    var clipboardWrite: ((terminalId: Long, text: String) -> Unit)? = null
     private val mutableHosts = MutableStateFlow<Map<Long, ActiveHost>>(emptyMap())
     private val mutableTerminals = MutableStateFlow<List<ActiveTerminal>>(emptyList())
     private var nextTerminalId = 1L
@@ -715,6 +721,10 @@ class HostConnections(
 
         override fun onLinkHealth(health: LinkHealth) {
             scope.launch { if (attempt == terminal.attempt) terminal.mutableLinkHealth.value = health }
+        }
+
+        override fun onClipboardWrite(text: String) {
+            scope.launch { if (attempt == terminal.attempt) clipboardWrite?.invoke(terminal.id, text) }
         }
     }
 

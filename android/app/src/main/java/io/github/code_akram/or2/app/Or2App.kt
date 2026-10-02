@@ -437,6 +437,7 @@ fun Or2App(
                         openInbox = { navigate(nav.push(Destination.Inbox)) },
                         openKeys = { navigate(nav.push(Destination.Keys)) },
                         openAbout = { navigate(nav.push(Destination.About)) },
+                        openSettings = { navigate(nav.push(Destination.Settings)) },
                         connectAll = { connect(connectable.map { it.host }) },
                         resume = resumeCard, onResume = { resumeLast() },
                         batteryCard = batteryCard, allowBattery = actions.requestBatteryExemption, dismissBattery = actions.battery::dismissCard,
@@ -461,6 +462,7 @@ fun Or2App(
                 )
                 Destination.About -> AboutRoute(back = ::pop, openLicenses = { navigate(nav.push(Destination.Licenses)) })
                 Destination.Licenses -> LicensesRoute(back = ::pop)
+                Destination.Settings -> SettingsRoute(back = ::pop)
                 Destination.Keys -> KeysScreen(keys, busy, actions.generateKey, actions.importKey, actions.deleteKey, back = ::pop)
                 Destination.EasyPair -> if (pairFlow == null) Column { TopBar(back = ::pop) } else PairDestination(
                     pairState, keys, pairFlow, actions.deviceLabel, actions.createKey,

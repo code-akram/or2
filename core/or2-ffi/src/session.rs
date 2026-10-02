@@ -382,6 +382,10 @@ pub trait SessionListener: Send + Sync {
     /// sample, the link turning stale past 5 s of silence, each further second while stale,
     /// recovery); never called for SSH terminals. Delivered between `Connected` and `Closed`.
     fn on_link_health(&self, health: LinkHealth) -> Result<(), ListenerError>;
+    /// The host's program set the clipboard (OSC 52 or OSC 1337 Copy), as text of at most
+    /// 1 MiB (UTF-8). Both transports; only between `Connected` and `Closed`. A read request is
+    /// never answered, so the host never learns the phone's clipboard.
+    fn on_clipboard_write(&self, text: String) -> Result<(), ListenerError>;
 }
 
 pub(crate) struct ListenerObserver(pub(crate) Box<dyn SessionListener>);
@@ -397,6 +401,10 @@ impl core::SessionObserver for ListenerObserver {
 
     fn link_health(&self, health: CoreLinkHealth) {
         let _ = self.0.on_link_health(health.into());
+    }
+
+    fn clipboard_write(&self, text: String) {
+        let _ = self.0.on_clipboard_write(text);
     }
 }
 
@@ -581,6 +589,36 @@ mod tests {
             ssh_driver.blocking_next_command(),
             Command::Text("b".into())
         );
+    }
+
+    #[test]
+    fn clipboard_writes_reach_the_listener() {
+        struct Copies(Arc<std::sync::Mutex<Vec<String>>>);
+        impl SessionListener for Copies {
+            fn on_state_changed(&self, _: super::SessionState) -> Result<(), ListenerError> {
+                Ok(())
+            }
+            fn on_frame_ready(&self) -> Result<(), ListenerError> {
+                Ok(())
+            }
+            fn on_link_health(&self, _: LinkHealth) -> Result<(), ListenerError> {
+                Ok(())
+            }
+            fn on_clipboard_write(&self, text: String) -> Result<(), ListenerError> {
+                self.0.lock().unwrap().push(text);
+                // A listener failure is ignored.
+                Err(ListenerError::Failed {
+                    reason: "ignored".into(),
+                })
+            }
+        }
+        let copies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observer = ListenerObserver(Box::new(Copies(copies.clone())));
+        let (_handle, mut driver) = channel(Arc::new(observer));
+        driver.transition(SessionState::Connected).unwrap();
+        driver.publish_clipboard("copied".into());
+        driver.publish_clipboard("again".into());
+        assert_eq!(*copies.lock().unwrap(), ["copied", "again"]);
     }
 
     #[test]

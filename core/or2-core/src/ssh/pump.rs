@@ -184,6 +184,9 @@ impl TerminalPump {
                 break;
             }
         }
+        if let Some(text) = self.terminal.take_clipboard_write() {
+            driver.publish_clipboard(text);
+        }
         if self.connected {
             self.publish(driver)?;
         }
@@ -561,6 +564,57 @@ mod tests {
         pump.enter_pending().await;
         pump.enter_due(&mut driver).unwrap();
         assert_eq!(drain(&mut writes), [b"\r".to_vec(), b"y".to_vec()]);
+    }
+
+    #[test]
+    fn output_carries_osc8_links_into_frames_and_osc52_to_the_observer() {
+        #[derive(Default)]
+        struct Clipboard(std::sync::Mutex<Vec<String>>);
+        impl SessionObserver for Clipboard {
+            fn state_changed(&self, _: &SessionState) {}
+            fn frame_ready(&self) {}
+            fn clipboard_write(&self, text: String) {
+                self.0.lock().unwrap().push(text);
+            }
+        }
+        let clipboard = Arc::new(Clipboard::default());
+        let (handle, mut driver) = channel(clipboard.clone());
+        let (mut pump, _writes, _) = TerminalPump::new(TerminalSize::new(20, 3).unwrap()).unwrap();
+        let (_events, mut incoming) = mpsc::channel(4);
+        let mut pending = None;
+        // Before Connected a write goes nowhere.
+        pump.output(
+            &mut driver,
+            b"\x1b]52;c;ZWFybHk=\x07".to_vec(),
+            &mut incoming,
+            &mut pending,
+        )
+        .unwrap();
+        pump.connect(&mut driver).unwrap();
+        handle.take_frame();
+        pump.output(
+            &mut driver,
+            b"\x1b]8;;https://example.org\x07site\x1b]8;;\x07\x1b]52;c;Y29waWVk\x07".to_vec(),
+            &mut incoming,
+            &mut pending,
+        )
+        .unwrap();
+        assert_eq!(*clipboard.0.lock().unwrap(), ["copied"]);
+        let taken = handle.take_frame().unwrap();
+        let row = taken
+            .frame
+            .rows()
+            .iter()
+            .find(|row| row.index() == 0)
+            .unwrap();
+        assert_eq!(
+            row.links(),
+            [crate::frame::CellLink {
+                start_column: 0,
+                end_column: 3,
+                uri: "https://example.org".into()
+            }]
+        );
     }
 
     #[test]

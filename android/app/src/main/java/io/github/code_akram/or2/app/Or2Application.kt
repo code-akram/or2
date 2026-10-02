@@ -2,9 +2,14 @@ package io.github.code_akram.or2.app
 
 import android.Manifest
 import android.app.Application
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.room.Room
 import io.github.code_akram.or2.connection.HostConnections
@@ -22,6 +27,7 @@ import io.github.code_akram.or2.service.ConnectionService
 import io.github.code_akram.or2.service.NetworkChanges
 import io.github.code_akram.or2.service.ServiceStarter
 import io.github.code_akram.or2.service.serviceSnapshots
+import io.github.code_akram.or2.terminal.HostClipboard
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -67,7 +73,25 @@ class Or2Application : Application() {
     val connections by lazy {
         HostConnections({ request, listener -> (connectorOverride ?: HostConnector.Native).connect(request, listener) }, database.dao(),
             moshFailures = database.dao(), moshServers = moshServers, timing = timing)
-            .also { it.userClose = reattach }
+            .also {
+                it.userClose = reattach
+                it.clipboardWrite = hostClipboard::offer
+            }
+    }
+
+    /** The user's settings (the Settings screen). */
+    val settings by lazy { AppSettings(prefs) }
+
+    /** Clipboard writes from hosts (OSC 52) into the Android clipboard, labelled `or2`. */
+    val hostClipboard by lazy {
+        val main = Handler(Looper.getMainLooper())
+        HostClipboard(
+            enabled = { settings.copyFromHost.value },
+            now = SystemClock::uptimeMillis,
+            schedule = { delay, action -> main.postDelayed(action, delay) },
+        ) { text ->
+            runCatching { getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("or2", text)) }
+        }
     }
 
     /**

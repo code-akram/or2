@@ -3380,6 +3380,65 @@ JVM tests for the routing and the button's visibility.
   reaches the observer (base64 decoded, an invalid payload dropped); JVM tests for URL detection
   (wrapped, trailing punctuation, brackets, schemes refused) and the rate limit.
 
+### Links implementation (branch `v011/links`)
+
+- **FFI shape.** The FFI row record is `TerminalRow` (Kotlin's `ResolvedRow` is the app's resolved copy of
+  it), so the export is `TerminalRow.links: Vec<CellLink>`, carried into `ResolvedRow.links`. `CellLink`'s
+  columns are **inclusive** (`start_column..=end_column`, Kotlin `IntRange`), ascending and not overlapping,
+  and a wide character's spacer tail belongs to its head's run; the core validates this
+  (`FrameError::LinkRange`). The field is `#[uniffi(default)]`, so Kotlin code that builds a `TerminalRow`
+  (fixtures, fakes) needs no change.
+- **Rust.** `TerminalEngine::frame` reads links only on changed rows whose libghostty row says it has a
+  hyperlink (`Row::has_hyperlink`), then per cell (`Cell::has_hyperlink`) through `Terminal::grid_ref`
+  (viewport point) and `GridRef::hyperlink_uri`, growing one reused buffer on `OutOfSpace`; adjacent cells
+  with the same URI merge into one run, two different adjacent links stay two runs. The engine registers
+  `on_clipboard_write` in `from_terminal`, so a new engine and one restored from a snapshot (mosh's older
+  states) both report; libghostty decodes the base64 (an invalid payload never reaches the callback) and
+  never forwards a read request (`?`). The engine keeps the newest write (`take_clipboard_write`); it
+  passes the first `text/plain` (else `text/*`) representation that is UTF-8 and at most
+  `MAX_CLIPBOARD_BYTES` (1 MiB), and drops a clear request (no representation), binary data, non-UTF-8 text
+  and anything larger. Every destination (`c`, `p`, `s`, none) counts: the phone has one clipboard.
+  `SessionObserver::clipboard_write` (default no-op) is called through `SessionDriver::publish_clipboard`,
+  only while `Connected`. The SSH pump takes the write after each output batch; the mosh driver after
+  each authenticated datagram (a later datagram may replace the live screen with a restored one).
+  `ListenerObserver` forwards it to `SessionListener.on_clipboard_write`; a listener error is ignored.
+- **Kotlin, links.** `terminal/TerminalLinks.kt` (`TerminalLinks.at(rows, cell)`): an OSC 8 run under the
+  cell first, then a text URL in the cell's logical line (rows joined while the previous one is `wrapped`,
+  each character mapped back to its cell). The regex is `\bhttps?://[^\s<>"'`]+` (case-insensitive), then
+  trailing `.,;:!?*` are trimmed and a closing `)`, `]` or `}` with no opener inside the URL
+  (`(see https://example.org/a)` loses the `)`, `https://example.org/a_(b)` keeps it). **Deviation:** the
+  `http`/`https` allowlist applies to OSC 8 targets too (`TerminalLinks.allowed`): `ls --hyperlink` emits
+  `file://host/path`, which names a file on the host, and `intent:`/`javascript:` must never come from a
+  remote program; a refused OSC 8 target falls back to the text under it. `TerminalView.onSingleTapUp`:
+  with no selection, a tap on a link underlines its cells in `accent` (1.5 dp, 300 ms) and starts
+  `ACTION_VIEW` with `CATEGORY_BROWSABLE` (Android's own resolver asks when there is no default; no
+  handler at all shows a short toast); otherwise today's behaviour (clear the selection, show the keyboard).
+  A tap while a selection is shown only clears it, so a link is never followed by accident.
+- **Kotlin, OSC 52.** `HostConnections.clipboardWrite` (set by `Or2Application`) receives
+  `(terminalId, text)` on the main dispatcher, only from the terminal's current session (a replaced mosh
+  attempt is ignored). `terminal/HostClipboard.kt` checks the switch at each write (a pending write is
+  dropped if it was turned off meanwhile), drops empty text and text over 1 MiB of UTF-8, and per terminal
+  writes the first at once and holds one pending write (the newest) until 500 ms after the last write.
+  The write is `ClipData.newPlainText("or2", text)`.
+- **Settings.** There was no Settings screen: this lane adds `Destination.Settings` (`settings` in saved
+  state), pushed from a new Home top-bar icon (`Or2Icons.Settings`, three sliders, between keys and about),
+  with `app/SettingsScreen.kt` (a TERMINAL group with the `Copy from the host` switch row) over
+  `app/AppSettings.kt` (stored inverted as `host_copy_off`, so absent means on). The Notify lane's
+  `Agent notifications` switch belongs in the same screen; whichever lane merges second adds its row there.
+- Tests: Rust `terminal::tests::osc8_hyperlinks_reach_the_row_as_column_runs` (runs, a wide tail, adjacent
+  links, a 600-byte URI), `osc52_clipboard_writes_are_decoded_and_bad_ones_dropped` (BEL/ST, newest wins,
+  read request unanswered, invalid base64, non-UTF-8, clear, the 1 MiB cap both sides),
+  `a_restored_engine_still_reports_clipboard_writes`; `frame::tests::links_must_lie_inside_the_row_in_order`;
+  `session::tests::clipboard_writes_reach_the_observer_only_while_connected`; SSH:
+  `ssh::pump::tests::output_carries_osc8_links_into_frames_and_osc52_to_the_observer`; mosh:
+  `mosh::driver::tests::osc8_links_reach_the_frames_and_osc52_the_observer_as_over_ssh` (fake server);
+  FFI: `frame::tests` (links mapped) and `session::tests::clipboard_writes_reach_the_listener`. JVM:
+  `TerminalLinksTest` (text URLs, wrapped rows, trailing punctuation, brackets, refused schemes, OSC 8 and
+  its allowlist, wide characters), `HostClipboardTest` (window, pending replacement, per terminal, switch,
+  cap, UTF-8 length), `AppSettingsTest`, `TerminalGridTest` (links kept and replaced with their row),
+  `NavigationTest` (settings) and `HostConnectionsTransportTest` (writes routed by terminal, a replaced
+  session ignored). Not covered on the device: the tap itself and the Android clipboard write.
+
 ## Gestures and hardware-keyboard shortcuts (lane Gestures)
 
 - **Horizontal swipe** (one finger, horizontal dominant, past a threshold, not while selecting):

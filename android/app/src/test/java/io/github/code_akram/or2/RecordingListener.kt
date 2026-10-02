@@ -22,6 +22,7 @@ class RecordingListener(private val throwAfterRecording: Boolean = false) : Sess
     val states = LinkedBlockingQueue<SessionState>()
     private val frameReady = LinkedBlockingQueue<Unit>()
     val healths = LinkedBlockingQueue<LinkHealth>()
+    val clipboardWrites = LinkedBlockingQueue<String>()
     val callbackThreads: MutableSet<Thread> = ConcurrentHashMap.newKeySet()
     private val active = AtomicInteger()
 
@@ -44,6 +45,8 @@ class RecordingListener(private val throwAfterRecording: Boolean = false) : Sess
     override fun onFrameReady() = record { frameReady.add(Unit) }
 
     override fun onLinkHealth(health: LinkHealth) = record { healths.add(health) }
+
+    override fun onClipboardWrite(text: String) = record { clipboardWrites.add(text) }
 
     private fun record(action: () -> Unit) {
         if (active.incrementAndGet() != 1) overlapped = true

@@ -1219,3 +1219,68 @@ async fn an_absolute_deadline_ends_a_session_the_server_never_answers() {
         assert!(started.elapsed() < longest, "{:?}", started.elapsed());
     }
 }
+
+/// Records state changes like [`Recorder`] and the clipboard writes the session passes on.
+struct ClipboardRecorder {
+    states: Mutex<mpsc::Sender<SessionState>>,
+    clipboard: Mutex<Vec<String>>,
+}
+
+impl SessionObserver for ClipboardRecorder {
+    fn state_changed(&self, state: &SessionState) {
+        let _ = self.states.lock().unwrap().send(state.clone());
+    }
+
+    fn frame_ready(&self) {}
+
+    fn clipboard_write(&self, text: String) {
+        self.clipboard.lock().unwrap().push(text);
+    }
+}
+
+#[tokio::test]
+async fn osc8_links_reach_the_frames_and_osc52_the_observer_as_over_ssh() {
+    let mut server = FakeServer::new(KEY).await;
+    let (sender, states) = mpsc::channel();
+    let observer = Arc::new(ClipboardRecorder {
+        states: Mutex::new(sender),
+        clipboard: Mutex::new(Vec::new()),
+    });
+    let (handle, _control) = spawn(
+        DirectUdp,
+        params(server.port(), KEY, 20, 5),
+        LOCALHOST,
+        observer.clone(),
+        None,
+        CONNECT_TIMEOUT,
+    )
+    .unwrap();
+    server.hear(Duration::from_secs(5)).await;
+    server.say(b"$ ").await;
+    assert_eq!(state(&states).await, SessionState::Connected);
+    server
+        .say(b"\x1b]8;;https://example.org/x\x07link\x1b]8;;\x07\x1b]52;c;Y29waWVk\x07")
+        .await;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut links = Vec::new();
+    while links.is_empty() || observer.clipboard.lock().unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "links {links:?}");
+        if let Some(taken) = handle.take_frame()
+            && let Some(row) = taken.frame.rows().iter().find(|row| row.index() == 0)
+        {
+            links = row.links().to_vec();
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        links,
+        [crate::frame::CellLink {
+            start_column: 2,
+            end_column: 5,
+            uri: "https://example.org/x".into()
+        }]
+    );
+    assert_eq!(*observer.clipboard.lock().unwrap(), ["copied"]);
+    handle.disconnect();
+}

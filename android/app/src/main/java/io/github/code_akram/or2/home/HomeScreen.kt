@@ -107,6 +107,7 @@ fun HomeScreen(
     connectAll: () -> Unit,
     modifier: Modifier = Modifier,
     openAbout: () -> Unit = {},
+    openSettings: () -> Unit = {},
     resume: HomeResume? = null,
     onResume: () -> Unit = {},
     /** The battery exemption was declined: a small, dismissible card offers it again, blocking nothing. */
@@ -137,6 +138,7 @@ fun HomeScreen(
                     }
                 }
                 IconAction(Or2Icons.Key, "SSH keys", openKeys, Modifier.testTag("nav-keys"))
+                IconAction(Or2Icons.Settings, "Settings", openSettings, Modifier.testTag("nav-settings"))
                 IconAction(Or2Icons.Info, "About or2", openAbout, Modifier.testTag("nav-about"))
             })
             Column(Modifier.padding(horizontal = Or2Dimens.Gutter)) {

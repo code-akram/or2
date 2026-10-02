@@ -95,6 +95,17 @@ pub struct Row {
     /// Soft-wrapped into the next row: selection joins them without a newline.
     wrapped: bool,
     cells: Vec<Cell>,
+    /// OSC 8 hyperlinks, ascending by column and not overlapping; empty when none.
+    links: Vec<CellLink>,
+}
+
+/// An OSC 8 hyperlink over a run of a row's cells: `start_column..=end_column` (both
+/// inclusive; a wide character's spacer tail is part of the run).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellLink {
+    pub start_column: u16,
+    pub end_column: u16,
+    pub uri: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +169,8 @@ pub enum FrameError {
     OrphanTail { row: u16, column: u16 },
     #[error("row {row} column {column}: spacer tails carry no text")]
     TailText { row: u16, column: u16 },
+    #[error("row {row}: links must be inside the row, ascending and not overlapping")]
+    LinkRange { row: u16 },
     #[error("cursor is outside the viewport")]
     CursorOutOfRange,
     #[error("delta frame does not match the size of the frame it updates")]
@@ -172,7 +185,14 @@ impl Row {
             index,
             wrapped,
             cells,
+            links: Vec::new(),
         }
+    }
+
+    /// The row with its OSC 8 hyperlinks.
+    pub fn with_links(mut self, links: Vec<CellLink>) -> Self {
+        self.links = links;
+        self
     }
 
     pub fn index(&self) -> u16 {
@@ -185,6 +205,10 @@ impl Row {
 
     pub fn cells(&self) -> &[Cell] {
         &self.cells
+    }
+
+    pub fn links(&self) -> &[CellLink] {
+        &self.links
     }
 
     fn validate(&self, size: TerminalSize) -> Result<(), FrameError> {
@@ -222,6 +246,16 @@ impl Row {
                 row,
                 column: size.columns() - 1,
             });
+        }
+        let mut next_free = 0u16;
+        for link in &self.links {
+            if link.start_column < next_free
+                || link.end_column < link.start_column
+                || link.end_column >= size.columns()
+            {
+                return Err(FrameError::LinkRange { row });
+            }
+            next_free = link.end_column + 1;
         }
         Ok(())
     }
@@ -652,6 +686,34 @@ mod tests {
             mailbox.publish(delta(4, 3, &[(0, "x")], 0)),
             Err(FrameError::SizeMismatch)
         );
+    }
+
+    #[test]
+    fn links_must_lie_inside_the_row_in_order() {
+        let link = |start, end| CellLink {
+            start_column: start,
+            end_column: end,
+            uri: "https://example.org".into(),
+        };
+        let frame = |links: Vec<CellLink>| {
+            Frame::delta(
+                size(6, 2),
+                vec![text_row(1, "abcdef", 6).with_links(links)],
+                None,
+                BG,
+                Scrollback::default(),
+            )
+        };
+        let ok = frame(vec![link(0, 1), link(2, 5)]).unwrap();
+        assert_eq!(ok.rows()[0].links(), [link(0, 1), link(2, 5)]);
+        for bad in [
+            vec![link(0, 6)],
+            vec![link(3, 2)],
+            vec![link(0, 2), link(2, 3)],
+            vec![link(3, 4), link(0, 1)],
+        ] {
+            assert_eq!(frame(bad), Err(FrameError::LinkRange { row: 1 }));
+        }
     }
 
     #[test]

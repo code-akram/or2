@@ -1,6 +1,7 @@
 package io.github.code_akram.or2.terminal
 
 import androidx.compose.ui.graphics.toArgb
+import io.github.code_akram.or2.ffi.CellLink
 import io.github.code_akram.or2.ffi.CellStyle
 import io.github.code_akram.or2.ffi.CellWidth
 import io.github.code_akram.or2.ffi.Scrollback
@@ -16,7 +17,8 @@ import kotlin.math.floor
 val DefaultBackground: UInt = (Or2Colors.TerminalBackground.toArgb() and 0xFFFFFF).toUInt()
 
 data class ResolvedCell(val text: String, val width: CellWidth, val style: CellStyle)
-data class ResolvedRow(val cells: List<ResolvedCell>, val wrapped: Boolean)
+/** [links] are the row's OSC 8 hyperlinks (inclusive column runs), empty when none. */
+data class ResolvedRow(val cells: List<ResolvedCell>, val wrapped: Boolean, val links: List<CellLink> = emptyList())
 data class GridSize(val columns: UShort, val rows: UShort)
 
 fun gridSize(width: Int, height: Int, cellWidth: Float, cellHeight: Float): GridSize? {
@@ -51,7 +53,7 @@ class TerminalGrid {
         val changed = frame.changedRows.associate { row ->
             row.index.toInt() to ResolvedRow(row.cells.map { cell ->
                 ResolvedCell(cell.text, cell.width, frame.styles[cell.style.toInt()])
-            }, row.wrapped)
+            }, row.wrapped, row.links)
         }
         rows = if (frame.full) {
             List(frame.rows.toInt()) { changed.getValue(it) }

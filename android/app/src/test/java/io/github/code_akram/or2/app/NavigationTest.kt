@@ -126,4 +126,12 @@ class NavigationTest {
         assertEquals(NavStack().push(Destination.About), stack.back())
         assertEquals(listOf(Destination.Home, Destination.About), NavStack.decode("about").entries)
     }
+
+    @Test
+    fun settingsArePushedOnHomeAndSurviveSavedState() {
+        val stack = NavStack().push(Destination.Settings)
+        assertEquals("home|settings", stack.encode())
+        assertEquals(stack, NavStack.decode(stack.encode()))
+        assertEquals(NavStack(), stack.back())
+    }
 }

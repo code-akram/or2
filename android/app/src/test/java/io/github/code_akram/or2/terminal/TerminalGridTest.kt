@@ -42,6 +42,16 @@ class TerminalGridTest {
         assertEquals(0x00ff00u, grid.rows[0].cells[0].style.foreground)
     }
 
+    @Test fun rowLinksAreKeptWithTheirRowAndReplacedWithIt() {
+        val grid = TerminalGrid()
+        val link = io.github.code_akram.or2.ffi.CellLink(0u, 0u, "https://example.org")
+        assertTrue(grid.apply(frame(true, 1u, listOf(row(0, "A").copy(links = listOf(link)), row(1, "B")))))
+        assertEquals(listOf(link), grid.rows[0].links)
+        assertEquals(emptyList<Any>(), grid.rows[1].links)
+        assertTrue(grid.apply(frame(false, 1u, listOf(row(0, "C")))))
+        assertEquals(emptyList<Any>(), grid.rows[0].links)
+    }
+
     @Test fun newViewRejectsDeltaAndMetadataOnlyDeltaKeepsRows() {
         val grid = TerminalGrid()
         assertFalse(grid.apply(frame(false, 1u, listOf(row(1, "C")))))

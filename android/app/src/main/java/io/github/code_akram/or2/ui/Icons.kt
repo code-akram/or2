@@ -100,4 +100,10 @@ object Or2Icons {
     val External = icon("external", "M14 4h6v6", "M20 4l-9 9", "M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5")
     val Document = icon("document", "M7 3.5h7l4 4V20a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z", "M14 3.5V8h4", "M9 12.5h6", "M9 16h6")
     val Fingerprint = icon("fingerprint", "M7 18c1-2 1-4 1-6a4 4 0 0 1 8 0c0 3 .5 5 1.5 6.5", "M12 12c0 3 0 5-1 7", "M4.5 9.5A8 8 0 0 1 12 4a8 8 0 0 1 7.5 5.5")
+
+    /** Settings: three sliders. */
+    val Settings = icon(
+        "settings", "M4 6.5h9", "M17 6.5h3", "M15 4.5v4", "M4 12h3", "M11 12h9", "M9 10v4",
+        "M4 17.5h11", "M19 17.5h1", "M17 15.5v4",
+    )
 }
