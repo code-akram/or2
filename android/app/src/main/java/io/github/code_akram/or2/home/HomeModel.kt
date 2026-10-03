@@ -5,6 +5,7 @@ import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.inbox.LinkStatus
+import io.github.code_akram.or2.inbox.agentLabel
 import io.github.code_akram.or2.inbox.linkStatus
 import io.github.code_akram.or2.session.hostFailureDetail
 import io.github.code_akram.or2.session.hostStateMessage
@@ -84,8 +85,7 @@ fun herdrDetail(view: HerdrView): String? {
     val focused = view.focusedPaneId ?: return null
     val agent = view.agents.firstOrNull { it.paneId == focused }
     val pane = view.panes.firstOrNull { it.paneId == focused }
-    val labels = listOfNotNull(agent?.displayAgent, agent?.name, agent?.agent, pane?.agent)
-    return labels.firstOrNull { it.isNotBlank() } ?: listOfNotNull(pane?.cwd, agent?.cwd).firstOrNull { it.isNotBlank() }
+    return agentLabel(agent, pane?.agent) ?: listOfNotNull(pane?.cwd, agent?.cwd).firstOrNull { it.isNotBlank() }
 }
 
 /**

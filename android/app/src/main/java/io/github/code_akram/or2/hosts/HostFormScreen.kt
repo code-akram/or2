@@ -107,7 +107,7 @@ fun HostFormScreen(
     }
 
     fun host(key: String?) = Host(
-        HostRecord(previous?.id ?: 0, label.trim(), username, key, showInInbox, transport, sleeps, previous?.moshFailedUntil ?: 0),
+        HostRecord(previous?.id ?: 0, label.trim(), username, key, showInInbox, transport, sleeps),
         addresses.map { HostEndpoint(it.hostname, it.port.toInt()) },
     )
     fun submit() {

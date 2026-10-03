@@ -86,7 +86,7 @@ class MoshServerLedgerTest {
         // A label or key edit is not a move.
         val renamed = one.copy(record = one.record.copy(label = "Renamed", keyId = "other-key", showInInbox = false))
         assertEquals(listOf(100u), ledger.pids(renamed))
-        assertEquals(listOf(100u), ledger.allPids(1))
+        assertEquals(listOf(100u), recordedServerPids(store, 1))
     }
 
     @Test
@@ -106,6 +106,5 @@ class MoshServerLedgerTest {
         assertEquals(emptyList<UInt>(), ledger.pids(two))
         assertEquals(emptyList<UInt>(), ledger.pids(testHost(id = 3)))
         assertEquals(emptyList<UInt>(), ledger.pids(testHost(id = 4)))
-        assertEquals(listOf(100u), ledger.allPids(1))
     }
 }

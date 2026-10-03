@@ -48,7 +48,7 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 | `crust` | `#11111B` | the composer card: darker than the terminal and the key pills around it; the hairline under the terminal header |
 | `terminalHeader` | `#222232` | the terminal card's header and its notice strip: halfway between the terminal background `#1E1E2E` and `surface`, one slight tonal step above the grid |
 | `accent` | `#89B4FA` | primary buttons, FAB, toggles, selection, links, checkmarks; text on accent is `background` |
-| `accentMuted` | `#343B53` fill with `accent` text | badges ("PRO"-style tags, status kickers) |
+| `accentMuted` | `#343B53` fill with `accent` text | a latched key (`Ctrl`, `Alt`), icon tiles, the disabled primary button |
 | `padKey` | `#38425F` (`accent` at 24 % over the terminal's `#1E1E2E`, opaque) with an `accent` glyph (4.7:1) | arrow-pad keys: blue, clearly apart from the terminal (1.65:1 against it, where `surface` was 1.1:1), and opaque so terminal text never shows through |
 | `padKeyEdge` | `accent` at 55 % (3.3:1 on the terminal) | the hairline of the arrow-pad keys and of the extras pill |
 | `attention` | `#FAB387` (peach) | blocked agents, warnings, "needs attention" dots |
@@ -74,7 +74,7 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   kicker 11 UPPERCASE mono with +0.15 em tracking in full `accent` (the key algorithm in a host-key
   dialog is security information; a 70 % accent was 4.1:1); toolbar and pad keys 12
   mono; composer text 13 mono; overlay pills on thumbnails and the terminal header's transport
-  badge 11 mono; badge 11; chip 12. Small mono lines (10.5) sit on a 16 sp line grid.
+  badge 11 mono; chip 12. Small mono lines (10.5) sit on a 16 sp line grid.
 - The one medium weight: the terminal header's host (`Or2Type.HeaderTitle`, sans 12 sp medium in
   `text`), followed by the target in mono 11 (`HeaderTarget`) in `textMuted`. It is a short label
   that has to win a glance over a screen of terminal text; everything else stays light or regular.
@@ -124,9 +124,10 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   centred in a 26 x 36 dp box that reaches halfway to the other disc (the boxes meet at the midpoint, so where
   the grown targets would overlap the box a tap lands in wins and a tap between the discs goes to the nearer one),
   status chips that are buttons are 28 dp, the composer's bare icon actions are 40 dp boxes (the
-  send button is a 36 dp disc in a 40 dp box). The toolbar and arrow-pad-extras keys are 30 x 40 dp
-  touch boxes (30 dp drawn) and 28-38 x 36 dp, shoulder to shoulder, so a tap lands on the nearest
-  key; the segmented control's segments span the whole 32 dp track.
+  send button is a 36 dp disc in a 40 dp box). The toolbar keys are 34 x 40 dp touch boxes around the
+  30 dp key drawn (a text key is as wide as its label plus 6 dp each side, at least 30 dp), and the
+  arrow-pad extras 28-38 x 36 dp, shoulder to shoulder, so a tap lands on the nearest key; the
+  segmented control's segments span the whole 32 dp track.
 - Fingerprints in list rows are ellipsized in the middle on one line (`SHA256:7vK2mQ9x…tB1MkA`); the
   full value is in the key's own sheet and in the host-key dialogs, which never shorten it.
 - Validation is calm on a pristine form: hints ("Choose a key") are muted, and only a typed value
@@ -134,7 +135,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 - Empty states: centred 72 dp `surface` circle with a 32 dp outline icon, a 20 sp title and a
   muted two-line explanation, then an optional call-to-action card.
 - Bottom sheets: `surfaceRaised`, 24 dp top radius, drag handle; option and detail sheets have a title
-  left and "Done" right. **Sheet inset rule** (`Or2Sheet`, the only sheet): a sheet never rises over
+  left and "Done" right. `Or2Sheet` owns the body's padding (the 12 dp gutter at the sides and below; a sheet that
+  lays out its own list, the session picker, pads itself) and the in-sheet card colour: cards and grouped lists in
+  a sheet are `surfaceRaisedRow`, a step above the sheet, never the darker `surface`. **Sheet inset rule** (`Or2Sheet`, the only sheet): a sheet never rises over
   the status bar. Material's sheet window is edge to edge and lets a tall sheet's surface reach the
   very top of the screen, padding only its content; `Or2Sheet` instead pads the whole sheet by the top
   safe-drawing inset plus `Or2Dimens.SheetTopGap` (12 dp), outside the surface, so a full-height sheet
@@ -213,11 +216,12 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   in progress), `MonoSmall` text on one line, ellipsized, tinted by severity (`textMuted` for information,
   `attention` for a warning, the icon too), and an optional trailing text action (`Chip` 12 sp in `accent`,
   drawn 28 dp tall). It has no fill of its own (it sits on its container's) and takes layout space: it pushes
-  what is below it down and never overlays it. The terminal card uses it for Connecting / Authenticating /
-  Waiting for host-key approval (muted, spinner) and for a closed session (warning, with **Close**); while the
-  session is connected, for an image upload: `Uploading image…` (muted, spinner, **Cancel**; for 3 s after a second
-  image that was not taken, `An image is already uploading`) or why it failed
-  (warning, **Dismiss**).
+  what is below it down and never overlays it. The terminal card has one strip, for one thing at a time: a
+  closed terminal's reason (warning, with **Close**), else an image upload: `Uploading image…` (muted, spinner,
+  **Cancel**; `Uploading image 2 of 3…` for several; for 3 s after an image the full queue did not take,
+  `At most 10 images at a time`) or why it failed
+  (warning, **Dismiss**). The card shows only once the terminal has connected, so nothing before that (connecting,
+  authenticating) has a strip.
 - **Share picker:** an image shared to or2 from another app opens a sheet titled **Send image to**: one grouped
   card of the open terminals (terminal icon, the host, the target in mono), the last used first. A tap shows
   that terminal and uploads the image to it. With no open terminal there is no sheet, only the one-line
@@ -266,7 +270,7 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   small, dismissible card above HOSTS says "Background connections may drop" with an **Allow** text
   action and a close glyph (`Or2Card` on `SurfaceRaised`, `Secondary` muted text, no modal). While a host is
   connected and notifications are not allowed, a second card of the same kind says "Show connection
-  and agent notifications" (one offer for both uses, `NotificationUse.AGENT_ALERTS`; **Allow** asks for the
+  and agent notifications" (one offer for both uses, `NotificationPermission.offer`; **Allow** asks for the
   permission, or opens the app's notification settings once Android no longer asks; the glyph dismisses it
   for good). A host
   that was unreachable shows, under its failure (or under `Asleep`), one `MonoSmall` muted line per
@@ -387,9 +391,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   - **Drag handle:** a thin 28 x 3 dp pill in `handle` (`#585B70`), 4 dp from the card's top edge,
     centred over the title, inside the 36 dp row: it costs no height and is part of the header, not a bar
     of its own. Dragging down anywhere on the header minimises (past 96 dp; less snaps back).
-  - **Notice strip under it:** while the session is not connected, a `NoticeStrip` (see Components) on the
-    same `terminalHeader` tone, above the hairline: `Connecting…` / `Authenticating…` muted with a spinner,
-    or a closed session's reason in `attention` with **Close**. It takes layout space.
+  - **Notice strip under it:** one `NoticeStrip` (see Components) on the same `terminalHeader` tone, above the
+    hairline: a closed terminal's reason in `attention` with **Close**, else an image upload's progress or failure.
+    It takes layout space.
 - **Terminals sheet** (the green disc; v0.1.2 streamline), titled **Terminals**: every open terminal grouped by
   host (a section header with the host's name, then one `surfaceRaisedRow` grouped card of 44 dp rows: the title
   in `RowLabel`, `Closed` muted under it for one that has closed, `● Current` (an `accent` dot) on the one on
@@ -401,16 +405,18 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   "Close session" row or pill: Ctrl+Shift+W closes through the same close, and the closed strip's **Close**
   remains for a session that closed by itself (a lost connection, a remote exit), whose final frame stays
   readable until then. A terminal that never connected shows the same grouped list, each row with its `×`.
-- **Terminal toolbar:** a floating pill (`background` at ~85 %) of rounded keys (`surface`),
-  30 dp wide (text keys as wide as their label) and 30 dp tall inside a 40 dp tall pill, each with
-  a 34 x 40 dp touch box (the platform grows the hit area to 48 dp):
-  `Ctrl`, `Esc`, `Tab` as mono text, then icon keys (arrow pad, panes, paste, history; tap pages
-  up into the scrollback, hold jumps to the bottom), then `⇧Tab` (Shift+Tab to the terminal, whatever is
-  latched: Claude Code's mode cycle, which Gboard cannot send), `/` and `@` as mono text (into the composer at
-  its cursor while it is open, else typed into the terminal, taking a latched `Ctrl`), then, apart, the composer
-  and keyboard toggles without key backgrounds. A latched `Ctrl` draws in `accent` until it has been used for
-  one key; `Alt` lives in the arrow pad's extras row. While text is selected `Copy` and `Clear`
-  join the row. Horizontally scrollable when it overflows.
+- **Terminal toolbar:** a floating pill (`background` at ~85 %, 8 dp from the screen's sides, keys 6 dp inside
+  it) of rounded keys (`surface`), 30 dp wide (text keys as wide as their label plus 6 dp each side) and 30 dp
+  tall inside a 40 dp tall pill, each with a 34 x 40 dp touch box (the platform grows the hit area to 48 dp):
+  `Ctrl`, `Esc`, `Tab` as mono text, then the arrow-pad and paste icon keys, then `⇧Tab` (Shift+Tab to the
+  terminal, whatever is latched: Claude Code's mode cycle, which Gboard cannot send), `/` and `@` as mono text
+  (into the composer at its cursor while it is open, else typed into the terminal, taking a latched `Ctrl`), then,
+  4 dp apart, the composer and keyboard toggles without key backgrounds. A latched `Ctrl` draws in `accent` until
+  it has been used for one key; `Alt` lives in the arrow pad's extras row. While text is selected `Copy` and
+  `Clear` lead the row and the typing keys (`⇧Tab`, `/`, `@`, which would clear the selection anyway) give way to
+  them. There is no panes key (the header's green disc opens that sheet) and no history key (a drag scrolls back,
+  the scroll-to-bottom button returns). The row fits a 411 dp wide phone without scrolling either way (405.6 and
+  384.8 dp by the tokens, `KeyToolbarTest`); it scrolls only with a large system font.
 - **Arrow pad:** the arrow key expands a floating 3×3 cluster above the toolbar: Backspace,
   Up, Clear-line / Left, Enter, Right / Down; keys are 40 dp squares with 12 dp radius and 6 dp gaps, each
   opaque on its own and blue, like the toolbar's arrow-pad icon (owner feedback on v0.1.1: grey keys on the
@@ -420,15 +426,17 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   Keys auto-repeat on hold (after 400 ms, every 60 ms).
   Clear-line is an eraser outline. Below the cluster, 6 dp under it, a 36 dp scrolling pill (`background`
   with the keys' `padKeyEdge` hairline) keeps `Alt`, `Home`, `End`, `PgUp`, `PgDn` and the shell symbols (28 dp
-  keys, label-wide navigation keys, `accent` labels; a latched `Alt` on `accentMuted`) one tap away, with an
-  edge fade on each side that has more keys behind it.
+  keys, label-wide navigation keys, `accent` labels; a latched `Alt` on `accentMuted`; no `/`, which is on the
+  toolbar) one tap away, with an edge fade on each side that has more keys behind it. Opening the pad closes the
+  composer, and opening the composer closes the pad.
 - **Composer (chat input):** a rounded 20 dp `crust` card docked above the IME and above the key
   toolbar (which stays, so `Esc`, `Ctrl` and `Tab` remain reachable), in one row (about 40 dp for a single line, growing to five): for a
   terminal that takes images an attach action at the left (an outline image glyph in `textMuted`, 40 dp box, opening the Photo
   Picker), a 13 sp mono placeholder (`Message <host>...`) or the text, a close action (40 dp box) and a
-  36 dp circular send button at the right. Paste and the panes sheet are not repeated in the card: the toolbar
-  directly below has both, and the keyboard pastes into the text. The send button (`surfaceTrack` until there is text and the session is connected, then
-  `accent`). Sending calls the session's `submit_text`: Rust writes the text (one bracketed paste
+  36 dp circular send button at the right. Paste is not repeated in the card: the toolbar directly below has it,
+  and the keyboard pastes into the text. Closing the composer (its ×, the toolbar toggle, Ctrl+Shift+Enter, opening
+  the pad) gives the keys back to the terminal. The send button (`surfaceTrack` until there is text and the session is connected, then
+  `accent`) buzzes once per message that goes out: a confirmed multi-line send buzzes on the dialog's **Send**. Sending calls the session's `submit_text`: Rust writes the text (one bracketed paste
   when the program enabled it) and then Enter as a separate write after a short pause, so agent
   TUIs with paste-burst detection submit instead of inserting a newline; this is the quick-reply
   path for blocked agents. The text is cleared only when it was sent: after a dropped session it
@@ -455,12 +463,14 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   size is rounded to half steps, so a slow pinch works at the small default.
 - Navigation swipes on tmux and herdr terminals (one finger sideways: window or tab; two fingers
   sideways: pane; two fingers up or down: session or workspace) give a haptic tick and no other
-  chrome: the terminal itself shows the move. A shell ignores them. The hardware-keyboard shortcuts
-  (Ctrl+Shift+...) are listed in a compact sheet (Ctrl+Shift+/): two grouped cards of dense rows,
-  keys in small mono text, what they do in muted secondary text.
+  chrome: the terminal itself shows the move. A shell ignores them. The gestures and the hardware-keyboard
+  shortcuts (Ctrl+Shift+...) are listed in one compact sheet, **Gestures & shortcuts** (Ctrl+Shift+/, and a row of
+  the Terminals sheet): a TOUCH card first (tap, tap a link, long press to select then Copy, drag to scroll, the
+  swipes, pinch; a muted line under it says the swipes move tmux and herdr), then a KEYBOARD card; dense rows, the
+  gesture or keys in small mono text, what it does in muted secondary text.
 
 ## Motion and feedback
 
 - 150–250 ms ease-out transitions; sheets slide, lists animate item placement.
 - Status dots for working agents pulse slowly (1.6 s); nothing else animates continuously.
-- Haptic tick on modifier latch, send, and host-key approval.
+- Haptic tick on modifier latch, send (once per message), and host-key approval.

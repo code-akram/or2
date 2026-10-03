@@ -51,8 +51,8 @@ class ImagePasteTest {
     fun thePathGoesIntoAnOpenComposerElseIntoTheTerminal() {
         assertEquals(InsertTarget.COMPOSER, insertTarget(composerOpen = true))
         assertEquals(InsertTarget.TERMINAL, insertTarget(composerOpen = false))
-        assertEquals("look at /p.png", composerWithPath("look at", "/p.png"))
-        assertEquals(" /p.png", composerWithPath("", "/p.png"))
+        assertEquals("look at /p.png", composerWithPaths("look at", listOf("/p.png")))
+        assertEquals(" /p.png", composerWithPaths("", listOf("/p.png")))
     }
 
     private class Upload {
@@ -91,8 +91,8 @@ class ImagePasteTest {
         assertTrue(paste.start { png })
         assertEquals(UploadState.Uploading(), paste.state.value)
         val notice = uploadNotice(paste.state.value)!!
-        assertEquals("Uploading image\u2026", notice.notice.text)
-        assertTrue(notice.notice.busy)
+        assertEquals("Uploading image\u2026", notice.text)
+        assertTrue(notice.busy)
         assertEquals("Cancel", notice.action)
         advanceUntilIdle()
         assertEquals(listOf("png" to 3), upload.calls)
@@ -159,7 +159,7 @@ class ImagePasteTest {
             assertFalse(path, insertablePath(path))
             // The terminal's insertion (bracketed paste or typed) and the composer's both refuse it.
             assertThrows(IllegalArgumentException::class.java) { pathInsertion(path) }
-            assertThrows(IllegalArgumentException::class.java) { composerWithPath("look at", path) }
+            assertThrows(IllegalArgumentException::class.java) { composerWithPaths("look at", listOf(path)) }
         }
         assertTrue(insertablePath("/home/zoë's files/or2-1.png"))
         // An upload whose host answers one fails in words, and nothing reaches the screen.
@@ -239,9 +239,9 @@ class ImagePasteTest {
         assertEquals(UploadState.Uploading(1, MAX_IMAGES, full = true), full)
         assertTrue(full.uploading)
         val notice = uploadNotice(full)!!
-        assertEquals(TOO_MANY_IMAGES, notice.notice.text)
-        assertEquals("At most 10 images at a time", notice.notice.text)
-        assertTrue(notice.notice.busy)
+        assertEquals(TOO_MANY_IMAGES, notice.text)
+        assertEquals("At most 10 images at a time", notice.text)
+        assertTrue(notice.busy)
         assertEquals("Cancel", notice.action)
         // For a moment, then back to the queue's own words.
         advanceTimeBy(ALREADY_SHOWN + 1)
@@ -270,7 +270,7 @@ class ImagePasteTest {
         assertEquals(listOf(path(1), path(3)), paste.paths.first())
         assertEquals(UploadState.Failed("1 of 3 images failed: SFTP is not available on this host"), paste.state.value)
         val notice = uploadNotice(paste.state.value)!!
-        assertEquals(NoticeTone.Warning, notice.notice.tone)
+        assertEquals(NoticeTone.Warning, notice.tone)
         assertEquals("Dismiss", notice.action)
         paste.dismiss()
         assertEquals(UploadState.Idle, paste.state.value)
@@ -361,14 +361,14 @@ class ImagePasteTest {
 
     @Test
     fun theStripCountsTheImagesOfARun() {
-        assertEquals("Uploading image…", uploadNotice(UploadState.Uploading())!!.notice.text)
-        assertEquals("Uploading image…", uploadNotice(UploadState.Uploading(1, 1))!!.notice.text)
-        assertEquals("Uploading image 1 of 3…", uploadNotice(UploadState.Uploading(1, 3))!!.notice.text)
-        assertEquals("Uploading image 3 of 4…", uploadNotice(UploadState.Uploading(3, 4))!!.notice.text)
+        assertEquals("Uploading image…", uploadNotice(UploadState.Uploading())!!.text)
+        assertEquals("Uploading image…", uploadNotice(UploadState.Uploading(1, 1))!!.text)
+        assertEquals("Uploading image 1 of 3…", uploadNotice(UploadState.Uploading(1, 3))!!.text)
+        assertEquals("Uploading image 3 of 4…", uploadNotice(UploadState.Uploading(3, 4))!!.text)
         for (state in listOf(UploadState.Uploading(2, 3), UploadState.Uploading(2, 10, full = true))) {
             val notice = uploadNotice(state)!!
-            assertTrue(notice.notice.busy)
-            assertEquals(NoticeTone.Info, notice.notice.tone)
+            assertTrue(notice.busy)
+            assertEquals(NoticeTone.Info, notice.tone)
             assertEquals("Cancel", notice.action)
         }
         assertNull(queueFailure(emptyList(), 3))
@@ -411,8 +411,8 @@ class ImagePasteTest {
         advanceUntilIdle()
         assertEquals(UploadState.Failed("SFTP is not available on this host"), paste.state.value)
         val notice = uploadNotice(paste.state.value)!!
-        assertEquals(NoticeTone.Warning, notice.notice.tone)
-        assertFalse(notice.notice.busy)
+        assertEquals(NoticeTone.Warning, notice.tone)
+        assertFalse(notice.busy)
         assertEquals("Dismiss", notice.action)
         paste.dismiss()
         assertEquals(UploadState.Idle, paste.state.value)

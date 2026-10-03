@@ -245,7 +245,6 @@ class UiGalleryActivity : ComponentActivity() {
             "terminal-tmux" -> Terminal(target = "tmux main", transport = Transport.MOSH)
             "terminal-long" -> Terminal(host = "build-box-staging-eu-west", target = "herdr personal w1:p2", transport = Transport.MOSH)
             "terminal-stale" -> Terminal(target = "tmux main", transport = Transport.MOSH, health = LinkHealth(12_300uL, 12_300uL))
-            "terminal-connecting" -> Terminal(cardState = SessionState.Connecting)
             "terminal-closed" -> Terminal(target = "tmux main", cardState = SessionState.Closed(CloseReason.Disconnected))
             "terminal-arrowpad" -> Terminal(pad = true)
             "terminal-arrowpad-text" -> Terminal(pad = true, dense = true)
@@ -546,7 +545,7 @@ class UiGalleryActivity : ComponentActivity() {
             "hostkey-first", "hostkey-changed", "hostkey-changed-many", "shortcuts",
             "add-host", "pair-scan", "pair-scan-scrolled", "pair-scan-denied", "pair-review", "pair-review-scrolled", "pair-review-new",
             "pair-progress", "pair-install", "keepalive", "keepalive-waiting",
-            "terminal", "terminal-tmux", "terminal-long", "terminal-stale", "terminal-connecting", "terminal-closed",
+            "terminal", "terminal-tmux", "terminal-long", "terminal-stale", "terminal-closed",
             "terminal-arrowpad", "terminal-arrowpad-text", "terminal-herdr-wheel", "terminal-composer",
             "terminal-attach", "terminal-uploading", "terminal-upload-failed", "share-picker", "terminals",
         )

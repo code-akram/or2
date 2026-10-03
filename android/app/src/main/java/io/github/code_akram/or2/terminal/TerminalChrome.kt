@@ -5,7 +5,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.content.MediaType
 import androidx.compose.foundation.content.consume
 import androidx.compose.foundation.content.contentReceiver
@@ -73,6 +72,8 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import io.github.code_akram.or2.ffi.KeyModifiers
+import io.github.code_akram.or2.ffi.TerminalKey
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Icons
@@ -93,14 +94,17 @@ class TerminalChromeState(padOpen: Boolean = false, composerOpen: Boolean = fals
     /** The composer's field (a state-based text field: it takes a keyboard's images, [Composer]). */
     val composer = TextFieldState(composerText)
 
-    /** The grid the terminal view shows while it is composed, else null: the Terminals sheet's `Copy screen` reads it. */
-    var screen: TerminalGrid? = null
-        internal set
-
     /** The composer's text; setting it puts the caret at its end. */
     var composerText: String
         get() = composer.text.toString()
         set(value) = composer.setTextAndPlaceCursorAtEnd(value)
+
+    /**
+     * The visible screen's text ([TerminalView.screenText]) while a [TerminalScreen] shows this state, else
+     * empty: a caller that hoists the state (the Terminals sheet's Copy screen) reads it.
+     */
+    var screenText: () -> String = { "" }
+        internal set
 
     /**
      * [sent] went out from the composer (a confirmed multi-line send): only that text is cleared. What
@@ -128,33 +132,36 @@ class TerminalChromeState(padOpen: Boolean = false, composerOpen: Boolean = fals
 fun composerAfterSend(current: String, sent: String): String =
     if (current.startsWith(sent)) current.substring(sent.length).trimStart() else current
 
+/** The 2 dp on each side (5 dp above and below) by which a key's touch box exceeds the key drawn in it. */
+private val KeyTouchInset = (Or2Dimens.KeyTouchWidth - Or2Dimens.KeyWidth) / 2
+
 /**
- * One key of the floating toolbar: a 30 dp tall rounded pill in `surface` (in a 40 dp touch box)
- * holding mono text or an outline icon in [tint]. [framed] false draws the bare icon (the composer and keyboard toggles). A
- * latched modifier ([latched]) draws in `accent`.
+ * One key of the floating toolbar: a [Or2Dimens.Key] tall rounded pill in `surface`, in a [Or2Dimens.KeyTouchWidth] x
+ * [Or2Dimens.KeyTouch] touch box, holding mono text (padded [Or2Dimens.KeyLabelPadding] each side) or an outline icon
+ * in [tint]. [framed] false draws the bare icon (the composer and keyboard toggles). A latched modifier ([latched])
+ * draws in `accent` on `accentMuted`, an open pad or composer ([active]) in `accent`. [compact] is the pad extras' height.
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ToolKey(
     description: String, onClick: () -> Unit, modifier: Modifier = Modifier, label: String? = null,
     icon: ImageVector? = null, latched: Boolean? = null, framed: Boolean = true, active: Boolean = false,
-    onLongClick: (() -> Unit)? = null, compact: Boolean = false, tint: Color = Or2Colors.Text,
+    compact: Boolean = false, tint: Color = Or2Colors.Text,
 ) {
     val on = latched == true || active
-    // The touch target is larger than the key drawn in it: 5 dp more above and below, 2 dp at the sides.
     Box(
-        modifier.heightIn(min = if (compact) Or2Dimens.PadExtrasHeight else Or2Dimens.KeyTouch).widthIn(min = Or2Dimens.KeyWidth + 4.dp)
-            .combinedClickable(role = Role.Button, onClick = onClick, onLongClick = onLongClick)
+        modifier.heightIn(min = if (compact) Or2Dimens.PadExtrasHeight else Or2Dimens.KeyTouch).widthIn(min = Or2Dimens.KeyTouchWidth)
+            .clickable(role = Role.Button, onClick = onClick)
             .semantics {
                 contentDescription = description
                 if (latched != null) stateDescription = if (latched) "Armed for next key" else "Off"
             }
-            .padding(2.dp),
+            .padding(KeyTouchInset),
         contentAlignment = Alignment.Center,
     ) {
         val color = if (on) Or2Colors.Accent else tint
         Box(
-            Modifier.heightIn(min = if (compact) Or2Dimens.PadExtrasHeight - 4.dp else Or2Dimens.Key).widthIn(min = Or2Dimens.KeyWidth).clip(Or2Shapes.Key)
+            Modifier.heightIn(min = if (compact) Or2Dimens.PadExtrasHeight - KeyTouchInset * 2 else Or2Dimens.Key)
+                .widthIn(min = Or2Dimens.KeyWidth).clip(Or2Shapes.Key)
                 .background(
                     when {
                         latched == true -> Or2Colors.AccentMuted
@@ -165,7 +172,10 @@ fun ToolKey(
             contentAlignment = Alignment.Center,
         ) {
             if (label != null) {
-                Text(label, style = Or2Type.Key, color = color, maxLines = 1, softWrap = false, modifier = Modifier.padding(horizontal = 6.dp))
+                Text(
+                    label, style = Or2Type.Key, color = color, maxLines = 1, softWrap = false,
+                    modifier = Modifier.padding(horizontal = Or2Dimens.KeyLabelPadding),
+                )
             } else if (icon != null) {
                 Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = color)
             }
@@ -174,62 +184,81 @@ fun ToolKey(
 }
 
 /** What the toolbar needs from the terminal; the screen owns the state, the toolbar only draws it. */
-class ToolbarState(
-    val ctrl: Boolean, val alt: Boolean, val selecting: Boolean, val padOpen: Boolean, val composerOpen: Boolean,
-)
+class ToolbarState(val ctrl: Boolean, val selecting: Boolean, val padOpen: Boolean, val composerOpen: Boolean)
 
 /**
- * What the toolbar's keys do. [shiftTab] sends Shift+Tab to the terminal whatever is latched (Claude Code's mode
- * cycle, which Gboard cannot send); [type] types a character (`/`, `@`) into the composer at its cursor while it is
- * open, else into the terminal.
+ * The toolbar's keys: the test tag (`key:<tag>`), what an assistive service reads, and the mono label or the icon.
+ * `⇧Tab` is Shift+Tab whatever is latched (Claude Code's mode cycle, which Gboard cannot send); `/` and `@` type into
+ * the composer at its cursor while it is open, else into the terminal.
  */
-class ToolbarActions(
-    val toggleCtrl: () -> Unit, val toggleAlt: () -> Unit, val escape: () -> Unit, val tab: () -> Unit,
-    val togglePad: () -> Unit, val panes: () -> Unit, val paste: () -> Unit, val history: () -> Unit,
-    val jumpToBottom: () -> Unit, val toggleComposer: () -> Unit, val toggleKeyboard: () -> Unit,
-    val copy: () -> Unit, val clearSelection: () -> Unit, val shiftTab: () -> Unit, val type: (String) -> Unit,
-)
+enum class ToolbarKey(val tag: String, val description: String, val label: String? = null, val icon: ImageVector? = null) {
+    COPY("Copy", "Copy selection", label = "Copy"),
+    CLEAR("Clear", "Clear selection", label = "Clear"),
+    CTRL("Ctrl", "Ctrl", label = "Ctrl"),
+    ESC("Esc", "Esc", label = "Esc"),
+    TAB("Tab", "Tab", label = "Tab"),
+    ARROWS("Arrows", "Arrow pad", icon = Or2Icons.Dpad),
+    PASTE("Paste", "Paste", icon = Or2Icons.Paste),
+    SHIFT_TAB("ShiftTab", "Shift+Tab", label = "⇧Tab"),
+    SLASH("Slash", "Slash", label = "/"),
+    AT("At", "At sign", label = "@"),
+    COMPOSER("Composer", "Composer", icon = Or2Icons.Chat),
+    KEYBOARD("Keyboard", "Keyboard", icon = Or2Icons.Keyboard),
+}
 
 /**
- * The floating key pill: `Ctrl`, `Alt`, `Esc`, `Tab` as mono text, then icon keys (arrow pad,
- * panes, paste, history), then `⇧Tab`, `/` and `@` as mono text, then, apart, the composer and keyboard
- * toggles without key backgrounds. It scrolls horizontally when it overflows.
+ * The keys before the toggles, in order. While text is selected Copy and Clear lead the row and the typing keys
+ * (`⇧Tab`, `/`, `@`, which would clear the selection anyway) give way to them, so the row fits a phone either way.
+ */
+fun toolbarKeys(selecting: Boolean): List<ToolbarKey> = if (selecting) {
+    listOf(ToolbarKey.COPY, ToolbarKey.CLEAR, ToolbarKey.CTRL, ToolbarKey.ESC, ToolbarKey.TAB, ToolbarKey.ARROWS, ToolbarKey.PASTE)
+} else {
+    listOf(
+        ToolbarKey.CTRL, ToolbarKey.ESC, ToolbarKey.TAB, ToolbarKey.ARROWS, ToolbarKey.PASTE,
+        ToolbarKey.SHIFT_TAB, ToolbarKey.SLASH, ToolbarKey.AT,
+    )
+}
+
+/** The composer and keyboard toggles, apart at the end of the row, without key backgrounds. */
+val ToolbarToggles = listOf(ToolbarKey.COMPOSER, ToolbarKey.KEYBOARD)
+
+/**
+ * The floating key pill: [toolbarKeys] (`Ctrl`, `Esc`, `Tab`, the arrow pad, Paste, `⇧Tab`, `/`, `@`), then, apart,
+ * [ToolbarToggles]. It fits a 411 dp wide phone without scrolling (`KeyToolbarTest`); the scroll is only a fallback for
+ * a large system font. [press] runs a key; a latched `Ctrl` draws in `accent` until it has been used for one key.
  */
 @Composable
 fun KeyToolbar(
-    state: ToolbarState, actions: ToolbarActions, modifier: Modifier = Modifier,
+    state: ToolbarState, press: (ToolbarKey) -> Unit, modifier: Modifier = Modifier,
     onKeyPositioned: (String, LayoutCoordinates) -> Unit = { _, _ -> },
 ) {
     val haptics = LocalHapticFeedback.current
-    fun tracked(label: String) = Modifier.testTag("key:$label").onGloballyPositioned { onKeyPositioned(label, it) }
+    val key: @Composable (ToolbarKey) -> Unit = { key ->
+        ToolKey(
+            key.description,
+            {
+                if (key == ToolbarKey.CTRL) haptics.tick(!state.ctrl)
+                press(key)
+            },
+            Modifier.testTag("key:${key.tag}").onGloballyPositioned { onKeyPositioned(key.tag, it) },
+            label = key.label, icon = key.icon, framed = key !in ToolbarToggles,
+            latched = if (key == ToolbarKey.CTRL) state.ctrl else null,
+            active = (key == ToolbarKey.ARROWS && state.padOpen) || (key == ToolbarKey.COMPOSER && state.composerOpen),
+        )
+    }
     Row(
-        modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp).clip(Or2Shapes.Pill)
-            .background(Or2Colors.ToolbarPill).padding(horizontal = 6.dp),
+        modifier.fillMaxWidth().padding(horizontal = Or2Dimens.ToolbarMargin, vertical = 6.dp).clip(Or2Shapes.Pill)
+            .background(Or2Colors.ToolbarPill).padding(horizontal = Or2Dimens.ToolbarPadding),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(
             Modifier.weight(1f).horizontalScroll(rememberScrollState()).testTag("toolbar-keys"),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (state.selecting) {
-                ToolKey("Copy selection", actions.copy, tracked("Copy"), label = "Copy")
-                ToolKey("Clear selection", actions.clearSelection, tracked("Clear"), label = "Clear")
-            }
-            ToolKey("Ctrl", { haptics.tick(!state.ctrl); actions.toggleCtrl() }, tracked("Ctrl"), label = "Ctrl", latched = state.ctrl)
-            ToolKey("Esc", actions.escape, tracked("Esc"), label = "Esc")
-            ToolKey("Tab", actions.tab, tracked("Tab"), label = "Tab")
-            ToolKey("Arrow pad", actions.togglePad, tracked("Arrows"), icon = Or2Icons.Dpad, active = state.padOpen)
-            ToolKey("Panes and sessions", actions.panes, tracked("Panes"), icon = Or2Icons.Sidebar)
-            ToolKey("Paste", actions.paste, tracked("Paste"), icon = Or2Icons.Paste)
-            ToolKey("History: page up, hold for the bottom", actions.history, tracked("History"), icon = Or2Icons.History,
-                onLongClick = actions.jumpToBottom)
-            ToolKey("Shift+Tab", actions.shiftTab, tracked("ShiftTab"), label = "⇧Tab")
-            ToolKey("Slash", { actions.type("/") }, tracked("Slash"), label = "/")
-            ToolKey("At sign", { actions.type("@") }, tracked("At"), label = "@")
+            toolbarKeys(state.selecting).forEach { key(it) }
         }
-        Spacer(Modifier.width(4.dp))
-        ToolKey("Composer", actions.toggleComposer, tracked("Composer"), icon = Or2Icons.Chat, framed = false, active = state.composerOpen)
-        ToolKey("Keyboard", actions.toggleKeyboard, tracked("Keyboard"), icon = Or2Icons.Keyboard, framed = false)
+        Spacer(Modifier.width(Or2Dimens.ToolbarTogglesGap))
+        ToolbarToggles.forEach { key(it) }
     }
 }
 
@@ -237,6 +266,37 @@ private fun HapticFeedback.tick(on: Boolean) =
     performHapticFeedback(if (on) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff)
 
 // --- arrow pad -------------------------------------------------------------------------------
+
+private val NoModifiers = KeyModifiers(false, false, false, false)
+
+/** One key of the arrow pad's cluster: its test tag (`pad:<tag>`), its description, its glyph and what it sends. */
+class PadKey(val tag: String, val description: String, val icon: ImageVector, val key: TerminalKey, val modifiers: KeyModifiers = NoModifiers)
+
+/**
+ * The cluster's rows: Backspace, Up, Clear-line (Ctrl-U, the shell's "clear the line before the cursor") / Left, Enter,
+ * Right / Down.
+ */
+val PadRows = listOf(
+    listOf(
+        PadKey("Backspace", "Backspace", Or2Icons.Backspace, TerminalKey.Backspace),
+        PadKey("Up", "Up", Or2Icons.ArrowUp, TerminalKey.ArrowUp),
+        PadKey("Clear", "Clear line", Or2Icons.Eraser, TerminalKey.Character("u"), KeyModifiers(false, true, false, false)),
+    ),
+    listOf(
+        PadKey("Left", "Left", Or2Icons.ArrowLeft, TerminalKey.ArrowLeft),
+        PadKey("Enter", "Enter", Or2Icons.Enter, TerminalKey.Enter),
+        PadKey("Right", "Right", Or2Icons.ArrowRight, TerminalKey.ArrowRight),
+    ),
+    listOf(PadKey("Down", "Down", Or2Icons.ArrowDown, TerminalKey.ArrowDown)),
+)
+
+/**
+ * The extras row below the cluster, each label with what it sends: the navigation keys, then the shell symbols
+ * (`/` is on the toolbar itself).
+ */
+val PadExtras: List<Pair<String, TerminalKey>> =
+    listOf("Home" to TerminalKey.Home, "End" to TerminalKey.End, "PgUp" to TerminalKey.PageUp, "PgDn" to TerminalKey.PageDown) +
+        listOf("-", "|", "~", "_", "$", "&", "*", "{", "}", "(", ")", "[", "]", "=", ";", "'", "\"").map { it to TerminalKey.Character(it) }
 
 /**
  * A key that sends on press and repeats while held (after 400 ms, every 60 ms). The tap
@@ -283,47 +343,34 @@ private fun RepeatKey(
     }
 }
 
-/** The arrow keys' send helpers, one place for what each pad key means. */
-class PadActions(
-    val backspace: () -> Unit, val up: () -> Unit, val clearLine: () -> Unit, val left: () -> Unit,
-    val enter: () -> Unit, val right: () -> Unit, val down: () -> Unit, val extra: (String) -> Unit,
-)
-
-/** Extra keys that no longer have a place in the toolbar: navigation and shell symbols. */
-val NavigationKeys = listOf("Home", "End", "PgUp", "PgDn")
-val SymbolKeys = listOf("/", "-", "|", "~", "_", "$", "&", "*", "{", "}", "(", ")", "[", "]", "=", ";", "'", "\"")
-val ExtraKeys = NavigationKeys + SymbolKeys
-
 /**
- * The floating 3x3 cluster above the toolbar: Backspace, Up, Clear-line / Left, Enter, Right /
- * Down; 40 dp squares with 12 dp radius that auto-repeat on hold, in the accent blue family so they never
- * blend into the terminal: a `padKey` fill (accent over the terminal background, opaque), an `accent`
- * glyph and a `padKeyEdge` hairline; Enter, the primary key, is filled `accent` with a `background`
- * glyph (the composer's send button). Nothing is drawn behind the cluster: the keys float over the
- * terminal, each opaque on its own. The toolbar's arrow-pad key opens and closes it. A scrolling row
- * below keeps the navigation and symbol keys one tap away: `accent` labels in a `background` pill with
- * the same blue hairline.
+ * The floating 3x3 cluster above the toolbar ([PadRows]); 40 dp squares with 12 dp radius that auto-repeat on hold, in
+ * the accent blue family so they never blend into the terminal: a `padKey` fill (accent over the terminal background,
+ * opaque), an `accent` glyph and a `padKeyEdge` hairline; Enter, the primary key, is filled `accent` with a
+ * `background` glyph (the composer's send button). Nothing is drawn behind the cluster: the keys float over the
+ * terminal, each opaque on its own. The toolbar's arrow-pad key opens and closes it. A scrolling row below keeps `Alt`
+ * and [PadExtras] one tap away: `accent` labels in a `background` pill with the same blue hairline. Every key goes to
+ * [send].
  */
 @Composable
-fun ArrowPad(actions: PadActions, alt: Boolean, toggleAlt: () -> Unit, modifier: Modifier = Modifier) {
+fun ArrowPad(send: (TerminalKey, KeyModifiers) -> Unit, alt: Boolean, toggleAlt: () -> Unit, modifier: Modifier = Modifier) {
     val haptics = LocalHapticFeedback.current
     Column(modifier.testTag("arrow-pad"), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(Or2Dimens.PadGap)) {
         Column(
             Modifier.testTag("pad-cluster"),
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(Or2Dimens.PadGap),
         ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(Or2Dimens.PadGap)) {
-                RepeatKey("Backspace", actions.backspace, Modifier.testTag("pad:Backspace"), icon = Or2Icons.Backspace)
-                RepeatKey("Up", actions.up, Modifier.testTag("pad:Up"), icon = Or2Icons.ArrowUp)
-                RepeatKey("Clear line", actions.clearLine, Modifier.testTag("pad:Clear"), icon = Or2Icons.Eraser)
+            PadRows.forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(Or2Dimens.PadGap)) {
+                    row.forEach { pad ->
+                        val enter = pad.key == TerminalKey.Enter
+                        RepeatKey(
+                            pad.description, { send(pad.key, pad.modifiers) }, Modifier.testTag("pad:${pad.tag}"), icon = pad.icon,
+                            container = if (enter) Or2Colors.Accent else Or2Colors.PadKey, tint = if (enter) Or2Colors.Background else Or2Colors.Accent,
+                        )
+                    }
+                }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(Or2Dimens.PadGap)) {
-                RepeatKey("Left", actions.left, Modifier.testTag("pad:Left"), icon = Or2Icons.ArrowLeft)
-                RepeatKey("Enter", actions.enter, Modifier.testTag("pad:Enter"), icon = Or2Icons.Enter,
-                    container = Or2Colors.Accent, tint = Or2Colors.Background)
-                RepeatKey("Right", actions.right, Modifier.testTag("pad:Right"), icon = Or2Icons.ArrowRight)
-            }
-            RepeatKey("Down", actions.down, Modifier.testTag("pad:Down"), icon = Or2Icons.ArrowDown)
         }
         val scroll = rememberScrollState()
         Row(
@@ -351,13 +398,10 @@ fun ArrowPad(actions: PadActions, alt: Boolean, toggleAlt: () -> Unit, modifier:
         ) {
             ToolKey("Alt", { haptics.tick(!alt); toggleAlt() }, Modifier.testTag("key:Alt"), label = "Alt", latched = alt, framed = false, compact = true,
                 tint = Or2Colors.Accent)
-            NavigationKeys.forEach { key ->
-                RepeatKey(key, { actions.extra(key) }, Modifier.testTag("extra:$key"), label = key,
-                    width = Or2Dimens.PadExtraNavKeyWidth, height = Or2Dimens.PadExtrasHeight, container = Color.Transparent)
-            }
-            SymbolKeys.forEach { symbol ->
-                RepeatKey(symbol, { actions.extra(symbol) }, Modifier.testTag("extra:$symbol"), label = symbol,
-                    width = Or2Dimens.PadExtraKeyWidth, height = Or2Dimens.PadExtrasHeight, container = Color.Transparent)
+            PadExtras.forEach { (label, key) ->
+                RepeatKey(label, { send(key, NoModifiers) }, Modifier.testTag("extra:$label"), label = label,
+                    width = if (label.length > 1) Or2Dimens.PadExtraNavKeyWidth else Or2Dimens.PadExtraKeyWidth,
+                    height = Or2Dimens.PadExtrasHeight, container = Color.Transparent)
             }
         }
     }
@@ -369,14 +413,15 @@ fun ArrowPad(actions: PadActions, alt: Boolean, toggleAlt: () -> Unit, modifier:
  * The chat input: a rounded 20 dp card in `crust` (darker than the toolbar around it) docked above
  * the IME, in one row: an attach action when the terminal takes images ([attach]: the Photo Picker),
  * the mono text (a placeholder while empty), a close action and a circular send button,
- * `surfaceTrack` until there is text, then `accent`. Paste and the panes sheet are one tap away in
- * the toolbar beneath, so the card does not repeat them (it was two stacked rows of the same glyphs);
- * the keyboard pastes into the text itself. Sending writes the text plus Enter to the session; this
- * is the quick-reply path for a blocked agent. The text is the caller's ([state]), so a message that
- * could not be sent stays where it was typed: [send] returns whether it went out, and only then is
- * the text cleared. [canSend] is false while the session is not connected. An image a keyboard
- * commits into the text (a clipboard screenshot, a GIF keyboard) goes to [receiveImage] with its
- * content Uri, which returns whether it took it; without one the field takes no images.
+ * `surfaceTrack` until there is text, then `accent`. Paste is one tap away in the toolbar beneath,
+ * so the card does not repeat it; the keyboard pastes into the text itself. Sending writes the text
+ * plus Enter to the session; this is the quick-reply path for a blocked agent. The text is the
+ * caller's ([state]), so a message that could not be sent stays where it was typed: [send] returns
+ * whether it went out (false too when it waits for a confirmation), and only then is the text cleared
+ * and the send felt (one haptic per message: a confirmed one buzzes from its dialog). [canSend] is
+ * false while the session is not connected. An image a keyboard commits into the text (a clipboard
+ * screenshot, a GIF keyboard) goes to [receiveImage] with its content Uri, which returns whether it
+ * took it; without one the field takes no images.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -421,9 +466,11 @@ fun Composer(
             Modifier.size(Or2Dimens.ComposerTouch).padding((Or2Dimens.ComposerTouch - Or2Dimens.ComposerAction) / 2).clip(Or2Shapes.Circle)
                 .background(if (ready) Or2Colors.Accent else Or2Colors.SurfaceTrack)
                 .clickable(enabled = ready, role = Role.Button) {
-                    haptics.performHapticFeedback(HapticFeedbackType.Confirm)
                     // Only a message that went out is cleared: after a drop the text is still there to resend.
-                    if (send(state.text.toString())) state.clearText()
+                    if (send(state.text.toString())) {
+                        haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+                        state.clearText()
+                    }
                 }
                 .semantics { contentDescription = "Send" }.testTag("composer-send"),
             contentAlignment = Alignment.Center,

@@ -244,8 +244,8 @@ fun HostOptionsSheet(
 ) {
     val host = card.host
     Or2Sheet(dismiss, title = host.label, done = "Done", modifier = Modifier.testTag("host-options-sheet")) {
-        Column(Modifier.padding(horizontal = Or2Dimens.Gutter).padding(bottom = Or2Dimens.Gutter)) {
-            GroupCard(color = Or2Colors.SurfaceRaisedRow) {
+        Column {
+            GroupCard {
                 val live = !card.link.canConnect
                 if (!live) {
                     ListRow("Connect", icon = Or2Icons.Power, enabled = !busy && host.keyId != null,
@@ -409,10 +409,10 @@ private fun SessionCard(session: HomeSession, width: Dp, onClick: () -> Unit, on
                     .then(if (session.closed) Modifier.alpha(0.5f) else Modifier),
             )
             if (session.closed) {
-                Badge("Closed", Modifier.align(Alignment.TopStart).padding(6.dp).testTag("session-closed:${session.id}"),
-                    container = Or2Colors.SurfaceTrack, content = Or2Colors.TextMuted, small = true)
+                Badge("Closed", Or2Colors.SurfaceTrack, Or2Colors.TextMuted,
+                    Modifier.align(Alignment.TopStart).padding(6.dp).testTag("session-closed:${session.id}"))
             } else {
-                TransportBadge(session.transport, Modifier.align(Alignment.TopStart).padding(6.dp).testTag("session-transport:${session.id}"), small = true)
+                TransportBadge(session.transport, Modifier.align(Alignment.TopStart).padding(6.dp).testTag("session-transport:${session.id}"))
             }
             Box(
                 Modifier.align(Alignment.TopEnd).size(40.dp).clip(Or2Shapes.Circle)

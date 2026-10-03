@@ -93,7 +93,8 @@ class TerminalDeviceTest {
         private var sequence = 0uL
         override fun sendText(text: String) { error?.let { throw it }; texts += text }
         override fun submitText(text: String) { error?.let { throw it } }
-        override fun pasteText(text: String) { error?.let { throw it } }
+        val pastes = mutableListOf<String>()
+        override fun pasteText(text: String) { error?.let { throw it }; pastes += text }
         override fun sendKey(input: KeyInput) { error?.let { throw it }; keys += input }
         // Deliberately no resize output: remount must recover via requestFullFrame, not resize.
         override fun resize(columns: UShort, rows: UShort) { sizes += GridSize(columns, rows) }
@@ -174,17 +175,17 @@ class TerminalDeviceTest {
             assertEquals(3, BaseInputConnection.getComposingSpanEnd(editable))
             view.input.toggleCtrl()
             view.input.toggleAlt()
-            view.paste("")
+            view.pasteText("")
             assertEquals("にほん", editable.toString())
             assertEquals("にほん", view.input.composing)
-            assertTrue(session.texts.isEmpty())
-            view.paste("echo pasted\n")
+            assertTrue(session.texts.isEmpty() && session.pastes.isEmpty())
+            view.pasteText("echo pasted\n")
             assertEquals("", editable.toString())
             assertEquals(-1, BaseInputConnection.getComposingSpanStart(editable))
             assertEquals(-1, BaseInputConnection.getComposingSpanEnd(editable))
             assertEquals(0, editable.getSpans(0, editable.length, Any::class.java).size)
             assertEquals("", view.input.composing)
-            assertEquals(listOf("echo pasted\n"), session.texts)
+            assertEquals(listOf("echo pasted\n"), session.pastes)
             assertTrue(view.input.ctrl)
             assertTrue(view.input.alt)
             assertFalse(old.setComposingText("にほんご", 1))
@@ -193,8 +194,8 @@ class TerminalDeviceTest {
             assertFalse(old.finishComposingText())
             assertFalse(old.deleteSurroundingText(1, 0))
             assertFalse(old.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER)))
-            assertEquals(listOf("echo pasted\n"), session.texts)
-            assertTrue(session.keys.isEmpty())
+            assertEquals(listOf("echo pasted\n"), session.pastes)
+            assertTrue(session.texts.isEmpty() && session.keys.isEmpty()) // The retired editor commits nothing.
             view.input.toggleCtrl()
             view.input.toggleAlt()
             val fresh = view.onCreateInputConnection(EditorInfo())
@@ -203,7 +204,7 @@ class TerminalDeviceTest {
             assertEquals("あたらしい", view.input.composing)
             assertTrue(fresh.commitText("新しい", 1))
             fresh.finishComposingText()
-            assertEquals(listOf("echo pasted\n", "新しい"), session.texts)
+            assertEquals(listOf("新しい"), session.texts)
             assertTrue(session.keys.isEmpty())
             assertEquals("", view.input.composing)
         }

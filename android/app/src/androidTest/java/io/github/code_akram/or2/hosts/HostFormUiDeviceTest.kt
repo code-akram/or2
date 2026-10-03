@@ -307,15 +307,14 @@ class HostFormUiDeviceTest {
     }
 
     @Test
-    fun editingASleepingHostStartsFromItsFlagAndKeepsTheMoshMemory() {
+    fun editingASleepingHostStartsFromItsFlag() {
         var saved: Host? = null
-        val previous = uiHost(sleeps = true).let { it.copy(record = it.record.copy(moshFailedUntil = 1_800_000_000_000L)) }
+        val previous = uiHost(sleeps = true)
         show(previous, save = { saved = it })
         compose.onNodeWithTag("host-sleeps").performScrollTo().performClick() // Off.
         compose.onNodeWithTag("host-form-primary").performScrollTo().performClick()
         compose.runOnIdle {
             assertEquals(false, saved!!.sleeps)
-            assertEquals(1_800_000_000_000L, saved!!.moshFailedUntil)
         }
     }
 }

@@ -9,16 +9,19 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 
-/** The real transport of every open terminal, keyed by terminal id (it changes when AUTO falls back). */
+/**
+ * For the latest collection [this] emits (the hosts, the terminals, a host's watches), the latest value of each
+ * element's own flow ([each]), in order; an empty collection is an empty list at once.
+ */
 @OptIn(ExperimentalCoroutinesApi::class)
-fun HostConnections.transports(): Flow<Map<Long, TerminalTransport>> = terminals.flatMapLatest { list ->
-    if (list.isEmpty()) flowOf(emptyMap())
-    else combine(list.map { t -> t.transport.map { t.id to it } }) { it.toMap() }
+inline fun <T, reified R> Flow<Collection<T>>.combineEach(noinline each: (T) -> Flow<R>): Flow<List<R>> = flatMapLatest { items ->
+    if (items.isEmpty()) flowOf(emptyList()) else combine(items.map(each)) { it.toList() }
 }
 
+/** The real transport of every open terminal, keyed by terminal id (it changes when AUTO falls back). */
+fun HostConnections.transports(): Flow<Map<Long, TerminalTransport>> =
+    terminals.combineEach { t -> t.transport.map { t.id to it } }.map { it.toMap() }
+
 /** Whether each open terminal has closed, keyed by terminal id. */
-@OptIn(ExperimentalCoroutinesApi::class)
-fun HostConnections.terminalClosedStates(): Flow<Map<Long, Boolean>> = terminals.flatMapLatest { list ->
-    if (list.isEmpty()) flowOf(emptyMap())
-    else combine(list.map { t -> t.state.map { t.id to (it is SessionState.Closed) } }) { it.toMap() }
-}
+fun HostConnections.terminalClosedStates(): Flow<Map<Long, Boolean>> =
+    terminals.combineEach { t -> t.state.map { t.id to (it is SessionState.Closed) } }.map { it.toMap() }

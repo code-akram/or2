@@ -67,12 +67,12 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
@@ -196,12 +196,18 @@ fun SectionHeader(text: String, modifier: Modifier = Modifier, hint: String? = n
     }
 }
 
-/** A `surface` card with the 16 dp radius; click and long-click are optional. */
+/**
+ * The fill of cards and grouped lists ([Or2Card], [GroupCard]) where they are: `surface` on a screen, `surfaceRaisedRow`
+ * inside a sheet (an [Or2Sheet] provides it, so a card there is a step above the sheet's `surfaceRaised`, never below it).
+ */
+val LocalCardColor = staticCompositionLocalOf { Or2Colors.Surface }
+
+/** A card with the 16 dp radius in [LocalCardColor] (unless [color] says otherwise); click and long-click are optional. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun Or2Card(
     modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, onLongClick: (() -> Unit)? = null,
-    color: Color = Or2Colors.Surface, border: BorderStroke? = null, shape: Shape = Or2Shapes.Card,
+    color: Color = LocalCardColor.current, border: BorderStroke? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val interactive = if (onClick != null || onLongClick != null) {
@@ -210,15 +216,15 @@ fun Or2Card(
         Modifier
     }
     Column(
-        modifier.fillMaxWidth().clip(shape).background(color)
-            .then(if (border != null) Modifier.border(border, shape) else Modifier).then(interactive),
+        modifier.fillMaxWidth().clip(Or2Shapes.Card).background(color)
+            .then(if (border != null) Modifier.border(border, Or2Shapes.Card) else Modifier).then(interactive),
         content = content,
     )
 }
 
-/** Rows of one group: one `surface` card, hairlines between rows are drawn by [GroupDivider]. */
+/** Rows of one group: one card in [LocalCardColor] (unless [color] says otherwise); [GroupDivider] draws the hairlines between rows. */
 @Composable
-fun GroupCard(modifier: Modifier = Modifier, color: Color = Or2Colors.Surface, content: @Composable ColumnScope.() -> Unit) {
+fun GroupCard(modifier: Modifier = Modifier, color: Color = LocalCardColor.current, content: @Composable ColumnScope.() -> Unit) {
     Column(modifier.fillMaxWidth().clip(Or2Shapes.Card).background(color), content = content)
 }
 
@@ -282,7 +288,7 @@ fun ListRow(
 
 /** A coloured dot; [pulsing] dots (working agents) breathe between full and 70 % alpha, 1.6 s. */
 @Composable
-fun StatusDot(color: Color, modifier: Modifier = Modifier, size: Dp = Or2Dimens.StatusDot, pulsing: Boolean = false) {
+fun StatusDot(color: Color, modifier: Modifier = Modifier, pulsing: Boolean = false) {
     val alpha = if (pulsing) {
         val transition = rememberInfiniteTransition(label = "pulse")
         transition.animateFloat(
@@ -293,7 +299,7 @@ fun StatusDot(color: Color, modifier: Modifier = Modifier, size: Dp = Or2Dimens.
     } else {
         1f
     }
-    Box(modifier.size(size).alpha(alpha).clip(CircleShape).background(color))
+    Box(modifier.size(Or2Dimens.StatusDot).alpha(alpha).clip(CircleShape).background(color))
 }
 
 /**
@@ -325,16 +331,12 @@ fun StatusChip(label: String, dot: Color, modifier: Modifier = Modifier, onClick
     }
 }
 
-/** A small tag: "PRO"-style kickers, the transport badge (`SSH`, `Mosh`). */
+/** A small mono pill, [content] text on [container]: the transport badge (`SSH`, `Mosh`) and its quiet-link form. */
 @Composable
-fun Badge(
-    text: String, modifier: Modifier = Modifier, container: Color = Or2Colors.AccentMuted, content: Color = Or2Colors.Accent,
-    small: Boolean = false,
-) {
+fun Badge(text: String, container: Color, content: Color, modifier: Modifier = Modifier) {
     Text(
-        text, style = if (small) Or2Type.Pill else Or2Type.Badge, color = content, maxLines = 1,
-        modifier = modifier.clip(Or2Shapes.Pill).background(container)
-            .padding(horizontal = if (small) 6.dp else 10.dp, vertical = if (small) 2.dp else 4.dp),
+        text, style = Or2Type.Pill, color = content, maxLines = 1,
+        modifier = modifier.clip(Or2Shapes.Pill).background(container).padding(horizontal = 6.dp, vertical = 2.dp),
     )
 }
 
@@ -396,8 +398,7 @@ fun Or2Field(
 /** A `surfaceTrack` pill with the selected segment raised in `surface`; the others are muted. */
 @Composable
 fun Segmented(
-    options: List<String>, selected: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier,
-    icons: List<ImageVector?> = emptyList(), tagPrefix: String = "segment",
+    options: List<String>, selected: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier, tagPrefix: String = "segment",
 ) {
     Row(
         modifier.clip(Or2Shapes.Pill).background(Or2Colors.SurfaceTrack).selectableGroup(),
@@ -415,10 +416,6 @@ fun Segmented(
                     .padding(horizontal = 12.dp).testTag("$tagPrefix:$index"),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center,
             ) {
-                icons.getOrNull(index)?.let {
-                    Icon(it, null, Modifier.size(Or2Dimens.Icon), tint = if (on) Or2Colors.Text else Or2Colors.TextMuted)
-                    Spacer(Modifier.width(6.dp))
-                }
                 Text(option, style = Or2Type.Body, color = if (on) Or2Colors.Text else Or2Colors.TextMuted, maxLines = 1)
             }
         }
@@ -463,12 +460,11 @@ fun PrimaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifi
 @Composable
 fun PillButton(
     text: String, onClick: () -> Unit, modifier: Modifier = Modifier, icon: ImageVector? = null,
-    enabled: Boolean = true, container: Color = Or2Colors.SurfaceTrack, content: Color = Or2Colors.Text,
-    compact: Boolean = false, iconFirst: Boolean = false,
+    enabled: Boolean = true, compact: Boolean = false, iconFirst: Boolean = false,
 ) {
-    val tint = if (enabled) content else Or2Colors.TextMuted
+    val tint = if (enabled) Or2Colors.Text else Or2Colors.TextMuted
     Row(
-        modifier.heightIn(min = if (compact) Or2Dimens.Chip else Or2Dimens.Segmented + 4.dp).clip(Or2Shapes.Pill).background(container)
+        modifier.heightIn(min = if (compact) Or2Dimens.Chip else Or2Dimens.Segmented + 4.dp).clip(Or2Shapes.Pill).background(Or2Colors.SurfaceTrack)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
             .padding(start = if (icon != null && iconFirst) 12.dp else if (compact) 12.dp else 18.dp, end = if (compact) 12.dp else 18.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center,
@@ -518,22 +514,19 @@ fun EmptyState(
     }
 }
 
-/** A warning/call-to-action card: `attentionSurface` with a 1 px border and a leading outline icon. */
+/** A warning/call-to-action card: `attentionSurface` with a 1 px border, a leading warning glyph and a muted subtitle. */
 @Composable
-fun AttentionCard(
-    title: String, subtitle: String?, modifier: Modifier = Modifier, icon: ImageVector = Or2Icons.Warning,
-    onClick: (() -> Unit)? = null, subtitleColor: Color = Or2Colors.TextMuted,
-) {
+fun AttentionCard(title: String, subtitle: String?, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
     Or2Card(
         modifier, onClick = onClick, color = Or2Colors.AttentionSurface,
         border = BorderStroke(1.dp, Or2Colors.AttentionBorder),
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(icon, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Attention)
+            Icon(Or2Icons.Warning, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Attention)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(title, style = Or2Type.RowLabel, color = Or2Colors.Text)
-                if (subtitle != null) Text(subtitle, style = Or2Type.Secondary, color = subtitleColor)
+                if (subtitle != null) Text(subtitle, style = Or2Type.Secondary, color = Or2Colors.TextMuted)
             }
             if (onClick != null) Icon(Or2Icons.ChevronRight, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.Subtle)
         }
@@ -571,8 +564,10 @@ val Or2SheetContentInsets: WindowInsets
  * surface rise to the very top of the screen, under the status bar, padding only its content. Here
  * the whole sheet stops [Or2Dimens.SheetTopGap] below the status bar (the padding sits outside the
  * surface), and the content keeps only the bottom and side insets. [scrollable] content scrolls
- * inside the sheet when it is taller than that room (the title row stays put); a sheet that lays
- * out its own scrolling list (the session picker) passes false. [modifier] applies to the sheet's body.
+ * inside the sheet when it is taller than that room (the title row stays put), inside the sheet's own
+ * body padding (the 12 dp gutter at the sides and below), so callers lay out only their rows; a sheet
+ * that lays out its own scrolling list (the session picker) passes false and pads itself. Cards and
+ * grouped lists in a sheet take `surfaceRaisedRow` ([LocalCardColor]). [modifier] applies to the sheet's body.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -591,23 +586,29 @@ fun Or2Sheet(
     ) {
         // The caller's modifier (its test tag) goes on the body, where the sheet is drawn: on the surface it would sit
         // outside the sheet's drag offset and report the bounds of where the sheet would be fully open.
-        Column(modifier) {
-            if (title != null || done != null) {
-                Row(
-                    Modifier.fillMaxWidth().padding(start = Or2Dimens.Gutter + 4.dp, end = Or2Dimens.Gutter - 4.dp, bottom = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        title.orEmpty(), style = Or2Type.ScreenTitle, color = Or2Colors.Text, maxLines = 1,
-                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).semantics { heading() },
-                    )
-                    if (done != null) TextAction(done, onDismiss, color = Or2Colors.Text, modifier = Modifier.testTag("sheet-done"))
+        CompositionLocalProvider(LocalCardColor provides Or2Colors.SurfaceRaisedRow) {
+            Column(modifier) {
+                if (title != null || done != null) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = Or2Dimens.Gutter + 4.dp, end = Or2Dimens.Gutter - 4.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            title.orEmpty(), style = Or2Type.ScreenTitle, color = Or2Colors.Text, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).semantics { heading() },
+                        )
+                        if (done != null) TextAction(done, onDismiss, color = Or2Colors.Text, modifier = Modifier.testTag("sheet-done"))
+                    }
                 }
-            }
-            if (scrollable) {
-                Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).testTag("sheet-content"), content = content)
-            } else {
-                content()
+                if (scrollable) {
+                    Column(
+                        Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())
+                            .padding(start = Or2Dimens.Gutter, end = Or2Dimens.Gutter, bottom = Or2Dimens.Gutter).testTag("sheet-content"),
+                        content = content,
+                    )
+                } else {
+                    content()
+                }
             }
         }
     }
@@ -652,10 +653,10 @@ fun Or2Dialog(
 
 /** A line of mono machine text in a `surfaceRaisedRow` block (fingerprints, public keys). */
 @Composable
-fun MonoBlock(text: String, modifier: Modifier = Modifier, color: Color = Or2Colors.Text, container: Color = Or2Colors.SurfaceRaisedRow) {
+fun MonoBlock(text: String, modifier: Modifier = Modifier, color: Color = Or2Colors.Text) {
     Text(
         text, style = Or2Type.Mono, color = color,
-        modifier = modifier.fillMaxWidth().clip(Or2Shapes.Field).background(container).padding(horizontal = 12.dp, vertical = 8.dp),
+        modifier = modifier.fillMaxWidth().clip(Or2Shapes.Field).background(Or2Colors.SurfaceRaisedRow).padding(horizontal = 12.dp, vertical = 8.dp),
     )
 }
 

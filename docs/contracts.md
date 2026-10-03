@@ -5335,12 +5335,11 @@ title; the transparent arrow pad). Four lanes own disjoint files; each fixes its
   Running/Attached marker; herdr's default session counts by `null` or by its listed name (`OpenSessions.of`). The
   UDP line is `picker-udp-blocked`, under the tabs, only with the lists (never with the gate).
 - **Terminals sheet.** One section header per host (also with one host), then 44 dp rows (`terminal-tab:<id>`,
-  `● Current`, `terminal-row-close:<id>`); `terminals-copy-screen` copies the grid's rows (a wrapped row joined to
-  the next, trailing blanks trimmed; nothing for an empty grid) and closes the sheet, relying on Android's own
-  copied confirmation (minSdk 34); `terminals-shortcuts` opens the existing shortcuts sheet. A terminal that never
-  connected shows the same grouped list (with its `×`) in place of the old Close pill. To read the visible grid,
-  `TerminalChromeState` gained `screen` (set by `TerminalScreen` while its view is composed) and `SessionScreen`
-  hoists the chrome state.
+  `● Current`, `terminal-row-close:<id>`); `terminals-copy-screen` copies lane B's
+  `TerminalChromeState.screenText()` (`SessionScreen` hoists the chrome state; nothing is copied for an empty
+  screen) through `ui/Clipboard.copyText` and closes the sheet, relying on Android's own copied confirmation
+  (minSdk 34); `terminals-shortcuts` opens the existing **Gestures & shortcuts** sheet. Closing a row leaves the sheet
+  open. A terminal that never connected shows the same grouped list (with its `×`) in place of the old Close pill.
 - **Navigation.** `NavStack.backOrHome()` from any terminal is Home. `afterPaired` / `afterKeepAlive` return Home
   and `Or2App` opens that host's picker (`homePicker`) as it connects. A saved `host:N` decodes to Home, and what
   was under it is dropped (Home is only ever the bottom).
@@ -5353,10 +5352,12 @@ title; the transparent arrow pad). Four lanes own disjoint files; each fixes its
   shows over a terminal too). The host-key dialog is the first pending prompt (no host screen to skip).
 - **Host form.** The Delete row is its own grouped card under the footnote, off while busy; a deleted host's form
   lands on Home.
-- Outside lane A's files: `ui/Icons.kt` (`More`), `terminal/TerminalChrome.kt` and `terminal/TerminalScreen.kt`
-  (the `screen` grid, three lines), `androidTest/ui/TopEdgeDeviceTest.kt` (gallery names), and the tests of the
-  removed API. Left for others: `StatusChip` (`ui/Components.kt`) and `dialogForOtherHost` (`inbox/InboxModel.kt`)
-  are now used only by tests.
+- Outside lane A's files: `ui/Icons.kt` (`More`), `androidTest/ui/TopEdgeDeviceTest.kt` (gallery names), the tests
+  of the removed API, and, after merging lanes B and C (as the lead asked): `app/OneTimePrompts.kt` (the deprecated
+  `offer(use)` and `NotificationUse` removed; `AppActions` reads the one `offer`), and `data/AppDatabase.kt` (the
+  unused `Host.moshFailedUntil` getter removed; the host form no longer copies the column). The inbox's dot colour
+  and Home's herdr label use lane C's `linkStatusColor` and `agentLabel`. Left for others: `StatusChip`
+  (`ui/Components.kt`) is now unused, and `dialogForOtherHost` (`inbox/InboxModel.kt`) is used only by tests.
 
 ## Lane B: terminal and UI code (Kotlin: `terminal/*`, `ui/*`, `paste/*`, `keys/*`, `pair/*`, `notify/*`,
 ## `session/TerminalHeader.kt`, `session/SessionMessages.kt`, the gallery for these)
@@ -5388,6 +5389,55 @@ title; the transparent arrow pad). Four lanes own disjoint files; each fixes its
   `subtitleColor`, `NoticeStrip.icon`), `DemoFrames.SURFACE`; stale comments (`KeyToolbar` lists Alt; "greys
   its pill"; `PairInstallKeyScreen`'s doc; `ui.md`'s 30 vs 34 dp toolbar boxes).
 
+**Implemented (branch `v012/lane-b-terminal`).** Kotlin only; no FFI change. Where the plan was silent:
+
+- **Toolbar as a table.** `ToolbarKey` (tag, description, label or icon), `toolbarKeys(selecting)` and
+  `ToolbarToggles`; the screen runs a key with one `press(key)` (`ToolbarActions` is gone; Ctrl+Shift+V and
+  Ctrl+Shift+Enter press the same keys). **While text is selected** `Copy` and `Clear` lead the row and the typing
+  keys (`⇧Tab`, `/`, `@`, which would clear the selection anyway) give way to them, so the row fits in both states.
+  The `History` key's `TerminalView.pageUp` and `Or2Icons.History` went with it.
+- **The fit check** (`KeyToolbarTest`, JVM) computes the row from the tokens (`KeyTouchWidth` 34, `KeyWidth` 30,
+  `KeyLabelPadding` 6, `ToolbarMargin` 8, `ToolbarPadding` 6, `ToolbarTogglesGap` 4 dp; a label is its characters
+  at DroidSansMono's 0.6 em of 12 sp, any non-ASCII glyph such as `⇧` a full em, at font scale 1): 405.6 dp
+  without a selection, 384.8 dp with one, both within 411. On a device, `TerminalChromeDeviceTest` lays the
+  screen out 411 dp wide and asserts the key row's scroll range is 0 in both states, and `TerminalVisualDeviceTest`
+  asserts every key sits inside the pill on the phone. The row keeps its horizontal scroll only as the fallback for
+  a large system font.
+- **Arrow pad.** `PadRows` (`PadKey`: tag, description, glyph, `TerminalKey`, modifiers; Clear-line is Ctrl-U) and
+  `PadExtras` (label to key); `ArrowPad(send, alt, toggleAlt)`.
+- **Paste.** Every paste is `TerminalView.pasteText` (the toolbar, Ctrl+Shift+V, a confirmed "Paste N lines?", an
+  image's paths). One `PendingLines` dialog serves "Send N lines?" and "Paste N lines?", body `They will run as
+  typed, one line at a time.`, confirm tagged `composer-send-confirm` or `paste-confirm`.
+- **One buzz.** The composer's send button buzzes only when the message went out; a confirmed one buzzes on the
+  dialog's **Send** alone. Closing the composer (×, toggle, Ctrl+Shift+Enter, opening the pad) calls
+  `requestFocus` on the terminal view.
+- **Shortcut helper.** `consumeShortcut(event, fire, passes)` serves the view and the composer (which passes
+  Paste and Copy to its text field).
+- **Clipboard.** `ui/Clipboard.kt`: `copyText`, `clipboardText` (`itemCount` checked, `coerceToText`),
+  `shareText`; no copy toast (Android 13+ confirms a copy itself; or2's minimum is 14). `PublicKeyActions`
+  (`keys/KeysScreen.kt`, tags `<prefix>-copy` / `-share`, a `more` slot for the key sheet's Delete) is the one
+  group. `Or2Application`'s host-clipboard write (app layer) is left to its owner.
+- **Sheets.** `Or2Sheet` pads its scrollable body (12 dp at the sides and below); a `scrollable = false` sheet
+  (the session picker) pads itself. `LocalCardColor` is `surface`, and `surfaceRaisedRow` inside a sheet:
+  `GroupCard` and `Or2Card` default to it.
+- **Shortcuts sheet.** Titled `Gestures & shortcuts` (the Terminals sheet's row and Ctrl+Shift+/): `TOUCH`
+  (`TouchRows`: Tap, Tap a link, Long press, Drag ↑ / ↓, Swipe ← / →, Two fingers ← / →, Two fingers ↑ / ↓,
+  Pinch) with a muted note that swipes move tmux and herdr, then `KEYBOARD`.
+- **Notice.** `TerminalNotice(text, tone, busy, action)`; `uploadNotice` returns one too (`UploadNotice` is gone);
+  the card shows `terminalNotice(state) ?: upload` in one strip, keeping the tags `terminal-notice` /
+  `terminal-status` / `terminal-close` and `upload-notice` / `upload-status` / `upload-action`. The gallery's
+  `terminal-connecting` is gone.
+- **Badges.** `TransportBadge(transport, modifier)` and `Badge(text, container, content, modifier)` (the small mono
+  pill only; `Or2Type.Badge` is gone). The header's green disc reads `Terminals` (tag `terminal-panes` kept).
+- **For lane A.** `TerminalChromeState.screenText()` returns the visible screen's text while a `TerminalScreen`
+  shows that state (`TerminalView.screenText`), for the Terminals sheet's **Copy screen**: hoist the chrome state
+  and pass it to `TerminalScreen`. A sheet no longer pads its own body or asks for `SurfaceRaisedRow` cards: Home's
+  host options sheet and the Sessions (Terminals) sheet still pad themselves on this branch, so they show a double
+  gutter until lane A drops their `padding(horizontal = Gutter).padding(bottom = Gutter)`.
+- **Outside the lane's files:** `session/SessionScreen.kt` (the `openPanes` line; `TerminalCard`'s strip, KDoc and
+  imports; `TransportBadge`, which lives there) and `home/HomeScreen.kt` (`small = true` dropped from the
+  `TransportBadge` call, forced by the signature).
+
 ## Lane C: Kotlin app-layer cleanup (`connection/*`, `service/*`, `data/*`, `inbox/InboxModel.kt`,
 ## `MainActivity.kt`, `app/OneTimePrompts.kt`; not `Or2App.kt`, `TerminalActivations.kt` or screens)
 
@@ -5406,6 +5456,22 @@ title; the transparent arrow pad). Four lanes own disjoint files; each fixes its
   once and shared by the application and the service.
 - One link-status message/colour and one agent-label function next to `LinkStatus` (lane A may use them).
 - Stale comments (`hasOpenSession`, `moshFailedUntil`, `AppActions.notifications`).
+
+**Implemented (branch `v012/lane-c-app`).** The mosh memory's DAO API and `MoshFailureStore` are gone and
+`saveHost` no longer clears it; `hosts.mosh_failed_until` stays in the entity and the v4 schema, marked unused
+(no migration, `4.json` unchanged). The test-only API is gone (tests carry `hasOpenSession` and
+`recordedServerPids` helpers; `NetworkChanges` starts unseeded, the watch seeds it); `NavStack.tab` is lane A's and
+stays. One `NotificationPermission.offer` (the agents card's dismissal key; `notifications_asked` still counts as
+an earlier request) and one battery-request intent. `HostConnections.currentPort(hostId, requireConnected)` serves
+`openTerminal`, `focusHerdrPane`, `replyToPane`, `scrollTarget`, `uploadImage` and `navigate`; `ActiveTerminal.isOpen`;
+`requestBackground` trusts `openTerminal`'s recheck. `combineEach` (in `TerminalFlows.kt`) carries the nine
+flows; `Or2Application.serviceSnapshots` is the one shared collection (`shareIn` its process scope, replay 1) that
+the service's controller and the starter read. `linkMessage`, `linkStatusColor` and `agentLabel` sit by
+`LinkStatus`. Left for the merge, in files of lane A: `Or2App.kt`'s `AppActions` default still calls the
+deprecated `offer(NotificationUse.CONNECTION)` shim (switch it to `.offer`, then delete the shim and the enum), and
+its `notifications` KDoc is stale; `HostFormScreen.kt` still copies `Host.moshFailedUntil` (then the getter can go);
+`docs/ui.md` still names `NotificationUse.AGENT_ALERTS`; `InboxScreen`, `HostScreen`, `PickerGate` and
+`HomeModel.herdrDetail` can use `linkMessage`, `linkStatusColor` and `agentLabel`.
 
 ## Lane D: Rust core and FFI (`core/*`; Kotlin only where an FFI change forces it)
 

@@ -31,12 +31,16 @@ import io.github.code_akram.or2.notify.ReplyNonces
 import io.github.code_akram.or2.ffi.networkChanged
 import io.github.code_akram.or2.service.ConnectionService
 import io.github.code_akram.or2.service.NetworkChanges
+import io.github.code_akram.or2.service.ServiceSnapshot
 import io.github.code_akram.or2.service.ServiceStarter
 import io.github.code_akram.or2.service.serviceSnapshots
 import io.github.code_akram.or2.terminal.HostClipboard
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.launch
 
 class Or2Application : Application() {
@@ -131,7 +135,19 @@ class Or2Application : Application() {
      * Calling it with nothing live is free: the registry of live sessions is empty.
      */
     val networkChanges by lazy {
-        NetworkChanges(CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate), null) { networkChanged() }
+        NetworkChanges(CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)) { networkChanged() }
+    }
+
+    /** The process's own scope on main: it lives as long as the process (an `Application` is never destroyed). */
+    private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /**
+     * What is open, for the foreground service and its starter: [connections]' snapshots collected once for the
+     * process and shared, the latest replayed to each new collector (a service that starts again gets it at once).
+     * The upstream runs in [processScope]; a collector (the service's) that is cancelled stops only itself.
+     */
+    val serviceSnapshots: Flow<ServiceSnapshot> by lazy {
+        connections.serviceSnapshots().shareIn(processScope, SharingStarted.Eagerly, replay = 1)
     }
 
     private var starter: ServiceStarter? = null
@@ -143,8 +159,8 @@ class Or2Application : Application() {
         starter = created
         // Read what the previous process left before this one starts writing.
         val marker = sessionMarker
-        CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate).launch {
-            connections.serviceSnapshots().collect { snapshot ->
+        processScope.launch {
+            serviceSnapshots.collect { snapshot ->
                 created.onSnapshot(snapshot)
                 marker.onOpenSessions(snapshot.sessions > 0)
             }

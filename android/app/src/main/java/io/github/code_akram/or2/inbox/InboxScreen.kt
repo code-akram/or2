@@ -59,14 +59,6 @@ fun statusColor(status: AgentStatus): Color = when (status) {
     AgentStatus.IDLE, AgentStatus.UNKNOWN -> Or2Colors.Idle
 }
 
-private fun linkColor(link: LinkStatus): Color? = when (link) {
-    LinkStatus.NOT_CONNECTED, LinkStatus.ASLEEP -> null
-    LinkStatus.CONNECTING -> Or2Colors.Accent
-    LinkStatus.NEEDS_HOST_KEY -> Or2Colors.Attention
-    LinkStatus.CONNECTED -> Or2Colors.Done
-    LinkStatus.FAILED -> Or2Colors.Danger
-}
-
 /**
  * Every agent across the hosts flagged for the inbox, blocked first and tinted, under sticky
  * status headers; below them each host's connection status with its connect action. Stateless:
@@ -178,7 +170,7 @@ private fun HostStatusRow(row: InboxHostRow, busy: Boolean, connect: () -> Unit)
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.width(LeadingSlot), contentAlignment = Alignment.CenterStart) {
-            linkColor(row.link)?.let { StatusDot(it) }
+            linkStatusColor(row.link)?.let { StatusDot(it) }
         }
         Column(Modifier.weight(1f)) {
             Text(row.host.label, style = Or2Type.RowLabel, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis)

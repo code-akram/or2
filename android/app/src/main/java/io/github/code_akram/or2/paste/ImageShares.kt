@@ -2,17 +2,12 @@ package io.github.code_akram.or2.paste
 
 import android.content.Intent
 import android.net.Uri
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.ui.GroupCard
 import io.github.code_akram.or2.ui.GroupDivider
 import io.github.code_akram.or2.ui.ListRow
-import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Icons
 import io.github.code_akram.or2.ui.Or2Sheet
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -108,18 +103,13 @@ data class ShareTarget(val id: Long, val host: String, val title: String)
 @Composable
 fun SharePickerSheet(targets: List<ShareTarget>, pick: (ShareTarget) -> Unit, dismiss: () -> Unit) {
     Or2Sheet(dismiss, title = "Send image to", done = null) {
-        Column(
-            Modifier.padding(horizontal = Or2Dimens.Gutter).padding(bottom = Or2Dimens.Gutter),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            GroupCard(Modifier.testTag("share-picker")) {
-                targets.forEachIndexed { index, target ->
-                    if (index > 0) GroupDivider()
-                    ListRow(
-                        target.host, subtitle = target.title, subtitleMono = true, icon = Or2Icons.Terminal,
-                        modifier = Modifier.testTag("share-target:${target.id}"), onClick = { pick(target) },
-                    )
-                }
+        GroupCard(Modifier.testTag("share-picker")) {
+            targets.forEachIndexed { index, target ->
+                if (index > 0) GroupDivider()
+                ListRow(
+                    target.host, subtitle = target.title, subtitleMono = true, icon = Or2Icons.Terminal,
+                    modifier = Modifier.testTag("share-target:${target.id}"), onClick = { pick(target) },
+                )
             }
         }
     }

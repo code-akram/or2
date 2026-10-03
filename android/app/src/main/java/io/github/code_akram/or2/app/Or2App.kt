@@ -90,11 +90,11 @@ class AppActions(
     val requestBatteryExemption: () -> Unit = {},
     val answerKeepAlive: (allow: Boolean) -> Unit = {},
     /**
-     * The in-context offer of the connection notification (Home's card while a host is connected); never asked on
-     * connect. [allowNotifications] asks for `POST_NOTIFICATIONS` (or opens the app's notification settings once
-     * Android no longer asks); it is the one entry point later uses (agent alerts) call from their own offer.
+     * The one in-context offer of notifications, for the connection status and agent alerts together (Home's card
+     * while a host is connected); never asked on connect. [allowNotifications] asks for `POST_NOTIFICATIONS` (or opens
+     * the app's notification settings once Android no longer asks), from the card and from Settings alike.
      */
-    val notifications: NotificationOffer = NotificationPermission(MemoryPrefStore()) { true }.offer(NotificationUse.CONNECTION),
+    val notifications: NotificationOffer = NotificationPermission(MemoryPrefStore()) { true }.offer,
     val allowNotifications: () -> Unit = {},
     /** True once per process when the previous one died with sessions open ([SessionMarker]): the launcher resumes. */
     val takeColdResume: () -> Boolean = { false },

@@ -1,14 +1,12 @@
 package io.github.code_akram.or2.service
 
 import io.github.code_akram.or2.connection.HostConnections
+import io.github.code_akram.or2.connection.combineEach
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.SessionState
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 
 /** A host connection as the service sees it: open (not closed) or not. */
@@ -72,16 +70,12 @@ fun notificationContent(snapshot: ServiceSnapshot): NotificationContent {
     return NotificationContent(title, text, lines)
 }
 
-/** The service's view of [HostConnections]: changes whenever a host or terminal opens, closes or is replaced. */
-@OptIn(ExperimentalCoroutinesApi::class)
+/**
+ * The service's view of [HostConnections]: changes whenever a host or terminal opens, closes or is replaced. The
+ * application collects it once and shares it (`Or2Application.serviceSnapshots`).
+ */
 fun HostConnections.serviceSnapshots(): Flow<ServiceSnapshot> {
-    val hostViews = hosts.flatMapLatest { active ->
-        if (active.isEmpty()) flowOf(emptyList())
-        else combine(active.values.map { a -> a.state.map { OpenHost(a.host.id, a.host.label, it !is HostState.Closed) } }) { it.toList() }
-    }
-    val terminalViews = terminals.flatMapLatest { list ->
-        if (list.isEmpty()) flowOf(emptyList())
-        else combine(list.map { t -> t.state.map { OpenTerminal(t.host.id, t.host.label, it !is SessionState.Closed) } }) { it.toList() }
-    }
+    val hostViews = hosts.map { it.values }.combineEach { a -> a.state.map { OpenHost(a.host.id, a.host.label, it !is HostState.Closed) } }
+    val terminalViews = terminals.combineEach { t -> t.state.map { OpenTerminal(t.host.id, t.host.label, it !is SessionState.Closed) } }
     return combine(hostViews, terminalViews) { h, t -> serviceSnapshot(h, t) }.distinctUntilChanged()
 }

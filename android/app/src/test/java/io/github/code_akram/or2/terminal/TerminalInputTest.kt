@@ -83,18 +83,6 @@ class TerminalInputTest {
         assertEquals(3, keys.size)
     }
 
-    @Test fun pasteIsLiteralAndEmptyPasteDoesNotDisturbComposition() {
-        input.compose("pending")
-        input.paste("")
-        assertEquals("pending", input.composing)
-        input.toggleCtrl()
-        input.paste("echo 界😀\n")
-        assertEquals(listOf("echo 界😀\n"), texts)
-        assertTrue(keys.isEmpty())
-        assertEquals("", input.composing)
-        assertTrue(input.ctrl) // Paste is not the next typed key; the modifier stays armed.
-    }
-
     @Test fun pasteCountsLogicalLinesAndConfirmsAnyLineBreak() {
         listOf(
             Triple("", 0, false), Triple("echo x", 1, false), Triple("\n", 2, true),

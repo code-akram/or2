@@ -2,7 +2,6 @@ package io.github.code_akram.or2.app
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -124,12 +123,11 @@ class OneTimePromptsTest {
     // --- notifications: offered in context, never on connect ---------------------------------------
 
     @Test
-    fun theConnectionOfferShowsUntilGrantedOrDismissed() {
+    fun theOfferShowsUntilGrantedOrDismissed() {
         val store = MemoryPrefStore()
         var granted = false
         val permission = NotificationPermission(store) { granted }
-        val offer = permission.offer(NotificationUse.CONNECTION)
-        assertSame(offer, permission.offer(NotificationUse.CONNECTION)) // One per use.
+        val offer = permission.offer
         assertTrue(offer.visible.value)
         granted = true
         permission.refresh() // The dialog closed, or the app is back from Settings.
@@ -139,14 +137,18 @@ class OneTimePromptsTest {
         assertTrue(offer.visible.value)
         offer.dismiss()
         assertFalse(offer.visible.value)
-        assertFalse(NotificationPermission(store) { false }.offer(NotificationUse.CONNECTION).visible.value) // Persisted.
+        assertFalse(NotificationPermission(store) { false }.offer.visible.value) // Persisted.
     }
 
     @Test
-    fun aUserWhoAnsweredTheEarlierConnectTimeRequestIsNotOfferedItAgain() {
-        val store = MemoryPrefStore().apply { putBoolean("notifications_asked", true) }
+    fun theEarlierConnectTimeRequestCountsAsOneButDoesNotHideTheOffer() {
+        val store = MemoryPrefStore().apply {
+            putBoolean("notifications_asked", true)
+            putBoolean("notification_offer_connection_dismissed", true) // The connection-only card of v0.1.0.
+        }
         val permission = NotificationPermission(store) { false }
-        assertFalse(permission.offer(NotificationUse.CONNECTION).visible.value)
+        // Home's card covers connection status and agent alerts: offered once more.
+        assertTrue(permission.offer.visible.value)
         // That request counts as one: once Android stops showing its dialog, Allow opens the settings.
         assertEquals(NotificationGrant.SETTINGS, permission.grant(rationale = false))
         assertEquals(NotificationGrant.REQUEST, permission.grant(rationale = true))
@@ -165,22 +167,15 @@ class OneTimePromptsTest {
         assertEquals(NotificationGrant.SETTINGS, permission.grant(rationale = false))
         assertEquals(NotificationGrant.SETTINGS, NotificationPermission(store) { false }.grant(rationale = false)) // Persisted.
         // A denial does not hide the offer: it stays until it is dismissed.
-        assertTrue(permission.offer(NotificationUse.CONNECTION).visible.value)
+        assertTrue(permission.offer.visible.value)
     }
 
     @Test
-    fun theAgentAlertsOfferIsANewUseWithItsOwnDismissal() {
-        // Home's card covers connection status and agent alerts: a user who dismissed the connection-only card, or
-        // answered the connect-time request, is offered it once more.
-        val store = MemoryPrefStore().apply { putBoolean("notifications_asked", true) }
-        val permission = NotificationPermission(store) { false }
-        permission.offer(NotificationUse.CONNECTION).dismiss()
-        val agents = permission.offer(NotificationUse.AGENT_ALERTS)
-        assertTrue(agents.visible.value)
-        agents.dismiss()
-        assertFalse(agents.visible.value)
-        assertFalse(NotificationPermission(store) { false }.offer(NotificationUse.AGENT_ALERTS).visible.value) // Persisted.
+    fun theOffersDismissalKeepsItsKey() {
+        // v0.1.1's agent-alerts card wrote this key: a user who dismissed it is not offered it again.
+        val store = MemoryPrefStore().apply { putBoolean("notification_offer_agents_dismissed", true) }
+        assertFalse(NotificationPermission(store) { false }.offer.visible.value)
         // Granted: no offer.
-        assertFalse(NotificationPermission(MemoryPrefStore()) { true }.offer(NotificationUse.AGENT_ALERTS).visible.value)
+        assertFalse(NotificationPermission(MemoryPrefStore()) { true }.offer.visible.value)
     }
 }

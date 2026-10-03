@@ -287,8 +287,8 @@ session already open is brought to the front, a shell always opens anew, a close
 reused) on fakes, and `TerminalActivationsProbeTest`
 the same over the real FFI against `contract_probe_host`'s deterministic answers. `UnlockPlanTest` covers biometric grouping
 (one prompt per distinct key record), `InboxModelTest` the inbox ordering and the flow that
-assembles it, `HostRecordsTest` trust clearing on any address-list change and the clearing of the mosh failure
-memory on a new transport or addresses (over a fake of the DAO's primitives), and `MigrationSqlTest`
+assembles it, `HostRecordsTest` trust clearing on any address-list change (over a fake of the DAO's
+primitives), and `MigrationSqlTest`
 runs the real v1 to v2, v2 to v3 and v3 to v4 SQL with foreign keys on and compares each result with a
 fresh database of that version. `HostConnectionsTransportTest` covers the instant opens (the AUTO choice table,
 the per-connection UDP verdict and its reset, the background mosh attempt and the swap, one attempt
@@ -472,14 +472,13 @@ spinner and progress line), `home-picker-failed` (the failure and **Retry**), `i
 connected host's screen), `picker-herdr`, `picker-many` (the host screen's picker at full height), `picker-tmux`,
 `picker-recent`, `host-form`, `host-form-new-key` (no stored key: **New key** chosen), `host-form-edit`, `keys`,
 `keys-empty`, `key-sheet` (a key's own sheet), `settings`, `about`, `licenses`, `license-text` (the GPL text page),
-`hostkey-first`, `hostkey-changed`, `hostkey-changed-many` (the tallest trust dialog), `shortcuts` (the keyboard
-shortcuts sheet), `add-host` (the add-host chooser in its sheet; `home-empty` shows it inline), `pair-scan`,
+`hostkey-first`, `hostkey-changed`, `hostkey-changed-many` (the tallest trust dialog), `shortcuts` (the gestures and
+keyboard shortcuts sheet), `add-host` (the add-host chooser in its sheet; `home-empty` shows it inline), `pair-scan`,
 `pair-scan-denied`, `pair-review`, `pair-review-new` (with a failure), `pair-progress`, `pair-install`
 (Easy pair; the camera preview itself is not in the gallery), `keepalive` (the battery step that ends adding a
 host), `keepalive-waiting` (Android's dialog up), `terminal` (a shell over SSH), `terminal-tmux` (a tmux
 target over Mosh), `terminal-long` (a title long enough to ellipsize), `terminal-stale` (Mosh, `Last heard
-12 s ago`), `terminal-connecting` and `terminal-closed` (the notice strip under the header, the latter with
-**Close**), `terminal-arrowpad`, `terminal-arrowpad-text` (the pad open over a terminal full of text, to
+12 s ago`), `terminal-closed` (the notice strip under the header, with **Close**), `terminal-arrowpad`, `terminal-arrowpad-text` (the pad open over a terminal full of text, to
 judge its blue keys against it), `terminal-herdr-wheel` (a herdr target tracking the mouse after a swipe up
 went to herdr as wheel events: the scroll-to-bottom button shows), `terminal-composer` (opens with a message typed and the keyboard up, to show
 the caret and the lit send button). Any name with the suffix `-scrolled` (`licenses-scrolled`, `about-scrolled`,

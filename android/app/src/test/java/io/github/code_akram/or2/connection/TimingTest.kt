@@ -22,11 +22,11 @@ class TimingTest {
         clock += 120
         timing.mark("connect host=3", "connected")
         clock += 30
-        timing.mark("connect host=3", "live", " extra=1")
+        timing.mark("connect host=3", "live")
         clock += 5
         timing.end("connect host=3", "done")
         assertEquals(
-            listOf("connect host=3 unlocked ms=0", "connect host=3 connected ms=120", "connect host=3 live ms=150 extra=1", "connect host=3 done ms=155"),
+            listOf("connect host=3 unlocked ms=0", "connect host=3 connected ms=120", "connect host=3 live ms=150", "connect host=3 done ms=155"),
             lines,
         )
         // Over: nothing more is logged for it, and a span that never began logs nothing.

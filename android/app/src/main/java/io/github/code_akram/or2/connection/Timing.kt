@@ -45,10 +45,10 @@ class Timing(
     }
 
     /** Logs [event] with the time since [span] began; nothing for a span that never began (or has ended). */
-    fun mark(span: String, event: String, detail: String = "") {
+    fun mark(span: String, event: String) {
         val sink = emit ?: return
         val ms = synchronized(lock) { starts[span]?.let { now() - it } } ?: return
-        sink("$span $event ms=$ms$detail")
+        sink("$span $event ms=$ms")
     }
 
     /** [mark], and the span is over: a later mark of the same name is dropped. */
