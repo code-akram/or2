@@ -73,14 +73,14 @@ class EnableReplyTest {
     fun theConfirmationAndTheOutcomesSayWhatTheContractSays() {
         val request = EnableReplyRequest(1, "archlinux", "pi", "pi")
         assertEquals(
-            "Enable Reply for pi on archlinux? or2 installs herdr's pi integration there. Restart pi afterwards.",
+            "or2 installs herdr's pi integration on archlinux. Restart pi afterwards.",
             request.question,
         )
         assertEquals("Done. Restart pi to reply to it.", request.done)
         // An agent herdr names otherwise than its integration.
         val claude = EnableReplyRequest(1, "archlinux", "Claude Code", "claude")
         assertEquals(
-            "Enable Reply for Claude Code on archlinux? or2 installs herdr's claude integration there. Restart Claude Code afterwards.",
+            "or2 installs herdr's claude integration on archlinux. Restart Claude Code afterwards.",
             claude.question,
         )
         assertEquals("Done. Restart Claude Code to reply to it.", claude.done)

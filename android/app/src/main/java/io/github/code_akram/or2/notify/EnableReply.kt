@@ -52,7 +52,7 @@ fun enableReplyFor(agent: HerdrAgent, integrations: Map<String, HerdrIntegration
 data class EnableReplyRequest(val hostId: Long, val hostLabel: String, val agent: String, val integration: String) {
     /** The confirmation, asked once. */
     val question: String
-        get() = "Enable Reply for $agent on $hostLabel? or2 installs herdr's $integration integration there. Restart $agent afterwards."
+        get() = "or2 installs herdr's $integration integration on $hostLabel. Restart $agent afterwards."
 
     /** The outcome of an install that went through. */
     val done: String get() = "Done. Restart $agent to reply to it."

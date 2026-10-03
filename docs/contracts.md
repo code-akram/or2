@@ -5740,3 +5740,6 @@ read now forgets what was known (it may be stale), so nothing is offered until a
 (`InboxModelTest.aHostsIntegrationsAreReadOnceAViewNeedsThemAndAnInstallMarksItsOwnCurrent`). `codex_daemon_off`
 counts only a bare boolean `false` at the exact key: a quoted string, or `daemon_auto_start=false` written inside one,
 never does, and a `#` inside a string is no comment (`reply.rs`, `the_codex_daemon_setting_is_found`).
+
+**Wording (lead, on the phone):** the confirmation's title already asks (`Enable Reply?`), so its body only says what
+happens: `or2 installs herdr's pi integration on archlinux. Restart pi afterwards.`

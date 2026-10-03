@@ -237,7 +237,7 @@ class InboxModelTest {
         val rows = buildInbox(listOf(InboxSource(1, "archlinux", null, "default", agents, integrations))).single().items
         assertEquals(listOf("pi", "opencode", null, null, null, null), rows.map { it.enableReply })
         assertEquals(
-            "Enable Reply for pi on archlinux? or2 installs herdr's pi integration there. Restart pi afterwards.",
+            "or2 installs herdr's pi integration on archlinux. Restart pi afterwards.",
             rows[0].enableReplyRequest?.question,
         )
         assertNull(rows[2].enableReplyRequest)

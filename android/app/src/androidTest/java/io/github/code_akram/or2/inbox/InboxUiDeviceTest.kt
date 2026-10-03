@@ -126,7 +126,7 @@ class InboxUiDeviceTest {
             }
         }
         compose.onNodeWithText(
-            "Enable Reply for pi on Box? or2 installs herdr's pi integration there. Restart pi afterwards.",
+            "or2 installs herdr's pi integration on Box. Restart pi afterwards.",
         ).assertIsDisplayed()
         compose.onNodeWithTag("enable-reply-cancel").performClick()
         compose.runOnIdle { assertEquals(0 to 1, enabled to dismissed) }
