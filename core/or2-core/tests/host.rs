@@ -1261,7 +1261,7 @@ fn scroll_target_scrolls_a_tmux_session_over_the_connection_and_a_shell_does_not
     let scroll = |target: TerminalTarget, pane: Option<&str>, scroll| {
         block_on(
             live.host
-                .scroll_target(target, pane.map(str::to_owned), scroll),
+                .scroll_target(target, pane.map(str::to_owned), scroll, None),
         )
     };
     scroll(tmux.clone(), None, TargetScroll::Up { lines: 4 }).unwrap();

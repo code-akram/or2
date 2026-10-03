@@ -733,6 +733,9 @@ class HostConnectionsTest {
             Triple(TerminalTarget.Herdr(null, "w1:p1"), null, TargetScroll.Down(2u)),
             Triple(TerminalTarget.Herdr(null, "w1:p1"), "w2:p4", TargetScroll.Bottom),
         ), port.scrolls)
+        // A tmux scroll carries its terminal's client id (it follows the session moves), herdr none.
+        assertEquals(listOf(tmux.handle.value!!.clientId(), null, null), port.scrollClients)
+        assertNotNull(port.scrollClients[0])
         holder.dismissHost(host.id)
         assertThrows(HostException.Closed::class.java) { runBlocking { holder.scrollTarget(tmux, TargetScroll.Bottom) } }
     }

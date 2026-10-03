@@ -448,6 +448,8 @@ pub enum HostCommand {
     ScrollTarget {
         target: TerminalTarget,
         pane_id: Option<String>,
+        /// The scrolling terminal's tmux client id (validated; [`SessionHandle::client_id`]).
+        client_id: Option<String>,
         scroll: TargetScroll,
         reply: oneshot::Sender<Result<(), HostError>>,
     },
@@ -746,14 +748,24 @@ impl HostHandle {
     /// session's focused pane), this connection keeping each pane's offset. A `Shell` target, or
     /// zero lines, does nothing and is `Ok`. Names are validated like [`TerminalTarget`]'s
     /// (`InvalidName`); a vanished herdr pane is [`HostError::PaneNotFound`].
+    ///
+    /// `client_id` is the scrolling terminal's [`SessionHandle::client_id`]: after a session
+    /// move ([`HostHandle::navigate`]) a tmux scroll acts on the session that terminal's client
+    /// shows, as window and pane moves do, not on the one it was opened on. herdr ignores it; a
+    /// malformed id is `InvalidName`.
     pub async fn scroll_target(
         &self,
         target: TerminalTarget,
         pane_id: Option<String>,
         scroll: TargetScroll,
+        client_id: Option<String>,
     ) -> Result<(), HostError> {
         target.validate()?;
-        if !pane_id.as_deref().is_none_or(is_valid_herdr_pane_id) {
+        if !pane_id.as_deref().is_none_or(is_valid_herdr_pane_id)
+            || !client_id
+                .as_deref()
+                .is_none_or(crate::tmux::is_valid_client_id)
+        {
             return Err(HostError::InvalidName);
         }
         if target == TerminalTarget::Shell
@@ -769,6 +781,7 @@ impl HostHandle {
         self.send(HostCommand::ScrollTarget {
             target,
             pane_id,
+            client_id,
             scroll,
             reply,
         })?;

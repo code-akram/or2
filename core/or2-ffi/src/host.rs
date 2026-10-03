@@ -531,15 +531,21 @@ impl HostConnection {
     /// without the program, `PaneNotFound` for a vanished herdr pane, `CommandFailed`
     /// otherwise. Call it at most once at a time per terminal (sum the deltas meanwhile).
     /// Cancelling the coroutine drops the reply only.
+    ///
+    /// `client_id` (API 18) is the scrolling terminal's `Session.client_id()`, as for
+    /// `navigate`: after a session move a tmux scroll acts on the session that terminal's
+    /// client shows, not the one it was opened on. herdr ignores it; a malformed id is
+    /// `InvalidName`.
     pub async fn scroll_target(
         &self,
         target: TerminalTarget,
         pane_id: Option<String>,
         scroll: TargetScroll,
+        client_id: Option<String>,
     ) -> Result<(), HostError> {
         Ok(self
             .handle
-            .scroll_target(target.into(), pane_id, scroll.into())
+            .scroll_target(target.into(), pane_id, scroll.into(), client_id)
             .await?)
     }
 

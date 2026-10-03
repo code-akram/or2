@@ -391,7 +391,8 @@ async fn tmux_scroll_enters_copy_mode_scrolls_by_lines_and_returns_to_the_bottom
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    let scroll = |scroll| tmux::scroll(&host, tmux_path, "it's work", scroll);
+    let clients = tmux::NavClients::new();
+    let scroll = |scroll| tmux::scroll(&host, tmux_path, &clients, "it's work", None, scroll);
     use or2_core::host::TargetScroll::{Bottom, Down, Up};
 
     // Down and Bottom outside copy mode have nothing to do, and succeed.
@@ -417,7 +418,7 @@ async fn tmux_scroll_enters_copy_mode_scrolls_by_lines_and_returns_to_the_bottom
     assert_eq!(mode("it's work"), "0");
 
     // A session that does not exist is a failure with tmux's message.
-    let error = tmux::scroll(&host, tmux_path, "gone", Up { lines: 1 })
+    let error = tmux::scroll(&host, tmux_path, &clients, "gone", None, Up { lines: 1 })
         .await
         .unwrap_err();
     assert!(

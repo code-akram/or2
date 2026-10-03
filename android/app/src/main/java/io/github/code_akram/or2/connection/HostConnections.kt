@@ -102,9 +102,11 @@ interface HostPort : AutoCloseable {
 
     /**
      * API 14: scrolls the history a tmux or herdr [target] shows (copy mode, `pane.scroll`); [paneId]
-     * is the herdr pane, null for the focused one. A shell target does nothing.
+     * is the herdr pane, null for the focused one. [clientId] (API 18) is the scrolling terminal's shown
+     * session's `clientId()`, as for [navigate]: after a session move a tmux scroll acts on the session
+     * its client shows. A shell target does nothing.
      */
-    suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll)
+    suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll, clientId: String?)
 
     /**
      * API 14: moves what a terminal on [target] shows (tmux window, pane or session; herdr tab, pane or
@@ -145,8 +147,8 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
         connection.watchHerdr(session, listener)
     override suspend fun focusHerdrPane(session: String?, paneId: String) = connection.focusHerdrPane(session, paneId)
     override suspend fun stopMoshServer(pid: UInt) = connection.stopMoshServer(pid)
-    override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll) =
-        connection.scrollTarget(target, paneId, scroll)
+    override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll, clientId: String?) =
+        connection.scrollTarget(target, paneId, scroll, clientId)
     override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) =
         connection.navigate(target, paneId, nav, clientId)
     override suspend fun replyToPane(session: String?, paneId: String, agent: AgentIdentity, text: String) =
@@ -900,14 +902,15 @@ class HostConnections(
     /**
      * Scrolls [terminal]'s tmux or herdr history (`scroll_target`) over its host's current connection
      * (a mosh terminal outlives the one it was opened on). A herdr target scrolls the pane its
-     * session's watch reports focused, else the one herdr names as focused. Throws [HostException]
+     * session's watch reports focused, else the one herdr names as focused; a tmux target the session its
+     * client shows now (the client id of [ActiveTerminal.handle], as [navigate] passes). Throws [HostException]
      * when there is no connection or the scroll failed.
      */
     suspend fun scrollTarget(terminal: ActiveTerminal, scroll: TargetScroll) {
         val current = mutableHosts.value[terminal.host.id] ?: throw HostException.Closed()
         if (current.retired) throw HostException.Closed()
         val port = current.mutablePort.value ?: throw HostException.NotConnected()
-        port.scrollTarget(terminal.target, focusedHerdrPane(current, terminal.target), scroll)
+        port.scrollTarget(terminal.target, focusedHerdrPane(current, terminal.target), scroll, terminal.mutableHandle.value?.clientId())
     }
 
     /**

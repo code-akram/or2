@@ -1152,6 +1152,7 @@ fn dispatch<D: DatagramTransport>(
         HostCommand::ScrollTarget {
             target,
             pane_id,
+            client_id,
             scroll,
             reply,
         } => {
@@ -1160,7 +1161,7 @@ fn dispatch<D: DatagramTransport>(
             runtime().spawn(async move {
                 let _tracker = tracker;
                 tokio::select! {
-                    result = scroll_target(&host, target, pane_id, scroll) => { let _ = reply.send(result); }
+                    result = scroll_target(&host, target, pane_id, client_id, scroll) => { let _ = reply.send(result); }
                     _ = closed_reason(&mut closing) => {}
                 }
             });
@@ -1411,6 +1412,7 @@ async fn scroll_target(
     host: &Arc<SshHost>,
     target: TerminalTarget,
     pane_id: Option<String>,
+    client_id: Option<String>,
     scroll: TargetScroll,
 ) -> Result<(), HostError> {
     let capabilities = host.programs().await.map_err(host_error)?;
@@ -1424,12 +1426,21 @@ async fn scroll_target(
                 .tmux
                 .as_deref()
                 .ok_or_else(|| missing("tmux"))?;
-            tmux::scroll(&**host, path, &session_name, scroll)
-                .await
-                .map_err(|error| match error {
-                    TmuxError::Remote(error) => host_error(error),
-                    TmuxError::Failed(message) => HostError::CommandFailed { message },
-                })
+            // The session the terminal's client shows, as `navigate` resolves it.
+            let client_id = client_id.filter(|_| capabilities.tmux_records_clients);
+            tmux::scroll(
+                &**host,
+                path,
+                &host.tmux_clients,
+                &session_name,
+                client_id.as_deref(),
+                scroll,
+            )
+            .await
+            .map_err(|error| match error {
+                TmuxError::Remote(error) => host_error(error),
+                TmuxError::Failed(message) => HostError::CommandFailed { message },
+            })
         }
         TerminalTarget::Herdr { session, .. } => {
             let path = capabilities

@@ -54,6 +54,8 @@ Each release's notes are in [docs/releases/](docs/releases/).
 - Tapping a second agent of a herdr session (inbox or notification) no longer opens a second herdr client next to
   the first, both showing the same focused pane: every way into herdr reuses the session's open terminal, after
   focusing the agent's pane. Duplicates already open are left alone.
+- Swiping through a tmux terminal's history after switching it to another tmux session scrolls the
+  session the terminal shows, not the one it was opened on.
 
 ## [0.1.1] - 2026-10-02
 

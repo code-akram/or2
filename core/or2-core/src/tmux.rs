@@ -89,15 +89,26 @@ pub fn scroll_command(tmux: &str, name: &str, scroll: TargetScroll) -> Option<Re
     Some(RemoteCommand::new(tmux).arg("-u").args(args))
 }
 
-/// Runs [`scroll_command`]. A pane that is not in copy mode (a `Down` or `Bottom` after tmux
-/// already left it) is success: there is nothing to scroll back.
+/// Runs [`scroll_command`] on the session a terminal attached to `target` shows now
+/// ([`shown_session`]: `target`, or the one a session move switched its client to). A pane that
+/// is not in copy mode (a `Down` or `Bottom` after tmux already left it) is success: there is
+/// nothing to scroll back.
 pub async fn scroll<H: RemoteHost>(
     host: &H,
     tmux: &str,
-    name: &str,
+    clients: &NavClients,
+    target: &str,
+    client: Option<&str>,
     scroll: TargetScroll,
 ) -> Result<(), TmuxError> {
-    let Some(command) = scroll_command(tmux, name, scroll) else {
+    if matches!(
+        scroll,
+        TargetScroll::Up { lines: 0 } | TargetScroll::Down { lines: 0 }
+    ) {
+        return Ok(());
+    }
+    let session = shown_session(host, tmux, clients, target, client).await?;
+    let Some(command) = scroll_command(tmux, &session, scroll) else {
         return Ok(());
     };
     let output = host.exec(&command).await?;
@@ -436,21 +447,7 @@ pub async fn navigate<H: RemoteHost>(
             switch_command(tmux, &found.name, nav == TargetNav::NextSession)
         }
         _ => {
-            let mut session = target.to_owned();
-            if let Some(id) = client
-                && let Some(name) = clients.get(id)
-            {
-                let listed = list_clients(host, tmux, id).await?;
-                match listed.iter().find(|listed| listed.recorded) {
-                    Some(found) => {
-                        if found.name != name {
-                            clients.remember(id, &found.name);
-                        }
-                        session = found.session.clone();
-                    }
-                    None => clients.release(id),
-                }
-            }
+            let session = shown_session(host, tmux, clients, target, client).await?;
             nav_command(tmux, &session, nav).expect("a window or pane move")
         }
     };
@@ -460,6 +457,36 @@ pub async fn navigate<H: RemoteHost>(
     } else {
         Err(failure(&output))
     }
+}
+
+/// The session a terminal attached to tmux session `target` shows now, for the moves and scrolls
+/// that act on a session rather than a client: `target`, or after a session move of its client
+/// (remembered in [`NavClients`] under its client id `client`) the session that client shows,
+/// found by what its attach recorded (one `list-clients` more). A record that is no longer
+/// listed is forgotten and `target` is used again.
+async fn shown_session<H: RemoteHost>(
+    host: &H,
+    tmux: &str,
+    clients: &NavClients,
+    target: &str,
+    client: Option<&str>,
+) -> Result<String, TmuxError> {
+    let Some((id, name)) = client.and_then(|id| Some((id, clients.get(id)?))) else {
+        return Ok(target.to_owned());
+    };
+    let listed = list_clients(host, tmux, id).await?;
+    Ok(match listed.iter().find(|listed| listed.recorded) {
+        Some(found) => {
+            if found.name != name {
+                clients.remember(id, &found.name);
+            }
+            found.session.clone()
+        }
+        None => {
+            clients.release(id);
+            target.to_owned()
+        }
+    })
 }
 
 /// Forgets a closed terminal's client: its [`NavClients`] entry, and (best effort, one exec)
@@ -878,6 +905,76 @@ mod tests {
             "'/t' '-u' 'previous-window' '-t' '=main'"
         );
         assert_eq!(clients.get(A), None);
+    }
+
+    /// A swipe scroll after a session move scrolls the session the terminal's client shows,
+    /// not the one it was opened on (the bug: it scrolled the target, out of sight).
+    #[tokio::test]
+    async fn a_scroll_after_a_session_move_scrolls_the_session_shown() {
+        let host = Scripted::default();
+        let clients = NavClients::new();
+        let list = format!("'/t' '-u' 'list-clients' '-F' '{}'", client_format(Some(A)));
+        let up = TargetScroll::Up { lines: 2 };
+
+        // Before any session move: one command on the target, no listing.
+        host.reply(0, "", "");
+        scroll(&host, "/t", &clients, "main", Some(A), up)
+            .await
+            .unwrap();
+        assert_eq!(
+            host.take_log(),
+            [
+                "'/t' '-u' 'copy-mode' '-e' '-t' '=main:' ';' 'send-keys' '-t' '=main:' '-X' \
+                 '-N' '2' 'scroll-up'"
+            ]
+        );
+
+        // The terminal's client is switched to `other`.
+        host.reply(0, "10:/dev/pts/1:main:/dev/pts/1\n", "");
+        host.reply(0, "", "");
+        navigate(
+            &host,
+            "/t",
+            &clients,
+            "main",
+            Some(A),
+            TargetNav::NextSession,
+        )
+        .await
+        .unwrap();
+        host.take_log();
+
+        // Now the scroll acts on `other`, found through the client its attach recorded.
+        host.reply(0, "20:/dev/pts/1:other:/dev/pts/1\n", "");
+        host.reply(0, "", "");
+        scroll(&host, "/t", &clients, "main", Some(A), TargetScroll::Bottom)
+            .await
+            .unwrap();
+        assert_eq!(
+            host.take_log(),
+            [
+                list,
+                "'/t' '-u' 'send-keys' '-t' '=other:' '-X' 'cancel'".into()
+            ]
+        );
+
+        // Without the terminal's id the target is all there is; zero lines run nothing.
+        host.reply(0, "", "");
+        scroll(&host, "/t", &clients, "main", None, up)
+            .await
+            .unwrap();
+        assert!(host.take_log()[0].contains("'=main:'"));
+        scroll(
+            &host,
+            "/t",
+            &clients,
+            "main",
+            Some(A),
+            TargetScroll::Up { lines: 0 },
+        )
+        .await
+        .unwrap();
+        assert!(host.take_log().is_empty());
     }
 
     #[tokio::test]

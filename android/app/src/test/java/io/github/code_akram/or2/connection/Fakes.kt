@@ -213,8 +213,11 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     /** While set, a `scroll_target` call waits for it; a failure is thrown after the call is recorded. */
     var scrollGate: CompletableDeferred<Unit>? = null
     var scrollFailure: Exception? = null
-    override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll) {
+    /** The client id each `scroll_target` call carried, in the same order as [scrolls]. */
+    val scrollClients = mutableListOf<String?>()
+    override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll, clientId: String?) {
         scrolls += Triple(target, paneId, scroll)
+        scrollClients += clientId
         scrollGate?.await()
         scrollFailure?.let { throw it }
     }
