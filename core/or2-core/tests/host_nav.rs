@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use common::{Sshd, sshd_ready, tmux_ready};
 use or2_core::host::{
-    HostConnectRequest, HostObserver, HostState, NavDirection, TargetNav, TerminalTarget,
+    HostConnectRequest, HostObserver, HostState, NavDirection, TargetNav, TargetScroll,
+    TerminalTarget, TerminalTransport,
 };
 use or2_core::keys::ClientKey;
 use or2_core::session::{SessionObserver, SessionState};
@@ -161,7 +162,9 @@ fn tmux_moves_windows_panes_and_the_terminal_client_between_sessions() {
     let terminal = host
         .open_terminal(
             target.clone(),
+            TerminalTransport::Ssh,
             TerminalSize::new(80, 24).unwrap(),
+            None,
             Arc::new(SessionObs(tx)),
         )
         .unwrap();
@@ -214,6 +217,31 @@ fn tmux_moves_windows_panes_and_the_terminal_client_between_sessions() {
     navigate(TargetNav::NextWindow).unwrap();
     assert_eq!(window("or2-b"), "1");
     assert_eq!(window("or2-a"), "1");
+
+    // So does a swipe scroll (it used to scroll the target, out of sight).
+    tmux(&sshd, &["send-keys", "-t", "=or2-b:", "seq 1 100", "Enter"]);
+    let history = || {
+        tmux(
+            &sshd,
+            &["display", "-p", "-t", "=or2-b:", "#{history_size}"],
+        )
+    };
+    let deadline = Instant::now() + WAIT;
+    while history() == "0" {
+        assert!(Instant::now() < deadline, "no history in or2-b");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let in_mode = |session: &str| {
+        let target = format!("={session}:");
+        tmux(&sshd, &["display", "-p", "-t", &target, "#{pane_in_mode}"])
+    };
+    let scroll =
+        |scroll| block_on(host.scroll_target(target.clone(), None, scroll, Some(id.clone())));
+    scroll(TargetScroll::Up { lines: 3 }).unwrap();
+    assert_eq!(in_mode("or2-b"), "1");
+    assert_eq!(in_mode("or2-a"), "0");
+    scroll(TargetScroll::Bottom).unwrap();
+    assert_eq!(in_mode("or2-b"), "0");
 
     // And back, wrapping around: or2-b, or2-a, then (previous) or2-b again.
     navigate(TargetNav::NextSession).unwrap();
@@ -305,7 +333,9 @@ fn two_terminals_on_one_tmux_session_each_move_only_their_own_client() {
         let terminal = host
             .open_terminal(
                 target.clone(),
+                TerminalTransport::Ssh,
                 TerminalSize::new(80, 24).unwrap(),
+                None,
                 Arc::new(SessionObs(tx)),
             )
             .unwrap();
@@ -526,7 +556,9 @@ fn an_old_tmux_attaches_plainly_and_its_session_moves_do_nothing() {
     let terminal = host
         .open_terminal(
             target.clone(),
+            TerminalTransport::Ssh,
             TerminalSize::new(80, 24).unwrap(),
+            None,
             Arc::new(SessionObs(tx)),
         )
         .unwrap();

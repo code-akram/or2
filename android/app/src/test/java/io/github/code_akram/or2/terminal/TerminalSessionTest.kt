@@ -41,8 +41,6 @@ class TerminalSessionTest {
         override fun requestFullFrame() { touch() }
         override fun takeFrame(): TerminalFrame? { touch(); return frame.also { frame = null } }
         override fun state(): SessionState { touch(); return SessionState.Connected }
-        override fun approveHostKey(fingerprint: String) { touch() }
-        override fun rejectHostKey() { touch() }
         override fun disconnect() { touch() }
         override fun transport(): TerminalTransport { touch(); return TerminalTransport.SSH }
         override fun serverPid(): UInt? = null

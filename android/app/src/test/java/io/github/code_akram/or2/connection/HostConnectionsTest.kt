@@ -488,7 +488,7 @@ class HostConnectionsTest {
     @Test
     fun connectedHostWatchesTheDefaultAndEveryListedHerdrSessionWhetherRunningOrNot() = runTest {
         val port = FakePort().apply {
-            caps = HostCapabilities("/usr/bin/tmux", "/home/x/.local/bin/herdr", null, "C.UTF-8", listOf(
+            caps = HostCapabilities("/usr/bin/tmux", "/home/x/.local/bin/herdr", null, listOf(
                 HerdrSessionInfo("default", true, true), HerdrSessionInfo("work", true, false),
                 HerdrSessionInfo("idle", false, false),
             ))
@@ -505,7 +505,7 @@ class HostConnectionsTest {
         assertEquals(listOf<String?>(null, "work", "idle"), port.watches.map { it.first })
         assertEquals(listOf("default", "work", "idle"), active.watches.value.map { it.name })
 
-        val view = HerdrView(1uL, 22u, null, emptyList(), emptyList(), emptyList(), emptyList())
+        val view = HerdrView(1uL, null, emptyList(), emptyList(), emptyList(), emptyList())
         port.watches[1].second.onHerdrStateChanged(HerdrState.Live(view))
         runCurrent()
         assertEquals(HerdrState.Live(view), active.watches.value[1].state.value)
@@ -544,7 +544,7 @@ class HostConnectionsTest {
         runCurrent()
         assertEquals(notRunning, active.watches.value[0].state.value)
         // herdr starts later: the same watch (no second one) goes live, whatever a refresh sees.
-        val view = HerdrView(1uL, 22u, null, emptyList(), emptyList(), emptyList(), emptyList())
+        val view = HerdrView(1uL, null, emptyList(), emptyList(), emptyList(), emptyList())
         port.watches[0].second.onHerdrStateChanged(HerdrState.Live(view))
         holder.refresh(active)
         runCurrent()
@@ -702,7 +702,7 @@ class HostConnectionsTest {
 
     @Test
     fun tmuxListingGoesThroughTheConnection() = runTest {
-        val port = FakePort().apply { tmux = listOf(TmuxSession("main", 3u, 1u, 100L, 200L)) }
+        val port = FakePort().apply { tmux = listOf(TmuxSession("main", 3u, 1u)) }
         val holder = holder(connector = { _, _ -> port })
         holder.connect(host, byteArrayOf(1))
         assertEquals(listOf("main"), holder.listTmuxSessions(holder.host(host.id)!!).map { it.name })
@@ -724,7 +724,7 @@ class HostConnectionsTest {
         holder.scrollTarget(tmux, TargetScroll.Up(3u))
         // No live view of the session yet: herdr is asked for its focused pane.
         holder.scrollTarget(herdr, TargetScroll.Down(2u))
-        val view = HerdrView(1uL, 22u, "w2:p4", emptyList(), emptyList(), emptyList(), emptyList())
+        val view = HerdrView(1uL, "w2:p4", emptyList(), emptyList(), emptyList(), emptyList())
         port.watches.first { it.first == null }.second.onHerdrStateChanged(HerdrState.Live(view))
         runCurrent()
         holder.scrollTarget(herdr, TargetScroll.Bottom)
@@ -733,6 +733,9 @@ class HostConnectionsTest {
             Triple(TerminalTarget.Herdr(null, "w1:p1"), null, TargetScroll.Down(2u)),
             Triple(TerminalTarget.Herdr(null, "w1:p1"), "w2:p4", TargetScroll.Bottom),
         ), port.scrolls)
+        // A tmux scroll carries its terminal's client id (it follows the session moves), herdr none.
+        assertEquals(listOf(tmux.handle.value!!.clientId(), null, null), port.scrollClients)
+        assertNotNull(port.scrollClients[0])
         holder.dismissHost(host.id)
         assertThrows(HostException.Closed::class.java) { runBlocking { holder.scrollTarget(tmux, TargetScroll.Bottom) } }
     }

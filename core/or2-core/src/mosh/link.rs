@@ -65,8 +65,6 @@ pub(super) struct Link<T: DatagramTransport> {
     sockets: Vec<T::Socket>,
     /// The only address any socket may reach (IP and port).
     peer: SocketAddr,
-    /// Whether the server is IPv6, which sizes the datagrams for the whole session.
-    peer_ipv6: bool,
     /// When the newest socket first delivered an authenticated datagram.
     newest_worked_since: Option<Instant>,
     /// Whether the datagram last returned by `poll_recv` came in on the newest socket.
@@ -125,7 +123,6 @@ impl<T: DatagramTransport> Link<T> {
             endpoint,
             sockets: vec![socket],
             peer,
-            peer_ipv6: peer.is_ipv6(),
             newest_worked_since: None,
             last_on_newest: false,
         })
@@ -133,7 +130,7 @@ impl<T: DatagramTransport> Link<T> {
 
     /// The server's address family sizes the datagrams.
     pub(super) fn peer_is_ipv6(&self) -> bool {
-        self.peer_ipv6
+        self.peer.is_ipv6()
     }
 
     /// Sends one datagram from the newest socket.

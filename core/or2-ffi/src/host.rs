@@ -320,7 +320,6 @@ pub struct HostCapabilities {
     pub tmux: Option<String>,
     pub herdr: Option<String>,
     pub mosh_server: Option<String>,
-    pub utf8_locale: String,
     pub herdr_sessions: Vec<HerdrSessionInfo>,
 }
 
@@ -330,7 +329,6 @@ impl From<core::HostCapabilities> for HostCapabilities {
             tmux: caps.tmux,
             herdr: caps.herdr,
             mosh_server: caps.mosh_server,
-            utf8_locale: caps.utf8_locale,
             herdr_sessions: caps
                 .herdr_sessions
                 .into_iter()
@@ -344,13 +342,12 @@ impl From<core::HostCapabilities> for HostCapabilities {
     }
 }
 
+/// A tmux session on the host; `list_tmux_sessions` returns them most recently active first.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct TmuxSession {
     pub name: String,
     pub windows: u32,
     pub attached_clients: u32,
-    pub created_unix: i64,
-    pub activity_unix: i64,
 }
 
 impl From<core::TmuxSession> for TmuxSession {
@@ -359,8 +356,6 @@ impl From<core::TmuxSession> for TmuxSession {
             name: session.name,
             windows: session.windows,
             attached_clients: session.attached_clients,
-            created_unix: session.created_unix,
-            activity_unix: session.activity_unix,
         }
     }
 }
@@ -459,7 +454,7 @@ impl HostConnection {
         listener: Box<dyn SessionListener>,
     ) -> Result<Arc<Session>, HostError> {
         let size = TerminalSize::new(columns, rows).map_err(|_| HostError::EmptyDimension)?;
-        let handle = self.handle.open_terminal_within(
+        let handle = self.handle.open_terminal(
             target.into(),
             transport.into(),
             size,
@@ -531,15 +526,21 @@ impl HostConnection {
     /// without the program, `PaneNotFound` for a vanished herdr pane, `CommandFailed`
     /// otherwise. Call it at most once at a time per terminal (sum the deltas meanwhile).
     /// Cancelling the coroutine drops the reply only.
+    ///
+    /// `client_id` (API 18) is the scrolling terminal's `Session.client_id()`, as for
+    /// `navigate`: after a session move a tmux scroll acts on the session that terminal's
+    /// client shows, not the one it was opened on. herdr ignores it; a malformed id is
+    /// `InvalidName`.
     pub async fn scroll_target(
         &self,
         target: TerminalTarget,
         pane_id: Option<String>,
         scroll: TargetScroll,
+        client_id: Option<String>,
     ) -> Result<(), HostError> {
         Ok(self
             .handle
-            .scroll_target(target.into(), pane_id, scroll.into())
+            .scroll_target(target.into(), pane_id, scroll.into(), client_id)
             .await?)
     }
 
@@ -812,8 +813,7 @@ mod tests {
             created_unix: -1,
             activity_unix: i64::MAX,
         });
-        assert_eq!((tmux.windows, tmux.created_unix), (3, -1));
-        assert_eq!(tmux.activity_unix, i64::MAX);
+        assert_eq!((tmux.windows, tmux.attached_clients), (3, 1));
         assert_eq!(
             core::TargetScroll::from(TargetScroll::Up { lines: 3 }),
             core::TargetScroll::Up { lines: 3 }

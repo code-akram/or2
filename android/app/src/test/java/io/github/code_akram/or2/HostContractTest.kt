@@ -234,7 +234,6 @@ class HostContractTest {
             assertEquals("/usr/bin/mosh-server", capabilities.moshServer)
             // API 14: the program probe's answer alone.
             assertEquals("/usr/bin/mosh-server", runBlocking { host.moshServer() })
-            assertEquals("C.UTF-8", capabilities.utf8Locale)
             assertEquals(listOf("default", "or2-probe"), capabilities.herdrSessions.map { it.name })
             assertEquals(listOf(true, false), capabilities.herdrSessions.map { it.running })
             assertEquals(listOf(true, false), capabilities.herdrSessions.map { it.isDefault })
@@ -249,8 +248,6 @@ class HostContractTest {
             assertEquals(listOf("main", "build"), tmux.map { it.name })
             assertEquals(3u, tmux[0].windows)
             assertEquals(1u, tmux[0].attachedClients)
-            assertEquals(1_700_000_000L, tmux[0].createdUnix)
-            assertTrue(tmux[0].activityUnix > tmux[1].activityUnix)
 
             host.disconnect()
             assertEquals(CloseReason.Disconnected, recorder.await<HostState.Closed>().reason)
@@ -321,7 +318,6 @@ class HostContractTest {
         // The fixed sequence: healthy, stale (past the 5 s grey-out), recovered.
         val sequence = List(3) { listener.awaitHealth() }
         assertEquals(listOf(300uL, 6000uL, 400uL), sequence.map { it.sinceHeardMs })
-        assertEquals(listOf(300uL, 9000uL, 400uL), sequence.map { it.sinceAckMs })
 
         mosh.roam()
         assertEquals("roams 1", listener.awaitFrame(mosh).rowText(2))
@@ -382,7 +378,6 @@ class HostContractTest {
         val update = recorder.await<HerdrState.Live>().view
         assertEquals(1uL, first.version)
         assertEquals(2uL, update.version)
-        assertEquals(22u, first.protocol)
         assertEquals("work", first.workspaces[0].label)
         assertEquals("w1:p1", first.focusedPaneId)
 
@@ -396,8 +391,6 @@ class HostContractTest {
         // And the instance a reply names: a session, a herdr-started agent's name, or none (no Reply).
         assertEquals(listOf(PROBE_CLAUDE, PROBE_CODEX, null), first.agents.map { it.replyIdentity })
         assertEquals(first.agents.map { it.paneId }, first.panes.map { it.paneId })
-        assertEquals(AgentStatus.BLOCKED, first.workspaces[0].agentStatus)
-        assertEquals(AgentStatus.WORKING, update.workspaces[0].agentStatus)
         assertEquals(update, (watch.state() as HerdrState.Live).view)
 
         watch.stop()
@@ -439,7 +432,6 @@ class HostContractTest {
         val watch = host.watchHerdr(null, recorder)
         val view = recorder.await<HerdrState.Live>().view
         assertEquals("w1:p2", view.focusedPaneId)
-        assertEquals(listOf(false, true, false), view.agents.map { it.focused })
         watch.stop()
         recorder.await<HerdrState.Live>()
         recorder.await<HerdrState.Closed>()

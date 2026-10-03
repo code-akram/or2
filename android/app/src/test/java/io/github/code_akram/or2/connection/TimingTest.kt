@@ -118,11 +118,11 @@ class TimingTest {
         hostListener.onHostStateChanged(HostState.Connected(0u))
         advanceUntilIdle() // The probe answers, and the default session is watched.
         clock += 400
-        val view = HerdrView(1uL, 22u, null, emptyList(), emptyList(), emptyList(), emptyList())
+        val view = HerdrView(1uL, null, emptyList(), emptyList(), emptyList(), emptyList())
         port.watches[0].second.onHerdrStateChanged(HerdrState.Live(view))
         advanceUntilIdle()
         // Later views of the same host are not the first.
-        port.watches[0].second.onHerdrStateChanged(HerdrState.Live(HerdrView(2uL, 22u, null, emptyList(), emptyList(), emptyList(), emptyList())))
+        port.watches[0].second.onHerdrStateChanged(HerdrState.Live(HerdrView(2uL, null, emptyList(), emptyList(), emptyList(), emptyList())))
         advanceUntilIdle()
         assertEquals(
             listOf(

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
 use serde_json::Value;
+use tokio::time::Instant;
 
 use super::HerdrError;
 use super::discovery::Directory;
@@ -151,13 +152,17 @@ pub(super) async fn call<H: RemoteHost>(
     id: &str,
     body: &RequestBody,
 ) -> Result<Value, HerdrError> {
-    call_raw(host, herdr, directory, session, id, body)
+    call_raw(host, herdr, directory, session, id, body, None)
         .await?
         .map_err(wire_error)
 }
 
 /// [`call`] with herdr's answer unmapped, for a caller that acts on a particular error code:
 /// the outer error is the socket's discovery failing, the inner one the request's.
+///
+/// `start_by` is the latest moment the request may be sent (a reply that must not land after
+/// its caller's deadline): a re-locate after a dead cached socket is bounded by it, and the
+/// request is never sent past it ([`super::reply::NO_TIME`]).
 pub(super) async fn call_raw<H: RemoteHost>(
     host: &H,
     herdr: &str,
@@ -165,31 +170,16 @@ pub(super) async fn call_raw<H: RemoteHost>(
     session: Option<&str>,
     id: &str,
     body: &RequestBody,
+    start_by: Option<Instant>,
 ) -> Result<Result<Value, WireError>, HerdrError> {
-    let mut fresh = false;
-    loop {
-        let cached = if fresh {
-            None
-        } else {
-            directory.cached_socket(session)
-        };
-        let from_cache = cached.is_some();
-        let socket = match cached {
-            Some(socket) => socket,
-            None => directory
-                .locate_fresh(host, herdr, session)
-                .await
-                .map_err(discovery_error)?,
-        };
-        match wire::call(host, &socket, id, body, Timing::default().request).await {
-            Ok(answer) => return Ok(Ok(answer)),
-            Err(WireError::Unreachable(_)) if from_cache => {
-                directory.invalidate();
-                fresh = true;
-            }
-            Err(error) => return Ok(Err(error)),
-        }
-    }
+    let timeout = Timing::default().request;
+    directory
+        .with_socket(host, herdr, session, start_by, |socket| async move {
+            wire::call(host, &socket, id, body, timeout).await
+        })
+        .await
+        .map(|(_, answer)| answer)
+        .map_err(discovery_error)
 }
 
 #[cfg(test)]

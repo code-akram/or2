@@ -83,7 +83,6 @@ pub fn text_bytes(text: &str) -> Vec<u8> {
 /// into what the application expects (for example arrow keys), so Kotlin always sends this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewportScroll {
-    Top,
     Bottom,
     /// Rows to move; negative moves up into history.
     Delta(i32),

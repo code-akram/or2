@@ -63,18 +63,18 @@ class TransportChromeDeviceTest {
         show()
         compose.onNodeWithTag("terminal-link").assertDoesNotExist()
         assertBadgeGreyed(false)
-        compose.runOnUiThread { health = LinkHealth(300uL, 300uL) }
+        compose.runOnUiThread { health = LinkHealth(300uL) }
         compose.onNodeWithTag("terminal-link").assertDoesNotExist()
         assertBadgeGreyed(false)
-        compose.runOnUiThread { health = LinkHealth(5000uL, 9000uL) }
+        compose.runOnUiThread { health = LinkHealth(5000uL) }
         compose.onNodeWithTag("terminal-link").assertDoesNotExist() // Exactly five seconds is not stale yet.
         assertBadgeGreyed(false)
-        compose.runOnUiThread { health = LinkHealth(12_300uL, 12_300uL) }
+        compose.runOnUiThread { health = LinkHealth(12_300uL) }
         compose.onNodeWithTag("terminal-link").assertIsDisplayed().assertContentDescriptionEquals("Last heard 12 s ago")
         // The pill says it, so the centred title keeps its room.
         compose.onNodeWithTag("terminal-transport", useUnmergedTree = true).assertTextEquals("Mosh · 12 s")
         assertBadgeGreyed(true)
-        compose.runOnUiThread { health = LinkHealth(400uL, 400uL) }
+        compose.runOnUiThread { health = LinkHealth(400uL) }
         compose.onNodeWithTag("terminal-link").assertDoesNotExist() // Recovered.
         assertBadgeGreyed(false)
     }
@@ -84,13 +84,13 @@ class TransportChromeDeviceTest {
         show()
         val body = { compose.onNodeWithTag("terminal-body").fetchSemanticsNode().boundsInRoot }
         val plain = body()
-        compose.runOnUiThread { health = LinkHealth(12_300uL, 12_300uL) }
+        compose.runOnUiThread { health = LinkHealth(12_300uL) }
         val link = compose.onNodeWithTag("terminal-link").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
         // It takes the header's own space: no row of the terminal is covered.
         assertTrue("the link line overlaps the terminal", link.bottom <= body().top)
         // And a flapping link must not make the grid (and the remote) resize each time.
         assertEquals(plain, body())
-        compose.runOnUiThread { health = LinkHealth(400uL, 400uL) }
+        compose.runOnUiThread { health = LinkHealth(400uL) }
         compose.onNodeWithTag("terminal-link").assertDoesNotExist()
         assertEquals(plain, body())
     }

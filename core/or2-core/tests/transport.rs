@@ -3,7 +3,7 @@
 use std::io::ErrorKind;
 use std::sync::Arc;
 
-use or2_core::transport::{DirectTcp, Endpoint, Transport};
+use or2_core::transport::{DirectTcp, Endpoint, RaceTiming, Transport};
 use russh::client;
 use russh::keys::PublicKeyOrCertificate;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -50,10 +50,14 @@ async fn a_race_reports_the_address_the_winning_connection_reached() {
     drop(dead);
     let (live, live_endpoint) = listener().await;
     let live_addr = live.local_addr().unwrap();
-    let raced = or2_core::transport::race(
+    let raced = or2_core::transport::race_with(
         &Arc::new(DirectTcp),
         &[dead_endpoint, live_endpoint],
-        std::time::Duration::from_millis(10),
+        RaceTiming {
+            stagger: std::time::Duration::from_millis(10),
+            ..RaceTiming::default()
+        },
+        None,
     )
     .await
     .unwrap();
@@ -95,7 +99,7 @@ async fn transport_stream_is_accepted_by_russh_connect_stream() {
 
 #[tokio::test]
 async fn race_skips_a_refused_address_at_once_and_reports_every_failure() {
-    use or2_core::transport::{RACE_STAGGER, race};
+    use or2_core::transport::{RACE_STAGGER, race_with};
     let transport = Arc::new(DirectTcp);
     let (dead, dead_endpoint) = listener().await;
     drop(dead);
@@ -105,10 +109,11 @@ async fn race_skips_a_refused_address_at_once_and_reports_every_failure() {
     // A refusal does not wait out the stagger: the live address starts as soon as the dead
     // one fails, so the whole race is far quicker than 250 ms.
     let started = std::time::Instant::now();
-    let raced = race(
+    let raced = race_with(
         &transport,
         &[dead_endpoint.clone(), live_endpoint.clone()],
-        RACE_STAGGER,
+        RaceTiming::default(),
+        None,
     )
     .await
     .unwrap();
@@ -118,10 +123,11 @@ async fn race_skips_a_refused_address_at_once_and_reports_every_failure() {
     accept.await.unwrap();
 
     // All dead: every address's error is listed, in request order.
-    let failure = race(
+    let failure = race_with(
         &transport,
         &[dead_endpoint.clone(), dead_endpoint],
-        RACE_STAGGER,
+        RaceTiming::default(),
+        None,
     )
     .await
     .unwrap_err();

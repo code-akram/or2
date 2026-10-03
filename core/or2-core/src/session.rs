@@ -7,15 +7,13 @@
 //! [`SessionObserver`] from its own thread, in order, without holding any lock.
 //!
 //! ```text
-//! Connecting ──▶ AwaitingHostKey ──▶ Authenticating ──▶ Connected
-//!     │  │                                  ▲                ▲
-//!     │  └──────────────────────────────────┘                │
-//!     └──────────── channel sessions (M2) ───────────────────┘
-//! any state ──▶ Closed (terminal, once)
+//! Connecting ──▶ Connected
+//!     │              │
+//!     └──────────────┴──▶ Closed (terminal, once)
 //! ```
 //!
-//! A session that owns a channel on an established host connection goes straight from
-//! `Connecting` to `Connected`: host-key and authentication states belong to the host.
+//! Every session is a terminal of an established host connection (a channel of it, or a mosh
+//! session it started), so host-key and authentication states belong to the host.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -24,72 +22,9 @@ use tokio::sync::mpsc;
 
 use crate::frame::{Frame, FrameError, FrameMailbox, TakenFrame};
 use crate::input::{KeyInput, ViewportScroll};
-use crate::keys::{ClientKey, KeyError};
 use crate::mosh::LinkHealth;
 use crate::term::TerminalSize;
-use crate::transport::{Endpoint, EndpointError};
 use crate::trust::{HostKey, HostKeyVerdict};
-
-/// A validated single-session request. The shipped connection is
-/// [`crate::host::HostConnectRequest`] (terminals are channels of a host connection); this is
-/// what the FFI's `contract_probe_session` fixture validates, with the same field rules, for the
-/// session contract tests.
-#[derive(Debug)]
-pub struct ConnectRequest {
-    pub endpoint: Endpoint,
-    pub username: String,
-    pub key: ClientKey,
-    pub trusted_host_keys: Vec<HostKey>,
-    pub size: TerminalSize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ConnectError {
-    #[error(transparent)]
-    Endpoint(#[from] EndpointError),
-    #[error("username must be nonempty without control characters")]
-    InvalidUsername,
-    #[error("stored private key is unusable: {0}")]
-    InvalidPrivateKey(KeyError),
-    #[error("trusted host key {index} is not an OpenSSH public key")]
-    InvalidTrustedHostKey { index: usize },
-    #[error("terminal columns and rows must both be nonzero")]
-    EmptyDimension,
-}
-
-impl ConnectRequest {
-    pub fn new(
-        host: &str,
-        port: u16,
-        username: &str,
-        private_key: &[u8],
-        trusted_host_keys: &[String],
-        columns: u16,
-        rows: u16,
-    ) -> Result<Self, ConnectError> {
-        let endpoint = Endpoint::new(host, port)?;
-        if username.is_empty() || username.chars().any(char::is_control) {
-            return Err(ConnectError::InvalidUsername);
-        }
-        let size = TerminalSize::new(columns, rows).map_err(|_| ConnectError::EmptyDimension)?;
-        let trusted_host_keys = trusted_host_keys
-            .iter()
-            .enumerate()
-            .map(|(index, line)| {
-                HostKey::from_openssh(line)
-                    .map_err(|_| ConnectError::InvalidTrustedHostKey { index })
-            })
-            .collect::<Result<_, _>>()?;
-        let key = ClientKey::from_stored(private_key).map_err(ConnectError::InvalidPrivateKey)?;
-        Ok(Self {
-            endpoint,
-            username: username.to_owned(),
-            key,
-            trusted_host_keys,
-            size,
-        })
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostKeyPrompt {
@@ -106,11 +41,9 @@ impl HostKeyPrompt {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
-    /// Transport and SSH handshake in progress. The initial state; not delivered as a change.
+    /// The channel or mosh session is being set up. The initial state; not delivered as a
+    /// change.
     Connecting,
-    /// Waiting for the user to approve or reject an untrusted host key.
-    AwaitingHostKey(HostKeyPrompt),
-    Authenticating,
     /// Shell open: frames flow and input is accepted.
     Connected,
     Closed(CloseReason),
@@ -155,8 +88,6 @@ impl SessionState {
     fn name(&self) -> &'static str {
         match self {
             Self::Connecting => "Connecting",
-            Self::AwaitingHostKey(_) => "AwaitingHostKey",
-            Self::Authenticating => "Authenticating",
             Self::Connected => "Connected",
             Self::Closed(_) => "Closed",
         }
@@ -166,13 +97,7 @@ impl SessionState {
         use SessionState::*;
         matches!(
             (self, next),
-            (Connecting, AwaitingHostKey(_) | Authenticating | Connected)
-                | (AwaitingHostKey(_), Authenticating)
-                | (Authenticating, Connected)
-                | (
-                    Connecting | AwaitingHostKey(_) | Authenticating | Connected,
-                    Closed(_)
-                )
+            (Connecting, Connected) | (Connecting | Connected, Closed(_))
         )
     }
 }
@@ -200,10 +125,6 @@ pub trait SessionObserver: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    ApproveHostKey {
-        fingerprint: String,
-    },
-    RejectHostKey,
     /// Latest wins; allowed before `Connected` so the PTY opens at the right size.
     Resize(TerminalSize),
     Text(String),
@@ -234,10 +155,6 @@ pub enum SessionError {
     NotConnected,
     #[error("the session is closed")]
     Closed,
-    #[error("no host key is awaiting a decision")]
-    NoHostKeyPrompt,
-    #[error("the fingerprint does not match the presented host key")]
-    HostKeyMismatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -334,28 +251,6 @@ impl SessionHandle {
     /// [`HostHandle::navigate`]: crate::host::HostHandle::navigate
     pub fn client_id(&self) -> Option<&str> {
         self.shared.client_id.as_deref()
-    }
-
-    pub fn approve_host_key(&self, fingerprint: &str) -> Result<(), SessionError> {
-        match &*lock(&self.shared.state) {
-            SessionState::AwaitingHostKey(prompt)
-                if prompt.presented.fingerprint() == fingerprint => {}
-            SessionState::AwaitingHostKey(_) => return Err(SessionError::HostKeyMismatch),
-            SessionState::Closed(_) => return Err(SessionError::Closed),
-            _ => return Err(SessionError::NoHostKeyPrompt),
-        }
-        self.send(Command::ApproveHostKey {
-            fingerprint: fingerprint.to_owned(),
-        })
-    }
-
-    pub fn reject_host_key(&self) -> Result<(), SessionError> {
-        match &*lock(&self.shared.state) {
-            SessionState::AwaitingHostKey(_) => {}
-            SessionState::Closed(_) => return Err(SessionError::Closed),
-            _ => return Err(SessionError::NoHostKeyPrompt),
-        }
-        self.send(Command::RejectHostKey)
     }
 
     pub fn resize(&self, size: TerminalSize) -> Result<(), SessionError> {
@@ -654,10 +549,6 @@ mod tests {
         lock(&recorder.events).clone()
     }
 
-    fn host_key() -> HostKey {
-        HostKey::from_openssh(&ClientKey::generate_ed25519("h").public_key().openssh).unwrap()
-    }
-
     fn frame(full: bool) -> Frame {
         let size = TerminalSize::new(3, 2).unwrap();
         let style = CellStyle::plain(Rgb::new(1, 2, 3), Rgb::new(4, 5, 6));
@@ -690,43 +581,6 @@ mod tests {
     }
 
     #[test]
-    fn host_key_decision_is_bound_to_the_presented_key() {
-        let (recorder, handle, mut driver) = setup(false);
-        assert_eq!(handle.state(), SessionState::Connecting);
-        assert!(
-            events(&recorder).is_empty(),
-            "the initial state is not a change"
-        );
-        assert_eq!(
-            handle.approve_host_key("SHA256:x"),
-            Err(SessionError::NoHostKeyPrompt)
-        );
-
-        let presented = host_key();
-        let prompt = HostKeyPrompt {
-            presented: presented.clone(),
-            previously_trusted: vec![host_key()],
-        };
-        assert_eq!(prompt.verdict(), HostKeyVerdict::Changed);
-        driver
-            .transition(SessionState::AwaitingHostKey(prompt))
-            .unwrap();
-        assert_eq!(
-            handle.approve_host_key(&host_key().fingerprint()),
-            Err(SessionError::HostKeyMismatch)
-        );
-        handle.approve_host_key(&presented.fingerprint()).unwrap();
-        assert_eq!(
-            driver.blocking_next_command(),
-            Command::ApproveHostKey {
-                fingerprint: presented.fingerprint()
-            }
-        );
-        driver.transition(SessionState::Authenticating).unwrap();
-        assert_eq!(handle.reject_host_key(), Err(SessionError::NoHostKeyPrompt));
-    }
-
-    #[test]
     fn input_requires_connected_and_resize_does_not() {
         let (_, handle, mut driver) = setup(false);
         let key = KeyInput::new(Key::Enter, Modifiers::default()).unwrap();
@@ -739,7 +593,7 @@ mod tests {
             Err(SessionError::NotConnected)
         );
         assert_eq!(
-            handle.scroll(ViewportScroll::Top),
+            handle.scroll(ViewportScroll::Bottom),
             Err(SessionError::NotConnected)
         );
         assert_eq!(handle.request_full_frame(), Err(SessionError::NotConnected));
@@ -755,7 +609,6 @@ mod tests {
         handle.resize(size).unwrap();
         assert_eq!(driver.blocking_next_command(), Command::Resize(size));
 
-        driver.transition(SessionState::Authenticating).unwrap();
         driver.transition(SessionState::Connected).unwrap();
         handle.send_text(String::new()).unwrap();
         handle.send_text("ls\n".into()).unwrap();
@@ -779,7 +632,6 @@ mod tests {
     fn frames_notify_once_until_taken_even_from_inside_the_callback() {
         let (recorder, handle, mut driver) = setup(false);
         assert_eq!(driver.publish(frame(true)), Err(PublishError::NotConnected));
-        driver.transition(SessionState::Authenticating).unwrap();
         driver.transition(SessionState::Connected).unwrap();
         assert_eq!(
             driver.publish(frame(false)),
@@ -788,23 +640,19 @@ mod tests {
         driver.publish(frame(true)).unwrap();
         driver.publish(frame(false)).unwrap();
         driver.publish(frame(false)).unwrap();
-        assert_eq!(
-            events(&recorder),
-            ["Authenticating", "Connected", "frame_ready(taken=false)"]
-        );
+        assert_eq!(events(&recorder), ["Connected", "frame_ready(taken=false)"]);
         let taken = handle.take_frame().unwrap();
         assert!(taken.frame.is_full());
         driver.publish(frame(false)).unwrap();
-        assert_eq!(events(&recorder).len(), 4);
+        assert_eq!(events(&recorder).len(), 3);
 
         // A renderer that takes inside the callback re-arms the notification immediately.
         let (recorder, _handle, mut driver) = setup(true);
-        driver.transition(SessionState::Authenticating).unwrap();
         driver.transition(SessionState::Connected).unwrap();
         driver.publish(frame(true)).unwrap();
         driver.publish(frame(false)).unwrap();
         assert_eq!(
-            events(&recorder)[2..],
+            events(&recorder)[1..],
             ["frame_ready(taken=true)", "frame_ready(taken=true)"]
         );
     }
@@ -812,29 +660,18 @@ mod tests {
     #[test]
     fn invalid_transitions_are_rejected_without_callbacks() {
         let (recorder, _handle, mut driver) = setup(false);
-        driver.transition(SessionState::Authenticating).unwrap();
-        assert_eq!(
-            driver.transition(SessionState::AwaitingHostKey(HostKeyPrompt {
-                presented: host_key(),
-                previously_trusted: Vec::new(),
-            })),
-            Err(TransitionError {
-                from: "Authenticating",
-                to: "AwaitingHostKey"
-            })
-        );
         driver.transition(SessionState::Connected).unwrap();
         assert_eq!(
-            driver.transition(SessionState::Authenticating),
+            driver.transition(SessionState::Connected),
             Err(TransitionError {
                 from: "Connected",
-                to: "Authenticating"
+                to: "Connected"
             })
         );
         driver.close(CloseReason::Disconnected);
-        assert!(driver.transition(SessionState::Authenticating).is_err());
+        assert!(driver.transition(SessionState::Connected).is_err());
         driver.close(CloseReason::Failed(SessionFailure::TimedOut));
-        assert_eq!(events(&recorder), ["Authenticating", "Connected", "Closed"]);
+        assert_eq!(events(&recorder), ["Connected", "Closed"]);
     }
 
     #[test]
@@ -857,7 +694,6 @@ mod tests {
         let weak: Weak<Recorder> = Arc::downgrade(&recorder);
         *lock(&recorder.handle) = None;
         drop(recorder);
-        driver.transition(SessionState::Authenticating).unwrap();
         driver.transition(SessionState::Connected).unwrap();
         driver.publish(frame(true)).unwrap();
         handle.disconnect();
@@ -874,7 +710,6 @@ mod tests {
             handle.resize(TerminalSize::new(1, 1).unwrap()),
             Err(SessionError::Closed)
         );
-        assert_eq!(handle.reject_host_key(), Err(SessionError::Closed));
         handle.disconnect();
         assert!(handle.take_frame().unwrap().frame.is_full());
     }
@@ -956,47 +791,6 @@ mod tests {
             SessionState::Closed(CloseReason::Failed(SessionFailure::Internal(
                 "session task ended without closing".into()
             )))
-        );
-    }
-
-    #[test]
-    fn connect_request_validates_every_field() {
-        let key = ClientKey::generate_ed25519("k").to_stored();
-        let trusted = vec![host_key().info().openssh];
-        let request = ConnectRequest::new("host", 22, "dev", &key, &trusted, 80, 24).unwrap();
-        assert_eq!(request.endpoint.host(), "host");
-        assert_eq!(request.endpoint.port(), 22);
-        assert_eq!(request.trusted_host_keys.len(), 1);
-        assert_eq!(request.size, TerminalSize::new(80, 24).unwrap());
-        assert!(!format!("{request:?}").contains("OPENSSH"));
-
-        let err = |host, port, user, key: &[u8], trusted: &[String], c, r| {
-            ConnectRequest::new(host, port, user, key, trusted, c, r).unwrap_err()
-        };
-        assert_eq!(
-            err("", 22, "a", &key, &[], 80, 24),
-            ConnectError::Endpoint(EndpointError::InvalidHost)
-        );
-        assert_eq!(
-            err("h", 0, "a", &key, &[], 80, 24),
-            ConnectError::Endpoint(EndpointError::InvalidPort)
-        );
-        assert_eq!(
-            err("h", 22, "", &key, &[], 80, 24),
-            ConnectError::InvalidUsername
-        );
-        assert_eq!(
-            err("h", 22, "a", &key, &[], 0, 24),
-            ConnectError::EmptyDimension
-        );
-        let bad_trust = vec![trusted[0].clone(), "nope".into()];
-        assert_eq!(
-            err("h", 22, "a", &key, &bad_trust, 80, 24),
-            ConnectError::InvalidTrustedHostKey { index: 1 }
-        );
-        assert_eq!(
-            err("h", 22, "a", b"junk", &[], 80, 24),
-            ConnectError::InvalidPrivateKey(KeyError::Malformed)
         );
     }
 }

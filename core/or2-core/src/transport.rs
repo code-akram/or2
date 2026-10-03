@@ -4,7 +4,7 @@
 //! A transport turns an [`Endpoint`] into a byte stream. Its `Stream` bound is exactly the bound
 //! `russh::client::connect_stream` requires, so any transport can carry an SSH connection.
 //! [`DirectTcp`] is the one stream implementation so far (it resolves a name once, retrying a
-//! `.local` one, and races what it resolved: see [`dial`]). [`race`] connects to a host's several
+//! `.local` one, and races what it resolved: see [`dial`]). [`race_with`] connects to a host's several
 //! addresses over any transport, each with its own time limit. Jump hosts and the Android network binding are added as
 //! further implementations or methods when those milestones need them.
 //!
@@ -122,7 +122,7 @@ pub const RACE_STAGGER: Duration = Duration::from_millis(250);
 /// never consume the whole budget while the others have already failed.
 pub const ADDRESS_TIMEOUT: Duration = Duration::from_secs(6);
 
-/// The timing of a [`race`].
+/// The timing of a [`race_with`].
 #[derive(Debug, Clone, Copy)]
 pub struct RaceTiming {
     /// See [`RACE_STAGGER`].
@@ -140,7 +140,7 @@ impl Default for RaceTiming {
     }
 }
 
-/// The winner of a [`race`]: its position in the address list, its stream and the remote
+/// The winner of a [`race_with`]: its position in the address list, its stream and the remote
 /// address the transport says that stream reached ([`Transport::peer_addr`]).
 #[derive(Debug)]
 pub struct Raced<S> {
@@ -367,30 +367,13 @@ where
 }
 
 /// Connects to the first of `addresses` that answers. Address 0 starts at once; each next one
-/// starts `stagger` after the previous one started, or immediately when that previous one
-/// fails. The first connection wins and every other attempt is dropped, so a loser never
+/// starts `timing.stagger` after the previous one started, or immediately when that previous
+/// one fails. The first connection wins and every other attempt is dropped, so a loser never
 /// keeps a socket. Dropping the future cancels all attempts. Each address has
-/// [`ADDRESS_TIMEOUT`] to answer (its own failure, `no answer within 6 s`), so the race always
-/// ends: the caller's own timeout is the overall bound, not the only one.
-pub async fn race<T: Transport>(
-    transport: &Arc<T>,
-    addresses: &[Endpoint],
-    stagger: Duration,
-) -> Result<Raced<T::Stream>, RaceFailure> {
-    race_with(
-        transport,
-        addresses,
-        RaceTiming {
-            stagger,
-            ..RaceTiming::default()
-        },
-        None,
-    )
-    .await
-}
-
-/// [`race`] with the full [`RaceTiming`], and optionally a [`RaceReport`] that follows every
-/// address as the race goes (reset at the start, finished when the race ends).
+/// `timing.address_timeout` to answer (its own failure, `no answer within 6 s`), so the race
+/// always ends: the caller's own timeout is the overall bound, not the only one. `report`, if
+/// given, follows every address as the race goes (reset at the start, finished when the race
+/// ends).
 pub async fn race_with<T: Transport>(
     transport: &Arc<T>,
     addresses: &[Endpoint],

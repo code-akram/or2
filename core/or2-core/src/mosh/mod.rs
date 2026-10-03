@@ -2,7 +2,7 @@
 //! `mosh-server`. M3 serves it as a terminal transport on a host connection (`ssh::mosh_session`).
 //!
 //! ```text
-//! bootstrap ──▶ MoshParams ──▶ start ──▶ SessionHandle (standard lifecycle and frames)
+//! bootstrap ──▶ MoshParams ──▶ run_session on a SessionDriver (standard lifecycle and frames)
 //!   (RemoteHost exec:                │
 //!    mosh-server new)                ▼
 //!                       driver thread ── ssp::Session (crypto, timers, state sync; no I/O)
@@ -21,13 +21,18 @@
 
 #![forbid(unsafe_code)]
 
-pub mod bootstrap;
+pub(crate) mod bootstrap;
 mod driver;
-pub mod ghostty;
+pub(crate) mod ghostty;
 mod link;
-pub mod ssp;
+pub(crate) mod ssp;
 
 pub use bootstrap::{BootstrapError, MoshKey, MoshParams, bootstrap, terminate};
-pub use driver::{CONNECT_TIMEOUT, HealthObserver, LinkControl, start, start_with};
-pub(crate) use driver::{GOODBYE_TIMEOUT, Plan, run_session};
+pub use driver::CONNECT_TIMEOUT;
+pub(crate) use driver::GOODBYE_TIMEOUT;
+/// The session driver itself, for the live test against a real `mosh-server`.
+#[cfg(feature = "test-support")]
+pub use driver::{Ended, Plan, run_session};
+#[cfg(not(feature = "test-support"))]
+pub(crate) use driver::{Plan, run_session};
 pub use ssp::session::LinkHealth;

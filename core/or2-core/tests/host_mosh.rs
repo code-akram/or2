@@ -34,7 +34,7 @@ use or2_core::mosh::LinkHealth;
 use or2_core::session::{
     CloseReason, SessionFailure, SessionHandle, SessionObserver, SessionState,
 };
-use or2_core::ssh::{HostOptions, connect_host_with_datagrams};
+use or2_core::ssh::{HostOptions, connect_host_with};
 use or2_core::term::TerminalSize;
 use or2_core::transport::DirectTcp;
 
@@ -248,7 +248,7 @@ impl Live {
         let proxy = Proxy::new(sshd.port);
         let (tx, states) = mpsc::channel();
         let log = Log::default();
-        let host = connect_host_with_datagrams(
+        let (host, _) = connect_host_with(
             Arc::new(DirectTcp),
             Arc::new(udp.clone()),
             request(&key, proxy.port, &sshd.host),
@@ -282,7 +282,7 @@ impl Live {
     /// A second, direct connection to the same sshd, like the one a restarted app makes.
     fn reconnect(&self) -> (HostHandle, mpsc::Receiver<HostState>) {
         let (tx, states) = mpsc::channel();
-        let host = connect_host_with_datagrams(
+        let (host, _) = connect_host_with(
             Arc::new(DirectTcp),
             Arc::new(TestUdp::default()),
             request(&self.key, self.sshd.port, &self.sshd.host),
@@ -314,7 +314,7 @@ impl Live {
         self.open_raw_within(tag, target, transport, size, None)
     }
 
-    /// [`Live::open_raw`] with a budget for the whole mosh start (`open_terminal_within`).
+    /// [`Live::open_raw`] with a budget for the whole mosh start (`open_terminal`).
     fn open_raw_within(
         &self,
         tag: &str,
@@ -327,7 +327,7 @@ impl Live {
         let health = Arc::new(Mutex::new(Vec::new()));
         let handle = self
             .host
-            .open_terminal_within(
+            .open_terminal(
                 target,
                 transport,
                 TerminalSize::new(size.0, size.1).unwrap(),
@@ -495,10 +495,11 @@ fn losing_the_host_connection_keeps_the_mosh_session_alive_and_usable() {
     mosh.wait("roamed-44");
     assert_eq!(
         live.host
-            .open_terminal_with(
+            .open_terminal(
                 TerminalTarget::Shell,
                 TerminalTransport::Mosh,
                 TerminalSize::new(80, 24).unwrap(),
+                None,
                 Arc::new(SessionObs {
                     tag: "late".into(),
                     tx: mpsc::channel().0,

@@ -32,7 +32,7 @@ use or2_core::host::{
 };
 use or2_core::keys::ClientKey;
 use or2_core::session::{CloseReason, SessionFailure, SessionObserver, SessionState};
-use or2_core::ssh::{HostOptions, connect_host_with_datagrams};
+use or2_core::ssh::{HostOptions, connect_host_with};
 use or2_core::term::TerminalSize;
 use or2_core::transport::DirectTcp;
 
@@ -209,7 +209,7 @@ impl Rig {
     fn connect(&self) -> (HostHandle, Duration, Instant) {
         let (tx, states) = mpsc::channel();
         let started = Instant::now();
-        let host = connect_host_with_datagrams(
+        let (host, _) = connect_host_with(
             Arc::new(DirectTcp),
             Arc::new(TestUdp::default()),
             HostConnectRequest::new(
@@ -389,7 +389,7 @@ fn open_on_pane(
 ) -> (or2_core::session::SessionHandle, Duration) {
     let (tx, states) = mpsc::channel();
     let terminal = host
-        .open_terminal_within(
+        .open_terminal(
             TerminalTarget::Herdr {
                 session: None,
                 pane_id: Some(pane.into()),
@@ -425,7 +425,7 @@ fn an_unreachable_host_never_delays_another_hosts_connection_or_inbox() {
 
     let (tx, states) = mpsc::channel();
     let key = ClientKey::generate_ed25519("");
-    let stuck = connect_host_with_datagrams(
+    let (stuck, _) = connect_host_with(
         Arc::new(DirectTcp),
         Arc::new(TestUdp::default()),
         HostConnectRequest::new(
@@ -469,7 +469,7 @@ fn a_terminal_on_a_vanished_pane_fails_and_leaves_no_mosh_server_behind() {
     for transport in [TerminalTransport::Mosh, TerminalTransport::Ssh] {
         let (tx, states) = mpsc::channel();
         let terminal = host
-            .open_terminal_within(
+            .open_terminal(
                 TerminalTarget::Herdr {
                     session: None,
                     pane_id: Some("w9:p9".into()),
@@ -532,7 +532,7 @@ fn ssh_terminal_on_a_pane() -> Duration {
     let started = Instant::now();
     let (tx, states) = mpsc::channel();
     let terminal = host
-        .open_terminal_within(
+        .open_terminal(
             TerminalTarget::Herdr {
                 session: None,
                 pane_id: Some("w2:p1".into()),
@@ -580,7 +580,7 @@ fn open_pending(
 ) {
     let (tx, states) = mpsc::channel();
     let terminal = host
-        .open_terminal_within(
+        .open_terminal(
             TerminalTarget::Herdr {
                 session: None,
                 pane_id: Some("w2:p1".into()),

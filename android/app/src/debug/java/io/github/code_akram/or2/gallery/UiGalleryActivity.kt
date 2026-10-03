@@ -39,7 +39,6 @@ import io.github.code_akram.or2.data.HostRecord
 import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.CloseReason
-import io.github.code_akram.or2.ffi.ConnectRequest
 import io.github.code_akram.or2.ffi.HerdrAgent
 import io.github.code_akram.or2.ffi.HerdrSessionInfo
 import io.github.code_akram.or2.ffi.HerdrTab
@@ -56,7 +55,6 @@ import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TmuxSession
 import io.github.code_akram.or2.ffi.contractProbeSession
-import io.github.code_akram.or2.ffi.generateEd25519Key
 import io.github.code_akram.or2.ffi.parsePairPayload
 import io.github.code_akram.or2.pair.AddHostSheet
 import io.github.code_akram.or2.pair.CameraAccess
@@ -244,7 +242,7 @@ class UiGalleryActivity : ComponentActivity() {
             "terminal" -> Terminal()
             "terminal-tmux" -> Terminal(target = "tmux main", transport = Transport.MOSH)
             "terminal-long" -> Terminal(host = "build-box-staging-eu-west", target = "herdr personal w1:p2", transport = Transport.MOSH)
-            "terminal-stale" -> Terminal(target = "tmux main", transport = Transport.MOSH, health = LinkHealth(12_300uL, 12_300uL))
+            "terminal-stale" -> Terminal(target = "tmux main", transport = Transport.MOSH, health = LinkHealth(12_300uL))
             "terminal-closed" -> Terminal(target = "tmux main", cardState = SessionState.Closed(CloseReason.Disconnected))
             "terminal-arrowpad" -> Terminal(pad = true)
             "terminal-arrowpad-text" -> Terminal(pad = true, dense = true)
@@ -295,21 +293,21 @@ class UiGalleryActivity : ComponentActivity() {
     )
 
     private fun agent(pane: String, status: AgentStatus, name: String, cwd: String, tab: String = "w1:t1", workspace: String = "w1") =
-        HerdrAgent(pane, tab, workspace, name, "claude", name, status, cwd, null, false, 1uL, "term_$pane")
+        HerdrAgent(pane, tab, workspace, name, "claude", name, status, cwd, 1uL, "term_$pane")
 
     private fun view(vararg agents: HerdrAgent) = HerdrView(
-        1uL, 22u, null,
-        listOf(HerdrWorkspace("w1", 1u, "or2", true, AgentStatus.BLOCKED), HerdrWorkspace("w2", 2u, "docs", false, AgentStatus.WORKING)),
-        listOf(HerdrTab("w1:t1", "w1", 1u, "ui-polish", true, AgentStatus.BLOCKED), HerdrTab("w2:t1", "w2", 1u, "readme", false, AgentStatus.WORKING)),
+        1uL, null,
+        listOf(HerdrWorkspace("w1", 1u, "or2"), HerdrWorkspace("w2", 2u, "docs")),
+        listOf(HerdrTab("w1:t1", "w1", 1u, "ui-polish"), HerdrTab("w2:t1", "w2", 1u, "readme")),
         emptyList(), agents.toList(),
     )
 
-    private val caps = HostCapabilities("/usr/bin/tmux", "/home/dev/.local/bin/herdr", null, "C.UTF-8", listOf(
+    private val caps = HostCapabilities("/usr/bin/tmux", "/home/dev/.local/bin/herdr", null, listOf(
         HerdrSessionInfo("personal", true, true), HerdrSessionInfo("work", true, false), HerdrSessionInfo("archive", false, false)))
     /** A host with more herdr sessions than fit: the picker at full height, its list scrolling inside the sheet. */
     private val manyCaps = caps.copy(herdrSessions = (1..30).map { HerdrSessionInfo("session-$it", it % 3 != 0, it == 1) })
     private val tmux = TmuxList.Loaded(listOf(
-        TmuxSession("main", 3u, 1u, 0L, 30L), TmuxSession("build", 1u, 0u, 0L, 20L), TmuxSession("scratch", 2u, 0u, 0L, 10L)))
+        TmuxSession("main", 3u, 1u), TmuxSession("build", 1u, 0u), TmuxSession("scratch", 2u, 0u)))
 
     private fun demoGrid(columns: Int = 55, rows: Int = 60) = TerminalGrid().also { check(it.apply(terminalDemoFrame(columns, rows))) }
 
@@ -477,24 +475,18 @@ class UiGalleryActivity : ComponentActivity() {
 
     private fun startProbe(): Session {
         probe?.let { return it }
-        val key = generateEd25519Key("gallery")
-        try {
-            return contractProbeSession(
-                ConnectRequest("probe.invalid", 22u, "probe", key.privateKey, emptyList(), 40u, 12u),
-                object : SessionListener {
-                    override fun onStateChanged(state: SessionState) {
-                        probeState.value = state
-                        if (state is SessionState.AwaitingHostKeyDecision) runOnUiThread { probe?.approveHostKey(state.presented.fingerprint) }
-                    }
-                    override fun onFrameReady() { probeFrames.trySend(Unit) }
-                    override fun onLinkHealth(health: LinkHealth) = Unit
-                    override fun onClipboardWrite(text: String) = Unit
-                    override fun onServerPid(pid: UInt) = Unit
-                },
-            ).also { probe = it }
-        } finally {
-            key.privateKey.fill(0)
-        }
+        return contractProbeSession(
+            40u, 12u,
+            object : SessionListener {
+                override fun onStateChanged(state: SessionState) {
+                    probeState.value = state
+                }
+                override fun onFrameReady() { probeFrames.trySend(Unit) }
+                override fun onLinkHealth(health: LinkHealth) = Unit
+                override fun onClipboardWrite(text: String) = Unit
+                override fun onServerPid(pid: UInt) = Unit
+            },
+        ).also { probe = it }
     }
 
     /**

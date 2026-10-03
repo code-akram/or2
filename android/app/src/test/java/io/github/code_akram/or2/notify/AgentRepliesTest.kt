@@ -129,8 +129,8 @@ class AgentRepliesTest {
         val replies = AgentReplies(this, admit, { k, a, t -> sent += k to t; agents += a; answer() }, alerts::replied)
         val watch = Any()
         fun view(status: AgentStatus, seq: ULong) = HerdrView(
-            1uL, 22u, null, emptyList(), emptyList(), emptyList(),
-            listOf(HerdrAgent(key.paneId, "w1:t1", "w1", "Claude Code", "claude", "Claude Code", status, "/work", null, false, seq, "term_1", claude)),
+            1uL, null, emptyList(), emptyList(), emptyList(),
+            listOf(HerdrAgent(key.paneId, "w1:t1", "w1", "Claude Code", "claude", "Claude Code", status, "/work", seq, "term_1", claude)),
         )
         alerts.viewChanged(watch, key.hostId, "Workstation", key.session, view(AgentStatus.WORKING, 1u))
         alerts.viewChanged(watch, key.hostId, "Workstation", key.session, view(AgentStatus.BLOCKED, 2u))
@@ -221,8 +221,8 @@ class AgentRepliesTest {
         val alerts = AgentAlerts(sink)
         val watch = Any()
         fun view(status: AgentStatus, seq: ULong) = HerdrView(
-            1uL, 22u, null, emptyList(), emptyList(), emptyList(),
-            listOf(HerdrAgent(key.paneId, "w1:t1", "w1", "Claude Code", "claude", "Claude Code", status, "/work", null, false, seq, "term_1", claude)),
+            1uL, null, emptyList(), emptyList(), emptyList(),
+            listOf(HerdrAgent(key.paneId, "w1:t1", "w1", "Claude Code", "claude", "Claude Code", status, "/work", seq, "term_1", claude)),
         )
         alerts.viewChanged(watch, key.hostId, "Workstation", key.session, view(AgentStatus.WORKING, 1u))
         alerts.viewChanged(watch, key.hostId, "Workstation", key.session, view(AgentStatus.BLOCKED, 2u))

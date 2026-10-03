@@ -13,7 +13,7 @@
 //! `discovery` lists sessions and finds a session's socket with `session list --json`
 //! ([`list_sessions`] is public, for the capability probe), `project` turns a
 //! `session.snapshot` into the [`view`], and `watch` keeps it current from subscribe, snapshot
-//! and invalidating events. Everything reaches herdr through [`RemoteHost`].
+//! and invalidating events. Everything reaches herdr through [`RemoteHost`](crate::remote::RemoteHost).
 
 pub mod generated;
 pub mod view;
@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::mpsc;
 
-use crate::remote::{RemoteError, RemoteHost};
+use crate::remote::RemoteError;
 
 pub(crate) use discovery::parse_listing;
 pub use discovery::{Directory, DiscoveryError, SessionEntry, list_sessions};
@@ -44,10 +44,7 @@ pub use navigate::navigate_in;
 pub use reply::{AgentIdentity, MAX_REPLY_BYTES, OPEN_THE_PANE, Reply, ReplyRoute, reply_in};
 pub use scroll::{ScrollOffsets, next_offset, scroll_pane_in};
 pub use view::{Agent, AgentSession, AgentStatus, HerdrView, Pane, Tab, Workspace};
-/// The watch's intervals, for integration tests that cannot wait for the production ones.
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-pub use watch::Timing;
+pub use watch::{Timing, run_in};
 
 /// Why there is no live view. `NotInstalled` and `IncompatibleProtocol` are final;
 /// `NotRunning` and `Failed` are retried while the host is connected.
@@ -230,90 +227,6 @@ impl Drop for HerdrWatchDriver {
     }
 }
 
-/// Starts a watch of `session` (`None` is herdr's default session) on the process-wide
-/// runtime. `herdr` is the absolute path from the capability probe; a caller whose probe
-/// found no herdr reports `Unavailable { NotInstalled }` itself instead of calling this. The
-/// host connection driver creates the [`channel`] itself and calls [`run`], so the handle can
-/// be returned synchronously.
-pub fn watch<H: RemoteHost>(
-    host: Arc<H>,
-    herdr: String,
-    session: Option<String>,
-    observer: Arc<dyn HerdrObserver>,
-) -> HerdrWatchHandle {
-    let (handle, driver) = channel(observer);
-    crate::ssh::runtime().spawn(run(host, herdr, session, driver));
-    handle
-}
-
-/// [`watch`] with the intervals of `timing` instead of the contract's, for integration tests
-/// (feature `test-support`).
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-pub fn watch_with_timing<H: RemoteHost>(
-    host: Arc<H>,
-    herdr: String,
-    session: Option<String>,
-    observer: Arc<dyn HerdrObserver>,
-    timing: Timing,
-) -> HerdrWatchHandle {
-    let (handle, driver) = channel(observer);
-    crate::ssh::runtime().spawn(watch::run(host, herdr, session, driver, timing));
-    handle
-}
-
-/// Drives `driver` until it is stopped or the host closes, then closes it. The host driver
-/// that owns this task ends it on host close by aborting or dropping it (the driver's `Drop`
-/// delivers `Closed`): a watch learns of a lost host only from a failing call, and one parked
-/// at a final `Unavailable` makes none. `herdr` is the
-/// absolute path from the capability probe. The session's socket is not an input: the client
-/// finds it with `<herdr> session list --json` (`socket_path`), so it never leaves the herdr
-/// module. See [`watch`](self::watch) for the protocol: subscribe, snapshot, invalidating
-/// events, `events_lost` recovery, and the retry rules for each [`HerdrUnavailable`].
-pub async fn run<H: RemoteHost>(
-    host: Arc<H>,
-    herdr: String,
-    session: Option<String>,
-    driver: HerdrWatchDriver,
-) {
-    watch::run(host, herdr, session, driver, watch::Timing::default()).await;
-}
-
-/// [`run`] with the connection's own [`Directory`]: the watch takes its first socket from it
-/// (the probe's listing, so a watch costs no `session list`) and re-discovers only after a
-/// failure.
-pub async fn run_in<H: RemoteHost>(
-    host: Arc<H>,
-    herdr: String,
-    directory: Arc<Directory>,
-    session: Option<String>,
-    driver: HerdrWatchDriver,
-) {
-    watch::run_in(
-        host,
-        herdr,
-        directory,
-        session,
-        driver,
-        watch::Timing::default(),
-    )
-    .await;
-}
-
-/// Focuses `pane_id` in `session` with one `pane.focus` request on a short-lived stream.
-/// `herdr` is the absolute path from the capability probe. It changes what the user's herdr
-/// clients show. A pane that no longer exists is [`HerdrError::PaneNotFound`]. Reads the
-/// session listing for the socket every time; a host connection uses [`focus_pane_in`] with
-/// its [`Directory`] instead.
-pub async fn focus_pane<H: RemoteHost>(
-    host: &H,
-    herdr: &str,
-    session: Option<&str>,
-    pane_id: &str,
-) -> Result<(), HerdrError> {
-    focus_pane_in(host, herdr, &Directory::new(), session, pane_id).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,7 +242,6 @@ mod tests {
     fn view(version: u64) -> HerdrView {
         HerdrView {
             version,
-            protocol: 22,
             focused_pane_id: None,
             workspaces: Vec::new(),
             tabs: Vec::new(),

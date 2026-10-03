@@ -26,7 +26,6 @@
 //! bootstrap `mosh-server`, so **losing the connection leaves it running**; a user disconnect
 //! still closes it (`Disconnected`, with mosh's shutdown handshake so the server exits).
 
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -35,10 +34,12 @@ use tokio::time::Instant;
 
 use crate::herdr::{self, HerdrObserver, HerdrWatchDriver, HerdrWatchHandle};
 use crate::keys::{ClientKey, KeyError};
+use crate::remote::RemoteError;
 use crate::session::{
     self, CloseReason, HostKeyPrompt, SessionDriver, SessionHandle, SessionObserver,
 };
 use crate::term::TerminalSize;
+use crate::tmux::TmuxError;
 use crate::transport::{Endpoint, EndpointError};
 use crate::trust::HostKey;
 
@@ -259,7 +260,7 @@ impl TerminalTarget {
 
 /// What the host offers, found by a probe per connection (`herdr_sessions` is re-read on
 /// every query). Programs are absolute paths; pass
-/// them to `herdr::run`/`watch`/`focus_pane` and the tmux and mosh commands. A missing program
+/// them to the herdr client, the tmux and the mosh commands. A missing program
 /// is `None`, and whoever would use it reports `NotInstalled`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostCapabilities {
@@ -354,6 +355,73 @@ pub enum HostError {
     TooLarge,
 }
 
+/// A failure to reach the host: `Closed` once the connection is gone, else a failed command.
+impl From<RemoteError> for HostError {
+    fn from(error: RemoteError) -> Self {
+        match error {
+            RemoteError::Closed => Self::Closed,
+            error => Self::CommandFailed {
+                message: error.to_string(),
+            },
+        }
+    }
+}
+
+impl From<TmuxError> for HostError {
+    fn from(error: TmuxError) -> Self {
+        match error {
+            TmuxError::Remote(error) => error.into(),
+            TmuxError::Failed(message) => Self::CommandFailed { message },
+        }
+    }
+}
+
+impl From<herdr::HerdrError> for HostError {
+    fn from(error: herdr::HerdrError) -> Self {
+        match error {
+            herdr::HerdrError::PaneNotFound => Self::PaneNotFound,
+            herdr::HerdrError::Remote(error) => error.into(),
+            error @ herdr::HerdrError::Failed(_) => Self::CommandFailed {
+                message: error.to_string(),
+            },
+        }
+    }
+}
+
+/// A program the capability probe looks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Program {
+    Tmux,
+    Herdr,
+    MoshServer,
+}
+
+impl Program {
+    /// Its name, as [`HostError::NotInstalled`] reports it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Tmux => "tmux",
+            Self::Herdr => "herdr",
+            Self::MoshServer => "mosh-server",
+        }
+    }
+}
+
+impl HostCapabilities {
+    /// The absolute path of `program`, or [`HostError::NotInstalled`] when the probe found none.
+    pub fn program(&self, program: Program) -> Result<&str, HostError> {
+        match program {
+            Program::Tmux => &self.tmux,
+            Program::Herdr => &self.herdr,
+            Program::MoshServer => &self.mosh_server,
+        }
+        .as_deref()
+        .ok_or_else(|| HostError::NotInstalled {
+            program: program.name().into(),
+        })
+    }
+}
+
 /// The largest image [`HostHandle::upload_image`] sends (20 MiB).
 pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
@@ -424,7 +492,7 @@ pub enum HostCommand {
         reply: oneshot::Sender<Result<Vec<TmuxSession>, HostError>>,
     },
     /// Focus `pane_id` in herdr `session` with the herdr path from the probe
-    /// ([`herdr::focus_pane`]). Reply `NotInstalled { program: "herdr" }` with no herdr found,
+    /// ([`herdr::focus_pane_in`]). Reply `NotInstalled { program: "herdr" }` with no herdr found,
     /// `PaneNotFound` when herdr says the pane is gone, `CommandFailed` for other failures.
     FocusHerdrPane {
         session: Option<String>,
@@ -448,6 +516,8 @@ pub enum HostCommand {
     ScrollTarget {
         target: TerminalTarget,
         pane_id: Option<String>,
+        /// The scrolling terminal's tmux client id (validated; [`SessionHandle::client_id`]).
+        client_id: Option<String>,
         scroll: TargetScroll,
         reply: oneshot::Sender<Result<(), HostError>>,
     },
@@ -494,7 +564,7 @@ pub enum HostCommand {
         extension: String,
         reply: oneshot::Sender<Result<UploadedImage, HostError>>,
     },
-    /// Run [`herdr::run`] (or an equivalent) on `driver`, with the herdr path from the probe.
+    /// Run [`herdr::run_in`] (or an equivalent) on `driver`, with the herdr path from the probe.
     /// The session name is validated. With no herdr found, move `driver` to
     /// `Unavailable { NotInstalled }` and wait for its stop.
     WatchHerdr {
@@ -525,8 +595,6 @@ struct Shared {
     state: Mutex<HostState>,
     /// See [`UserCancel`].
     user_cancel: watch::Sender<bool>,
-    /// The remote address the winning TCP connection reached; set before `Connected`.
-    peer: Mutex<Option<SocketAddr>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -537,7 +605,6 @@ pub fn channel(observer: Arc<dyn HostObserver>) -> (HostHandle, HostDriver) {
     let shared = Arc::new(Shared {
         state: Mutex::new(HostState::Connecting),
         user_cancel: watch::channel(false).0,
-        peer: Mutex::new(None),
     });
     let (sender, receiver) = mpsc::unbounded_channel();
     (
@@ -571,15 +638,6 @@ impl Drop for HostHandle {
 impl HostHandle {
     pub fn state(&self) -> HostState {
         lock(&self.shared.state).clone()
-    }
-
-    /// The remote address the host's TCP connection actually reached (the winner of address
-    /// racing, after name resolution), once it is `Connected`; `None` before that, and for a
-    /// transport that cannot say. This is the address mosh must send its UDP datagrams to:
-    /// the host name may resolve to other addresses, now or later, which are not this
-    /// session's `mosh-server`. Only the IP is meaningful for UDP (the port is the SSH one).
-    pub fn peer_addr(&self) -> Option<SocketAddr> {
-        *lock(&self.shared.peer)
     }
 
     pub fn approve_host_key(&self, fingerprint: &str) -> Result<(), HostError> {
@@ -616,35 +674,17 @@ impl HostHandle {
         let _ = self.commands.send(HostCommand::Disconnect);
     }
 
-    /// Opens a terminal session on the host. The returned session starts in `Connecting` and
-    /// reaches `Connected` once its channel is open; failures close it.
+    /// Opens a terminal session on the host over `transport`. The returned session starts in
+    /// `Connecting` and reaches `Connected` once its channel is open (SSH) or the server's first
+    /// datagram authenticates (mosh); failures close it.
+    ///
+    /// `budget` is for a mosh terminal: it must be `Connected` within `budget` **of this call**
+    /// (the deadline is absolute, so the probe, the pane focus, the bootstrap, the socket and
+    /// the first authenticated datagram all spend from the same allowance), else it closes
+    /// `Failed { TimedOut }` after stopping the server it may have started. `None` keeps the
+    /// host's own `mosh_connect_timeout`, counted from the end of the bootstrap. Ignored for SSH
+    /// terminals.
     pub fn open_terminal(
-        &self,
-        target: TerminalTarget,
-        size: TerminalSize,
-        observer: Arc<dyn SessionObserver>,
-    ) -> Result<SessionHandle, HostError> {
-        self.open_terminal_with(target, TerminalTransport::Ssh, size, observer)
-    }
-
-    /// [`HostHandle::open_terminal`] with the choice of how the terminal reaches the host.
-    pub fn open_terminal_with(
-        &self,
-        target: TerminalTarget,
-        transport: TerminalTransport,
-        size: TerminalSize,
-        observer: Arc<dyn SessionObserver>,
-    ) -> Result<SessionHandle, HostError> {
-        self.open_terminal_within(target, transport, size, None, observer)
-    }
-
-    /// [`HostHandle::open_terminal_with`] with a budget for a mosh terminal: it must be
-    /// `Connected` within `budget` **of this call** (the deadline is absolute, so the probe,
-    /// the pane focus, the bootstrap, the socket and the first authenticated datagram all
-    /// spend from the same allowance), else it closes `Failed { TimedOut }` after stopping
-    /// the server it may have started. `None` keeps the host's own `mosh_connect_timeout`,
-    /// counted from the end of the bootstrap. Ignored for SSH terminals.
-    pub fn open_terminal_within(
         &self,
         target: TerminalTarget,
         transport: TerminalTransport,
@@ -673,28 +713,22 @@ impl HostHandle {
     /// The host's programs and locale, probed once per connection (the driver caches them),
     /// with herdr's session list read afresh on every call.
     pub async fn capabilities(&self) -> Result<HostCapabilities, HostError> {
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
-        self.send(HostCommand::Capabilities { reply })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::Capabilities { reply })
+            .await
     }
 
     /// The path of `mosh-server` on the host, `None` when it is not installed. Resolved by the
     /// program probe alone (one exec round trip, cached per connection), never by herdr's
     /// session listing, so a transport choice that awaits it is not held up by a slow herdr.
     pub async fn mosh_server(&self) -> Result<Option<String>, HostError> {
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
-        self.send(HostCommand::MoshServer { reply })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::MoshServer { reply })
+            .await
     }
 
     /// tmux sessions, most recently active first; empty when no tmux server runs.
     pub async fn list_tmux_sessions(&self) -> Result<Vec<TmuxSession>, HostError> {
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
-        self.send(HostCommand::ListTmux { reply })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::ListTmux { reply })
+            .await
     }
 
     /// Focuses `pane_id` in herdr `session` (`None` is the default session): herdr's focus is
@@ -708,19 +742,17 @@ impl HostHandle {
         session: Option<String>,
         pane_id: String,
     ) -> Result<(), HostError> {
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
         if !session.as_deref().is_none_or(is_valid_herdr_session_name)
             || !is_valid_herdr_pane_id(&pane_id)
         {
             return Err(HostError::InvalidName);
         }
-        self.send(HostCommand::FocusHerdrPane {
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::FocusHerdrPane {
             session,
             pane_id,
             reply,
-        })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        })
+        .await
     }
 
     /// Stops the `mosh-server` with process id `pid` on the host, which an earlier client left
@@ -731,13 +763,14 @@ impl HostHandle {
     /// touched. `Err` when the stop could not run (the host had no free channel, answered too
     /// slowly or closed): the caller keeps the pid and tries again on the next connection.
     pub async fn stop_mosh_server(&self, pid: u32) -> Result<(), HostError> {
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
         if pid == 0 {
             return Err(HostError::InvalidName);
         }
-        self.send(HostCommand::StopMoshServer { pid, reply })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::StopMoshServer {
+            pid,
+            reply,
+        })
+        .await
     }
 
     /// Scrolls the history of what `target` shows, without the mouse (contracts.md,
@@ -746,14 +779,24 @@ impl HostHandle {
     /// session's focused pane), this connection keeping each pane's offset. A `Shell` target, or
     /// zero lines, does nothing and is `Ok`. Names are validated like [`TerminalTarget`]'s
     /// (`InvalidName`); a vanished herdr pane is [`HostError::PaneNotFound`].
+    ///
+    /// `client_id` is the scrolling terminal's [`SessionHandle::client_id`]: after a session
+    /// move ([`HostHandle::navigate`]) a tmux scroll acts on the session that terminal's client
+    /// shows, as window and pane moves do, not on the one it was opened on. herdr ignores it; a
+    /// malformed id is `InvalidName`.
     pub async fn scroll_target(
         &self,
         target: TerminalTarget,
         pane_id: Option<String>,
         scroll: TargetScroll,
+        client_id: Option<String>,
     ) -> Result<(), HostError> {
         target.validate()?;
-        if !pane_id.as_deref().is_none_or(is_valid_herdr_pane_id) {
+        if !pane_id.as_deref().is_none_or(is_valid_herdr_pane_id)
+            || !client_id
+                .as_deref()
+                .is_none_or(crate::tmux::is_valid_client_id)
+        {
             return Err(HostError::InvalidName);
         }
         if target == TerminalTarget::Shell
@@ -764,15 +807,14 @@ impl HostHandle {
         {
             return Ok(());
         }
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
-        self.send(HostCommand::ScrollTarget {
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::ScrollTarget {
             target,
             pane_id,
+            client_id,
             scroll,
             reply,
-        })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        })
+        .await
     }
 
     /// Moves what a terminal on `target` shows (a gesture or a shortcut): for tmux the window,
@@ -809,16 +851,14 @@ impl HostHandle {
         if target == TerminalTarget::Shell {
             return Ok(());
         }
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
-        self.send(HostCommand::Navigate {
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::Navigate {
             target,
             pane_id,
             client_id,
             nav,
             reply,
-        })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        })
+        .await
     }
 
     /// Sends `text` to `agent` in herdr pane `pane_id` of `session` (`None` is the default
@@ -865,17 +905,15 @@ impl HostHandle {
         if text.len() > herdr::MAX_REPLY_BYTES {
             return Err(HostError::TooLarge);
         }
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
-        self.send(HostCommand::ReplyToPane {
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::ReplyToPane {
             session,
             pane_id,
             agent,
             text,
             deadline: tokio::time::Instant::now() + QUERY_TIMEOUT,
             reply,
-        })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        })
+        .await
     }
 
     /// Uploads an image for an agent to read (contracts.md, "Image paste"): `bytes` go over
@@ -901,14 +939,13 @@ impl HostHandle {
             return Err(HostError::TooLarge);
         }
         let timeout = upload_timeout(bytes.len());
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
-        self.send(HostCommand::UploadImage {
-            bytes,
-            extension,
-            reply,
-        })?;
-        let uploaded = await_reply(response, timeout).await?;
+        let uploaded = self
+            .query(timeout, |reply| HostCommand::UploadImage {
+                bytes,
+                extension,
+                reply,
+            })
+            .await?;
         // Taken, in the step that received it (nothing awaits in between): the host keeps the
         // image. A caller dropped before this never acknowledges it, and the host removes it.
         // A caller that comes for the path only after the host stopped waiting for its
@@ -935,6 +972,19 @@ impl HostHandle {
         let (handle, driver) = herdr::channel(observer);
         self.send(HostCommand::WatchHerdr { session, driver })?;
         Ok(handle)
+    }
+
+    /// Sends the query `command` builds around its reply sender, on a connected host, and waits
+    /// for the answer for at most `timeout` ([`await_reply`]).
+    async fn query<T>(
+        &self,
+        timeout: Duration,
+        command: impl FnOnce(oneshot::Sender<Result<T, HostError>>) -> HostCommand,
+    ) -> Result<T, HostError> {
+        let (reply, response) = oneshot::channel();
+        self.require_connected()?;
+        self.send(command(reply))?;
+        await_reply(response, timeout).await
     }
 
     fn require_connected(&self) -> Result<(), HostError> {
@@ -1000,12 +1050,6 @@ impl HostDriver {
     /// The signal that the user has ended the host, which stays usable after this driver exits.
     pub(crate) fn user_cancel(&self) -> UserCancel {
         self.shared.user_cancel.subscribe()
-    }
-
-    /// Records the address the winning connection reached, to be set before the move to
-    /// `Connected` so a handle that sees `Connected` can read it.
-    pub fn set_peer_addr(&self, peer: Option<SocketAddr>) {
-        *lock(&self.shared.peer) = peer;
     }
 
     /// Moves to `next` and notifies the observer. On `Closed` further commands are refused,
@@ -1331,7 +1375,9 @@ mod tests {
             handle
                 .open_terminal(
                     TerminalTarget::Shell,
+                    TerminalTransport::Ssh,
                     size(),
+                    None,
                     Arc::new(SessionRecorder::default())
                 )
                 .err(),
@@ -1402,7 +1448,13 @@ mod tests {
         );
         assert_eq!(
             handle
-                .open_terminal(TerminalTarget::Shell, size(), sessions.clone())
+                .open_terminal(
+                    TerminalTarget::Shell,
+                    TerminalTransport::Ssh,
+                    size(),
+                    None,
+                    sessions.clone()
+                )
                 .err(),
             Some(HostError::NotConnected)
         );
@@ -1423,7 +1475,9 @@ mod tests {
             session_name: "a:b".into(),
         };
         assert_eq!(
-            handle.open_terminal(bad, size(), sessions.clone()).err(),
+            handle
+                .open_terminal(bad, TerminalTransport::Ssh, size(), None, sessions.clone())
+                .err(),
             Some(HostError::InvalidName)
         );
         assert_eq!(
@@ -2027,7 +2081,13 @@ mod tests {
         let watches = Arc::new(WatchRecorder::default());
         assert_eq!(
             handle
-                .open_terminal(TerminalTarget::Shell, size(), sessions.clone())
+                .open_terminal(
+                    TerminalTarget::Shell,
+                    TerminalTransport::Ssh,
+                    size(),
+                    None,
+                    sessions.clone()
+                )
                 .err(),
             Some(HostError::Closed)
         );
@@ -2082,15 +2142,16 @@ mod tests {
         let sessions = Arc::new(SessionRecorder::default());
         let before = Instant::now();
         let _plain = handle
-            .open_terminal_with(
+            .open_terminal(
                 TerminalTarget::Shell,
                 TerminalTransport::Mosh,
                 size(),
+                None,
                 sessions.clone(),
             )
             .unwrap();
         let _budgeted = handle
-            .open_terminal_within(
+            .open_terminal(
                 TerminalTarget::Shell,
                 TerminalTransport::Mosh,
                 size(),
@@ -2123,7 +2184,7 @@ mod tests {
         };
         let open = |target: &TerminalTarget, transport| {
             handle
-                .open_terminal_with(target.clone(), transport, size(), sessions.clone())
+                .open_terminal(target.clone(), transport, size(), None, sessions.clone())
                 .unwrap()
         };
         let first = open(&tmux, TerminalTransport::Ssh);
@@ -2158,7 +2219,13 @@ mod tests {
             pane_id: Some("w1:p2".into()),
         };
         let terminal = handle
-            .open_terminal(target.clone(), size(), sessions.clone())
+            .open_terminal(
+                target.clone(),
+                TerminalTransport::Ssh,
+                size(),
+                None,
+                sessions.clone(),
+            )
             .unwrap();
         let watch = handle
             .watch_herdr(Some("work".into()), watches.clone())
@@ -2205,7 +2272,13 @@ mod tests {
         // Opened but not yet picked up when the host closes: closed with the host's reason.
         let user_closed = Arc::new(SessionRecorder::default());
         let queued = handle
-            .open_terminal(TerminalTarget::Shell, size(), user_closed.clone())
+            .open_terminal(
+                TerminalTarget::Shell,
+                TerminalTransport::Ssh,
+                size(),
+                None,
+                user_closed.clone(),
+            )
             .unwrap();
         let queued_watch = handle
             .watch_herdr(None, Arc::new(WatchRecorder::default()))
@@ -2225,7 +2298,13 @@ mod tests {
         connect(&mut driver);
         let lost = Arc::new(SessionRecorder::default());
         let queued = handle
-            .open_terminal(TerminalTarget::Shell, size(), lost.clone())
+            .open_terminal(
+                TerminalTarget::Shell,
+                TerminalTransport::Ssh,
+                size(),
+                None,
+                lost.clone(),
+            )
             .unwrap();
         let reason = CloseReason::Failed(SessionFailure::ConnectionLost("gone".into()));
         driver.close(reason.clone());

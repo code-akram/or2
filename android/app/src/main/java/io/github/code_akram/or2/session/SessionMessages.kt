@@ -10,8 +10,6 @@ import io.github.code_akram.or2.ffi.SessionState
 
 fun sessionMessage(state: SessionState): String = when (state) {
     SessionState.Connecting -> "Connecting…"
-    is SessionState.AwaitingHostKeyDecision -> "Waiting for host-key approval"
-    SessionState.Authenticating -> "Authenticating…"
     SessionState.Connected -> "Connected"
     is SessionState.Closed -> when (val reason = state.reason) {
         CloseReason.Disconnected -> "Disconnected"

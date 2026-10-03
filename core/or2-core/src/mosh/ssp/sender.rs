@@ -140,6 +140,7 @@ impl TransportSender {
     }
 
     /// The peer state our next instruction will acknowledge.
+    #[cfg(test)]
     pub fn ack_num(&self) -> u64 {
         self.ack_num
     }
@@ -177,13 +178,6 @@ impl TransportSender {
     /// link is, and decides whether to show predictions at all from it.
     pub fn interval(srtt_ms: f64) -> u64 {
         ((srtt_ms / 2.0).ceil() as u64).clamp(SEND_INTERVAL_MIN_MS, SEND_INTERVAL_MAX_MS)
-    }
-
-    /// The number of the newest state we have actually sent. A
-    /// prediction made now expires at this plus one, because that is
-    /// the state the keystroke it predicts will travel in.
-    pub fn sent_state_last(&self) -> u64 {
-        self.sent_states.last().expect("never empty").num
     }
 
     /// When we last heard anything at all from the peer.
@@ -427,11 +421,6 @@ impl TransportSender {
         };
         self.shutdown_tries >= SHUTDOWN_RETRIES
             || now.saturating_sub(start) >= ACTIVE_RETRY_TIMEOUT_MS
-    }
-
-    /// Whether the goodbye handshake has started.
-    pub fn shutting_down(&self) -> bool {
-        self.shutting_down
     }
 
     /// True once the peer has acknowledged our shutdown state.

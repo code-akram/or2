@@ -22,7 +22,7 @@ use common::{Grid, Proxy, Sshd, sshd_ready, tmux_ready};
 use or2_core::herdr::{HerdrObserver, HerdrState, HerdrUnavailable};
 use or2_core::host::{
     HerdrSessionInfo, HostConnectRequest, HostError, HostHandle, HostObserver, HostState,
-    TerminalTarget,
+    TerminalTarget, TerminalTransport,
 };
 use or2_core::input::{Key, KeyInput, Modifiers};
 use or2_core::keys::ClientKey;
@@ -30,9 +30,9 @@ use or2_core::remote::{OUTPUT_CAP, RemoteCommand, RemoteError, RemoteHost};
 use or2_core::session::{
     CloseReason, SessionFailure, SessionHandle, SessionObserver, SessionState,
 };
-use or2_core::ssh::{HostOptions, SshRemote, connect_host, connect_tapped};
+use or2_core::ssh::{HostOptions, SshRemote, connect_host, connect_host_with};
 use or2_core::term::TerminalSize;
-use or2_core::transport::DirectTcp;
+use or2_core::transport::{DirectTcp, DirectUdp};
 
 /// Skips the test without `/usr/bin/sshd`, or fails when `OR2_REQUIRE_SSHD` is set.
 macro_rules! require_sshd {
@@ -212,7 +212,9 @@ impl Live {
             .host
             .open_terminal(
                 target,
+                TerminalTransport::Ssh,
                 TerminalSize::new(columns, rows).unwrap(),
+                None,
                 Arc::new(SessionObs {
                     tag: tag.into(),
                     tx,
@@ -550,8 +552,9 @@ fn remote_with(sshd: &Sshd, options: HostOptions) -> (HostHandle, SshRemote) {
     let key = ClientKey::generate_ed25519("");
     sshd.authorize(&key);
     let (observer, _states, _) = host_observer();
-    let (host, tapped) = connect_tapped(
+    let (host, tapped) = connect_host_with(
         Arc::new(DirectTcp),
+        Arc::new(DirectUdp),
         request(&key, &[(lo(), sshd.port)], std::slice::from_ref(&sshd.host)),
         observer,
         options,
@@ -878,7 +881,9 @@ fn user_disconnect_closes_terminals_and_watches_before_the_host_with_disconnecte
         live.host
             .open_terminal(
                 TerminalTarget::Shell,
+                TerminalTransport::Ssh,
                 TerminalSize::new(80, 24).unwrap(),
+                None,
                 Arc::new(SessionObs {
                     tag: "late".into(),
                     tx: mpsc::channel().0,
@@ -963,7 +968,9 @@ fn losing_the_connection_closes_terminals_and_the_host_with_the_same_failure() {
     let handle = host
         .open_terminal(
             TerminalTarget::Shell,
+            TerminalTransport::Ssh,
             TerminalSize::new(80, 24).unwrap(),
+            None,
             Arc::new(SessionObs {
                 tag: "t".into(),
                 tx,
@@ -1000,7 +1007,9 @@ fn losing_the_connection_closes_terminals_and_the_host_with_the_same_failure() {
     assert_eq!(
         host.open_terminal(
             TerminalTarget::Shell,
+            TerminalTransport::Ssh,
             TerminalSize::new(80, 24).unwrap(),
+            None,
             Arc::new(SessionObs {
                 tag: "late".into(),
                 tx: mpsc::channel().0,
@@ -1035,7 +1044,9 @@ fn names_are_validated_before_anything_runs() {
         let (tx, states) = mpsc::channel();
         let result = live.host.open_terminal(
             target,
+            TerminalTransport::Ssh,
             TerminalSize::new(80, 24).unwrap(),
+            None,
             Arc::new(SessionObs {
                 tag: "x".into(),
                 tx,
@@ -1261,7 +1272,7 @@ fn scroll_target_scrolls_a_tmux_session_over_the_connection_and_a_shell_does_not
     let scroll = |target: TerminalTarget, pane: Option<&str>, scroll| {
         block_on(
             live.host
-                .scroll_target(target, pane.map(str::to_owned), scroll),
+                .scroll_target(target, pane.map(str::to_owned), scroll, None),
         )
     };
     scroll(tmux.clone(), None, TargetScroll::Up { lines: 4 }).unwrap();
@@ -1361,7 +1372,9 @@ fn herdr_terminals_run_the_probed_herdr_with_the_session_and_report_a_failed_foc
                     session: session.map(Into::into),
                     pane_id: pane.map(Into::into),
                 },
+                TerminalTransport::Ssh,
                 TerminalSize::new(80, 24).unwrap(),
+                None,
                 Arc::new(SessionObs {
                     tag: tag.into(),
                     tx,

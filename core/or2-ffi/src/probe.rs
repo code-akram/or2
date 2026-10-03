@@ -1,11 +1,10 @@
 //! Contract probe: a test fixture, not a connection.
 //!
-//! `contract_probe_session` validates a real `ConnectRequest` and returns a real `Session`
-//! whose driver is a deterministic script on a Rust thread instead of an SSH connection. It
-//! presents a host key generated once per process, uses the production trust check against
-//! the request's trusted keys, and renders fixed cells plus echoes of the input it receives.
-//! JVM and device tests use it to exercise listener threading, lifecycle, host-key decisions,
-//! frames and input across the real FFI. App code must never call it.
+//! `contract_probe_session` returns a real `Session` whose driver is a deterministic script on a
+//! Rust thread instead of an SSH channel: the probe host's SSH terminal (below), on a host of
+//! its own. It renders fixed cells plus echoes of the input it receives. JVM and device tests use
+//! it to exercise listener threading, lifecycle, frames and input across the real FFI. App code
+//! must never call it.
 //!
 //! `contract_probe_host` does the same for a host connection (API 4): see its documentation.
 //! It also serves `TerminalTransport::Mosh` terminals (API 8 to 10) deterministically.
@@ -40,9 +39,7 @@ use tokio::task::JoinSet;
 use crate::host::{
     HostConnectError, HostConnectRequest, HostConnection, HostListener, HostListenerObserver,
 };
-use crate::session::{
-    ConnectError, ConnectRequest, ListenerObserver, Session, SessionListener, TerminalTransport,
-};
+use crate::session::{ListenerObserver, Session, SessionError, SessionListener, TerminalTransport};
 
 const FOREGROUND: Rgb = Rgb::new(0xd0, 0xd0, 0xd0);
 const BACKGROUND: Rgb = Rgb::new(0x10, 0x10, 0x18);
@@ -68,13 +65,16 @@ const MOSH_HEALTH_SEQUENCE: [LinkHealth; 3] = [
 /// Test fixture only; see the module documentation. Never connects to anything.
 #[uniffi::export]
 pub fn contract_probe_session(
-    request: ConnectRequest,
+    columns: u16,
+    rows: u16,
     listener: Box<dyn SessionListener>,
-) -> Result<Arc<Session>, ConnectError> {
-    let request = request.validate()?;
+) -> Result<Arc<Session>, SessionError> {
+    let size = TerminalSize::new(columns, rows).map_err(|_| SessionError::EmptyDimension)?;
     let (handle, driver) = core::channel(Arc::new(ListenerObserver(listener)));
     spawn_probe_thread("or2-contract-probe", async move {
-        run_session(&request.trusted_host_keys, request.size, driver).await;
+        // A probe host's SSH terminal, on a host of its own that nothing ever closes.
+        let (_keep_open, stop) = watch::channel(None);
+        run_terminal(driver, size, BANNER.into(), false, stop).await;
     });
     Ok(Session::new(handle, TerminalTransport::Ssh))
 }
@@ -107,38 +107,6 @@ fn untrusted_prompt(trusted: &[HostKey]) -> Option<HostKeyPrompt> {
         presented: presented.clone(),
         previously_trusted: trusted.to_vec(),
     })
-}
-
-async fn run_session(trusted: &[HostKey], mut size: TerminalSize, mut driver: SessionDriver) {
-    if let Some(prompt) = untrusted_prompt(trusted) {
-        driver
-            .transition(SessionState::AwaitingHostKey(prompt))
-            .expect("Connecting -> AwaitingHostKey");
-        loop {
-            match driver.next_command().await {
-                Command::ApproveHostKey { fingerprint }
-                    if fingerprint == probe_host_key().fingerprint() =>
-                {
-                    break;
-                }
-                Command::RejectHostKey => {
-                    return driver.close(CloseReason::Failed(SessionFailure::HostKeyRejected));
-                }
-                Command::Disconnect => return driver.close(CloseReason::Disconnected),
-                Command::Resize(new_size) => size = new_size,
-                _ => {}
-            }
-        }
-    }
-    driver
-        .transition(SessionState::Authenticating)
-        .expect("-> Authenticating");
-    driver
-        .transition(SessionState::Connected)
-        .expect("-> Connected");
-    // Nothing but its own commands ever stops a standalone session.
-    let (_keep_open, stop) = watch::channel(None);
-    serve_terminal(driver, size, BANNER.into(), false, stop).await;
 }
 
 /// Serves one connected terminal session: fixed cells plus echoes of the input it receives.
@@ -215,7 +183,6 @@ async fn serve_terminal(
             }
             Command::Scroll(scroll) => {
                 screen.history_offset = match scroll {
-                    ViewportScroll::Top => 0,
                     ViewportScroll::Bottom => HISTORY_ROWS,
                     ViewportScroll::Delta(rows) | ViewportScroll::Wheel { rows, .. } => screen
                         .history_offset
@@ -237,7 +204,6 @@ async fn serve_terminal(
                 }
             }
             Command::Disconnect => return driver.close(CloseReason::Disconnected),
-            Command::ApproveHostKey { .. } | Command::RejectHostKey => {}
         }
         if matches!(driver.state(), SessionState::Closed(_)) {
             return;
@@ -255,15 +221,15 @@ fn publish(driver: &mut SessionDriver, frame: Frame) {
 
 /// Test fixture only; see the module documentation. Never connects to anything.
 ///
-/// The host uses the production trust check against the request's trusted keys with the same
-/// per-process host key as `contract_probe_session`, then reports `Connected { 0 }`.
+/// The host uses the production trust check against the request's trusted keys with a host key
+/// generated once per process, then reports `Connected { 0 }`.
 /// `capabilities` (which reports a `mosh-server`), `mosh_server` (its path) and `list_tmux_sessions` return fixed data. `focus_herdr_pane` succeeds for the
 /// probe view's panes (`w1:p1`, `w1:p2`, `w2:p1`) and is `PaneNotFound` for any other id; the
-/// focused pane then shows as `focused` in the views of watches started afterwards. `open_terminal` returns a
-/// session served by the M1 probe script without host-key states (`Connecting` to
+/// focused pane is then the `focused_pane_id` of the views of watches started afterwards. `open_terminal` returns a
+/// session served by the probe script (`Connecting` to
 /// `Connected`; row 0 names the target). With `TerminalTransport::Mosh` the terminal behaves the
 /// same, plus: after its first frame `on_link_health` receives three values in order,
-/// (300, 300), (6000, 9000) and (400, 400) ms for (`since_heard_ms`, `since_ack_ms`); and each
+/// 300, 6000 and 400 ms for `since_heard_ms`; and each
 /// `Session.roam()` (or `network_changed()`) is counted in row 2, the echo row: `roams N`
 /// alone, or after the latest text echo as `text 61 | roams N`. SSH probe terminals never
 /// report health and ignore `roam()`. `watch_herdr` goes `Live`, updates once and closes on
@@ -522,13 +488,13 @@ async fn run_herdr_watch(
     driver.close();
 }
 
-/// The panes of [`probe_view`]; the first is focused until `focus_herdr_pane` moves it.
 /// The `mosh-server` pid every probe mosh terminal reports (`Session.server_pid`).
 pub const PROBE_SERVER_PID: u32 = 4242;
 /// A pid whose `stop_mosh_server` fails on a probe host, whatever else is true.
 pub const PROBE_UNSTOPPABLE_PID: u32 = 13;
 /// Where a probe host says it put an uploaded image.
 pub const PROBE_IMAGE_DIR: &str = "/home/probe/.cache/or2/images";
+/// The panes of [`probe_view`]; the first is focused until `focus_herdr_pane` moves it.
 const PROBE_PANES: [&str; 3] = ["w1:p1", "w1:p2", "w2:p1"];
 /// The probe view's blocked agent (until its second view resolves it): a reply to it is typed.
 const PROBE_BLOCKED_PANE: &str = "w1:p1";
@@ -552,8 +518,6 @@ fn probe_view(label: &str, version: u64, resolved: bool, focus: &str) -> HerdrVi
             display_agent: Some(name.to_uppercase()),
             status,
             cwd: Some(format!("/home/probe/{name}")),
-            title: None,
-            focused: pane == focus,
             state_change_seq: seq,
             terminal_id: format!("term_{pane}"),
             agent_session: None,
@@ -562,14 +526,8 @@ fn probe_view(label: &str, version: u64, resolved: bool, focus: &str) -> HerdrVi
     };
     let pane = |a: &Agent| Pane {
         pane_id: a.pane_id.clone(),
-        tab_id: a.tab_id.clone(),
-        workspace_id: a.workspace_id.clone(),
-        label: None,
         agent: a.agent.clone(),
-        agent_status: a.status,
         cwd: a.cwd.clone(),
-        title: None,
-        focused: a.focused,
     };
     // The blocked agent has a session (its hooks reported one), the working one was started by
     // herdr (named, ready), and the idle one has neither: it gets no `reply_identity`.
@@ -589,22 +547,17 @@ fn probe_view(label: &str, version: u64, resolved: bool, focus: &str) -> HerdrVi
     ];
     HerdrView {
         version,
-        protocol: 22,
         focused_pane_id: Some(focus.into()),
         workspaces: vec![
             Workspace {
                 workspace_id: "w1".into(),
                 number: 1,
                 label: label.into(),
-                focused: true,
-                agent_status: first,
             },
             Workspace {
                 workspace_id: "w2".into(),
                 number: 2,
                 label: "scratch".into(),
-                focused: false,
-                agent_status: AgentStatus::Idle,
             },
         ],
         tabs: vec![
@@ -613,16 +566,12 @@ fn probe_view(label: &str, version: u64, resolved: bool, focus: &str) -> HerdrVi
                 workspace_id: "w1".into(),
                 number: 1,
                 label: "agents".into(),
-                focused: true,
-                agent_status: first,
             },
             Tab {
                 tab_id: "w2:t1".into(),
                 workspace_id: "w2".into(),
                 number: 1,
                 label: "shell".into(),
-                focused: false,
-                agent_status: AgentStatus::Idle,
             },
         ],
         panes: agents.iter().map(pane).collect(),

@@ -469,49 +469,37 @@ impl<H: RemoteHost> Watch<H> {
 
         // The first attempt of a watch takes its socket from the connection's listing; every
         // later one (a retry after a failure, a recovery) reads the listing again.
-        let mut fresh = self.attempts > 0;
+        if self.attempts > 0 {
+            self.directory.invalidate();
+        }
         self.attempts += 1;
         // Two streams open together, one for the subscription and one for the first snapshot
         // (which must follow the subscription's acknowledgement, not its open): a socket that
         // the cached listing named but that does not open sends the attempt back to the
         // listing once, instead of failing the watch for a retry interval.
-        let (socket, events, requests) = loop {
-            let directory = Arc::clone(&self.directory);
-            let cached = if fresh {
-                None
-            } else {
-                directory.cached_socket(target.session.as_deref())
-            };
-            let from_cache = cached.is_some();
-            let socket = match cached {
-                Some(socket) => socket,
-                None => self
-                    .pump(directory.locate_fresh(&*host, &target.herdr, target.session.as_deref()))
-                    .await?
-                    .map_err(exit_for_discovery)?,
-            };
-            let opened = self
-                .pump(tokio::time::timeout(timeout, async {
-                    tokio::join!(wire::open(&*host, &socket), wire::open(&*host, &socket))
-                }))
-                .await?
-                .map_err(|_| exit_for_wire(WireError::TimedOut))?;
-            match opened {
-                (Ok(events), Ok(requests)) => break (socket, events, requests),
-                (events, requests) => {
-                    let error = events
-                        .err()
-                        .or(requests.err())
-                        .expect("one of the two opens failed");
-                    if from_cache && matches!(error, WireError::Unreachable(_)) {
-                        self.directory.invalidate();
-                        fresh = true;
-                        continue;
-                    }
-                    return Err(exit_for_wire(error));
+        let directory = Arc::clone(&self.directory);
+        let opens = directory.with_socket(
+            &*host,
+            &target.herdr,
+            target.session.as_deref(),
+            None,
+            |socket| {
+                let host = &host;
+                async move {
+                    tokio::time::timeout(timeout, async {
+                        let (events, requests) = tokio::join!(
+                            wire::open(&**host, &socket),
+                            wire::open(&**host, &socket)
+                        );
+                        Ok((events?, requests?))
+                    })
+                    .await
+                    .unwrap_or(Err(WireError::TimedOut))
                 }
-            }
-        };
+            },
+        );
+        let (socket, opened) = self.pump(opens).await?.map_err(exit_for_discovery)?;
+        let (events, requests) = opened.map_err(exit_for_wire)?;
 
         // Subscribe first, then read: nothing that happens from here on can be missed.
         let id = self.request_id();
@@ -530,6 +518,9 @@ impl<H: RemoteHost> Watch<H> {
         let mut first_read = Some(requests);
 
         let mut subscribed = PaneKeys::new();
+        // The panes herdr refused a subscription for (not for a vanished pane): asked again
+        // only once the panes differ.
+        let mut refused: Option<PaneKeys> = None;
         let mut rejected = 0;
         let mut last_read: Option<Instant> = None;
         loop {
@@ -557,7 +548,7 @@ impl<H: RemoteHost> Watch<H> {
                 self.install(project::project(&snapshot));
 
                 let panes = project::pane_keys(&snapshot);
-                if !panes.is_subset(&subscribed) {
+                if !panes.is_subset(&subscribed) && refused.as_ref() != Some(&panes) {
                     let id = self.request_id();
                     match self
                         .pump(subscribe(&*host, &socket, &id, &panes, timeout))
@@ -566,6 +557,7 @@ impl<H: RemoteHost> Watch<H> {
                         Ok(stream) => {
                             self.events = Some(stream);
                             subscribed = panes;
+                            refused = None;
                             rejected = 0;
                             // Events between the read and the new subscription are gone.
                             self.dirty = true;
@@ -578,10 +570,13 @@ impl<H: RemoteHost> Watch<H> {
                             self.dirty = true;
                         }
                         // Any other rejection is not about a vanished pane, so re-reading the
-                        // panes cannot help. The view stays live on the lifecycle stream that
-                        // is still open; per-pane status events are missing until a later
-                        // read (the next invalidation) is accepted.
-                        Err(WireError::Herdr { code, .. }) if code != PANE_NOT_FOUND => {}
+                        // panes cannot help, nor can asking again for the same ones. The view
+                        // stays live on the lifecycle stream that is still open; per-pane
+                        // status events are missing until a read finds other panes and their
+                        // subscription is accepted.
+                        Err(WireError::Herdr { code, .. }) if code != PANE_NOT_FOUND => {
+                            refused = Some(panes);
+                        }
                         Err(error) => return Err(exit_for_wire(error)),
                     }
                 }
@@ -619,28 +614,18 @@ impl<H: RemoteHost> Watch<H> {
     }
 }
 
-/// Runs the watch until `driver` is stopped or the host closes, then closes it. Discovers
-/// sockets with a directory of its own (the first attempt reads the listing).
-pub(super) async fn run<H: RemoteHost>(
-    host: Arc<H>,
-    herdr: String,
-    session: Option<String>,
-    driver: HerdrWatchDriver,
-    timing: Timing,
-) {
-    run_in(
-        host,
-        herdr,
-        Arc::new(Directory::new()),
-        session,
-        driver,
-        timing,
-    )
-    .await;
-}
-
-/// [`run`] with the connection's `directory`, so the first attempt costs no `session list`.
-pub(super) async fn run_in<H: RemoteHost>(
+/// Drives `driver` until it is stopped or the host closes, then closes it, with the intervals
+/// of `timing` (the contract's are [`Timing::default`]). The host driver that owns this task
+/// ends it on host close by aborting or dropping it (the driver's `Drop` delivers `Closed`): a
+/// watch learns of a lost host only from a failing call, and one parked at a final
+/// `Unavailable` makes none. `herdr` is the absolute path from the capability probe. The
+/// session's socket is not an input: the first attempt takes it from the connection's
+/// `directory` (the probe's listing, so a watch costs no `session list`), and a retry or a
+/// recovery reads `<herdr> session list --json` again (`socket_path`), so it never leaves the
+/// herdr module. See the module documentation for the protocol: subscribe, snapshot,
+/// invalidating events, `events_lost` recovery, and the retry rules for each
+/// [`HerdrUnavailable`].
+pub async fn run_in<H: RemoteHost>(
     host: Arc<H>,
     herdr: String,
     directory: Arc<Directory>,
@@ -672,7 +657,6 @@ mod tests {
     fn view(label: &str) -> HerdrView {
         HerdrView {
             version: 0,
-            protocol: 22,
             focused_pane_id: Some(label.to_owned()),
             workspaces: Vec::new(),
             tabs: Vec::new(),

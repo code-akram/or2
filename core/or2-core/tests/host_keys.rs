@@ -116,10 +116,11 @@ impl Connection {
         let (tx, states) = mpsc::channel();
         let terminal = self
             .host
-            .open_terminal_with(
+            .open_terminal(
                 target,
                 transport,
                 TerminalSize::new(80, 24).unwrap(),
+                None,
                 Arc::new(SessionObs(tx)),
             )
             .unwrap();

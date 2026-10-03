@@ -174,6 +174,18 @@ impl ExecOutput {
     pub fn success(&self) -> bool {
         self.status == Some(0)
     }
+
+    /// What a failed command said: the first line of stderr, trimmed and cut to 200
+    /// characters, or `exit status …` when that line is empty.
+    pub fn stderr_line(&self) -> String {
+        let stderr = String::from_utf8_lossy(&self.stderr);
+        let first = stderr.lines().next().unwrap_or("").trim();
+        if first.is_empty() {
+            format!("exit status {:?}", self.status)
+        } else {
+            first.chars().take(200).collect()
+        }
+    }
 }
 
 pub trait RemoteHost: Send + Sync + 'static {

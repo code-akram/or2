@@ -89,9 +89,9 @@ outputs, not checked-in copies.
 
 The shared M1 contracts (transport, key material, host-key trust, session lifecycle and
 callbacks, changed-row frames, input) are defined in [contracts](contracts.md), which also
-separates what is implemented from lane work. FFI API version 5 exports `build_info`,
-`terminal_size`, key generation and import, `connect_host` with the `HostConnection`, `Session`
-and `HerdrWatch` objects and their listeners, and two test fixtures (`contract_probe_session`,
+separates what is implemented from lane work. FFI API version 18 exports `build_info`, key
+generation and import, `connect_host` with the `HostConnection`, `Session` and `HerdrWatch`
+objects and their listeners, pairing, and two test fixtures (`contract_probe_session`,
 `contract_probe_host`) that drive the real objects without a network. There is no export that
 connects a single shell: terminals are channels of a host connection. See [build instructions](build.md) for the shared toolchain and verification commands.
 

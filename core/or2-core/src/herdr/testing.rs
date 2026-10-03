@@ -174,6 +174,8 @@ enum Command {
 struct State {
     exec: Result<ExecOutput, RemoteError>,
     exec_log: Vec<String>,
+    /// How long each exec takes (a slow host).
+    exec_delay: std::time::Duration,
     open_error: Option<RemoteError>,
     /// Sockets nothing listens on: opening one is `Io`, as a stale path is over OpenSSH.
     dead_sockets: Vec<String>,
@@ -227,6 +229,7 @@ impl FakeHost {
             state: Arc::new(Mutex::new(State {
                 exec: Ok(output(0, "", "")),
                 exec_log: Vec::new(),
+                exec_delay: std::time::Duration::ZERO,
                 open_error: None,
                 dead_sockets: Vec::new(),
                 opened: Vec::new(),
@@ -257,6 +260,11 @@ impl FakeHost {
 
     pub fn set_exec(&self, status: u32, stdout: &str, stderr: &str) {
         lock(&self.state).exec = Ok(output(status, stdout, stderr));
+    }
+
+    /// Every exec from now on takes `delay` (a slow host).
+    pub fn set_exec_delay(&self, delay: std::time::Duration) {
+        lock(&self.state).exec_delay = delay;
     }
 
     pub fn set_exec_error(&self, error: RemoteError) {
@@ -412,9 +420,13 @@ impl RemoteHost for FakeHost {
     type Stream = DuplexStream;
 
     async fn exec_rendered(&self, line: &str) -> Result<ExecOutput, RemoteError> {
-        let mut state = lock(&self.state);
-        state.exec_log.push(line.to_owned());
-        state.exec.clone()
+        let (result, delay) = {
+            let mut state = lock(&self.state);
+            state.exec_log.push(line.to_owned());
+            (state.exec.clone(), state.exec_delay)
+        };
+        tokio::time::sleep(delay).await;
+        result
     }
 
     async fn open_unix(&self, path: &str) -> Result<DuplexStream, RemoteError> {

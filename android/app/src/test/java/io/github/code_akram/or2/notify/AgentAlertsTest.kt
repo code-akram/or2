@@ -65,12 +65,12 @@ class AgentAlertsTest {
         pane: String, status: AgentStatus, seq: ULong, name: String? = "Claude Code", terminal: String = "term_$pane",
         session: String? = "sess_$pane",
     ) = HerdrAgent(
-        pane, "w1:t1", "w1", name, "claude", name, status, "/work", "title", false, seq, terminal,
+        pane, "w1:t1", "w1", name, "claude", name, status, "/work", seq, terminal,
         session?.let { AgentIdentity(terminal, "claude", name, AgentSession("id", it)) },
     )
 
     private fun view(vararg agents: HerdrAgent, focused: String? = null) =
-        HerdrView(1uL, 22u, focused, emptyList(), emptyList(), emptyList(), agents.toList())
+        HerdrView(1uL, focused, emptyList(), emptyList(), emptyList(), agents.toList())
 
     private fun deliver(view: HerdrView?, watch: Any = this.watch, session: String? = null, host: Long = 1) =
         alerts.viewChanged(watch, host, "Workstation", session, view)
@@ -473,7 +473,7 @@ class AgentAlertsTest {
         deliver(view(agent("w1:p1", AgentStatus.DONE, 3u, terminal = "term_b")))
         deliver(view(agent("w1:p1", AgentStatus.DONE, 3u, terminal = "term_b")))
         assertTrue(key in sink.up)
-        deliver(view(HerdrAgent("w1:p1", "w1:t1", "w1", "Codex", "codex", "Codex", AgentStatus.DONE, "/work", null, false, 3u, "term_b")))
+        deliver(view(HerdrAgent("w1:p1", "w1:t1", "w1", "Codex", "codex", "Codex", AgentStatus.DONE, "/work", 3u, "term_b")))
         assertFalse(key in sink.up)
     }
 

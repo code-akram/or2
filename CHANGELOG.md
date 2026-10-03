@@ -44,8 +44,14 @@ Each release's notes are in [docs/releases/](docs/releases/).
 - "Send N lines?" and "Paste N lines?" are asked only while the program would run the lines one at a time; a
   program with bracketed paste on (a shell's line editor, an agent) gets them as one paste, and the toolbar's
   Paste is one bracketed paste there too.
-- FFI API 17 (`Session.mouse_click`, `Session.paste_text`, `HostConnection.reply_to_pane`, `upload_image`,
-  `TerminalModes.bracketed_paste`).
+- FFI API 18 (API 17 added `Session.mouse_click`, `Session.paste_text`, `HostConnection.reply_to_pane`,
+  `upload_image`, `TerminalModes.bracketed_paste`; 18 adds `scroll_target`'s `client_id` and removes what the app
+  never read: the session host-key path (`ConnectRequest`, `ConnectException`, `Session.approve_host_key` /
+  `reject_host_key`, the `AwaitingHostKeyDecision` and `Authenticating` session states and their errors;
+  `contract_probe_session` takes a size), `terminal_size`, `BuildInfo.minimum_android_sdk` / `renderer`,
+  `ViewportScroll.Top`, `TmuxSession.created_unix` / `activity_unix`, `LinkHealth.since_ack_ms`,
+  `HostCapabilities.utf8_locale`, the herdr workspace, tab and pane `focused` / `agent_status`, pane
+  `tab_id` / `workspace_id` / `label` / `title`, agent `title` / `focused` and the view's `protocol`).
 - Image upload is much faster on a distant host: a host's uploads share one SFTP session, its independent checks
   go out together, and old images are swept after the path is in, so an upload into an existing directory waits
   for 8 round trips instead of 27 (11 for the first on a connection).
@@ -90,6 +96,10 @@ Each release's notes are in [docs/releases/](docs/releases/).
 - A herdr terminal's thumbnail follows the pane herdr has in front, whatever pane it was opened on.
 - Ctrl+Shift+W closes a terminal the way its `×` does (an open one is disconnected, so its mosh server stops).
 - A message of several lines sent from the composer buzzes once, on the confirmation's **Send**, not twice.
+- Swiping through a tmux terminal's history after switching it to another tmux session scrolls the
+  session the terminal shows, not the one it was opened on.
+- A terminal opened with an explicit Mosh choice gives up after its 15 s connect timeout when UDP is blocked; a slow
+  socket open could make it wait up to twice that.
 
 ## [0.1.1] - 2026-10-02
 

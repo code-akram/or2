@@ -28,9 +28,12 @@ use crate::tmux;
 /// How long herdr's session listing may take before it counts as failed.
 pub const HERDR_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Fixed, with no `'` and no `\` (the rendering contract of `render_script`; a test enforces
-/// it). Prints `or2:<name>:<value>` lines. Unknown output is ignored by [`parse`].
-pub const PROBE_SCRIPT: &str = r#"
+/// The shell function both scripts find a program with: `or2_find <name>` sets `or2_path` to its
+/// absolute path from `command -v`, else from the usual user-local and package manager
+/// directories, else to nothing.
+macro_rules! or2_find {
+    () => {
+        r#"
 or2_find() {
   or2_path=$(command -v "$1" 2>/dev/null)
   case "$or2_path" in
@@ -43,7 +46,15 @@ or2_find() {
       ;;
   esac
 }
-or2_find tmux
+"#
+    };
+}
+
+/// Fixed, with no `'` and no `\` (the rendering contract of `render_script`; a test enforces
+/// it). Prints `or2:<name>:<value>` lines. Unknown output is ignored by [`parse`].
+pub const PROBE_SCRIPT: &str = concat!(
+    or2_find!(),
+    r#"or2_find tmux
 echo "or2:tmux:$or2_path"
 if [ -n "$or2_path" ]; then echo "or2:tmux-version:$("$or2_path" -V 2>/dev/null </dev/null)"; fi
 or2_find herdr
@@ -62,25 +73,15 @@ done
 if [ -n "$or2_found" ]; then or2_loc=$or2_found; elif [ -n "$or2_first" ]; then or2_loc=$or2_first; fi
 echo "or2:locale:$or2_loc"
 echo "or2:end"
-"#;
+"#
+);
 
 /// Finds herdr like [`PROBE_SCRIPT`] and runs its `session list --json` in the same exec:
 /// `or2:herdr:<path>`, then (when found) `or2:list-begin`, herdr's stdout, and
 /// `or2:list-end:<status>`. Same rendering contract: no `'`, no `\`.
-pub const HERDR_SCRIPT: &str = r#"
-or2_find() {
-  or2_path=$(command -v "$1" 2>/dev/null)
-  case "$or2_path" in
-    /*) ;;
-    *)
-      or2_path=
-      for or2_dir in "$HOME/.local/bin" "$HOME/.cargo/bin" /opt/homebrew/bin /usr/local/bin /usr/bin /bin "$HOME/.nix-profile/bin" /run/current-system/sw/bin; do
-        if [ -f "$or2_dir/$1" ] && [ -x "$or2_dir/$1" ]; then or2_path="$or2_dir/$1"; break; fi
-      done
-      ;;
-  esac
-}
-or2_find herdr
+pub const HERDR_SCRIPT: &str = concat!(
+    or2_find!(),
+    r#"or2_find herdr
 echo "or2:herdr:$or2_path"
 if [ -n "$or2_path" ]; then
   echo "or2:list-begin"
@@ -89,26 +90,11 @@ if [ -n "$or2_path" ]; then
   echo
   echo "or2:list-end:$or2_status"
 fi
-"#;
+"#
+);
 
 /// The locale reported when the host lists no UTF-8 one.
 const FALLBACK_LOCALE: &str = "en_US.UTF-8";
-
-/// Runs [`PROBE_SCRIPT`] and [`HERDR_SCRIPT`] on `host` at once and parses the answers. A
-/// script that fails to run is an error; a missing program is `None` in the result; a herdr that
-/// cannot list its sessions (hung, failing, garbage) is found with no sessions. Only a
-/// connection that closes mid-probe fails the second script.
-pub async fn probe<H: RemoteHost>(host: &H) -> Result<HostCapabilities, RemoteError> {
-    probe_entries(host).await.map(|(caps, _)| caps)
-}
-
-/// [`probe`], also returning the session listing the second script read (`None` when herdr is
-/// missing or its listing failed), with the sockets the host driver's [`Directory`] needs.
-pub async fn probe_entries<H: RemoteHost>(
-    host: &H,
-) -> Result<(HostCapabilities, Option<Vec<SessionEntry>>), RemoteError> {
-    probe_within(host, HERDR_LIST_TIMEOUT, probe_programs(host)).await
-}
 
 /// The program probe alone: [`PROBE_SCRIPT`]'s programs and locale, `herdr_sessions` empty.
 /// One exec round trip, never held up by herdr's session listing: the host driver caches it
@@ -129,8 +115,12 @@ pub async fn probe_programs<H: RemoteHost>(host: &H) -> Result<HostCapabilities,
 /// cache of it, which publishes its answer to every waiter the moment [`PROBE_SCRIPT`] returns)
 /// and [`HERDR_SCRIPT`] in its own exec at the same time, the listing bounded by
 /// `herdr_limit`. The listing only fills `herdr_sessions`; nothing that needs a program's path
-/// waits for it.
-pub(crate) async fn probe_within<H: RemoteHost>(
+/// waits for it. Also returns the listing itself (`None` when herdr is missing or its listing
+/// failed), with the sockets the host driver's [`Directory`] needs. A script that fails to run
+/// is an error; a missing program is `None`; a herdr that cannot list its sessions (hung,
+/// failing, garbage) is found with no sessions. Only a connection that closes mid-probe fails
+/// the second script.
+pub async fn probe_within<H: RemoteHost>(
     host: &H,
     herdr_limit: Duration,
     programs: impl Future<Output = Result<HostCapabilities, RemoteError>>,
@@ -173,24 +163,6 @@ fn parse_herdr_listing(output: &str) -> Option<Vec<SessionEntry>> {
     let (listing, end) = rest.rsplit_once("\nor2:list-end:")?;
     let status: u32 = end.lines().next()?.trim().parse().ok()?;
     herdr::parse_listing(Some(status), listing.as_bytes(), b"").ok()
-}
-
-/// Lists herdr's sessions through [`herdr::list_sessions`] (the one parser of
-/// `<herdr> session list --json`), giving up after [`HERDR_LIST_TIMEOUT`] (`TimedOut`). A failing
-/// herdr, or output that is not herdr's session list, is `Io`; a closed connection stays
-/// `Closed`.
-pub async fn herdr_sessions<H: RemoteHost>(
-    host: &H,
-    herdr: &str,
-) -> Result<Vec<HerdrSessionInfo>, RemoteError> {
-    let entries = tokio::time::timeout(HERDR_LIST_TIMEOUT, herdr::list_sessions(host, herdr))
-        .await
-        .map_err(|_| RemoteError::TimedOut)?;
-    match entries {
-        Ok(entries) => Ok(entries.iter().map(session_info).collect()),
-        Err(DiscoveryError::Remote(error)) => Err(error),
-        Err(other) => Err(RemoteError::Io(other.to_string())),
-    }
 }
 
 /// The last session list read successfully, kept apart from the probe's immutable programs and
@@ -299,6 +271,17 @@ mod tests {
     use super::*;
     use crate::remote::{ExecOutput, render_script};
     use std::sync::Mutex;
+
+    /// The whole probe as a connection runs it, with its listing.
+    async fn probe_entries<H: RemoteHost>(
+        host: &H,
+    ) -> Result<(HostCapabilities, Option<Vec<SessionEntry>>), RemoteError> {
+        probe_within(host, HERDR_LIST_TIMEOUT, probe_programs(host)).await
+    }
+
+    async fn probe<H: RemoteHost>(host: &H) -> Result<HostCapabilities, RemoteError> {
+        probe_entries(host).await.map(|(caps, _)| caps)
+    }
 
     #[test]
     fn the_script_renders_as_sh_dash_c_without_quotes_or_backslashes() {
@@ -444,16 +427,6 @@ mod tests {
         assert_eq!(caps.herdr.as_deref(), Some("/fake/herdr"));
         assert_eq!(caps.utf8_locale, "C.UTF-8");
         assert!(caps.herdr_sessions.is_empty());
-        assert_eq!(
-            herdr_sessions(
-                &Stub {
-                    herdr: Herdr::Hangs
-                },
-                "/fake/herdr"
-            )
-            .await,
-            Err(RemoteError::TimedOut)
-        );
     }
 
     #[tokio::test]
@@ -476,26 +449,6 @@ mod tests {
                 is_default: true
             }],
             "name, running and default come from herdr::list_sessions; the rest is dropped"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_listing_failure_is_io_and_a_closed_connection_stays_closed() {
-        for herdr in [Herdr::Fails, Herdr::Sessions("{\"sessions\":7}")] {
-            assert!(matches!(
-                herdr_sessions(&Stub { herdr }, "/fake/herdr").await,
-                Err(RemoteError::Io(_))
-            ));
-        }
-        assert_eq!(
-            herdr_sessions(
-                &Stub {
-                    herdr: Herdr::ConnectionGone
-                },
-                "/fake/herdr"
-            )
-            .await,
-            Err(RemoteError::Closed)
         );
     }
 

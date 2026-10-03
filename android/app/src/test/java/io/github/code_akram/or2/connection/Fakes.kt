@@ -71,8 +71,6 @@ class FakeSession(val events: MutableList<String> = mutableListOf(), val transpo
     override fun serverPid() = pid
     override fun clientId() = client
     override fun roam() { roams++ }
-    override fun approveHostKey(fingerprint: String) = Unit
-    override fun rejectHostKey() = Unit
     private var disconnected = false
 
     /** Input the session took, in order (`text:`, `key:`, `submit:`, `scroll:`); after `disconnect` input is refused as Rust does. */
@@ -118,7 +116,7 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     var nativeState: HostState = HostState.Connecting
     var approved: String? = null
     var destroyed = false
-    var caps = HostCapabilities("/usr/bin/tmux", "/usr/bin/herdr", null, "C.UTF-8", listOf(HerdrSessionInfo("default", true, true)))
+    var caps = HostCapabilities("/usr/bin/tmux", "/usr/bin/herdr", null, listOf(HerdrSessionInfo("default", true, true)))
     var capsFailure: Exception? = null
     /** While set, the capability probe is unanswered: `capabilities()` waits for it to complete. */
     var capsGate: CompletableDeferred<Unit>? = null
@@ -220,8 +218,11 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     /** While set, a `scroll_target` call waits for it; a failure is thrown after the call is recorded. */
     var scrollGate: CompletableDeferred<Unit>? = null
     var scrollFailure: Exception? = null
-    override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll) {
+    /** The client id each `scroll_target` call carried, in the same order as [scrolls]. */
+    val scrollClients = mutableListOf<String?>()
+    override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll, clientId: String?) {
         scrolls += Triple(target, paneId, scroll)
+        scrollClients += clientId
         scrollGate?.await()
         scrollFailure?.let { throw it }
     }

@@ -19,11 +19,11 @@ use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 
 use crate::host::{HostConnectRequest, HostHandle, HostObserver};
-use crate::transport::{DatagramTransport, DirectTcp, Transport};
+use crate::transport::{DirectTcp, DirectUdp};
 
 pub use connection::HostOptions;
 #[cfg(any(test, feature = "test-support"))]
-pub use connection::{SshRemote, connect_tapped};
+pub use connection::{SshRemote, connect_host_with};
 pub(crate) use pair_client::{Next, PairSession};
 
 pub(crate) fn runtime() -> &'static Runtime {
@@ -48,33 +48,12 @@ pub fn network_changed() {
 /// serves terminals, queries and herdr watches until closed. Returns at once; the state
 /// changes and the final `Closed` arrive through `observer` on a Rust-owned thread.
 pub fn connect_host(request: HostConnectRequest, observer: Arc<dyn HostObserver>) -> HostHandle {
-    connect_host_with(
+    connection::start(
         Arc::new(DirectTcp),
+        Arc::new(DirectUdp),
         request,
         observer,
         HostOptions::default(),
+        None,
     )
-}
-
-/// [`connect_host`] over any transport and with explicit timings, for tests.
-pub fn connect_host_with<T: Transport>(
-    transport: Arc<T>,
-    request: HostConnectRequest,
-    observer: Arc<dyn HostObserver>,
-    options: HostOptions,
-) -> HostHandle {
-    connection::start(transport, request, observer, options)
-}
-
-/// [`connect_host_with`] that also chooses the datagram transport mosh terminals use (the
-/// default is [`DirectUdp`]). For tests that watch or sabotage the UDP side, and for a
-/// network-bound transport.
-pub fn connect_host_with_datagrams<T: Transport, D: DatagramTransport>(
-    transport: Arc<T>,
-    datagrams: Arc<D>,
-    request: HostConnectRequest,
-    observer: Arc<dyn HostObserver>,
-    options: HostOptions,
-) -> HostHandle {
-    connection::start_datagrams(transport, datagrams, request, observer, options)
 }

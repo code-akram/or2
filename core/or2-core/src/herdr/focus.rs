@@ -53,8 +53,8 @@ use tokio::time::{Instant, sleep_until};
 use super::HerdrError;
 use super::discovery::{Directory, DiscoveryError};
 use super::generated::request::{PaneTarget, RequestBody};
-use super::watch::{PANE_NOT_FOUND, Timing};
-use super::wire::{self, WireError};
+use super::watch::PANE_NOT_FOUND;
+use super::wire::WireError;
 use crate::remote::RemoteHost;
 
 /// How long an acknowledged focus counts for a terminal that opens on the same pane.
@@ -351,28 +351,7 @@ pub async fn focus_pane_in<H: RemoteHost>(
     let body = RequestBody::PaneFocus(PaneTarget {
         pane_id: pane_id.to_owned(),
     });
-    let mut fresh = false;
-    loop {
-        let cached = if fresh {
-            None
-        } else {
-            directory.cached_socket(session)
-        };
-        let from_cache = cached.is_some();
-        let socket = match cached {
-            Some(socket) => socket,
-            None => directory
-                .locate_fresh(host, herdr, session)
-                .await
-                .map_err(discovery_error)?,
-        };
-        match wire::call(host, &socket, "or2_focus", &body, Timing::default().request).await {
-            Ok(_) => return Ok(()),
-            Err(WireError::Unreachable(_)) if from_cache => {
-                directory.invalidate();
-                fresh = true;
-            }
-            Err(error) => return Err(wire_error(error)),
-        }
-    }
+    super::scroll::call(host, herdr, directory, session, "or2_focus", &body)
+        .await
+        .map(|_| ())
 }

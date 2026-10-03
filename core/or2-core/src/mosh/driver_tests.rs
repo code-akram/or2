@@ -16,8 +16,9 @@ use tokio::sync::mpsc as async_mpsc;
 
 use crate::frame::{CellWidth, Frame};
 use crate::input::{Key, KeyInput, Modifiers};
+use crate::session::{SessionHandle, SessionObserver, channel};
 use crate::term::TerminalSize;
-use crate::transport::DatagramSocket;
+use crate::transport::{DatagramSocket, DirectUdp, Endpoint};
 
 use super::super::bootstrap::MoshKey;
 use super::super::ssp::crypto::{Direction, Session as CryptoSession};
@@ -322,22 +323,48 @@ fn params(port: u16, key: &str, columns: u16, rows: u16) -> MoshParams {
     }
 }
 
+/// Runs a session on a thread of its own, as the host driver does, to the server at `peer` and
+/// the port in `params`.
+fn spawn<T: DatagramTransport>(
+    transport: T,
+    params: MoshParams,
+    peer: IpAddr,
+    observer: Arc<dyn SessionObserver>,
+    connect_timeout: Duration,
+) -> SessionHandle {
+    let (handle, mut driver) = channel(observer);
+    let plan = Plan {
+        transport: Arc::new(transport),
+        peer: SocketAddr::new(peer, params.port),
+        params,
+        shutdown: Arc::new(Notify::new()),
+        connect_timeout,
+        deadline: None,
+    };
+    let runtime = crate::ssh::runtime();
+    std::thread::spawn(move || {
+        runtime.block_on(async move {
+            let ended = run_session(plan, &mut driver).await;
+            driver.close(ended.reason);
+        })
+    });
+    handle
+}
+
 fn start_fake(
     port: u16,
     key: &str,
     connect_timeout: Duration,
-) -> (SessionHandle, LinkControl, mpsc::Receiver<SessionState>) {
+) -> (SessionHandle, mpsc::Receiver<SessionState>) {
     let (sender, states) = mpsc::channel();
-    let (handle, control) = spawn(
+    let handle = spawn(
         DirectUdp,
         params(port, key, 20, 5),
         LOCALHOST,
         Arc::new(Recorder(Mutex::new(sender))),
-        None,
         connect_timeout,
-    )
-    .unwrap();
-    (handle, control, states)
+    );
+    (handle, states)
 }
 
 /// Runs a session as a task of the current runtime instead of on a thread of its own, so a test
@@ -351,8 +378,6 @@ fn start_here(transport: MemTransport, key: &str) -> (SessionHandle, mpsc::Recei
         transport: Arc::new(transport),
         peer: SocketAddr::new(LOCALHOST, params.port),
         params,
-        health: None,
-        roam: Arc::new(Notify::new()),
         shutdown: Arc::new(Notify::new()),
         connect_timeout: CONNECT_TIMEOUT,
         deadline: None,
@@ -439,7 +464,7 @@ async fn state(states: &mpsc::Receiver<SessionState>) -> SessionState {
 #[tokio::test]
 async fn a_session_connects_shows_output_takes_input_resizes_roams_and_ends() {
     let mut server = FakeServer::new(KEY).await;
-    let (handle, control, states) = start_fake(server.port(), KEY, CONNECT_TIMEOUT);
+    let (handle, states) = start_fake(server.port(), KEY, CONNECT_TIMEOUT);
     assert_eq!(handle.state(), SessionState::Connecting);
     let mut grid = Grid::default();
 
@@ -483,7 +508,7 @@ async fn a_session_connects_shows_output_takes_input_resizes_roams_and_ends() {
     .await;
 
     // Roaming: the next datagram comes from a new source port and the server follows it.
-    control.roam();
+    handle.roam();
     handle.send_text("c".into()).unwrap();
     let heard = server
         .hear_until(|heard| heard.iter().any(|h| h.from.port() != first_port))
@@ -605,7 +630,7 @@ async fn a_click_reaches_the_server_only_while_the_program_tracks_the_mouse() {
 #[tokio::test]
 async fn disconnect_says_goodbye_to_the_server_and_closes() {
     let mut server = FakeServer::new(KEY).await;
-    let (handle, _control, states) = start_fake(server.port(), KEY, CONNECT_TIMEOUT);
+    let (handle, states) = start_fake(server.port(), KEY, CONNECT_TIMEOUT);
     server.hear(Duration::from_secs(5)).await.unwrap();
     server.say(b"hi").await;
     assert_eq!(state(&states).await, SessionState::Connected);
@@ -627,7 +652,7 @@ async fn disconnect_says_goodbye_to_the_server_and_closes() {
 #[tokio::test]
 async fn disconnect_does_not_wait_for_a_server_that_is_gone() {
     let mut server = FakeServer::new(KEY).await;
-    let (handle, _control, states) = start_fake(server.port(), KEY, CONNECT_TIMEOUT);
+    let (handle, states) = start_fake(server.port(), KEY, CONNECT_TIMEOUT);
     server.hear(Duration::from_secs(5)).await.unwrap();
     server.say(b"hi").await;
     assert_eq!(state(&states).await, SessionState::Connected);
@@ -645,7 +670,7 @@ async fn disconnect_does_not_wait_for_a_server_that_is_gone() {
 #[tokio::test]
 async fn dropping_the_handle_disconnects() {
     let mut server = FakeServer::new(KEY).await;
-    let (handle, _control, states) = start_fake(server.port(), KEY, CONNECT_TIMEOUT);
+    let (handle, states) = start_fake(server.port(), KEY, CONNECT_TIMEOUT);
     server.hear(Duration::from_secs(5)).await.unwrap();
     server.say(b"hi").await;
     assert_eq!(state(&states).await, SessionState::Connected);
@@ -659,7 +684,7 @@ async fn dropping_the_handle_disconnects() {
 #[tokio::test]
 async fn a_server_that_never_answers_times_out() {
     let server = FakeServer::new(KEY).await;
-    let (_handle, _control, states) = start_fake(server.port(), KEY, Duration::from_millis(300));
+    let (_handle, states) = start_fake(server.port(), KEY, Duration::from_millis(300));
     assert_eq!(
         state(&states).await,
         SessionState::Closed(CloseReason::Failed(SessionFailure::TimedOut))
@@ -669,7 +694,7 @@ async fn a_server_that_never_answers_times_out() {
 #[tokio::test]
 async fn a_server_with_another_key_is_never_connected() {
     let mut server = FakeServer::new(OTHER_KEY).await;
-    let (handle, _control, states) = start_fake(server.port(), KEY, Duration::from_millis(600));
+    let (handle, states) = start_fake(server.port(), KEY, Duration::from_millis(600));
     // It cannot even read the client's datagrams, so it never learns where to answer.
     assert!(server.hear(Duration::from_millis(300)).await.is_none());
     assert_eq!(
@@ -682,7 +707,7 @@ async fn a_server_with_another_key_is_never_connected() {
 #[tokio::test]
 async fn forged_datagrams_do_not_connect_a_session() {
     let mut server = FakeServer::new(KEY).await;
-    let (handle, _control, states) = start_fake(server.port(), KEY, Duration::from_millis(600));
+    let (handle, states) = start_fake(server.port(), KEY, Duration::from_millis(600));
     let heard = server.hear(Duration::from_secs(5)).await.unwrap();
     // Garbage from the right address does not authenticate.
     server.wire.send_to(&[9u8; 80], heard.from).await.unwrap();
@@ -693,11 +718,67 @@ async fn forged_datagrams_do_not_connect_a_session() {
     assert!(handle.take_frame().is_none());
 }
 
-#[test]
-fn an_invalid_endpoint_is_refused_synchronously() {
-    let (sender, _states) = mpsc::channel();
-    let observer = Arc::new(Recorder(Mutex::new(sender)));
-    assert!(start(params(0, KEY, 80, 24), LOCALHOST, observer).is_err());
+/// A socket the network refuses every datagram of: each receive reports the refusal at once.
+struct Refused(SocketAddr);
+
+impl DatagramSocket for Refused {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(MEM_CLIENT)
+    }
+
+    fn peer_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.0)
+    }
+
+    fn try_send(&self, datagram: &[u8]) -> io::Result<usize> {
+        Ok(datagram.len())
+    }
+
+    fn poll_recv(&self, _: &mut Context<'_>, _: &mut [u8]) -> Poll<io::Result<usize>> {
+        Poll::Ready(Err(io::ErrorKind::ConnectionRefused.into()))
+    }
+}
+
+struct Refusing;
+
+impl DatagramTransport for Refusing {
+    type Socket = Refused;
+
+    async fn bind(&self, endpoint: &Endpoint) -> io::Result<Refused> {
+        Ok(Refused(SocketAddr::new(
+            endpoint.host().parse().unwrap(),
+            endpoint.port(),
+        )))
+    }
+}
+
+/// Refusals are not datagrams: a receive that keeps failing pauses briefly and gives commands
+/// their turn, so a disconnect is served at once (the receive used to take up to 64 refusals
+/// in a row, 20 ms apart, about 1.3 s, before a command was looked at).
+#[tokio::test]
+async fn a_disconnect_is_not_held_up_by_a_receive_the_network_keeps_refusing() {
+    let (sender, states) = mpsc::channel();
+    let handle = spawn(
+        Refusing,
+        params(60003, KEY, 20, 5),
+        LOCALHOST,
+        Arc::new(Recorder(Mutex::new(sender))),
+        CONNECT_TIMEOUT,
+    );
+    // Well inside the first run of refusals.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let asked = StdInstant::now();
+    handle.disconnect();
+    assert_eq!(
+        state(&states).await,
+        SessionState::Closed(CloseReason::Disconnected)
+    );
+    // The goodbye waits its bound for a server that never answers; nothing else may.
+    let took = asked.elapsed();
+    assert!(
+        took < GOODBYE_TIMEOUT + Duration::from_millis(400),
+        "the disconnect took {took:?}"
+    );
 }
 
 /// A transport whose sockets open only when told to (after the first `free` binds, which are
@@ -733,28 +814,23 @@ impl DatagramTransport for Gated {
     }
 }
 
-fn start_gated(
-    transport: Gated,
-    port: u16,
-) -> (SessionHandle, LinkControl, mpsc::Receiver<SessionState>) {
+fn start_gated(transport: Gated, port: u16) -> (SessionHandle, mpsc::Receiver<SessionState>) {
     let (sender, states) = mpsc::channel();
-    let (handle, control) = spawn(
+    let handle = spawn(
         transport,
         params(port, KEY, 20, 5),
         LOCALHOST,
         Arc::new(Recorder(Mutex::new(sender))),
-        None,
         CONNECT_TIMEOUT,
-    )
-    .unwrap();
-    (handle, control, states)
+    );
+    (handle, states)
 }
 
 #[tokio::test]
 async fn a_disconnect_does_not_wait_for_the_first_socket() {
     // The resolver never answers.
     let (transport, _gate, _binds) = Gated::new(0);
-    let (handle, _control, states) = start_gated(transport, 60002);
+    let (handle, states) = start_gated(transport, 60002);
     handle.disconnect();
     let started = StdInstant::now();
     assert_eq!(
@@ -764,11 +840,41 @@ async fn a_disconnect_does_not_wait_for_the_first_socket() {
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
+/// Without an absolute deadline the connect timeout covers the socket open and the first
+/// datagram together: one allowance, counted once (it used to start again after the open, so a
+/// slow open could double it).
+#[tokio::test]
+async fn the_connect_timeout_counts_the_socket_open_and_the_first_datagram_together() {
+    let server = FakeServer::new(KEY).await;
+    let (transport, gate, _binds) = Gated::new(0);
+    let (sender, states) = mpsc::channel();
+    let started = StdInstant::now();
+    let _handle = spawn(
+        transport,
+        params(server.port(), KEY, 20, 5),
+        LOCALHOST,
+        Arc::new(Recorder(Mutex::new(sender))),
+        Duration::from_millis(1000),
+    );
+    // The resolver answers after most of the allowance; the server never does.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    gate.notify_one();
+    assert_eq!(
+        state(&states).await,
+        SessionState::Closed(CloseReason::Failed(SessionFailure::TimedOut))
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "timed out after {elapsed:?}, not once the one allowance was spent"
+    );
+}
+
 #[tokio::test]
 async fn a_resize_while_the_first_socket_opens_is_not_lost() {
     let mut server = FakeServer::new(KEY).await;
     let (transport, gate, _binds) = Gated::new(0);
-    let (handle, _control, _states) = start_gated(transport, server.port());
+    let (handle, _states) = start_gated(transport, server.port());
     handle.resize(TerminalSize::new(30, 6).unwrap()).unwrap();
     // Give the driver time to take the command while the socket is still not open.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -784,13 +890,13 @@ async fn a_rebind_stuck_on_the_resolver_does_not_freeze_the_session() {
     let mut server = FakeServer::new(KEY).await;
     // The first socket opens at once; every later one waits for a resolver that never answers.
     let (transport, _gate, binds) = Gated::new(1);
-    let (handle, control, states) = start_gated(transport, server.port());
+    let (handle, states) = start_gated(transport, server.port());
     let mut grid = Grid::default();
     server.hear(Duration::from_secs(5)).await.unwrap();
     server.say(b"hi").await;
     assert_eq!(state(&states).await, SessionState::Connected);
 
-    control.roam();
+    handle.roam();
     let deadline = StdInstant::now() + Duration::from_secs(5);
     while binds.load(Ordering::SeqCst) < 2 {
         assert!(StdInstant::now() < deadline, "the rebind never started");
@@ -849,15 +955,13 @@ impl DatagramTransport for Moving {
 async fn a_roam_to_another_address_is_refused_and_the_session_keeps_its_server() {
     let mut server = FakeServer::new(KEY).await;
     let (sender, states) = mpsc::channel();
-    let (handle, control) = spawn(
+    let handle = spawn(
         Moving(AtomicUsize::new(0)),
         params(server.port(), KEY, 20, 5),
         LOCALHOST,
         Arc::new(Recorder(Mutex::new(sender))),
-        None,
         CONNECT_TIMEOUT,
-    )
-    .unwrap();
+    );
     let mut grid = Grid::default();
     let first_port = server
         .hear(Duration::from_secs(5))
@@ -870,7 +974,7 @@ async fn a_roam_to_another_address_is_refused_and_the_session_keeps_its_server()
 
     // The roam opens a socket that resolves elsewhere; it is refused, so the client keeps
     // sending from its old socket to the same server, and replies are still read.
-    control.roam();
+    handle.roam();
     tokio::time::sleep(Duration::from_millis(300)).await;
     handle.send_text("x".into()).unwrap();
     let heard = server
@@ -996,15 +1100,13 @@ async fn a_connected_session_reports_link_health_only_when_it_turns_stale_and_wh
         health: Mutex::new(Vec::new()),
         connected: std::sync::atomic::AtomicBool::new(false),
     });
-    let (handle, _control) = spawn(
+    let handle = spawn(
         DirectUdp,
         params(server.port(), KEY, 20, 5),
         LOCALHOST,
         recorder.clone(),
-        None,
         CONNECT_TIMEOUT,
-    )
-    .unwrap();
+    );
     server.hear(Duration::from_secs(5)).await.unwrap();
     // Silent until the server authenticates.
     tokio::time::sleep(Duration::from_millis(1300)).await;
@@ -1052,53 +1154,10 @@ async fn a_connected_session_reports_link_health_only_when_it_turns_stale_and_wh
     handle.disconnect();
 }
 
-/// The `start_with` hook is not the session observer's throttled report: it sees every
-/// sample, about once a second, before the server has been heard as well.
 #[tokio::test]
-async fn the_health_observer_hook_sees_every_sample_including_before_connected() {
-    struct Hook(Mutex<Vec<StdInstant>>);
-    impl HealthObserver for Hook {
-        fn link_health(&self, _health: LinkHealth) {
-            self.0.lock().unwrap().push(StdInstant::now());
-        }
-    }
+async fn roam_on_the_session_handle_opens_a_new_socket() {
     let mut server = FakeServer::new(KEY).await;
-    let hook = Arc::new(Hook(Mutex::new(Vec::new())));
-    let (sender, states) = mpsc::channel();
-    let recorder = Arc::new(HealthRecorder {
-        states: Mutex::new(sender),
-        health: Mutex::new(Vec::new()),
-        connected: std::sync::atomic::AtomicBool::new(false),
-    });
-    let (handle, _control) = spawn(
-        DirectUdp,
-        params(server.port(), KEY, 20, 5),
-        LOCALHOST,
-        recorder.clone(),
-        Some(hook.clone()),
-        CONNECT_TIMEOUT,
-    )
-    .unwrap();
-    server.hear(Duration::from_secs(5)).await.unwrap();
-    // Not connected yet: the hook still hears about the link every second.
-    tokio::time::sleep(Duration::from_millis(2400)).await;
-    assert!(
-        (1..=3).contains(&hook.0.lock().unwrap().len()),
-        "{} samples before Connected",
-        hook.0.lock().unwrap().len()
-    );
-    assert!(recorder.health.lock().unwrap().is_empty());
-    server.say(b"hi").await;
-    assert_eq!(state(&states).await, SessionState::Connected);
-    tokio::time::sleep(Duration::from_millis(2000)).await;
-    assert!(hook.0.lock().unwrap().len() >= 3);
-    handle.disconnect();
-}
-
-#[tokio::test]
-async fn roam_on_the_session_handle_opens_a_new_socket_like_the_link_control() {
-    let mut server = FakeServer::new(KEY).await;
-    let (handle, _control, states) = start_fake(server.port(), KEY, CONNECT_TIMEOUT);
+    let (handle, states) = start_fake(server.port(), KEY, CONNECT_TIMEOUT);
     let first_port = server
         .hear(Duration::from_secs(5))
         .await
@@ -1129,8 +1188,6 @@ async fn the_shutdown_signal_disconnects_with_the_goodbye_handshake() {
         transport: Arc::new(DirectUdp),
         peer: SocketAddr::new(LOCALHOST, server.port()),
         params: params(server.port(), KEY, 20, 5),
-        health: None,
-        roam: Arc::new(Notify::new()),
         shutdown: shutdown.clone(),
         connect_timeout: CONNECT_TIMEOUT,
         deadline: None,
@@ -1172,8 +1229,6 @@ async fn the_shutdown_signal_disconnects_with_the_goodbye_handshake() {
             transport: Arc::new(DirectUdp),
             peer: SocketAddr::new(LOCALHOST, server.port()),
             params: params(server.port(), KEY, 20, 5),
-            health: None,
-            roam: Arc::new(Notify::new()),
             shutdown,
             connect_timeout: CONNECT_TIMEOUT,
             deadline: None,
@@ -1198,8 +1253,6 @@ async fn an_unanswered_goodbye_closes_disconnected_without_confirming_the_server
         transport: Arc::new(DirectUdp),
         peer: SocketAddr::new(LOCALHOST, server.port()),
         params: params(server.port(), KEY, 20, 5),
-        health: None,
-        roam: Arc::new(Notify::new()),
         shutdown: shutdown.clone(),
         connect_timeout: CONNECT_TIMEOUT,
         deadline: None,
@@ -1238,8 +1291,6 @@ async fn an_absolute_deadline_ends_a_session_the_server_never_answers() {
             transport: Arc::new(DirectUdp),
             peer: SocketAddr::new(LOCALHOST, server.port()),
             params: params(server.port(), KEY, 20, 5),
-            health: None,
-            roam: Arc::new(Notify::new()),
             shutdown: Arc::new(Notify::new()),
             connect_timeout: CONNECT_TIMEOUT,
             deadline: Some(Instant::now() + deadline),
@@ -1288,15 +1339,13 @@ async fn osc8_links_reach_the_frames_and_osc52_the_observer_as_over_ssh() {
         states: Mutex::new(sender),
         clipboard: Mutex::new(Vec::new()),
     });
-    let (handle, _control) = spawn(
+    let handle = spawn(
         DirectUdp,
         params(server.port(), KEY, 20, 5),
         LOCALHOST,
         observer.clone(),
-        None,
         CONNECT_TIMEOUT,
-    )
-    .unwrap();
+    );
     server.hear(Duration::from_secs(5)).await;
     server.say(b"$ ").await;
     assert_eq!(state(&states).await, SessionState::Connected);

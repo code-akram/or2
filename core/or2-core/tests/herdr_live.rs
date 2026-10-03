@@ -21,8 +21,7 @@ use or2_core::herdr::generated::request::{
 use or2_core::herdr::view::AgentStatus;
 use or2_core::herdr::{
     Directory, FocusGate, HerdrError, HerdrObserver, HerdrState, HerdrUnavailable, HerdrView,
-    HerdrWatchHandle, Timing, focus_pane, list_sessions, navigate_in, run_in, watch,
-    watch_with_timing, wire,
+    HerdrWatchHandle, Timing, focus_pane_in, list_sessions, navigate_in, run_in, wire,
 };
 use or2_core::host::{NavDirection, TargetNav};
 use or2_core::remote::{ExecOutput, LocalHost, RemoteError, RemoteHost};
@@ -206,6 +205,27 @@ impl HerdrObserver for Recorder {
     }
 }
 
+/// Watches `herdr`'s session as a host connection does (`run_in` on a task, here with a
+/// directory of its own, so the first attempt reads the listing), with the intervals of
+/// `timing`.
+fn watch(
+    host: Arc<LocalHost>,
+    herdr: &Isolated,
+    observer: Arc<dyn HerdrObserver>,
+    timing: Timing,
+) -> HerdrWatchHandle {
+    let (handle, driver) = or2_core::herdr::channel(observer);
+    tokio::spawn(run_in(
+        host,
+        herdr.herdr().to_owned(),
+        Arc::new(Directory::new()),
+        Some(herdr.name.clone()),
+        driver,
+        timing,
+    ));
+    handle
+}
+
 fn live_view(handle: &HerdrWatchHandle) -> Option<HerdrView> {
     match handle.state() {
         HerdrState::Live { view } => Some(view),
@@ -246,15 +266,14 @@ async fn the_view_follows_an_isolated_session_and_focus_pane_works() {
     let recorder = Arc::new(Recorder::default());
     let handle = watch(
         Arc::clone(&host),
-        herdr.herdr().to_owned(),
-        Some(herdr.name.clone()),
+        &herdr,
         recorder.clone(),
+        Timing::default(),
     );
 
     // A fresh session is empty.
     let initial = view_where(&handle, "the first view", |_| true).await;
     assert_eq!(initial.version, 1);
-    assert_eq!(initial.protocol, 22);
     assert!(initial.workspaces.is_empty() && initial.tabs.is_empty());
     assert!(initial.panes.is_empty() && initial.agents.is_empty());
     assert_eq!(initial.focused_pane_id, None);
@@ -272,7 +291,6 @@ async fn the_view_follows_an_isolated_session_and_focus_pane_works() {
     let view = view_where(&handle, "the first workspace", |v| v.panes.len() == 1).await;
     assert_eq!(view.workspaces.len(), 1);
     assert_eq!(view.tabs.len(), 1);
-    assert!(view.workspaces[0].focused && view.tabs[0].focused && view.panes[0].focused);
     assert_eq!(view.focused_pane_id.as_deref(), Some(first_pane.as_str()));
 
     // A second workspace (not focused) appears with its root pane.
@@ -293,10 +311,8 @@ async fn the_view_follows_an_isolated_session_and_focus_pane_works() {
         .find(|w| w.workspace_id == workspace)
         .expect("the new workspace is in the view");
     assert_eq!(shown.label, "or2-live");
-    assert!(!shown.focused);
     assert_eq!(view.panes.len(), 2);
     let pane = view.panes.iter().find(|p| p.pane_id == root).unwrap();
-    assert_eq!(pane.workspace_id, workspace);
     assert_eq!(pane.cwd.as_deref(), Some("/tmp"));
     assert_eq!(view.focused_pane_id.as_deref(), Some(first_pane.as_str()));
 
@@ -381,8 +397,7 @@ async fn the_view_follows_an_isolated_session_and_focus_pane_works() {
     assert_eq!(agent.agent.as_deref(), Some("or2-test-agent"));
     assert_eq!(agent.workspace_id, workspace);
     let first_seq = agent.state_change_seq;
-    let pane = view.panes.iter().find(|p| p.pane_id == split_pane).unwrap();
-    assert_eq!(pane.agent_status, AgentStatus::Working);
+    assert_eq!(agent.status, AgentStatus::Working);
 
     herdr.call(report(2, PaneAgentState::Blocked)).await;
     let view = view_where(&handle, "a blocked agent", |v| {
@@ -398,44 +413,32 @@ async fn the_view_follows_an_isolated_session_and_focus_pane_works() {
         agent.state_change_seq > first_seq,
         "the transition counter moved"
     );
-    assert_eq!(
-        view.workspaces
-            .iter()
-            .find(|w| w.workspace_id == workspace)
-            .unwrap()
-            .agent_status,
-        AgentStatus::Blocked,
-        "the workspace aggregates its agents"
-    );
 
     // Focus a pane in the other workspace, through `focus_pane`.
-    focus_pane(&*host, herdr.herdr(), Some(&herdr.name), &split_pane)
-        .await
-        .unwrap();
-    let view = view_where(&handle, "the focus change", |v| {
+    focus_pane_in(
+        &*host,
+        herdr.herdr(),
+        &Directory::new(),
+        Some(&herdr.name),
+        &split_pane,
+    )
+    .await
+    .unwrap();
+    view_where(&handle, "the focus change", |v| {
         v.focused_pane_id.as_deref() == Some(split_pane.as_str())
     })
     .await;
-    assert!(
-        view.panes
-            .iter()
-            .find(|p| p.pane_id == split_pane)
-            .unwrap()
-            .focused
-    );
-    assert!(
-        !view
-            .panes
-            .iter()
-            .find(|p| p.pane_id == first_pane)
-            .unwrap()
-            .focused
-    );
     // A pane that does not exist is an error, not a silent success.
     assert!(
-        focus_pane(&*host, herdr.herdr(), Some(&herdr.name), "w999:p999")
-            .await
-            .is_err()
+        focus_pane_in(
+            &*host,
+            herdr.herdr(),
+            &Directory::new(),
+            Some(&herdr.name),
+            "w999:p999"
+        )
+        .await
+        .is_err()
     );
 
     // Release the agent, close the split pane and the workspace.
@@ -512,13 +515,7 @@ async fn the_watch_recovers_when_the_server_starts_stops_and_restarts() {
         retry: Duration::from_millis(500),
         ..Timing::default()
     };
-    let handle = watch_with_timing(
-        host,
-        herdr.herdr().to_owned(),
-        Some(herdr.name.clone()),
-        recorder.clone(),
-        timing,
-    );
+    let handle = watch(host, &herdr, recorder.clone(), timing);
     let deadline = Instant::now() + Duration::from_secs(15);
     while matches!(handle.state(), HerdrState::Starting) && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -653,6 +650,7 @@ async fn a_directory_seeds_the_watch_and_the_focus_and_a_stale_path_is_rediscove
         Arc::clone(&directory),
         Some(herdr.name.clone()),
         driver,
+        Timing::default(),
     ));
     let view = view_where(&handle, "the view from the seeded directory", |v| {
         v.panes.len() == 1
@@ -712,6 +710,7 @@ async fn a_directory_seeds_the_watch_and_the_focus_and_a_stale_path_is_rediscove
         stale,
         Some(herdr.name.clone()),
         driver,
+        Timing::default(),
     ));
     view_where(&handle, "the view after rediscovering", |v| {
         v.panes.len() == 1

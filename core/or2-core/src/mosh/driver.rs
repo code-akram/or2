@@ -9,14 +9,13 @@
 //! dead network is mosh's point. It ends when the server announces the end of the session
 //! (`RemoteExited`), the user disconnects, or something internal breaks.
 //!
-//! Two entry points share one loop: [`start`] / [`start_with`] own a fresh session (a thread
-//! of their own), and [`run_session`] runs on a [`SessionDriver`] the caller already holds (the
-//! host driver, which bootstrapped the server over its SSH connection and must clean up after a
-//! session that never connected).
+//! [`run_session`] runs a session on a [`SessionDriver`] the caller already holds: the host
+//! driver, which bootstrapped the server over its SSH connection and must clean up after a
+//! session that never connected.
 
 use std::future::{Future, poll_fn};
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,13 +23,9 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::{Instant, sleep, sleep_until, timeout_at};
 
-use crate::input::text_bytes;
-use crate::session::{
-    CloseReason, Command, SessionDriver, SessionFailure, SessionHandle, SessionObserver,
-    SessionState, channel,
-};
+use crate::session::{CloseReason, Command, SessionDriver, SessionFailure, SessionState};
 use crate::submit::SubmitSequencer;
-use crate::transport::{DatagramTransport, DirectUdp, Endpoint, EndpointError};
+use crate::transport::DatagramTransport;
 
 use super::bootstrap::MoshParams;
 use super::ghostty::GhosttyScreen;
@@ -42,8 +37,7 @@ use super::ssp::session::{Fault, LinkHealth, Session};
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a disconnect waits for the server to acknowledge the shutdown before giving up.
 pub(crate) const GOODBYE_TIMEOUT: Duration = Duration::from_secs(1);
-/// How often [`HealthObserver::link_health`] is called, and the least time between two reports
-/// to the session's observer.
+/// The least time between two link-health reports to the session's observer.
 const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 /// Silence from the server past which the link counts as stale (the grey-out threshold the UI
 /// uses), in milliseconds.
@@ -58,124 +52,39 @@ const REBIND_RETRY: Duration = Duration::from_secs(1);
 const REBIND_TIMEOUT: Duration = Duration::from_secs(3);
 /// How many datagrams are taken in one go before frames and commands get a turn.
 const MAX_DATAGRAMS_PER_TURN: usize = 64;
-
-/// Receives the link's health about once a second, from the driver thread. This is the hook M3
-/// uses to show "no contact for N seconds"; it must return quickly.
-pub trait HealthObserver: Send + Sync {
-    fn link_health(&self, health: LinkHealth);
-}
-
-/// Controls the network side of a running session. Cheap to clone and callable from any thread.
-#[derive(Clone)]
-pub struct LinkControl {
-    roam: Arc<Notify>,
-}
-
-impl LinkControl {
-    /// The network changed: open a new socket now and send from it, instead of waiting ten
-    /// seconds without answers to notice. The server follows the first datagram that
-    /// authenticates from the new source.
-    pub fn roam(&self) {
-        self.roam.notify_one();
-    }
-}
-
-/// Starts a mosh session over OS UDP sockets. Validates the address synchronously and returns
-/// at once; everything else arrives through `observer`. `peer` is the IP address the SSH
-/// connection that ran the bootstrap actually reached (`HostHandle::peer_addr`, not a name
-/// looked up again); the server listens on it at UDP port `params.port`. Every socket of the
-/// session, roaming included, must reach exactly that address.
-pub fn start(
-    params: MoshParams,
-    peer: IpAddr,
-    observer: Arc<dyn SessionObserver>,
-) -> Result<SessionHandle, EndpointError> {
-    Ok(start_with(DirectUdp, params, peer, observer, None)?.0)
-}
-
-/// [`start`] over any [`DatagramTransport`], with a health hook, returning the network control
-/// next to the session handle.
-pub fn start_with<T: DatagramTransport>(
-    transport: T,
-    params: MoshParams,
-    peer: IpAddr,
-    observer: Arc<dyn SessionObserver>,
-    health: Option<Arc<dyn HealthObserver>>,
-) -> Result<(SessionHandle, LinkControl), EndpointError> {
-    spawn(transport, params, peer, observer, health, CONNECT_TIMEOUT)
-}
-
-fn spawn<T: DatagramTransport>(
-    transport: T,
-    params: MoshParams,
-    peer: IpAddr,
-    observer: Arc<dyn SessionObserver>,
-    health: Option<Arc<dyn HealthObserver>>,
-    connect_timeout: Duration,
-) -> Result<(SessionHandle, LinkControl), EndpointError> {
-    // Only to validate the port; the link builds its own endpoint from the pinned address.
-    Endpoint::new(&peer.to_string(), params.port)?;
-    let (handle, mut driver) = channel(observer);
-    let control = LinkControl {
-        roam: Arc::new(Notify::new()),
-    };
-    // Initialize before spawning so runtime initialization is never done in a callback.
-    let runtime = crate::ssh::runtime();
-    let plan = Plan {
-        transport: Arc::new(transport),
-        peer: SocketAddr::new(peer, params.port),
-        params,
-        health,
-        roam: control.roam.clone(),
-        shutdown: Arc::new(Notify::new()),
-        connect_timeout,
-        deadline: None,
-    };
-    std::thread::Builder::new()
-        .name("or2-mosh".into())
-        .spawn(move || {
-            runtime.block_on(async move {
-                let ended = run_session(plan, &mut driver).await;
-                driver.close(ended.reason);
-            })
-        })
-        .expect("create mosh session thread");
-    Ok((handle, control))
-}
+/// The pause after the network refused a receive (ICMP unreachable), which ends that turn.
+const REFUSED_PAUSE: Duration = Duration::from_millis(20);
 
 /// Everything one mosh session needs besides its [`SessionDriver`].
-pub(crate) struct Plan<T: DatagramTransport> {
-    pub(crate) transport: Arc<T>,
+pub struct Plan<T: DatagramTransport> {
+    pub transport: Arc<T>,
     /// The pinned server address: the IP the SSH connection reached and the bootstrap's port.
-    pub(crate) peer: SocketAddr,
-    pub(crate) params: MoshParams,
-    pub(crate) health: Option<Arc<dyn HealthObserver>>,
-    /// [`LinkControl::roam`]'s signal.
-    pub(crate) roam: Arc<Notify>,
+    pub peer: SocketAddr,
+    pub params: MoshParams,
     /// Ends the session like [`Command::Disconnect`] (with the shutdown handshake); a permit
     /// given before the session reads it is kept. The host driver gives it when the user
     /// disconnects the host.
-    pub(crate) shutdown: Arc<Notify>,
+    pub shutdown: Arc<Notify>,
     /// How long to wait for the server's first datagram, socket open included, counted from
     /// the start of the session. Used when `deadline` is `None`.
-    pub(crate) connect_timeout: Duration,
+    pub connect_timeout: Duration,
     /// An absolute moment by which the session must be `Connected`, set by a caller that has
     /// already spent part of its allowance (the host driver's bootstrap): it replaces
     /// `connect_timeout` for the socket open and the first datagram. A moment already past
     /// fails the session `TimedOut` at once.
-    pub(crate) deadline: Option<Instant>,
+    pub deadline: Option<Instant>,
 }
 
 /// How a session ended: the reason the user sees, and whether the server is KNOWN to have
 /// ended too.
 #[derive(Debug)]
-pub(crate) struct Ended {
-    pub(crate) reason: CloseReason,
+pub struct Ended {
+    pub reason: CloseReason,
     /// The peer itself confirmed the end (it acknowledged our goodbye, or announced its own).
     /// A goodbye that timed out or failed leaves this false although the reason is still
     /// `Disconnected`: the server may be running, and a caller that can reach it another way
     /// (the SSH connection that started it) must stop it.
-    pub(crate) server_gone: bool,
+    pub server_gone: bool,
 }
 
 impl Ended {
@@ -190,10 +99,7 @@ impl Ended {
 /// Runs the session on `driver` until it ends and says why. Does NOT close the driver: the
 /// caller does, after whatever cleanup it owes (`driver.state()` is still `Connected` if the
 /// session ever was, so a caller can tell a start that never connected).
-pub(crate) async fn run_session<T: DatagramTransport>(
-    plan: Plan<T>,
-    driver: &mut SessionDriver,
-) -> Ended {
+pub async fn run_session<T: DatagramTransport>(plan: Plan<T>, driver: &mut SessionDriver) -> Ended {
     match run(plan, driver).await {
         Ok(ended) => ended,
         Err(failure) => Ended::unconfirmed(CloseReason::Failed(failure)),
@@ -212,21 +118,18 @@ async fn run<T: DatagramTransport>(
         transport,
         peer,
         params,
-        health,
-        roam,
         shutdown,
         connect_timeout,
         deadline: absolute,
     } = plan;
     let key = params.key.to_base64_key().map_err(internal)?;
     let screen = GhosttyScreen::new(params.size).map_err(internal)?;
+    // One allowance for the socket open and the first datagram together, computed once.
+    let deadline = absolute.unwrap_or_else(|| Instant::now() + connect_timeout);
     // Opening the first socket resolves the host name, which can take as long as the resolver
     // does: a disconnect (or a dropped handle) must not wait for it. A resize is remembered.
     let mut size = params.size;
-    let open = timeout_at(
-        absolute.unwrap_or_else(|| Instant::now() + connect_timeout),
-        Link::open(transport, peer),
-    );
+    let open = timeout_at(deadline, Link::open(transport, peer));
     tokio::pin!(open);
     let mut link = loop {
         tokio::select! {
@@ -243,7 +146,7 @@ async fn run<T: DatagramTransport>(
             command = driver.next_command() => match command {
                 Command::Disconnect => return Ok(Ended::unconfirmed(CloseReason::Disconnected)),
                 Command::Resize(new) => size = new,
-                // Nothing to send to yet, and host keys do not exist.
+                // Nothing to send to yet.
                 _ => {}
             },
             () = shutdown.notified() => return Ok(Ended::unconfirmed(CloseReason::Disconnected)),
@@ -256,12 +159,9 @@ async fn run<T: DatagramTransport>(
         .map_err(internal)?;
 
     let mut buffer = [0u8; RECEIVE_MTU];
-    let deadline = absolute.unwrap_or_else(|| Instant::now() + connect_timeout);
     let mut connected = false;
     let mut published = u64::MAX;
     let mut next_rebind = Instant::now();
-    // The `HealthObserver` hook of `start_with` gets every sample, before `Connected` too.
-    let mut next_observer = Instant::now() + HEALTH_INTERVAL;
     // The session observer's reports start when the session connects (see `HealthThrottle`).
     let mut next_report: Option<Instant> = None;
     let mut throttle = HealthThrottle::default();
@@ -277,12 +177,6 @@ async fn run<T: DatagramTransport>(
             opening = Some(Box::pin(link.next_socket()));
             opening_deadline = Instant::now() + REBIND_TIMEOUT;
         }
-        if let Some(observer) = &health
-            && Instant::now() >= next_observer
-        {
-            observer.link_health(session.link_health());
-            next_observer = Instant::now() + HEALTH_INTERVAL;
-        }
         if let Some(due) = next_report
             && Instant::now() >= due
         {
@@ -297,9 +191,6 @@ async fn run<T: DatagramTransport>(
         // Wake for the next health duty only: an idle, healthy session sleeps until its own
         // protocol timers or the moment its link would turn stale.
         let mut wait = Duration::from_millis(session.wait_time_ms().max(1));
-        if health.is_some() {
-            wait = wait.min(next_observer.saturating_duration_since(Instant::now()));
-        }
         if let Some(due) = next_report {
             wait = wait.min(due.saturating_duration_since(Instant::now()));
         }
@@ -334,8 +225,12 @@ async fn run<T: DatagramTransport>(
                             }
                         }
                         // The network says no (a refused port, an unreachable route). mosh
-                        // keeps trying, so this is not an end; just do not spin on it.
-                        Err(_) => sleep(Duration::from_millis(20)).await,
+                        // keeps trying, so this is not an end; just do not spin on it, and end
+                        // the turn so commands (a disconnect) are not held behind refusals.
+                        Err(_) => {
+                            sleep(REFUSED_PAUSE).await;
+                            break;
+                        }
                     }
                     taken += 1;
                     if taken < MAX_DATAGRAMS_PER_TURN {
@@ -387,7 +282,6 @@ async fn run<T: DatagramTransport>(
                 opening = None;
                 next_rebind = Instant::now() + REBIND_RETRY;
             }
-            () = roam.notified() => session.request_rebind(),
             () = shutdown.notified() => {
                 let server_gone = goodbye(&mut link, &mut session, &mut buffer).await;
                 return Ok(Ended { reason: CloseReason::Disconnected, server_gone });
@@ -457,13 +351,18 @@ fn apply_input(
     connected: bool,
     submits: &mut SubmitSequencer,
 ) -> Result<(), SessionFailure> {
+    if let Some(bytes) = session
+        .terminal()
+        .live()
+        .engine()
+        .input_bytes(&command)
+        .map_err(internal)?
+        && !bytes.is_empty()
+    {
+        session.send_input(&bytes);
+    }
     match command {
-        // Handled by the caller, which owns the link.
-        Command::Disconnect => {}
-        // mosh has no host key prompt: the SSH connection that ran the bootstrap made that
-        // decision.
-        Command::ApproveHostKey { .. } | Command::RejectHostKey => {}
-        // The network changed: rotate to a new socket now (`LinkControl::roam` does the same).
+        // The network changed: rotate to a new socket now.
         Command::Roam => session.request_rebind(),
         Command::Resize(size) => {
             session
@@ -473,67 +372,15 @@ fn apply_input(
                 publish(driver, session)?;
             }
         }
-        Command::Text(text) => session.send_input(&text_bytes(&text)),
-        Command::Submit(text) => {
-            let bytes = session
-                .terminal()
-                .live()
-                .engine()
-                .submit_text_bytes(&text)
-                .map_err(internal)?;
-            if !bytes.is_empty() {
-                session.send_input(&bytes);
-            }
-            submits.arm();
-        }
-        // A submit's text without its Enter.
-        Command::Paste(text) => {
-            let bytes = session
-                .terminal()
-                .live()
-                .engine()
-                .submit_text_bytes(&text)
-                .map_err(internal)?;
-            if !bytes.is_empty() {
-                session.send_input(&bytes);
-            }
-        }
-        Command::Key(key) => {
-            let bytes = session
-                .terminal()
-                .live()
-                .engine()
-                .encode_key(&key)
-                .map_err(internal)?;
-            session.send_input(&bytes);
-        }
-        Command::Scroll(scroll) => {
-            let bytes = session
-                .terminal()
-                .live()
-                .engine()
-                .scroll(scroll)
-                .map_err(internal)?;
-            if !bytes.is_empty() {
-                session.send_input(&bytes);
-            }
-            publish(driver, session)?;
-        }
-        Command::MouseClick { column, row } => {
-            let bytes = session
-                .terminal()
-                .live()
-                .engine()
-                .mouse_click(column, row)
-                .map_err(internal)?;
-            if !bytes.is_empty() {
-                session.send_input(&bytes);
-            }
-        }
+        // Its Enter follows, after the delay.
+        Command::Submit(_) => submits.arm(),
+        Command::Scroll(_) => publish(driver, session)?,
         Command::FullFrame => {
             session.terminal().live().engine().request_full_frame();
             publish(driver, session)?;
         }
+        // Input is written above; a disconnect is the caller's, which owns the link.
+        _ => {}
     }
     Ok(())
 }
@@ -575,11 +422,13 @@ async fn goodbye<T: DatagramTransport>(
         send(link, session, &tick.datagrams);
         let wait = Duration::from_millis(session.wait_time_ms().clamp(1, 50));
         tokio::select! {
-            received = poll_fn(|cx| link.poll_recv(cx, buffer)) => {
-                if let Ok(length) = received {
+            received = poll_fn(|cx| link.poll_recv(cx, buffer)) => match received {
+                Ok(length) => {
                     let _ = session.handle_datagram(&buffer[..length]);
                 }
-            }
+                // A refusal is no answer; do not spin on it.
+                Err(_) => sleep(wait.min(REFUSED_PAUSE)).await,
+            },
             () = sleep(wait) => {}
             () = sleep_until(deadline) => {}
         }

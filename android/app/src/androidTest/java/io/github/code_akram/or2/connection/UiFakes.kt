@@ -48,8 +48,6 @@ class UiSession(private val initial: SessionState = SessionState.Connected) : Se
     override fun serverPid(): UInt? = null
     override fun clientId(): String? = null
     override fun roam() = Unit
-    override fun approveHostKey(fingerprint: String) = Unit
-    override fun rejectHostKey() = Unit
 }
 
 class UiWatch : HerdrWatchInterface, AutoCloseable {
@@ -66,8 +64,8 @@ class UiPort(
 ) : HostPort {
     var hostListener: HostListener? = null
     var native: HostState = HostState.Connecting
-    var caps = HostCapabilities("/usr/bin/tmux", "/usr/bin/herdr", null, "C.UTF-8", listOf(HerdrSessionInfo("default", true, true)))
-    var tmux = listOf(TmuxSession("main", 2u, 1u, 0L, 10L))
+    var caps = HostCapabilities("/usr/bin/tmux", "/usr/bin/herdr", null, listOf(HerdrSessionInfo("default", true, true)))
+    var tmux = listOf(TmuxSession("main", 2u, 1u))
     val sessions = mutableListOf<Pair<TerminalTarget, UiSession>>()
     val watchListeners = mutableListOf<HerdrListener>()
 
@@ -92,7 +90,7 @@ class UiPort(
     }
     override suspend fun focusHerdrPane(session: String?, paneId: String) = Unit
     override suspend fun stopMoshServer(pid: UInt) = Unit
-    override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll) = Unit
+    override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll, clientId: String?) = Unit
     override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) = Unit
     override suspend fun replyToPane(
         session: String?, paneId: String, agent: AgentIdentity, text: String,

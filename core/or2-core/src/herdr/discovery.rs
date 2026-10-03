@@ -10,7 +10,9 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::Deserialize;
+use tokio::time::{Instant, timeout_at};
 
+use super::wire::WireError;
 use crate::remote::{RemoteCommand, RemoteError, RemoteHost};
 
 /// What stderr snippet a diagnostic may carry, in characters.
@@ -231,22 +233,8 @@ impl Directory {
         socket_of(state.entries.as_deref()?, session).ok()
     }
 
-    /// The socket of `session`: from the stored list when it is trusted and calls the session
-    /// running, else from a listing read now (which is then stored).
-    pub async fn locate<H: RemoteHost>(
-        &self,
-        host: &H,
-        herdr: &str,
-        session: Option<&str>,
-    ) -> Result<String, DiscoveryError> {
-        if let Some(socket) = self.cached_socket(session) {
-            return Ok(socket);
-        }
-        self.locate_fresh(host, herdr, session).await
-    }
-
-    /// [`Directory::locate`] that always reads the listing: the caller just saw the cached
-    /// socket fail.
+    /// The socket of `session` from a listing read now (which is then stored): there is none
+    /// cached ([`Directory::cached_socket`]), or the caller just saw the cached one fail.
     pub async fn locate_fresh<H: RemoteHost>(
         &self,
         host: &H,
@@ -254,6 +242,54 @@ impl Directory {
         session: Option<&str>,
     ) -> Result<String, DiscoveryError> {
         socket_of(&self.refresh(host, herdr).await?, session)
+    }
+
+    /// Runs `attempt` (one or more requests on streams it opens) on `session`'s socket: the
+    /// cached one first; a cached socket that does not open ([`WireError::Unreachable`]: nothing
+    /// was sent) makes the listing be read again and `attempt` run once more on the fresh
+    /// socket. That is the only time a request runs `herdr session list`. Returns the socket
+    /// `attempt` last ran on, and its result.
+    ///
+    /// `start_by` is the latest moment `attempt` may start sending (a reply that must not land
+    /// after its caller's deadline): the re-locate is bounded by it, and `attempt` never starts
+    /// past it ([`super::reply::NO_TIME`]).
+    pub(super) async fn with_socket<H: RemoteHost, T, F: Future<Output = Result<T, WireError>>>(
+        &self,
+        host: &H,
+        herdr: &str,
+        session: Option<&str>,
+        start_by: Option<Instant>,
+        mut attempt: impl FnMut(String) -> F,
+    ) -> Result<(String, Result<T, WireError>), DiscoveryError> {
+        let no_time = || DiscoveryError::Failed(super::reply::NO_TIME.into());
+        let mut fresh = false;
+        loop {
+            let cached = if fresh {
+                None
+            } else {
+                self.cached_socket(session)
+            };
+            let from_cache = cached.is_some();
+            let socket = match cached {
+                Some(socket) => socket,
+                None => match start_by {
+                    Some(by) => timeout_at(by, self.locate_fresh(host, herdr, session))
+                        .await
+                        .map_err(|_| no_time())??,
+                    None => self.locate_fresh(host, herdr, session).await?,
+                },
+            };
+            if start_by.is_some_and(|by| Instant::now() > by) {
+                return Err(no_time());
+            }
+            match attempt(socket.clone()).await {
+                Err(WireError::Unreachable(_)) if from_cache => {
+                    self.invalidate();
+                    fresh = true;
+                }
+                result => return Ok((socket, result)),
+            }
+        }
     }
 }
 
@@ -382,20 +418,21 @@ mod tests {
         host.set_listing(LISTING);
         let directory = Directory::new();
         // Nothing is known yet: the first lookup reads the listing, the next ones do not.
+        assert!(directory.cached_socket(None).is_none());
         assert_eq!(
-            directory.locate(&host, "h", None).await.unwrap(),
+            directory.locate_fresh(&host, "h", None).await.unwrap(),
             "/home/user/.config/herdr/herdr.sock"
         );
         assert_eq!(
-            directory.locate(&host, "h", Some("work")).await.unwrap(),
-            "/home/user/.config/herdr/sessions/work/herdr.sock"
+            directory.cached_socket(Some("work")).as_deref(),
+            Some("/home/user/.config/herdr/sessions/work/herdr.sock")
         );
         assert_eq!(host.exec_log().len(), 1);
         // A stopped or unknown session is not answered from the list: it may have started since.
         for name in ["idle", "nope"] {
             assert!(directory.cached_socket(Some(name)).is_none());
             assert!(matches!(
-                directory.locate(&host, "h", Some(name)).await,
+                directory.locate_fresh(&host, "h", Some(name)).await,
                 Err(DiscoveryError::NotRunning(_))
             ));
         }
@@ -403,7 +440,7 @@ mod tests {
         // A socket that failed makes the next lookup read the listing again.
         directory.invalidate();
         assert!(directory.cached_socket(None).is_none());
-        directory.locate(&host, "h", None).await.unwrap();
+        directory.locate_fresh(&host, "h", None).await.unwrap();
         assert_eq!(host.exec_log().len(), 4);
         assert!(directory.cached_socket(None).is_some());
     }
