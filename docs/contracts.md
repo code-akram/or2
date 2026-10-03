@@ -5552,3 +5552,32 @@ the contract.
 
 The lead merges A, B, C and D, runs the full gate (`docs/build.md`) and the device suite on the
 `.devicetest` app, then a Codex review of the whole change, then installs a signed build for the owner's QA.
+
+# v0.1.2: agents in the picker (owner QA, 2026-10-03)
+
+The owner, from a host card: *"the archlinux host is not showing all the agent sessions active in the herdr default
+session"* and *"the refresh button does nothing"*. Debugged on the phone: the Inbox lists every agent correctly; the
+picker's herdr tab lists only herdr **sessions** (`default (default)`, `or2-spike`), never the agents inside them, so
+from a host the agents look missing and reaching one needs the Inbox. Refresh works (a new tmux session appeared)
+but shows no feedback, and on the herdr tab it can change nothing the owner looks for. The tmux list is read once per
+connection, so it goes stale between openings. Kotlin only (lane Picker; `host/SessionPicker.kt`, `app/HostPicker.kt`
+and their tests/gallery).
+
+- **The herdr tab lists agents.** Under each running herdr session, its agents grouped by workspace (the workspace
+  label as a small muted header), each row: the agent label (`agentLabel`), its status dot and word
+  (working / blocked / done / idle, the Inbox's colours), and the pane's cwd muted. Data: the host's live herdr
+  views (the same source as the Inbox: `HostConnections.herdrViews()` / `inbox`), so it is current without a refresh.
+  A session the app does not watch yet, or one not running, shows as today (one row, `Not running` muted).
+- **Tapping an agent** opens the herdr terminal focused on that pane: the Inbox tap's path
+  (`TerminalActivations.openAgent` / `launchOpenAgent`), which reuses the session's open terminal. The sheet closes.
+- **A `Whole session` row** under each running session keeps today's behaviour (open or switch to that session's
+  terminal as it is); it carries the `● Open` mark when that session has an open terminal.
+- **Labels:** the default session is `default` (no `(default)` suffix); a running session with no agents says
+  `No agents` muted under its `Whole session` row.
+- **tmux:** the list is re-read each time the picker opens (and when the tab is shown), with a small spinner in place
+  of the list until the first answer; a later re-read keeps the old list visible with the spinner beside the
+  `Refresh` row. **Refresh** stays on the tmux tab only, shows the spinner while it runs, and also re-probes the
+  host's capabilities (new herdr sessions), as today. The herdr tab has no Refresh.
+- **Tests.** JVM: grouping by session and workspace, labels, status mapping, the default-session label, an agent tap
+  calling the agent path with host/session/pane, `Whole session` keeping the reuse rule. Device: the herdr tab with
+  agents from fakes (rows, tap opens the terminal focused), the tmux spinner. Gallery: `picker-herdr` shows agents.
