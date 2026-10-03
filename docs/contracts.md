@@ -5052,3 +5052,50 @@ queued path. `HostHandle::upload_image` now returns the path only when its ackno
 host (`taken.send` succeeds), else `CommandFailed` ("the upload took too long and its image was removed").
 Test: `host::tests::a_path_whose_acknowledgement_the_host_stopped_waiting_for_is_not_returned` (fails with the
 check disabled).
+
+### Several images at once (v0.1.2, owner request 2026-10-03)
+
+The owner could attach only one image at a time: the picker took one, the share target took one, and a
+second image during an upload was refused. v0.1.2 takes several. Kotlin only: Rust's `upload_image` is
+unchanged and is called once per image, one after another, on the host's connection (no FFI change, API
+stays 16).
+
+- **Sources.**
+  - The composer's attach button opens `PickMultipleVisualMedia` (images only) with **at most 10**
+    (`MAX_IMAGES`). Picking one image behaves exactly as before.
+  - The share target accepts `ACTION_SEND_MULTIPLE` of `image/*` as well as `ACTION_SEND` (both in the
+    manifest's intent filters). Each `EXTRA_STREAM` item goes through the same checks as a single share
+    (`content:` only; anything else is skipped and counted as refused, never silently dropped). The
+    open-terminal picker is asked once for the whole share.
+  - A keyboard's image (`commitContent`) is one image, as before.
+- **One queue per terminal** (`ImagePaste`). Every image from every source joins the terminal's queue, in
+  arrival order, and the queue uploads them **one at a time** (prepare, then `upload_image`). An image
+  arriving while the queue runs joins it instead of being refused. At most `MAX_IMAGES` (10) are pending
+  or running at once; an image beyond that is not taken: the strip says `At most 10 images at a time`
+  for `ALREADY_SHOWN` and the source gives back what it holds (a keyboard's grant), exactly as the old
+  refusal did. `ALREADY_UPLOADING` and `UploadState.AlreadyUploading` go away.
+- **Every queued item's `prepare` runs**, also when the queue is cancelled before reaching it, so a
+  keyboard grant or a provider read is always given back (the existing rule "once taken, prepare always
+  runs" holds per item). A cancelled item's `prepare` stops at once and nothing of it is uploaded.
+- **Insert once, when the queue is empty.** The paths of the images that uploaded are inserted together,
+  in arrival order, as one insertion: each `pathInsertion` (a space, then the shell-quoted path)
+  concatenated, so `" /a.png /b.jpg"`, with no Enter, into the same target as before (composer when open,
+  else one bracketed paste into the terminal). A path that is not `insertablePath` is left out and counts
+  as failed. One image inserts exactly what it inserts today.
+- **Failures don't stop the queue.** A failed image is skipped and the rest still upload. When the queue
+  ends, the paths that uploaded are inserted, and the strip shows a warning with `Dismiss`: one image
+  failed → its reason, as today; several images and some failed → `<n> of <total> images failed: <first
+  reason>`.
+- **Cancel** (the strip's action while uploading) stops the running upload (Rust removes its temporary
+  file, as today), drops everything still queued, and **inserts nothing** from that queue run. Images that
+  had already finished stay in `~/.cache/or2/images` (private, swept after 7 days); no remote delete.
+- **Strip.** One image: `Uploading image…` as today. Several: `Uploading image <i> of <n>…`, where `n`
+  grows if more join the running queue. Busy spinner and `Cancel` as today.
+- **Tests (JVM).** The queue: three images upload in order and insert once as `" p1 p2 p3"`; an image
+  joining a running queue is uploaded and inserted with the rest; the 11th pending image is refused with
+  the message and its source is told (`start` returns false); a failure in the middle still uploads and
+  inserts the others and shows `1 of 3 images failed: <reason>`; cancel inserts nothing and runs every
+  queued `prepare` (counted); the strip's `i of n` text; one image behaves exactly as before (the existing
+  tests stay green, adjusted only where they asserted `AlreadyUploading`). Shares: `ACTION_SEND_MULTIPLE`
+  with three `content:` images gives three, a `file:` item among them is skipped and counted, more than 10
+  keeps the first 10 and says so. Device (compile): the picker contract and the intent filter.
