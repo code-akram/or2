@@ -131,7 +131,7 @@ class Or2Application : Application() {
      * Calling it with nothing live is free: the registry of live sessions is empty.
      */
     val networkChanges by lazy {
-        NetworkChanges(CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate), null) { networkChanged() }
+        NetworkChanges(CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)) { networkChanged() }
     }
 
     private var starter: ServiceStarter? = null

@@ -22,7 +22,14 @@ fun testHost(
     transport: TransportPref = TransportPref.AUTO, sleeps: Boolean = false,
 ) = Host(HostRecord(id, label, "fixture", keyId, showInInbox, transport, sleeps), addresses)
 
-val testPublicKey = PublicKeyInfo("test-algorithm", "test-public-line", "test-fingerprint", "")
+/** Whether any terminal has not closed and was not dismissed. */
+fun HostConnections.hasOpenSession(): Boolean = terminals.value.any { !it.retired && it.state.value !is SessionState.Closed }
+
+/** Every pid the [MoshServerLedger] in [store] holds for [hostId], whatever destination it was started through. */
+fun recordedServerPids(store: PrefStore, hostId: Long): List<UInt> = store.getString("mosh_servers").orEmpty().split(",")
+    .map { it.split(":") }.filter { it.size == 3 && it[0] == hostId.toString() }.map { it[1].toUInt() }
+
+val testPublicKey =PublicKeyInfo("test-algorithm", "test-public-line", "test-fingerprint", "")
 val testPrompt = HostState.AwaitingHostKeyDecision(testPublicKey, emptyList())
 
 class FakeTrust(val events: MutableList<String> = mutableListOf()) : TrustStore {

@@ -195,7 +195,7 @@ class InboxModelTest {
     }
 
     @Test
-    fun linkStatusesAndPendingPromptsFollowTheConnections() = runTest {
+    fun hostStatesAndPendingPromptsFollowTheConnections() = runTest {
         val dispatcher = UnconfinedTestDispatcher(testScheduler)
         val listeners = mutableMapOf<Long, HostListener>()
         val holder = HostConnections({ request, listener ->
@@ -204,13 +204,13 @@ class InboxModelTest {
         }, FakeTrust(), dispatcher, dispatcher)
         val one = testHost(1, "One", addresses = listOf(HostEndpoint("one.invalid", 22)))
         val two = testHost(2, "Two", addresses = listOf(HostEndpoint("two.invalid", 22)))
-        assertEquals(emptyMap<Long, LinkStatus>(), holder.linkStatuses().first())
+        assertEquals(emptyMap<Long, HostState>(), holder.hostStates().first())
         holder.connect(listOf(one, two), byteArrayOf(1))
         val prompt = HostState.AwaitingHostKeyDecision(io.github.code_akram.or2.ffi.PublicKeyInfo("a", "b", "c", ""), emptyList())
         listeners[2]!!.onHostStateChanged(prompt)
         listeners[1]!!.onHostStateChanged(HostState.Connected(0u))
         runCurrent()
-        assertEquals(mapOf(1L to LinkStatus.CONNECTED, 2L to LinkStatus.NEEDS_HOST_KEY), holder.linkStatuses().first())
+        assertEquals(mapOf(1L to HostState.Connected(0u), 2L to prompt), holder.hostStates().first())
         val pending = holder.pendingHostKeys().first()
         assertEquals(listOf(2L), pending.map { it.active.host.id })
         assertEquals(prompt, pending.single().prompt)

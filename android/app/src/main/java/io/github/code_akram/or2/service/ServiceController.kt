@@ -35,8 +35,7 @@ class ServiceController(
     private var job: Job? = null
 
     /** The snapshot the notification currently reflects. */
-    var current: ServiceSnapshot = ServiceSnapshot(emptyList())
-        private set
+    private var current = ServiceSnapshot(emptyList())
 
     fun begin() {
         state.running = true
@@ -120,11 +119,11 @@ class ServiceStarter(private val state: ServiceRunState = ServiceRunState.Proces
  */
 class NetworkChanges(
     private val scope: CoroutineScope,
-    initial: Long?,
     private val debounceMs: Long = DEBOUNCE_MS,
     private val notify: () -> Unit,
 ) {
-    private var current = initial
+    /** The default network, from [seed] (the watch's start) on; null before it and while there is none. */
+    private var current: Long? = null
     private var transports: String? = null
     private var iface: String? = null
     private var pending: Job? = null

@@ -49,11 +49,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -1301,17 +1298,6 @@ class HostConnections(
     }
 
     /**
-     * Waits (at most [timeoutMs]) for the capability probe of [current]. Returns at once when the
-     * probe has answered.
-     */
-    suspend fun awaitCapabilities(current: ActiveHost, timeoutMs: Long = 3_000) {
-        if (current.capabilities.value != null || current.capabilitiesError.value != null) return
-        withTimeoutOrNull(timeoutMs) {
-            merge(current.capabilities, current.capabilitiesError).filterNotNull().first()
-        }
-    }
-
-    /**
      * Call before [openTerminal]. Only a tap that itself connected the host ([connectedInThisTap]: a
      * Resume that had to connect first) waits, under AUTO, for `mosh_server()` (the program probe: one
      * exec round trip, at most [timeoutMs]), so its shell can still choose mosh. Any other tap, an
@@ -1354,9 +1340,6 @@ class HostConnections(
         cancelBackground(terminal)
         terminal.mutableHandle.value?.disconnect()
     }
-
-    /** True while any terminal has not closed: the foreground service and the battery prompt care. */
-    fun hasOpenSession(): Boolean = mutableTerminals.value.any { !it.retired && it.state.value !is SessionState.Closed }
 
     /**
      * The notification's "Disconnect all": ends every terminal and every host connection (their

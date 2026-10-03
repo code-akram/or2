@@ -731,39 +731,6 @@ class HostConnectionsTransportTest {
     }
 
     @Test
-    fun awaitCapabilitiesReturnsAtOnceWhenKnownAndGivesUpAfterTheTimeout() = runTest {
-        val known = rig()
-        val t0 = testScheduler.currentTime
-        known.holder.awaitCapabilities(known.active, timeoutMs = 10_000)
-        assertEquals(t0, testScheduler.currentTime) // No waiting.
-
-        val failed = rig(probed = false)
-        // The failed probe is an answer too: it must not make the caller wait out the timeout.
-        assertNotNull(failed.active.capabilitiesError.value)
-        val t1 = testScheduler.currentTime
-        failed.holder.awaitCapabilities(failed.active, timeoutMs = 10_000)
-        assertEquals(t1, testScheduler.currentTime)
-
-        // A probe that never answers: the caller gives up after the timeout and carries on without it.
-        val never = rig(pending = true)
-        val before = testScheduler.currentTime
-        never.holder.awaitCapabilities(never.active, timeoutMs = 3_000)
-        assertEquals(3_000L, testScheduler.currentTime - before)
-        assertNull(never.active.capabilities.value)
-        assertNull(never.active.capabilitiesError.value)
-
-        // And one that answers within the timeout ends the wait as soon as it does.
-        val slow = rig(pending = true)
-        val started = testScheduler.currentTime
-        val waiting = async { slow.holder.awaitCapabilities(slow.active, timeoutMs = 3_000) }
-        advanceTimeBy(1_000)
-        slow.port.capsGate!!.complete(Unit)
-        waiting.await()
-        assertEquals(1_000L, testScheduler.currentTime - started)
-        assertNotNull(slow.active.capabilities.value)
-    }
-
-    @Test
     fun clipboardWritesArePassedOnWithTheTerminalOnlyFromItsCurrentSession() = runTest {
         val rig = rig()
         val copies = mutableListOf<Pair<Long, String>>()

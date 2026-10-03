@@ -346,13 +346,13 @@ class HostConnectionsMoshServerTest {
 
         // Label, key, inbox and transport edits move nothing.
         process.holder.hostEdited(host, host.copy(record = host.record.copy(label = "Renamed", keyId = "another", showInInbox = false)))
-        assertEquals(listOf(4242u), process.ledger.allPids(host.id))
+        assertEquals(listOf(4242u), recordedServerPids(store, host.id))
         assertEquals(remembered, memory.last.value)
 
         // A new address list invalidates both, and reverting the edit does not bring them back.
         val moved = host.copy(addresses = listOf(HostEndpoint("other.invalid", 2222)))
         process.holder.hostEdited(host, moved)
-        assertEquals(emptyList<UInt>(), process.ledger.allPids(host.id))
+        assertEquals(emptyList<UInt>(), recordedServerPids(store, host.id))
         assertNull(memory.last.value)
         process.holder.hostEdited(moved, host)
         assertEquals(emptyList<UInt>(), process.ledger.pids(host))
@@ -361,7 +361,7 @@ class HostConnectionsMoshServerTest {
         process.ledger.record(host, 777u)
         memory.remember(remembered)
         process.holder.hostEdited(host, host.copy(record = host.record.copy(username = "someone-else")))
-        assertEquals(emptyList<UInt>(), process.ledger.allPids(host.id))
+        assertEquals(emptyList<UInt>(), recordedServerPids(store, host.id))
         assertNull(memory.last.value)
     }
 

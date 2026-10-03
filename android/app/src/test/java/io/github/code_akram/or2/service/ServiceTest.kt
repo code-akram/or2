@@ -252,7 +252,7 @@ class ServiceTest {
     @Test
     fun networkChangesAreDebouncedByHalfASecond() = runTest {
         var notified = 0
-        val changes = NetworkChanges(this, initial = 1L) { notified++ }
+        val changes = NetworkChanges(this) { notified++ }.apply { seed(1L) }
         changes.available(2L)
         advanceTimeBy(499)
         assertEquals(0, notified)
@@ -268,7 +268,7 @@ class ServiceTest {
     @Test
     fun onlyARealDefaultNetworkChangeCounts() = runTest {
         var notified = 0
-        val changes = NetworkChanges(this, initial = 1L) { notified++ }
+        val changes = NetworkChanges(this) { notified++ }.apply { seed(1L) }
         changes.available(1L) // The callback's first report of the network that is already the default.
         advanceTimeBy(1_000)
         assertEquals(0, notified)
@@ -291,7 +291,7 @@ class ServiceTest {
     @Test
     fun noNetworkAtRegistrationMeansTheFirstAvailableIsAChange() = runTest {
         var notified = 0
-        val changes = NetworkChanges(this, initial = null) { notified++ }
+        val changes = NetworkChanges(this) { notified++ }
         changes.available(7L)
         advanceTimeBy(500)
         runCurrent()
@@ -304,7 +304,7 @@ class ServiceTest {
     fun aTransportSetChangeOnTheSameDefaultNetworkRoams() = runTest {
         // A VPN-carried connection: the default network (the VPN) never changes, only what it rides on.
         var notified = 0
-        val changes = NetworkChanges(this, initial = 1L) { notified++ }
+        val changes = NetworkChanges(this) { notified++ }.apply { seed(1L) }
         changes.capabilitiesChanged(1L, "VPN,WIFI") // The first report is the baseline.
         advanceTimeBy(1_000)
         assertEquals(0, notified)
@@ -321,7 +321,7 @@ class ServiceTest {
     @Test
     fun bandwidthAndSignalUpdatesDoNothing() = runTest {
         var notified = 0
-        val changes = NetworkChanges(this, initial = 1L) { notified++ }
+        val changes = NetworkChanges(this) { notified++ }.apply { seed(1L) }
         changes.capabilitiesChanged(1L, "WIFI")
         changes.linkChanged(1L, "wlan0")
         // The same callbacks fire again and again with the same transports and interface (a new
@@ -338,7 +338,7 @@ class ServiceTest {
     @Test
     fun anInterfaceChangeRoamsAndAnInterfaceThatAppearsOrVanishesCounts() = runTest {
         var notified = 0
-        val changes = NetworkChanges(this, initial = 1L) { notified++ }
+        val changes = NetworkChanges(this) { notified++ }.apply { seed(1L) }
         changes.linkChanged(1L, "wlan0")
         changes.linkChanged(1L, "wlan1")
         advanceTimeBy(1_000)
@@ -354,7 +354,7 @@ class ServiceTest {
     @Test
     fun aNewDefaultNetworkStartsFromANewBaseline() = runTest {
         var notified = 0
-        val changes = NetworkChanges(this, initial = 1L) { notified++ }
+        val changes = NetworkChanges(this) { notified++ }.apply { seed(1L) }
         changes.capabilitiesChanged(1L, "WIFI")
         changes.linkChanged(1L, "wlan0")
         changes.available(2L) // Mobile data takes over: one roam for the switch.
@@ -371,7 +371,7 @@ class ServiceTest {
     @Test
     fun theReturnToTheForegroundRoamsOnceThroughTheSameDebounce() = runTest {
         var notified = 0
-        val changes = NetworkChanges(this, initial = 1L) { notified++ }
+        val changes = NetworkChanges(this) { notified++ }.apply { seed(1L) }
         changes.foregrounded()
         advanceTimeBy(499)
         assertEquals(0, notified)
@@ -392,7 +392,7 @@ class ServiceTest {
     @Test
     fun seedingTracksTheCurrentNetworkWithoutCountingIt() = runTest {
         var notified = 0
-        val changes = NetworkChanges(this, initial = null) { notified++ }
+        val changes = NetworkChanges(this) { notified++ }
         changes.seed(4L)
         changes.available(4L)
         advanceTimeBy(1_000)

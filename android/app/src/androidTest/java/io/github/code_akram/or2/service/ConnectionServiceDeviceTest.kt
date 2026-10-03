@@ -85,7 +85,10 @@ class ConnectionServiceDeviceTest {
         notificationsVisible(),
     )
 
-    private fun notification() = context.getSystemService(NotificationManager::class.java).activeNotifications
+    /** Any terminal that has not closed. */
+    private fun anyTerminalOpen() = app.connections.terminals.value.any { it.state.value !is SessionState.Closed }
+
+    private fun notification() =context.getSystemService(NotificationManager::class.java).activeNotifications
         .firstOrNull { it.id == ConnectionService.NOTIFICATION_ID }?.notification
 
     @Test
@@ -97,7 +100,7 @@ class ConnectionServiceDeviceTest {
         runBlocking(Dispatchers.Main) {
             val active = app.connections.host(host.id)!!
             app.connections.openTerminal(active, TerminalTarget.Shell)
-            assertTrue(app.connections.hasOpenSession())
+            assertTrue(anyTerminalOpen())
         }
         assertTrue("the service runs while a session is open", ServiceRunState.Process.running)
 
@@ -107,7 +110,7 @@ class ConnectionServiceDeviceTest {
         runBlocking(Dispatchers.Main) {
             assertTrue(app.connections.host(host.id)!!.state.value is HostState.Closed)
             assertTrue(app.connections.terminals.value.all { it.state.value is SessionState.Closed })
-            assertFalse(app.connections.hasOpenSession())
+            assertFalse(anyTerminalOpen())
         }
         assertNotNull(ports.firstOrNull())
     }

@@ -225,13 +225,6 @@ fun HostConnections.herdrViews(): Flow<Map<Pair<Long, String?>, HerdrView>> = ho
     }
 }
 
-/** Link status of every connection, keyed by host id; hosts without a connection are absent. */
-@OptIn(ExperimentalCoroutinesApi::class)
-fun HostConnections.linkStatuses(): Flow<Map<Long, LinkStatus>> = hosts.flatMapLatest { active ->
-    if (active.isEmpty()) flowOf(emptyMap())
-    else combine(active.values.map { a -> a.state.map { a.host.id to linkStatus(it, a.host.sleeps) } }) { it.toMap() }
-}
-
 /** A host-key decision the user has not made yet. */
 data class PendingHostKey(val active: ActiveHost, val prompt: HostState.AwaitingHostKeyDecision)
 
