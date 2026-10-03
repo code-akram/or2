@@ -244,7 +244,7 @@ async fn run<T: DatagramTransport>(
             command = driver.next_command() => match command {
                 Command::Disconnect => return Ok(Ended::unconfirmed(CloseReason::Disconnected)),
                 Command::Resize(new) => size = new,
-                // Nothing to send to yet, and host keys do not exist.
+                // Nothing to send to yet.
                 _ => {}
             },
             () = shutdown.notified() => return Ok(Ended::unconfirmed(CloseReason::Disconnected)),
@@ -464,10 +464,7 @@ fn apply_input(
     match command {
         // Handled by the caller, which owns the link.
         Command::Disconnect => {}
-        // mosh has no host key prompt: the SSH connection that ran the bootstrap made that
-        // decision.
-        Command::ApproveHostKey { .. } | Command::RejectHostKey => {}
-        // The network changed: rotate to a new socket now (`LinkControl::roam` does the same).
+        // The network changed: rotate to a new socket now.
         Command::Roam => session.request_rebind(),
         Command::Resize(size) => {
             session

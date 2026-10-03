@@ -1,11 +1,10 @@
 //! Contract probe: a test fixture, not a connection.
 //!
-//! `contract_probe_session` validates a real `ConnectRequest` and returns a real `Session`
-//! whose driver is a deterministic script on a Rust thread instead of an SSH connection. It
-//! presents a host key generated once per process, uses the production trust check against
-//! the request's trusted keys, and renders fixed cells plus echoes of the input it receives.
-//! JVM and device tests use it to exercise listener threading, lifecycle, host-key decisions,
-//! frames and input across the real FFI. App code must never call it.
+//! `contract_probe_session` returns a real `Session` whose driver is a deterministic script on a
+//! Rust thread instead of an SSH channel: the probe host's SSH terminal (below), on a host of
+//! its own. It renders fixed cells plus echoes of the input it receives. JVM and device tests use
+//! it to exercise listener threading, lifecycle, frames and input across the real FFI. App code
+//! must never call it.
 //!
 //! `contract_probe_host` does the same for a host connection (API 4): see its documentation.
 //! It also serves `TerminalTransport::Mosh` terminals (API 8 to 10) deterministically.
@@ -40,9 +39,7 @@ use tokio::task::JoinSet;
 use crate::host::{
     HostConnectError, HostConnectRequest, HostConnection, HostListener, HostListenerObserver,
 };
-use crate::session::{
-    ConnectError, ConnectRequest, ListenerObserver, Session, SessionListener, TerminalTransport,
-};
+use crate::session::{ListenerObserver, Session, SessionError, SessionListener, TerminalTransport};
 
 const FOREGROUND: Rgb = Rgb::new(0xd0, 0xd0, 0xd0);
 const BACKGROUND: Rgb = Rgb::new(0x10, 0x10, 0x18);
@@ -68,13 +65,16 @@ const MOSH_HEALTH_SEQUENCE: [LinkHealth; 3] = [
 /// Test fixture only; see the module documentation. Never connects to anything.
 #[uniffi::export]
 pub fn contract_probe_session(
-    request: ConnectRequest,
+    columns: u16,
+    rows: u16,
     listener: Box<dyn SessionListener>,
-) -> Result<Arc<Session>, ConnectError> {
-    let request = request.validate()?;
+) -> Result<Arc<Session>, SessionError> {
+    let size = TerminalSize::new(columns, rows).map_err(|_| SessionError::EmptyDimension)?;
     let (handle, driver) = core::channel(Arc::new(ListenerObserver(listener)));
     spawn_probe_thread("or2-contract-probe", async move {
-        run_session(&request.trusted_host_keys, request.size, driver).await;
+        // A probe host's SSH terminal, on a host of its own that nothing ever closes.
+        let (_keep_open, stop) = watch::channel(None);
+        run_terminal(driver, size, BANNER.into(), false, stop).await;
     });
     Ok(Session::new(handle, TerminalTransport::Ssh))
 }
@@ -107,38 +107,6 @@ fn untrusted_prompt(trusted: &[HostKey]) -> Option<HostKeyPrompt> {
         presented: presented.clone(),
         previously_trusted: trusted.to_vec(),
     })
-}
-
-async fn run_session(trusted: &[HostKey], mut size: TerminalSize, mut driver: SessionDriver) {
-    if let Some(prompt) = untrusted_prompt(trusted) {
-        driver
-            .transition(SessionState::AwaitingHostKey(prompt))
-            .expect("Connecting -> AwaitingHostKey");
-        loop {
-            match driver.next_command().await {
-                Command::ApproveHostKey { fingerprint }
-                    if fingerprint == probe_host_key().fingerprint() =>
-                {
-                    break;
-                }
-                Command::RejectHostKey => {
-                    return driver.close(CloseReason::Failed(SessionFailure::HostKeyRejected));
-                }
-                Command::Disconnect => return driver.close(CloseReason::Disconnected),
-                Command::Resize(new_size) => size = new_size,
-                _ => {}
-            }
-        }
-    }
-    driver
-        .transition(SessionState::Authenticating)
-        .expect("-> Authenticating");
-    driver
-        .transition(SessionState::Connected)
-        .expect("-> Connected");
-    // Nothing but its own commands ever stops a standalone session.
-    let (_keep_open, stop) = watch::channel(None);
-    serve_terminal(driver, size, BANNER.into(), false, stop).await;
 }
 
 /// Serves one connected terminal session: fixed cells plus echoes of the input it receives.
@@ -237,7 +205,6 @@ async fn serve_terminal(
                 }
             }
             Command::Disconnect => return driver.close(CloseReason::Disconnected),
-            Command::ApproveHostKey { .. } | Command::RejectHostKey => {}
         }
         if matches!(driver.state(), SessionState::Closed(_)) {
             return;
@@ -255,12 +222,12 @@ fn publish(driver: &mut SessionDriver, frame: Frame) {
 
 /// Test fixture only; see the module documentation. Never connects to anything.
 ///
-/// The host uses the production trust check against the request's trusted keys with the same
-/// per-process host key as `contract_probe_session`, then reports `Connected { 0 }`.
+/// The host uses the production trust check against the request's trusted keys with a host key
+/// generated once per process, then reports `Connected { 0 }`.
 /// `capabilities` (which reports a `mosh-server`), `mosh_server` (its path) and `list_tmux_sessions` return fixed data. `focus_herdr_pane` succeeds for the
 /// probe view's panes (`w1:p1`, `w1:p2`, `w2:p1`) and is `PaneNotFound` for any other id; the
 /// focused pane then shows as `focused` in the views of watches started afterwards. `open_terminal` returns a
-/// session served by the M1 probe script without host-key states (`Connecting` to
+/// session served by the probe script (`Connecting` to
 /// `Connected`; row 0 names the target). With `TerminalTransport::Mosh` the terminal behaves the
 /// same, plus: after its first frame `on_link_health` receives three values in order,
 /// (300, 300), (6000, 9000) and (400, 400) ms for (`since_heard_ms`, `since_ack_ms`); and each

@@ -13,8 +13,6 @@ import io.github.code_akram.or2.ffi.SessionState
 
 fun sessionMessage(state: SessionState): String = when (state) {
     SessionState.Connecting -> "Connecting…"
-    is SessionState.AwaitingHostKeyDecision -> "Waiting for host-key approval"
-    SessionState.Authenticating -> "Authenticating…"
     SessionState.Connected -> "Connected"
     is SessionState.Closed -> when (val reason = state.reason) {
         CloseReason.Disconnected -> "Disconnected"
@@ -105,8 +103,6 @@ fun herdrStateMessage(state: HerdrState): String = when (state) {
 fun sessionErrorMessage(error: SessionException): String = when (error) {
     is SessionException.NotConnected -> "The session is not connected yet."
     is SessionException.Closed -> "The session has closed. Reconnect to continue."
-    is SessionException.NoHostKeyPrompt -> "This host-key prompt has expired."
-    is SessionException.HostKeyMismatch -> "The presented host key no longer matches this decision. Disconnect and verify it again."
     is SessionException.EmptyDimension -> "Terminal dimensions must be nonzero."
     is SessionException.InvalidKey -> "The requested terminal key is invalid."
 }

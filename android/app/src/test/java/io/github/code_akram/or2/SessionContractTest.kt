@@ -2,95 +2,44 @@ package io.github.code_akram.or2
 
 import io.github.code_akram.or2.ffi.CellWidth
 import io.github.code_akram.or2.ffi.CloseReason
-import io.github.code_akram.or2.ffi.ConnectException
-import io.github.code_akram.or2.ffi.ConnectRequest
 import io.github.code_akram.or2.ffi.CursorShape
 import io.github.code_akram.or2.ffi.KeyInput
 import io.github.code_akram.or2.ffi.KeyModifiers
 import io.github.code_akram.or2.ffi.SessionException
-import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalFrame
 import io.github.code_akram.or2.ffi.TerminalKey
 import io.github.code_akram.or2.ffi.Underline
 import io.github.code_akram.or2.ffi.ViewportScroll
 import io.github.code_akram.or2.ffi.contractProbeSession
-import io.github.code_akram.or2.ffi.generateEd25519Key
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Session lifecycle, callbacks, host-key decisions, frames and input across the real FFI,
- * driven by the contract probe (a scripted session driver; no network).
+ * Session lifecycle, callbacks, frames and input across the real FFI, driven by the contract
+ * probe (a scripted session driver; no network). Host keys belong to the host
+ * ([HostContractTest]).
  */
 class SessionContractTest {
-    private val clientKey = generateEd25519Key("probe")
-
-    private fun request(
-        trusted: List<String> = emptyList(),
-        host: String = "probe.invalid",
-        port: UShort = 22u,
-        username: String = "akram",
-        privateKey: ByteArray = clientKey.privateKey.copyOf(),
-        columns: UShort = 40u,
-        rows: UShort = 6u,
-    ) = ConnectRequest(host, port, username, privateKey, trusted, columns, rows)
-
     private fun TerminalFrame.rowText(index: Int) =
         changedRows.single { it.index.toInt() == index }.cells.joinToString("") { it.text }.trimEnd()
 
-    /** Opens a first-use probe only to learn the host key it presents, then disconnects. */
-    private fun probeHostKey(): String {
-        val listener = RecordingListener()
-        contractProbeSession(request(), listener).use { session ->
-            val prompt = listener.awaitState<SessionState.AwaitingHostKeyDecision>()
-            session.disconnect()
-            listener.awaitState<SessionState.Closed>()
-            return prompt.presented.openssh
-        }
-    }
-
     @Test
-    fun invalidRequestsAreRejectedSynchronouslyWithTypedErrors() {
+    fun emptyDimensionsAreRejectedSynchronously() {
         val listener = RecordingListener()
-        val trusted = listOf(clientKey.publicKey.openssh, "not a key")
-        assertThrows(ConnectException.InvalidHost::class.java) { contractProbeSession(request(host = "a b"), listener) }
-        assertThrows(ConnectException.InvalidPort::class.java) { contractProbeSession(request(port = 0u), listener) }
-        assertThrows(ConnectException.InvalidUsername::class.java) { contractProbeSession(request(username = ""), listener) }
-        assertThrows(ConnectException.EmptyDimension::class.java) { contractProbeSession(request(rows = 0u), listener) }
-        assertThrows(ConnectException.InvalidPrivateKey::class.java) {
-            contractProbeSession(request(privateKey = "junk".encodeToByteArray()), listener)
-        }
-        val error = assertThrows(ConnectException.InvalidTrustedHostKey::class.java) {
-            contractProbeSession(request(trusted = trusted), listener)
-        }
-        assertEquals(1u, error.index)
+        assertThrows(SessionException.EmptyDimension::class.java) { contractProbeSession(0u, 5u, listener) }
+        assertThrows(SessionException.EmptyDimension::class.java) { contractProbeSession(30u, 0u, listener) }
         listener.assertNoMoreStates()
     }
 
     @Test
-    fun firstUseSessionRoundTripsStatesFramesAndInput() {
+    fun sessionRoundTripsStatesFramesAndInput() {
         val listener = RecordingListener()
         val testThread = Thread.currentThread()
-        contractProbeSession(request(), listener).use { session ->
-            val prompt = listener.awaitState<SessionState.AwaitingHostKeyDecision>()
-            assertTrue(prompt.previouslyTrusted.isEmpty())
-            assertEquals("ssh-ed25519", prompt.presented.algorithm)
-            assertTrue(prompt.presented.fingerprint.startsWith("SHA256:"))
-            assertEquals(prompt, session.state())
-
-            assertThrows(SessionException.NotConnected::class.java) { session.sendText("early") }
-            assertThrows(SessionException.NotConnected::class.java) { session.submitText("early") }
-            assertThrows(SessionException.HostKeyMismatch::class.java) {
-                session.approveHostKey(clientKey.publicKey.fingerprint)
-            }
-            session.resize(30u, 5u) // Before Connected: the first full frame uses it.
-            session.approveHostKey(prompt.presented.fingerprint)
-            listener.awaitState<SessionState.Authenticating>()
+        contractProbeSession(30u, 5u, listener).use { session ->
             listener.awaitState<SessionState.Connected>()
 
             val first = listener.awaitFrame(session)
@@ -192,44 +141,9 @@ class SessionContractTest {
     }
 
     @Test
-    fun trustedHostKeySkipsThePrompt() {
-        val trusted = probeHostKey()
-        val listener = RecordingListener()
-        contractProbeSession(request(trusted = listOf(clientKey.publicKey.openssh, trusted)), listener).use { session ->
-            listener.awaitState<SessionState.Authenticating>()
-            listener.awaitState<SessionState.Connected>()
-            assertTrue(listener.awaitFrame(session).full)
-            session.disconnect()
-            listener.awaitState<SessionState.Closed>()
-        }
-    }
-
-    @Test
-    fun changedHostKeyShowsPreviousKeysAndCanBeRejected() {
-        val previous = generateEd25519Key("old host key")
-        val listener = RecordingListener()
-        contractProbeSession(request(trusted = listOf(previous.publicKey.openssh)), listener).use { session ->
-            val prompt = listener.awaitState<SessionState.AwaitingHostKeyDecision>()
-            assertEquals(listOf(previous.publicKey.fingerprint), prompt.previouslyTrusted.map { it.fingerprint })
-            assertEquals("", prompt.previouslyTrusted.single().comment)
-            assertTrue(prompt.presented.fingerprint != previous.publicKey.fingerprint)
-            assertNull(session.takeFrame())
-            session.rejectHostKey()
-            val closed = listener.awaitState<SessionState.Closed>()
-            assertEquals(CloseReason.Failed(SessionFailure.HostKeyRejected), closed.reason)
-            assertThrows(SessionException.Closed::class.java) {
-                session.approveHostKey(prompt.presented.fingerprint)
-            }
-        }
-    }
-
-    @Test
     fun listenerExceptionsDoNotAffectTheSession() {
         val listener = RecordingListener(throwAfterRecording = true)
-        contractProbeSession(request(), listener).use { session ->
-            val prompt = listener.awaitState<SessionState.AwaitingHostKeyDecision>()
-            session.approveHostKey(prompt.presented.fingerprint)
-            listener.awaitState<SessionState.Authenticating>()
+        contractProbeSession(40u, 6u, listener).use { session ->
             listener.awaitState<SessionState.Connected>()
             assertTrue(listener.awaitFrame(session).full)
             session.sendText("x")
@@ -242,8 +156,8 @@ class SessionContractTest {
     @Test
     fun closingTheSessionObjectDisconnects() {
         val listener = RecordingListener()
-        val session = contractProbeSession(request(), listener)
-        listener.awaitState<SessionState.AwaitingHostKeyDecision>()
+        val session = contractProbeSession(40u, 6u, listener)
+        listener.awaitState<SessionState.Connected>()
         session.close()
         assertEquals(CloseReason.Disconnected, listener.awaitState<SessionState.Closed>().reason)
     }

@@ -1,7 +1,6 @@
 package io.github.code_akram.or2.session
 
 import io.github.code_akram.or2.ffi.CloseReason
-import io.github.code_akram.or2.ffi.PublicKeyInfo
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ui.NoticeTone
 import io.github.code_akram.or2.ui.Or2Colors
@@ -48,10 +47,7 @@ class TerminalHeaderTest {
     @Test
     fun connectingIsAMutedBusyNoticeAndClosedAWarningWithClose() {
         assertNull(terminalNotice(SessionState.Connected))
-        listOf(
-            SessionState.Connecting, SessionState.Authenticating,
-            SessionState.AwaitingHostKeyDecision(PublicKeyInfo("ssh-ed25519", "k", "SHA256:x", ""), emptyList()),
-        ).forEach {
+        listOf<SessionState>(SessionState.Connecting).forEach {
             val notice = terminalNotice(it)!!
             assertEquals(NoticeTone.Info, notice.tone)
             assertTrue(notice.busy)

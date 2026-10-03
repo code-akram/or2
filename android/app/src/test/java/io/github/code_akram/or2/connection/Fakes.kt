@@ -64,8 +64,6 @@ class FakeSession(val events: MutableList<String> = mutableListOf(), val transpo
     override fun serverPid() = pid
     override fun clientId() = client
     override fun roam() { roams++ }
-    override fun approveHostKey(fingerprint: String) = Unit
-    override fun rejectHostKey() = Unit
     private var disconnected = false
 
     /** Input the session took, in order (`text:`, `key:`, `submit:`, `scroll:`); after `disconnect` input is refused as Rust does. */

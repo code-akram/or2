@@ -39,7 +39,6 @@ import io.github.code_akram.or2.data.HostRecord
 import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.CloseReason
-import io.github.code_akram.or2.ffi.ConnectRequest
 import io.github.code_akram.or2.ffi.HerdrAgent
 import io.github.code_akram.or2.ffi.HerdrSessionInfo
 import io.github.code_akram.or2.ffi.HerdrTab
@@ -56,7 +55,6 @@ import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TmuxSession
 import io.github.code_akram.or2.ffi.contractProbeSession
-import io.github.code_akram.or2.ffi.generateEd25519Key
 import io.github.code_akram.or2.ffi.parsePairPayload
 import io.github.code_akram.or2.pair.AddHostSheet
 import io.github.code_akram.or2.pair.CameraAccess
@@ -461,24 +459,18 @@ class UiGalleryActivity : ComponentActivity() {
 
     private fun startProbe(): Session {
         probe?.let { return it }
-        val key = generateEd25519Key("gallery")
-        try {
-            return contractProbeSession(
-                ConnectRequest("probe.invalid", 22u, "probe", key.privateKey, emptyList(), 40u, 12u),
-                object : SessionListener {
-                    override fun onStateChanged(state: SessionState) {
-                        probeState.value = state
-                        if (state is SessionState.AwaitingHostKeyDecision) runOnUiThread { probe?.approveHostKey(state.presented.fingerprint) }
-                    }
-                    override fun onFrameReady() { probeFrames.trySend(Unit) }
-                    override fun onLinkHealth(health: LinkHealth) = Unit
-                    override fun onClipboardWrite(text: String) = Unit
-                    override fun onServerPid(pid: UInt) = Unit
-                },
-            ).also { probe = it }
-        } finally {
-            key.privateKey.fill(0)
-        }
+        return contractProbeSession(
+            40u, 12u,
+            object : SessionListener {
+                override fun onStateChanged(state: SessionState) {
+                    probeState.value = state
+                }
+                override fun onFrameReady() { probeFrames.trySend(Unit) }
+                override fun onLinkHealth(health: LinkHealth) = Unit
+                override fun onClipboardWrite(text: String) = Unit
+                override fun onServerPid(pid: UInt) = Unit
+            },
+        ).also { probe = it }
     }
 
     /**

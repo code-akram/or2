@@ -3,24 +3,20 @@ package io.github.code_akram.or2
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.code_akram.or2.ffi.CellWidth
 import io.github.code_akram.or2.ffi.CloseReason
-import io.github.code_akram.or2.ffi.ConnectException
-import io.github.code_akram.or2.ffi.ConnectRequest
 import io.github.code_akram.or2.ffi.HostAddress
 import io.github.code_akram.or2.ffi.HostConnectRequest
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.KeyException
 import io.github.code_akram.or2.ffi.LinkHealth
-import io.github.code_akram.or2.ffi.Renderer
+import io.github.code_akram.or2.ffi.SessionException
 import io.github.code_akram.or2.ffi.SessionListener
 import io.github.code_akram.or2.ffi.SessionState
-import io.github.code_akram.or2.ffi.TerminalException
 import io.github.code_akram.or2.ffi.buildInfo
 import io.github.code_akram.or2.ffi.contractProbeHost
 import io.github.code_akram.or2.ffi.contractProbeSession
 import io.github.code_akram.or2.ffi.generateEd25519Key
 import io.github.code_akram.or2.ffi.importPrivateKey
-import io.github.code_akram.or2.ffi.terminalSize
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
@@ -37,16 +33,8 @@ class NativeDeviceTest {
     @Test
     fun loadsPackagedArm64LibraryAndRoundTripsThroughUniFfi() {
         val info = buildInfo()
-        assertEquals(17u, info.apiVersion)
-        assertEquals(34u, info.minimumAndroidSdk)
-        assertEquals(Renderer.CANVAS, info.renderer)
-        val size = terminalSize(97u, 31u)
-        assertEquals(97.toUShort(), size.columns)
-        assertEquals(31.toUShort(), size.rows)
-        assertEquals(3007u, size.cellCount)
-        assertEquals(4294836225u, terminalSize(65535u, 65535u).cellCount)
-        assertThrows(TerminalException.EmptyDimension::class.java) { terminalSize(0u, 31u) }
-        assertThrows(TerminalException.EmptyDimension::class.java) { terminalSize(97u, 0u) }
+        assertEquals(18u, info.apiVersion)
+        assertTrue(info.version.isNotEmpty())
     }
 
     @Test
@@ -87,16 +75,9 @@ class NativeDeviceTest {
 
     @Test
     fun deliversSessionCallbacksFromRustThreadsOnArt() {
-        val key = generateEd25519Key("device")
         val listener = Listener()
-        val request = ConnectRequest("probe.invalid", 22u, "akram", key.privateKey, emptyList(), 12u, 3u)
-        assertThrows(ConnectException.InvalidPort::class.java) {
-            contractProbeSession(request.copy(port = 0u), listener)
-        }
-        contractProbeSession(request, listener).use { session ->
-            val prompt = listener.next() as SessionState.AwaitingHostKeyDecision
-            session.approveHostKey(prompt.presented.fingerprint)
-            assertEquals(SessionState.Authenticating, listener.next())
+        assertThrows(SessionException.EmptyDimension::class.java) { contractProbeSession(0u, 3u, listener) }
+        contractProbeSession(12u, 3u, listener).use { session ->
             assertEquals(SessionState.Connected, listener.next())
             assertNotNull(listener.frames.poll(5, TimeUnit.SECONDS))
             val frame = session.takeFrame()!!

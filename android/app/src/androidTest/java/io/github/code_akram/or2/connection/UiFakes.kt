@@ -48,8 +48,6 @@ class UiSession(private val initial: SessionState = SessionState.Connected) : Se
     override fun serverPid(): UInt? = null
     override fun clientId(): String? = null
     override fun roam() = Unit
-    override fun approveHostKey(fingerprint: String) = Unit
-    override fun rejectHostKey() = Unit
 }
 
 class UiWatch : HerdrWatchInterface, AutoCloseable {

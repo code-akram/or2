@@ -32,14 +32,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import io.github.code_akram.or2.ffi.ConnectRequest
 import io.github.code_akram.or2.ffi.CursorShape
 import io.github.code_akram.or2.ffi.Session
 import io.github.code_akram.or2.ffi.SessionListener
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalFrame
 import io.github.code_akram.or2.ffi.contractProbeSession
-import io.github.code_akram.or2.ffi.generateEd25519Key
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
@@ -65,27 +63,18 @@ class TerminalProbeActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addOnFrameMetricsAvailableListener(metricsListener, Handler(Looper.getMainLooper()))
-        val key = generateEd25519Key("terminal probe")
-        try {
-            session = contractProbeSession(
-                ConnectRequest("probe.invalid", 22u, "probe", key.privateKey, emptyList(), 40u, 12u),
-                object : SessionListener {
-                    override fun onStateChanged(state: SessionState) {
-                        this@TerminalProbeActivity.state.value = state
-                        if (state is SessionState.AwaitingHostKeyDecision) {
-                            // Posting defers until the synchronous factory has assigned the handle.
-                            runOnUiThread { session.approveHostKey(state.presented.fingerprint) }
-                        }
-                    }
-                    override fun onFrameReady() { frames.trySend(Unit) }
-                    override fun onLinkHealth(health: LinkHealth) = Unit
-                    override fun onClipboardWrite(text: String) = Unit
-                    override fun onServerPid(pid: UInt) = Unit
-                },
-            )
-        } finally {
-            key.privateKey.fill(0)
-        }
+        session = contractProbeSession(
+            40u, 12u,
+            object : SessionListener {
+                override fun onStateChanged(state: SessionState) {
+                    this@TerminalProbeActivity.state.value = state
+                }
+                override fun onFrameReady() { frames.trySend(Unit) }
+                override fun onLinkHealth(health: LinkHealth) = Unit
+                override fun onClipboardWrite(text: String) = Unit
+                override fun onServerPid(pid: UInt) = Unit
+            },
+        )
         setContent {
             Or2Theme {
                 Column(Modifier.windowInsetsPadding(WindowInsets.safeDrawing)) {

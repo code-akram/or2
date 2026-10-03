@@ -167,7 +167,7 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
                     break abandon(&mut prepare).await;
                 }
                 Command::Resize(new) => size = new,
-                // Nothing to send to yet, and host keys do not exist.
+                // Nothing to send to yet.
                 _ => {}
             },
             () = shutdown.notified() => {

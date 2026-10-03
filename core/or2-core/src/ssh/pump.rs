@@ -278,10 +278,7 @@ impl TerminalPump {
                 self.terminal.request_full_frame();
                 self.publish(driver)?;
             }
-            Command::ApproveHostKey { .. }
-            | Command::RejectHostKey
-            | Command::Roam
-            | Command::Disconnect => {}
+            Command::Roam | Command::Disconnect => {}
         }
         Ok(())
     }

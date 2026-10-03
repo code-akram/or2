@@ -1,7 +1,6 @@
-//! Session contract for Kotlin: request, state, errors, input, the `Session` object and the
+//! Session contract for Kotlin: state, errors, input, the `Session` object and the
 //! `SessionListener` callback. See docs/contracts.md for threading and ownership rules.
 
-use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use or2_core::host::TerminalTransport as CoreTransport;
@@ -9,102 +8,15 @@ use or2_core::input as core_input;
 use or2_core::mosh::LinkHealth as CoreLinkHealth;
 use or2_core::session as core;
 use or2_core::term::TerminalSize;
-use or2_core::transport::EndpointError;
 use uniffi::UnexpectedUniFFICallbackError;
-use zeroize::Zeroizing;
 
 use crate::frame::TerminalFrame;
-use crate::keys::PublicKeyInfo;
-
-/// The request `contract_probe_session` validates (a test fixture; real connections use
-/// `HostConnectRequest`).
-#[derive(uniffi::Record)]
-pub struct ConnectRequest {
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    /// `ClientKeyMaterial.private_key`, decrypted from the Keystore for this call only.
-    pub private_key: Vec<u8>,
-    /// `PublicKeyInfo.openssh` lines Kotlin trusts for this host. Empty on first use.
-    pub trusted_host_keys: Vec<String>,
-    pub columns: u16,
-    pub rows: u16,
-}
-
-impl fmt::Debug for ConnectRequest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ConnectRequest")
-            .field("host", &self.host)
-            .field("port", &self.port)
-            .field("username", &self.username)
-            .field("trusted_host_keys", &self.trusted_host_keys.len())
-            .field("columns", &self.columns)
-            .field("rows", &self.rows)
-            .finish_non_exhaustive()
-    }
-}
-
-impl ConnectRequest {
-    /// Validates every field and decodes the key. The FFI copy of the key is zeroized here.
-    pub(crate) fn validate(self) -> Result<core::ConnectRequest, ConnectError> {
-        let private_key = Zeroizing::new(self.private_key);
-        Ok(core::ConnectRequest::new(
-            &self.host,
-            self.port,
-            &self.username,
-            &private_key,
-            &self.trusted_host_keys,
-            self.columns,
-            self.rows,
-        )?)
-    }
-}
-
-#[derive(Debug, thiserror::Error, uniffi::Error)]
-pub enum ConnectError {
-    #[error("host must be nonempty without whitespace or control characters")]
-    InvalidHost,
-    #[error("port must be nonzero")]
-    InvalidPort,
-    #[error("username must be nonempty without control characters")]
-    InvalidUsername,
-    #[error("the stored private key is unusable")]
-    InvalidPrivateKey,
-    #[error("trusted host key {index} is not an OpenSSH public key")]
-    InvalidTrustedHostKey { index: u32 },
-    #[error("terminal columns and rows must both be nonzero")]
-    EmptyDimension,
-}
-
-impl From<core::ConnectError> for ConnectError {
-    fn from(error: core::ConnectError) -> Self {
-        match error {
-            core::ConnectError::Endpoint(EndpointError::InvalidHost) => Self::InvalidHost,
-            core::ConnectError::Endpoint(EndpointError::InvalidPort) => Self::InvalidPort,
-            core::ConnectError::InvalidUsername => Self::InvalidUsername,
-            core::ConnectError::InvalidPrivateKey(_) => Self::InvalidPrivateKey,
-            core::ConnectError::InvalidTrustedHostKey { index } => Self::InvalidTrustedHostKey {
-                index: u32::try_from(index).unwrap_or(u32::MAX),
-            },
-            core::ConnectError::EmptyDimension => Self::EmptyDimension,
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum SessionState {
     Connecting,
-    /// Show `presented.fingerprint`. `previously_trusted` empty means first use; otherwise the
-    /// host key changed. Persist trust in Kotlin before calling `approve_host_key`.
-    AwaitingHostKeyDecision {
-        presented: PublicKeyInfo,
-        previously_trusted: Vec<PublicKeyInfo>,
-    },
-    Authenticating,
     Connected,
-    Closed {
-        reason: CloseReason,
-    },
+    Closed { reason: CloseReason },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -150,15 +62,6 @@ impl From<core::SessionState> for SessionState {
     fn from(state: core::SessionState) -> Self {
         match state {
             core::SessionState::Connecting => Self::Connecting,
-            core::SessionState::AwaitingHostKey(prompt) => Self::AwaitingHostKeyDecision {
-                presented: prompt.presented.info().into(),
-                previously_trusted: prompt
-                    .previously_trusted
-                    .iter()
-                    .map(|key| key.info().into())
-                    .collect(),
-            },
-            core::SessionState::Authenticating => Self::Authenticating,
             core::SessionState::Connected => Self::Connected,
             core::SessionState::Closed(reason) => Self::Closed {
                 reason: reason.into(),
@@ -204,10 +107,6 @@ pub enum SessionError {
     NotConnected,
     #[error("the session is closed")]
     Closed,
-    #[error("no host key is awaiting a decision")]
-    NoHostKeyPrompt,
-    #[error("the fingerprint does not match the presented host key")]
-    HostKeyMismatch,
     #[error("terminal columns and rows must both be nonzero")]
     EmptyDimension,
     #[error("function keys are F1 to F12; character keys need text without control characters")]
@@ -219,8 +118,6 @@ impl From<core::SessionError> for SessionError {
         match error {
             core::SessionError::NotConnected => Self::NotConnected,
             core::SessionError::Closed => Self::Closed,
-            core::SessionError::NoHostKeyPrompt => Self::NoHostKeyPrompt,
-            core::SessionError::HostKeyMismatch => Self::HostKeyMismatch,
         }
     }
 }
@@ -508,16 +405,6 @@ impl Session {
     /// seconds without answers. SSH: a no-op. Never fails; a closed session ignores it.
     pub fn roam(&self) {
         self.handle.roam();
-    }
-
-    /// `fingerprint` must be the prompt's `presented.fingerprint`, binding the decision to the
-    /// key the user saw.
-    pub fn approve_host_key(&self, fingerprint: String) -> Result<(), SessionError> {
-        Ok(self.handle.approve_host_key(&fingerprint)?)
-    }
-
-    pub fn reject_host_key(&self) -> Result<(), SessionError> {
-        Ok(self.handle.reject_host_key()?)
     }
 
     /// Latest wins. Allowed before `Connected`; a full frame follows once connected.
