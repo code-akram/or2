@@ -5396,6 +5396,48 @@ title; the transparent arrow pad). Four lanes own disjoint files; each fixes its
   wrong const, `docs/design.md`'s "API version 5").
 - Not now: a generic lifecycle type, gating the probe behind a cargo feature.
 
+**Implemented (branch `v012/lane-d-rust`).** Where this differs from the sections above, this note is
+the contract.
+
+- *Bugs, each with a test.* `scroll_target` takes the terminal's tmux client id (FFI: a last
+  `client_id` argument; Kotlin passes the shown session's `clientId()`, as for `navigate`) and scrolls
+  the session that client shows (`tmux::shown_session`, shared with `navigate`). The mosh connect
+  timeout is computed once for the socket open and the first datagram. A reply's prompt re-locates a
+  dead cached socket only within the time its own bound leaves before the deadline, and is never sent
+  past it (`NO_TIME`). A pane subscription refused for another reason than `pane_not_found` is asked
+  again only when a read finds other panes. A refused receive (ICMP) ends the driver's turn after
+  20 ms, so a disconnect is served at once; the goodbye no longer spins on refusals.
+- *Removed.* The session host-key path (sessions go `Connecting` → `Connected` → `Closed`; host keys
+  are the host's); `contract_probe_session(columns, rows, listener)` (`EmptyDimension` for a zero
+  size) runs the probe host's SSH terminal script, row 0 `or2 contract probe`. mosh has one entry,
+  `run_session` (exported with `Plan`/`Ended` under `test-support` for `mosh_live`); roaming is
+  `Session.roam`. herdr: `run_in(host, herdr, directory, session, driver, Timing)` and
+  `focus_pane_in` are the entry points; `herdr_live` runs them. `HostHandle::peer_addr` (mosh still
+  pins the IP the TCP connection reached, inside the driver), `transport::race` (`race_with`),
+  `probe`/`probe_entries`/`herdr_sessions` (`probe_within` is public), `stranded_servers`,
+  `Link.peer_ipv6`, the ssp leftovers. `HostHandle::open_terminal(target, transport, size, budget,
+  observer)` is the one open.
+- *FFI API 18.* Gone: `terminal_size`/`TerminalSize`/`TerminalError`, `BuildInfo.minimum_android_sdk`/
+  `renderer`/`Renderer`, `ViewportScroll::Top` (core too), `TmuxSession.created_unix`/`activity_unix`
+  (core keeps them for sorting), `LinkHealth.since_ack_ms` (core keeps it), `HostCapabilities.utf8_locale`
+  (core keeps it for the mosh bootstrap), and the herdr fields listed above, from the core projection too
+  (`HerdrView { version, focused_pane_id, workspaces { workspace_id, number, label }, tabs { tab_id,
+  workspace_id, number, label }, panes { pane_id, agent, cwd }, agents }`; agents lose `title` and
+  `focused`): a snapshot that changes only an unread field is no longer delivered.
+- *One of each.* `spawn_query`/`spawn_until_closed` for every dispatch arm that runs a task,
+  `From<RemoteError | TmuxError | HerdrError> for HostError`, `HostCapabilities::program(Program)`,
+  `HostHandle::query`, `TerminalEngine::input_bytes`, `Directory::with_socket` (focus, scroll,
+  navigate, the reply's prompt, the watch's opens; a watch's retry invalidates the directory),
+  `ExecOutput::stderr_line`, one `or2_find` macro, `Client`/`relay` on `HostEvent`, and
+  `connect_host` plus `connect_host_with(transport, datagrams, request, observer, options) ->
+  (HostHandle, Receiver<SshRemote>)` (tests). `HostHandle::focus_herdr_pane` and `stop_mosh_server`
+  now validate before checking the connection. mosh `ssp`/`ghostty`/`bootstrap` and tmux's inner
+  helpers are `pub(crate)`.
+- *Kotlin, forced by the FFI.* The port's `scrollTarget` gains `clientId`; `SessionMessages` loses the
+  two removed session states and errors; tests, device tests and the debug gallery/probe follow the
+  new records and `contractProbeSession`. Skipped: `terminal_session`'s own not-installed checks keep
+  their `SessionFailure` (they are not host queries); the older contract sections are left as written.
+
 ## Integration
 
 The lead merges A, B, C and D, runs the full gate (`docs/build.md`) and the device suite on the
