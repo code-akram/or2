@@ -27,6 +27,7 @@ import io.github.code_akram.or2.notify.AgentAlerts
 import io.github.code_akram.or2.notify.AgentNotifications
 import io.github.code_akram.or2.notify.AgentOpenRequests
 import io.github.code_akram.or2.notify.AgentReplies
+import io.github.code_akram.or2.notify.EnableReplyRequests
 import io.github.code_akram.or2.notify.ReplyNonces
 import io.github.code_akram.or2.ffi.networkChanged
 import io.github.code_akram.or2.service.ConnectionService
@@ -66,7 +67,11 @@ class Or2Application : Application() {
     /** Agent notifications: one per Blocked or Done edge a live herdr watch sees, none for the pane on screen. */
     val agentAlerts by lazy {
         AgentAlerts(AgentNotifications(this, prefs), ReplyNonces(prefs)) { agentAlertSettings.enabled.value }
+            .also { alerts -> alerts.enableReply = { hostId, agent -> connections.enableReplyFor(hostId, agent) } }
     }
+
+    /** An Enable Reply waiting for its confirmation (an Inbox row's, a notification's), for the dialog. */
+    val enableReplies = EnableReplyRequests()
 
     /**
      * A notification's Reply ([AgentReplyReceiver]): over the host's live connection only, on the application's own
@@ -104,7 +109,7 @@ class Or2Application : Application() {
     var connectorOverride: HostConnector? = null
 
     /** The process's one set of connections; [ConnectionService] keeps the process alive while any is open. */
-    val connections by lazy {
+    val connections: HostConnections by lazy {
         HostConnections({ request, listener -> (connectorOverride ?: HostConnector.Native).connect(request, listener) }, database.dao(),
             moshServers = moshServers, timing = timing)
             .also {
