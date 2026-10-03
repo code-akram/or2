@@ -18,6 +18,8 @@
 //! - [`pairing`], [`exchange`], [`signals`]: the live run and the forced command `or2-pair enroll`
 //!   (Unix),
 //! - [`net`]: the one socket, behind a small trait,
+//! - [`reply`]: after the checks, Reply for the agents on this host (herdr's integrations, set up
+//!   once the person says yes),
 //! - [`rail`]: how all of it is drawn: one clack-style rail, colour and glyphs as the terminal allows,
 //! - [`run`]: the whole flow, with its environment injected.
 
@@ -41,6 +43,7 @@ pub mod payload;
 pub mod prompt;
 pub mod qr;
 pub mod rail;
+pub mod reply;
 pub mod run;
 #[cfg(unix)]
 pub mod safefs;
@@ -79,8 +82,9 @@ pub fn system_interfaces() -> Vec<Iface> {
 /// the tests of the built binary can point it at throwaway files: `OR2_PAIR_TEST_HOME` and
 /// `OR2_PAIR_TEST_USER` (the account), `OR2_PAIR_TEST_AUTHORIZED_KEYS` (a key file elsewhere than
 /// `<home>/.ssh/authorized_keys`: a disposable sshd's `AuthorizedKeysFile`),
-/// `OR2_PAIR_TEST_ETC_SSH` (where the host key and `sshd_config` are read) and
-/// `OR2_PAIR_TEST_WINDOW_SECS` (the pairing window).
+/// `OR2_PAIR_TEST_ETC_SSH` (where the host key and `sshd_config` are read),
+/// `OR2_PAIR_TEST_WINDOW_SECS` (the pairing window) and `OR2_PAIR_TEST_PROGRAM_DIRS` (where
+/// programs are looked for, in place of `PATH` and the usual directories; set, even empty).
 #[cfg(feature = "test-support")]
 fn test_var(name: &str) -> Option<OsString> {
     std::env::var_os(name).filter(|value| !value.is_empty())
@@ -166,7 +170,16 @@ pub fn run_main(options: &args::Options, code_from_stdin: bool) -> Result<Exit, 
     let exe = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(|error| error.to_string());
-    let program_dirs = checks::program_dirs(path.as_deref(), &account.home);
+    #[allow(unused_mut)]
+    let mut program_dirs = checks::program_dirs(path.as_deref(), &account.home);
+    // The tests of the built binary point the program search away from this machine's own
+    // herdr and agents (the Reply step would run them).
+    #[cfg(feature = "test-support")]
+    if let Some(dirs) = std::env::var_os("OR2_PAIR_TEST_PROGRAM_DIRS") {
+        program_dirs = std::env::split_paths(&dirs)
+            .filter(|dir| dir.is_absolute())
+            .collect();
+    }
     let facts = hints::HostFacts::detect(
         Platform::current(),
         std::path::Path::new("/"),
@@ -189,6 +202,10 @@ pub fn run_main(options: &args::Options, code_from_stdin: bool) -> Result<Exit, 
         exe,
         prompt: &Stdin,
         can_ask: code_from_stdin || Stdin::available(),
+        interactive: Stdin::available(),
+        commands: &hints::SystemCommands {
+            timeout: reply::TIMEOUT,
+        },
         style,
         random: &random,
         now: &now,

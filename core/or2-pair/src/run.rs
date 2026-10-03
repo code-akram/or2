@@ -1,5 +1,5 @@
-//! `or2-pair` end to end: checks, ask for the phone's code, add the temporary key, print the
-//! QR, wait for the phone, clean up.
+//! `or2-pair` end to end: checks, Reply for the agents here ([`crate::reply`]), ask for the
+//! phone's code, add the temporary key, print the QR, wait for the phone, clean up.
 //!
 //! Everything the run touches comes in through [`Env`] (home directory, interfaces, the sshd
 //! probe, the prompt, the clock, the signals), so the whole flow runs against a temporary home in
@@ -28,6 +28,7 @@ use crate::payload::{self, Payload};
 use crate::prompt::CodePrompt;
 use crate::qr::{self, QrStyle};
 use crate::rail::{Mark, Rail, Style};
+use crate::reply;
 
 /// The signals the run reacts to (SIGINT, SIGTERM, SIGHUP): a counter that something else
 /// increments. The real one is [`OsSignals`]; tests count by hand.
@@ -90,6 +91,11 @@ pub struct Env<'a> {
     /// Whether there is a person to ask. The binary sets it from "standard input is a terminal";
     /// pairing without one is refused.
     pub can_ask: bool,
+    /// Whether standard input is a terminal: only then does the Reply step ask (the test host
+    /// reads its code from a pipe, which `can_ask` allows; a question there would take it).
+    pub interactive: bool,
+    /// Runs herdr for the Reply step ([`crate::reply`]), time-limited.
+    pub commands: &'a dyn crate::hints::Commands,
     /// How the output is drawn ([`crate::rail`]): colours, glyphs, width, redraws. `--no-color`
     /// and `--ascii` are applied on top.
     pub style: Style,
@@ -282,7 +288,24 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
     for check in &found {
         rail.step(out, mark(check.level), &check.text)?;
     }
+    // Reply for the agents on this host, when herdr is here (its absence is a check). It asks
+    // only in a run that pairs, on a terminal; `--check` and `--manual` change nothing, so they
+    // print the commands. Nothing it meets stops the run.
+    let reply = |out: &mut dyn Write, ask: bool| -> io::Result<()> {
+        let Some(herdr) = checks::find_program("herdr", &env.program_dirs) else {
+            return Ok(());
+        };
+        let step = reply::Step {
+            herdr,
+            program_dirs: &env.program_dirs,
+            home: &env.account.home,
+            commands: env.commands,
+            ask: (ask && env.interactive).then_some(env.prompt),
+        };
+        reply::run(&step, &rail, out)
+    };
     if options.check_only {
+        reply(out, false)?;
         let warnings = found
             .iter()
             .filter(|check| matches!(check.level, Level::Warn | Level::Fail))
@@ -301,6 +324,7 @@ pub fn run(options: &Options, env: &Env<'_>, out: &mut dyn Write) -> Result<Exit
     if !manual && found.iter().any(|check| check.level == Level::Fail) {
         return Err(RunError::Blocked);
     }
+    reply(out, !manual)?;
 
     let user = env.account.name.clone();
     let name = options

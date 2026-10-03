@@ -23,6 +23,8 @@ fn a_fifo_as_authorized_keys_is_reported_and_does_not_hang_the_check() {
         .env("USER", "tester")
         .env("OR2_PAIR_TEST_HOME", home.path())
         .env("OR2_PAIR_TEST_USER", "tester")
+        // No herdr or agent of this machine is run.
+        .env("OR2_PAIR_TEST_PROGRAM_DIRS", "")
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
