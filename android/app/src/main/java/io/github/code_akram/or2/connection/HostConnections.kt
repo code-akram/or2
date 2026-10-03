@@ -49,11 +49,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -307,13 +304,19 @@ class ActiveTerminal internal constructor(val id: Long, val host: Host, val targ
     val hasConnected = mutableHasConnected.asStateFlow()
 
     /**
-     * Connected now and not deliberately closing (the user's Disconnect or Close of the terminal or of
-     * its whole host, and a host's release or destination edit, set the flag before the native close is
-     * reported, and a dismissed terminal is retired): the only state a terminal may
-     * become the Resume target in. Unlike [hasConnected] it is not history.
+     * Not closed and not deliberately closing: the user's Disconnect or Close of the terminal or of its whole
+     * host, and a host's release or destination edit, set [disconnectRequested] before the native close is
+     * reported (a dismissed terminal is retired, which sets it too).
+     */
+    val isOpen: Boolean
+        get() = !disconnectRequested && mutableState.value !is SessionState.Closed
+
+    /**
+     * [isOpen] and connected now: the only state a terminal may become the Resume target in, or take a
+     * shared image. Unlike [hasConnected] it is not history.
      */
     val isOpenForReattach: Boolean
-        get() = mutableState.value == SessionState.Connected && !disconnectRequested && !retired
+        get() = !disconnectRequested && mutableState.value == SessionState.Connected
     val frameReady = mutableFrames.asSharedFlow()
     val handle = mutableHandle.asStateFlow()
 
@@ -359,7 +362,7 @@ class ActiveTerminal internal constructor(val id: Long, val host: Host, val targ
  * first (never shown ones after, in the order they were opened).
  */
 fun shareTargets(terminals: List<ActiveTerminal>): List<ActiveTerminal> = terminals
-    .filter { !it.retired && !it.disconnectRequested && it.state.value == SessionState.Connected }
+    .filter { it.isOpenForReattach }
     .sortedByDescending { it.shownAt }
 
 /**
@@ -457,10 +460,8 @@ class HostConnections(
     fun findOpenTerminal(hostId: Long, target: TerminalTarget): ActiveTerminal? = openTerminals(hostId) { it == target }.firstOrNull()
 
     /** The terminals on [hostId] whose target [matches] and that have not closed or been told to, in creation order. */
-    fun openTerminals(hostId: Long, matches: (TerminalTarget) -> Boolean): List<ActiveTerminal> = mutableTerminals.value.filter {
-        it.host.id == hostId && matches(it.target) && !it.retired && !it.disconnectRequested &&
-            it.state.value !is SessionState.Closed
-    }
+    fun openTerminals(hostId: Long, matches: (TerminalTarget) -> Boolean): List<ActiveTerminal> =
+        mutableTerminals.value.filter { it.host.id == hostId && matches(it.target) && it.isOpen }
 
     fun isLive(hostId: Long) = mutableHosts.value[hostId]?.isLive == true
 
@@ -880,9 +881,8 @@ class HostConnections(
      * `TerminalActivations`). Throws [HostException] (`PaneNotFound` when the pane has gone).
      */
     suspend fun focusHerdrPane(current: ActiveHost, session: String?, paneId: String) {
-        if (!owns(current) || current.retired) throw HostException.Closed()
-        val port = current.mutablePort.value ?: throw HostException.NotConnected()
-        port.focusHerdrPane(session, paneId)
+        if (!owns(current)) throw HostException.Closed()
+        currentPort(current.host.id, requireConnected = false).focusHerdrPane(session, paneId)
     }
 
     /**
@@ -891,11 +891,8 @@ class HostConnections(
      * used; nothing connects from here (a reply comes from the background). Throws [HostException.NotConnected]
      * when the host has none, and the reply's own [HostException] otherwise. The text is never logged.
      */
-    suspend fun replyToPane(hostId: Long, session: String?, paneId: String, agent: AgentIdentity, text: String): ReplyRoute {
-        val current = mutableHosts.value[hostId]?.takeIf { it.isLive && !it.retired && it.state.value is HostState.Connected }
-        val port = current?.mutablePort?.value ?: throw HostException.NotConnected()
-        return port.replyToPane(session, paneId, agent, text)
-    }
+    suspend fun replyToPane(hostId: Long, session: String?, paneId: String, agent: AgentIdentity, text: String): ReplyRoute =
+        currentPort(hostId, requireConnected = true).replyToPane(session, paneId, agent, text)
 
     /**
      * Scrolls [terminal]'s tmux or herdr history (`scroll_target`) over its host's current connection
@@ -904,21 +901,31 @@ class HostConnections(
      * when there is no connection or the scroll failed.
      */
     suspend fun scrollTarget(terminal: ActiveTerminal, scroll: TargetScroll) {
-        val current = mutableHosts.value[terminal.host.id] ?: throw HostException.Closed()
-        if (current.retired) throw HostException.Closed()
-        val port = current.mutablePort.value ?: throw HostException.NotConnected()
-        port.scrollTarget(terminal.target, focusedHerdrPane(current, terminal.target), scroll)
+        val port = currentPort(terminal.host.id, requireConnected = false)
+        port.scrollTarget(terminal.target, focusedHerdrPane(terminal.host.id, terminal.target), scroll)
     }
 
     /**
      * Uploads an image for [terminal] ([HostPort.uploadImage]) over its host's current connection (a mosh
      * terminal outlives the one it was opened on). Throws [HostException] when there is none.
      */
-    suspend fun uploadImage(terminal: ActiveTerminal, bytes: ByteArray, extension: String): String {
-        val current = mutableHosts.value[terminal.host.id] ?: throw HostException.Closed()
-        if (current.retired) throw HostException.Closed()
-        val port = current.mutablePort.value ?: throw HostException.NotConnected()
-        return port.uploadImage(bytes, extension)
+    suspend fun uploadImage(terminal: ActiveTerminal, bytes: ByteArray, extension: String): String =
+        currentPort(terminal.host.id, requireConnected = false).uploadImage(bytes, extension)
+
+    /**
+     * The port of [hostId]'s current connection, for a call over it. Without [requireConnected]: [HostException.Closed]
+     * when the host has no connection or it was retired, [HostException.NotConnected] while it has no port yet. With
+     * it, only a connection that is up now (`Connected`, not being disconnected) will do, [HostException.NotConnected]
+     * otherwise.
+     */
+    private fun currentPort(hostId: Long, requireConnected: Boolean): HostPort {
+        val current = mutableHosts.value[hostId]
+        if (requireConnected) {
+            if (current == null || current.disconnectRequested || current.state.value !is HostState.Connected) throw HostException.NotConnected()
+        } else if (current == null || current.retired) {
+            throw HostException.Closed()
+        }
+        return current.mutablePort.value ?: throw HostException.NotConnected()
     }
 
     /** The terminals an image shared from another app can go to: the open ones, the last shown first ([shareTargets]). */
@@ -936,9 +943,9 @@ class HostConnections(
         }
         .distinctUntilChanged()
 
-    private fun focusedHerdrPane(current: ActiveHost, target: TerminalTarget): String? {
+    private fun focusedHerdrPane(hostId: Long, target: TerminalTarget): String? {
         val herdr = target as? TerminalTarget.Herdr ?: return null
-        val watch = current.mutableWatches.value.firstOrNull { it.session == herdr.session }
+        val watch = mutableHosts.value[hostId]?.mutableWatches?.value?.firstOrNull { it.session == herdr.session }
         return (watch?.state?.value as? HerdrState.Live)?.view?.focusedPaneId
     }
 
@@ -958,8 +965,8 @@ class HostConnections(
      * before it connected is retried over SSH on the same [ActiveTerminal].
      */
     fun openTerminal(current: ActiveHost, target: TerminalTarget): ActiveTerminal {
-        if (!owns(current) || current.retired) throw HostException.Closed()
-        val port = current.mutablePort.value ?: throw HostException.NotConnected()
+        if (!owns(current)) throw HostException.Closed()
+        val port = currentPort(current.host.id, requireConnected = false)
         val planned = planOpen(current.transportPref, target, current.udpVerdict.value, current.moshServer.value)
         // A BLOCKED verdict is not forever: a firewall prompt answered later, or a network that changed, lets
         // mosh through again. Past [UDP_RECHECK_MS] a tmux or herdr open (never a shell: it would wait) tries
@@ -985,14 +992,14 @@ class HostConnections(
     // --- the background mosh attempt and the swap -------------------------------------------
 
     /**
-     * A tmux or herdr terminal opened over SSH while UDP is untested wants mosh behind it. One attempt
-     * per host is in flight while the verdict is `UNKNOWN`; the others wait for its verdict (never for
-     * UDP: their SSH terminal is already in use): `OK` starts theirs, `BLOCKED` keeps them on SSH.
+     * A tmux or herdr terminal opened over SSH while UDP is untested, or while a `BLOCKED` verdict is due its
+     * recheck ([openTerminal] decided that just now, [recheckDue]), wants mosh behind it. One attempt per
+     * host is in flight while the verdict is `UNKNOWN`; the others wait for its verdict (never for UDP: their
+     * SSH terminal is already in use): `OK` starts theirs, `BLOCKED` keeps them on SSH.
      */
     private fun requestBackground(terminal: ActiveTerminal, current: ActiveHost) {
         when (current.udpVerdict.value) {
-            UdpVerdict.OK -> startBackground(terminal, current)
-            UdpVerdict.BLOCKED -> if (current.probingTerminal == null && recheckDue(current, terminal.target)) startBackground(terminal, current)
+            UdpVerdict.OK, UdpVerdict.BLOCKED -> startBackground(terminal, current)
             UdpVerdict.UNKNOWN ->
                 if (current.probingTerminal == null) startBackground(terminal, current) else current.awaitingVerdict += terminal
         }
@@ -1000,8 +1007,7 @@ class HostConnections(
 
     /** Starts [terminal]'s one background mosh session (the explicit-mosh 15 s budget); false when it did not start. */
     private fun startBackground(terminal: ActiveTerminal, current: ActiveHost): Boolean {
-        if (terminal.backgroundTried || terminal.retired || terminal.disconnectRequested) return false
-        if (terminal.mutableState.value is SessionState.Closed || !owns(current) || current.retired) return false
+        if (terminal.backgroundTried || !terminal.isOpen || !owns(current) || current.retired) return false
         val port = current.mutablePort.value ?: return false
         terminal.backgroundTried = true
         val attempt = terminal.attempt + 1
@@ -1041,7 +1047,7 @@ class HostConnections(
      * attempt counter), and the SSH session is disconnected. The verdict becomes `OK`.
      */
     private fun swapToMosh(terminal: ActiveTerminal, current: ActiveHost, session: SessionInterface) {
-        if (terminal.retired || terminal.disconnectRequested || terminal.mutableState.value is SessionState.Closed) {
+        if (!terminal.isOpen) {
             cancelBackground(terminal)
             return
         }
@@ -1100,7 +1106,6 @@ class HostConnections(
         if (current != null) releaseProbe(current, terminal)
     }
 
-    /** [terminal]'s attempt no longer stands for the host's: the next terminal waiting for a verdict tries. */
     /**
      * Whether an AUTO tmux or herdr open on [current] should try mosh again behind its SSH terminal: the verdict
      * has been `BLOCKED` for [UDP_RECHECK_MS], no attempt is in flight, and the probe did not say `mosh-server`
@@ -1112,6 +1117,7 @@ class HostConnections(
             current.moshServer.value?.let { it.path != null } != false &&
             monotonicMs() - current.blockedAtMs >= UDP_RECHECK_MS
 
+    /** [terminal]'s attempt no longer stands for the host's: the next terminal waiting for a verdict tries. */
     private fun releaseProbe(current: ActiveHost, terminal: ActiveTerminal) {
         if (current.probingTerminal !== terminal) return
         current.probingTerminal = null
@@ -1273,7 +1279,7 @@ class HostConnections(
     private fun fallBackToSsh(terminal: ActiveTerminal, current: ActiveHost, state: SessionState.Closed): Boolean {
         val failure = (state.reason as? CloseReason.Failed)?.failure ?: return false
         if (!terminal.fallbackEligible || !isMoshFallback(failure) || terminal.mutableHasConnected.value) return false
-        if (terminal.disconnectRequested || terminal.retired || !owns(current) || current.retired) return false
+        if (terminal.disconnectRequested || !owns(current) || current.retired) return false
         // What mosh did on this connection, whatever happens to the SSH retry: later AUTO terminals on
         // it go straight to SSH, and the host screen says why. Nothing outlives the connection.
         setVerdict(current, UdpVerdict.BLOCKED)
@@ -1301,17 +1307,6 @@ class HostConnections(
     }
 
     /**
-     * Waits (at most [timeoutMs]) for the capability probe of [current]. Returns at once when the
-     * probe has answered.
-     */
-    suspend fun awaitCapabilities(current: ActiveHost, timeoutMs: Long = 3_000) {
-        if (current.capabilities.value != null || current.capabilitiesError.value != null) return
-        withTimeoutOrNull(timeoutMs) {
-            merge(current.capabilities, current.capabilitiesError).filterNotNull().first()
-        }
-    }
-
-    /**
      * Call before [openTerminal]. Only a tap that itself connected the host ([connectedInThisTap]: a
      * Resume that had to connect first) waits, under AUTO, for `mosh_server()` (the program probe: one
      * exec round trip, at most [timeoutMs]), so its shell can still choose mosh. Any other tap, an
@@ -1336,10 +1331,9 @@ class HostConnections(
     suspend fun navigate(terminal: ActiveTerminal, nav: TargetNav): Boolean {
         if (terminal.target is TerminalTarget.Shell) return false
         return terminal.navigation.withLock {
-            val current = mutableHosts.value[terminal.host.id]?.takeIf { it.isLive && !it.retired }
-            val port = current?.mutablePort?.value ?: return@withLock false
+            if (!isLive(terminal.host.id)) return@withLock false
             try {
-                port.navigate(terminal.target, null, nav, terminal.mutableHandle.value?.clientId())
+                currentPort(terminal.host.id, requireConnected = false).navigate(terminal.target, null, nav, terminal.mutableHandle.value?.clientId())
                 true
             } catch (_: HostException) {
                 false
@@ -1354,9 +1348,6 @@ class HostConnections(
         cancelBackground(terminal)
         terminal.mutableHandle.value?.disconnect()
     }
-
-    /** True while any terminal has not closed: the foreground service and the battery prompt care. */
-    fun hasOpenSession(): Boolean = mutableTerminals.value.any { !it.retired && it.state.value !is SessionState.Closed }
 
     /**
      * The notification's "Disconnect all": ends every terminal and every host connection (their

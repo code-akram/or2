@@ -102,7 +102,7 @@ class MigrationDeviceTest {
                 assertTrue(host.showInInbox)
                 assertEquals(TransportPref.AUTO, host.transport) // v1 -> v2 -> v3 -> v4 in one open.
                 assertFalse(host.sleeps)
-                assertEquals(0L, host.moshFailedUntil)
+                assertEquals(0L, host.record.moshFailedUntil)
             }
         } finally {
             database.close()
@@ -199,24 +199,10 @@ class MigrationDeviceTest {
                 dao.saveHost(Host(HostRecord(0, "Beta", "u", null, true, TransportPref.SSH), listOf(HostEndpoint("beta.invalid", 22))), null)
                 assertEquals(listOf(TransportPref.MOSH, TransportPref.SSH), dao.hosts().first().sortedBy { it.label }.map { it.transport })
 
-                // `sleeps` is written by an edit; the mosh failure memory by its own query, and an edit that changes
-                // the transport or the addresses forgets it, one that changes neither (a label) keeps it.
+                // `sleeps` is written by an edit; the unused `mosh_failed_until` stays at its default.
                 dao.saveHost(migrated.copy(record = migrated.record.copy(transport = TransportPref.MOSH, sleeps = true)), dao.host(1)!!)
                 assertTrue(dao.host(1)!!.sleeps)
-                dao.markMoshFailed(1, 1_790_000_000_000L)
-                assertEquals(1_790_000_000_000L, dao.host(1)!!.moshFailedUntil)
-                val stored = dao.host(1)!!
-                dao.saveHost(stored.copy(record = stored.record.copy(label = "Renamed")), stored)
-                assertEquals(1_790_000_000_000L, dao.host(1)!!.moshFailedUntil)
-                dao.saveHost(stored.copy(record = stored.record.copy(transport = TransportPref.AUTO)), dao.host(1)!!)
-                assertEquals(0L, dao.host(1)!!.moshFailedUntil)
-                dao.markMoshFailed(1, 1_790_000_000_000L)
-                val again = dao.host(1)!!
-                dao.saveHost(again.copy(addresses = listOf(HostEndpoint("elsewhere.invalid", 22))), again)
-                assertEquals(0L, dao.host(1)!!.moshFailedUntil)
-                dao.markMoshFailed(1, 5L)
-                dao.clearMoshFailure(1)
-                assertEquals(0L, dao.host(1)!!.moshFailedUntil)
+                assertEquals(0L, dao.host(1)!!.record.moshFailedUntil)
             }
         } finally {
             database.close()

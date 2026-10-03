@@ -5363,6 +5363,22 @@ title; the transparent arrow pad). Four lanes own disjoint files; each fixes its
 - One link-status message/colour and one agent-label function next to `LinkStatus` (lane A may use them).
 - Stale comments (`hasOpenSession`, `moshFailedUntil`, `AppActions.notifications`).
 
+**Implemented (branch `v012/lane-c-app`).** The mosh memory's DAO API and `MoshFailureStore` are gone and
+`saveHost` no longer clears it; `hosts.mosh_failed_until` stays in the entity and the v4 schema, marked unused
+(no migration, `4.json` unchanged). The test-only API is gone (tests carry `hasOpenSession` and
+`recordedServerPids` helpers; `NetworkChanges` starts unseeded, the watch seeds it); `NavStack.tab` is lane A's and
+stays. One `NotificationPermission.offer` (the agents card's dismissal key; `notifications_asked` still counts as
+an earlier request) and one battery-request intent. `HostConnections.currentPort(hostId, requireConnected)` serves
+`openTerminal`, `focusHerdrPane`, `replyToPane`, `scrollTarget`, `uploadImage` and `navigate`; `ActiveTerminal.isOpen`;
+`requestBackground` trusts `openTerminal`'s recheck. `combineEach` (in `TerminalFlows.kt`) carries the nine
+flows; `Or2Application.serviceSnapshots` is the one shared collection (`shareIn` its process scope, replay 1) that
+the service's controller and the starter read. `linkMessage`, `linkStatusColor` and `agentLabel` sit by
+`LinkStatus`. Left for the merge, in files of lane A: `Or2App.kt`'s `AppActions` default still calls the
+deprecated `offer(NotificationUse.CONNECTION)` shim (switch it to `.offer`, then delete the shim and the enum), and
+its `notifications` KDoc is stale; `HostFormScreen.kt` still copies `Host.moshFailedUntil` (then the getter can go);
+`docs/ui.md` still names `NotificationUse.AGENT_ALERTS`; `InboxScreen`, `HostScreen`, `PickerGate` and
+`HomeModel.herdrDetail` can use `linkMessage`, `linkStatusColor` and `agentLabel`.
+
 ## Lane D: Rust core and FFI (`core/*`; Kotlin only where an FFI change forces it)
 
 - **Bugs:** tmux swipe-scroll targets the terminal's original session after a session switch (pass the

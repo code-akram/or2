@@ -128,34 +128,15 @@ enum class NotificationGrant {
 }
 
 /**
- * What the app wants notifications for. Each use has its own in-context offer ([NotificationPermission.offer]) and
- * its own dismissal; the permission itself is one.
- *
- * Nothing asks on connect; every offer's "Allow" calls the same `AppActions.allowNotifications`.
- */
-enum class NotificationUse(val dismissedKey: String, val legacyKey: String? = null) {
-    /**
-     * The foreground service's ongoing notification (hosts, sessions, "Disconnect all"). The service runs without the
-     * permission; only the notification is not shown. `notifications_asked` is the flag of the connect-time request
-     * this offer replaced: a user who answered that is not offered it again.
-     */
-    CONNECTION("notification_offer_connection_dismissed", legacyKey = "notifications_asked"),
-
-    /**
-     * Agent alerts (v0.1.1) together with the connection status: Home's one card covers both ("Show connection and
-     * agent notifications"). A new use, so a user who dismissed the connection-only card is offered it once more.
-     */
-    AGENT_ALERTS("notification_offer_agents_dismissed"),
-}
-
-/**
  * `POST_NOTIFICATIONS`, asked only in context, never on connect (minSdk 34: it is always a runtime permission).
  * [granted] reads the permission; [grant] says whether "Allow" shows Android's dialog or the app's notification
  * settings (after a request, Android stops showing its dialog once the user denied it for good, which is when
- * `shouldShowRequestPermissionRationale` is false again).
+ * `shouldShowRequestPermissionRationale` is false again). Nothing asks on connect: the one in-context [offer] (Home's
+ * "Show connection and agent notifications" card) and the Settings switch both call `AppActions.allowNotifications`.
  */
 class NotificationPermission(private val store: PrefStore, private val granted: () -> Boolean) {
-    private val offers = mutableMapOf<NotificationUse, NotificationOffer>()
+    /** The one offer: connection status and agent alerts together. */
+    val offer = NotificationOffer(store, granted)
 
     fun isGranted(): Boolean = granted()
 
@@ -165,32 +146,39 @@ class NotificationPermission(private val store: PrefStore, private val granted: 
     /** Android's dialog is being shown (called just before it is launched). */
     fun requested() = store.putBoolean(REQUESTED, true)
 
-    /** The in-context offer for [use]; one per use. */
-    fun offer(use: NotificationUse): NotificationOffer = offers.getOrPut(use) { NotificationOffer(store, use, granted) }
+    /** The permission may have changed (its dialog closed, or the app returned from Settings): the offer re-reads it. */
+    fun refresh() = offer.refresh()
 
-    /** The permission may have changed (its dialog closed, or the app returned from Settings): every offer re-reads it. */
-    fun refresh() = offers.values.forEach(NotificationOffer::refresh)
+    /**
+     * Kept only so `AppActions`' default in `Or2App.kt` compiles until that call reads [offer]: every use is the one
+     * offer now. Remove with that call.
+     */
+    @Deprecated("There is one offer", ReplaceWith("offer"))
+    fun offer(@Suppress("UNUSED_PARAMETER") use: NotificationUse): NotificationOffer = offer
 
-    private fun wasRequested() = store.getBoolean(REQUESTED) || NotificationUse.entries.any { it.legacyKey?.let(store::getBoolean) == true }
+    /** `notifications_asked` is the flag of the connect-time request the offers replaced: that request counts as one. */
+    private fun wasRequested() = store.getBoolean(REQUESTED) || store.getBoolean(LEGACY_ASKED)
 
     private companion object {
         const val REQUESTED = "notifications_requested"
+        const val LEGACY_ASKED = "notifications_asked"
     }
 }
 
+/** See [NotificationPermission.offer] (the deprecated overload). Remove with it. */
+@Deprecated("There is one offer: NotificationPermission.offer")
+enum class NotificationUse { CONNECTION, AGENT_ALERTS }
+
 /**
- * One use's offer ([NotificationUse]): [visible] while the permission is not granted and the user neither dismissed
- * the offer nor answered that use's earlier prompt. It stays after a denial, so the user can still allow it (through
- * Settings once Android stops asking), until it is dismissed.
+ * The in-context offer: [visible] while the permission is not granted and the user has not dismissed it. It stays
+ * after a denial, so the user can still allow it (through Settings once Android stops asking), until it is dismissed.
  */
-class NotificationOffer internal constructor(
-    private val store: PrefStore, private val use: NotificationUse, private val granted: () -> Boolean,
-) {
+class NotificationOffer internal constructor(private val store: PrefStore, private val granted: () -> Boolean) {
     private val mutableVisible = MutableStateFlow(visibleNow())
     val visible: StateFlow<Boolean> = mutableVisible.asStateFlow()
 
     fun dismiss() {
-        store.putBoolean(use.dismissedKey, true)
+        store.putBoolean(DISMISSED, true)
         refresh()
     }
 
@@ -198,5 +186,13 @@ class NotificationOffer internal constructor(
         mutableVisible.value = visibleNow()
     }
 
-    private fun visibleNow() = !granted() && !store.getBoolean(use.dismissedKey) && use.legacyKey?.let(store::getBoolean) != true
+    private fun visibleNow() = !granted() && !store.getBoolean(DISMISSED)
+
+    private companion object {
+        /**
+         * The agent-alerts offer's key (v0.1.1, the card that covers both). The connection-only card's dismissal
+         * (`notification_offer_connection_dismissed`) and the connect-time request did not hide it, and still do not.
+         */
+        const val DISMISSED = "notification_offer_agents_dismissed"
+    }
 }

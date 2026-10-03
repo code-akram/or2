@@ -56,10 +56,6 @@ class MoshServerLedger(private val store: PrefStore) {
         return entries.filter { it.hostId == host.id && it.identity == identity }.map { it.pid }
     }
 
-    /** Every recorded pid of [hostId], whatever destination it was started through (diagnostics and tests). */
-    @Synchronized
-    fun allPids(hostId: Long): List<UInt> = entries.filter { it.hostId == hostId }.map { it.pid }
-
     /**
      * Only a new record must reach the disk at once. A clear that a process death loses costs one
      * repeated stop at the next connection, which is harmless.

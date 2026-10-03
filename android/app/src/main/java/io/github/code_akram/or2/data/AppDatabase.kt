@@ -54,8 +54,8 @@ data class HostRecord(
      */
     @ColumnInfo(name = "sleeps", defaultValue = "0") val sleeps: Boolean = false,
     /**
-     * Epoch milliseconds until which AUTO skips mosh for this host (mosh failed to reach it over UDP);
-     * 0 is no memory. Cleared when the transport preference or the addresses change.
+     * Unused: the old per-host memory of a mosh failure (v4). Nothing reads or writes it any more (UDP is learned
+     * per connection, see `UdpVerdict`); the column stays so the schema needs no migration.
      */
     @ColumnInfo(name = "mosh_failed_until", defaultValue = "0") val moshFailedUntil: Long = 0,
 )
@@ -96,6 +96,8 @@ data class Host(val record: HostRecord, val addresses: List<HostEndpoint>) {
     val showInInbox get() = record.showInInbox
     val transport get() = record.transport
     val sleeps get() = record.sleeps
+
+    /** Unused ([HostRecord.moshFailedUntil]); kept only while the host form still copies it. */
     val moshFailedUntil get() = record.moshFailedUntil
 
     /** `host:port` summaries for lists and dialogs. */
@@ -128,17 +130,8 @@ interface TrustStore {
     suspend fun replaceTrust(host: Host, presented: PublicKeyInfo)
 }
 
-/** The per-host memory of a mosh failure that AUTO honours across connections and restarts. */
-interface MoshFailureStore {
-    /** AUTO skips mosh for [hostId] until [until] (epoch milliseconds). */
-    suspend fun markMoshFailed(hostId: Long, until: Long)
-
-    /** Forgets the failure: the next AUTO terminal tries mosh again. */
-    suspend fun clearMoshFailure(hostId: Long)
-}
-
 @Dao
-abstract class AppDao : TrustStore, MoshFailureStore {
+abstract class AppDao : TrustStore {
     @Transaction
     @Query("SELECT * FROM hosts ORDER BY label COLLATE NOCASE")
     abstract fun hostRows(): Flow<List<HostWithAddresses>>
@@ -172,15 +165,9 @@ abstract class AppDao : TrustStore, MoshFailureStore {
     @Query("DELETE FROM host_addresses WHERE hostId = :hostId")
     abstract suspend fun deleteAddresses(hostId: Long)
 
-    // `mosh_failed_until` is deliberately not here: an edit never touches the failure memory except
-    // through `saveHost`, which clears it when the transport or the addresses change.
+    // The unused `mosh_failed_until` is not written.
     @Query("UPDATE hosts SET label = :label, username = :username, keyId = :keyId, showInInbox = :showInInbox, transport = :transport, sleeps = :sleeps WHERE id = :id")
     abstract suspend fun updateHost(id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean, transport: TransportPref, sleeps: Boolean)
-
-    @Query("UPDATE hosts SET mosh_failed_until = :until WHERE id = :hostId")
-    abstract override suspend fun markMoshFailed(hostId: Long, until: Long)
-
-    override suspend fun clearMoshFailure(hostId: Long) = markMoshFailed(hostId, 0)
 
     @Query("DELETE FROM hosts WHERE id = :id")
     abstract suspend fun deleteHost(id: Long)
@@ -215,8 +202,6 @@ abstract class AppDao : TrustStore, MoshFailureStore {
         } else {
             val stored = host(host.id) ?: error("Host was deleted.")
             if (host.addresses != stored.addresses) clearTrust(host.id)
-            // A different destination or a new preference is a fresh decision about mosh.
-            if (host.addresses != stored.addresses || host.transport != stored.transport) clearMoshFailure(host.id)
             updateHost(host.id, host.label, host.username, host.keyId, host.showInInbox, host.transport, host.sleeps)
             deleteAddresses(host.id)
             insertAddresses(addressRows(host.id, host.addresses))

@@ -49,10 +49,10 @@ class HostConnectionsTransportTest {
      */
     private suspend fun TestScope.rig(
         pref: TransportPref = TransportPref.AUTO, moshServer: String? = "/usr/bin/mosh-server", probed: Boolean = true,
-        pending: Boolean = false, moshPending: Boolean = false, failedUntil: Long = 0, roundTripMs: Long = 0,
+        pending: Boolean = false, moshPending: Boolean = false, roundTripMs: Long = 0,
         moshServerFailures: Int = 0,
     ): Rig {
-        val host = testHost(transport = pref, moshFailedUntil = failedUntil)
+        val host = testHost(transport = pref)
         val port = FakePort()
         port.caps = port.caps.copy(moshServer = moshServer)
         port.moshServerFailuresLeft = moshServerFailures
@@ -538,15 +538,6 @@ class HostConnectionsTransportTest {
         assertEquals(UdpVerdict.UNKNOWN, rig.active.udpVerdict.value)
     }
 
-    @Test
-    fun nothingAboutUdpIsRememberedAcrossConnections() = runTest {
-        // A host record still carrying the old 24 h memory: it is not read any more.
-        val rig = rig(failedUntil = Long.MAX_VALUE)
-        assertEquals(UdpVerdict.UNKNOWN, rig.active.udpVerdict.value)
-        rig.holder.openTerminal(rig.active, shell)
-        assertEquals(listOf(TerminalTransport.MOSH), rig.port.transports)
-    }
-
     // --- the shell's fallback --------------------------------------------------------------
 
     @Test
@@ -737,39 +728,6 @@ class HostConnectionsTransportTest {
         clean.hostListener.onHostStateChanged(HostState.Closed(CloseReason.Disconnected))
         advanceUntilIdle()
         assertFalse(clean.active.wasLost)
-    }
-
-    @Test
-    fun awaitCapabilitiesReturnsAtOnceWhenKnownAndGivesUpAfterTheTimeout() = runTest {
-        val known = rig()
-        val t0 = testScheduler.currentTime
-        known.holder.awaitCapabilities(known.active, timeoutMs = 10_000)
-        assertEquals(t0, testScheduler.currentTime) // No waiting.
-
-        val failed = rig(probed = false)
-        // The failed probe is an answer too: it must not make the caller wait out the timeout.
-        assertNotNull(failed.active.capabilitiesError.value)
-        val t1 = testScheduler.currentTime
-        failed.holder.awaitCapabilities(failed.active, timeoutMs = 10_000)
-        assertEquals(t1, testScheduler.currentTime)
-
-        // A probe that never answers: the caller gives up after the timeout and carries on without it.
-        val never = rig(pending = true)
-        val before = testScheduler.currentTime
-        never.holder.awaitCapabilities(never.active, timeoutMs = 3_000)
-        assertEquals(3_000L, testScheduler.currentTime - before)
-        assertNull(never.active.capabilities.value)
-        assertNull(never.active.capabilitiesError.value)
-
-        // And one that answers within the timeout ends the wait as soon as it does.
-        val slow = rig(pending = true)
-        val started = testScheduler.currentTime
-        val waiting = async { slow.holder.awaitCapabilities(slow.active, timeoutMs = 3_000) }
-        advanceTimeBy(1_000)
-        slow.port.capsGate!!.complete(Unit)
-        waiting.await()
-        assertEquals(1_000L, testScheduler.currentTime - started)
-        assertNotNull(slow.active.capabilities.value)
     }
 
     @Test

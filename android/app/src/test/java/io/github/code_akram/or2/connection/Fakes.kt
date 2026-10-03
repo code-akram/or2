@@ -19,10 +19,17 @@ import kotlinx.coroutines.flow.MutableStateFlow
 fun testHost(
     id: Long = 7, label: String = "Fixture", keyId: String? = "ephemeral",
     addresses: List<HostEndpoint> = listOf(HostEndpoint("fixture.invalid", 2222)), showInInbox: Boolean = true,
-    transport: TransportPref = TransportPref.AUTO, sleeps: Boolean = false, moshFailedUntil: Long = 0,
-) = Host(HostRecord(id, label, "fixture", keyId, showInInbox, transport, sleeps, moshFailedUntil), addresses)
+    transport: TransportPref = TransportPref.AUTO, sleeps: Boolean = false,
+) = Host(HostRecord(id, label, "fixture", keyId, showInInbox, transport, sleeps), addresses)
 
-val testPublicKey = PublicKeyInfo("test-algorithm", "test-public-line", "test-fingerprint", "")
+/** Whether any terminal has not closed and was not dismissed. */
+fun HostConnections.hasOpenSession(): Boolean = terminals.value.any { !it.retired && it.state.value !is SessionState.Closed }
+
+/** Every pid the [MoshServerLedger] in [store] holds for [hostId], whatever destination it was started through. */
+fun recordedServerPids(store: PrefStore, hostId: Long): List<UInt> = store.getString("mosh_servers").orEmpty().split(",")
+    .map { it.split(":") }.filter { it.size == 3 && it[0] == hostId.toString() }.map { it[1].toUInt() }
+
+val testPublicKey =PublicKeyInfo("test-algorithm", "test-public-line", "test-fingerprint", "")
 val testPrompt = HostState.AwaitingHostKeyDecision(testPublicKey, emptyList())
 
 class FakeTrust(val events: MutableList<String> = mutableListOf()) : TrustStore {
@@ -303,12 +310,8 @@ class FakeDao : AppDao() {
     override suspend fun updateHost(id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean, transport: TransportPref, sleeps: Boolean) {
         if (failSave) error("storage failure")
         records.value = records.value.map {
-            if (it.id == id) HostRecord(id, label, username, keyId, showInInbox, transport, sleeps, it.moshFailedUntil) else it
+            if (it.id == id) it.copy(label = label, username = username, keyId = keyId, showInInbox = showInInbox, transport = transport, sleeps = sleeps) else it
         }
-    }
-    override suspend fun markMoshFailed(hostId: Long, until: Long) {
-        events += "mosh-failed:$hostId:$until"
-        records.value = records.value.map { if (it.id == hostId) it.copy(moshFailedUntil = until) else it }
     }
     override suspend fun deleteHost(id: Long) {
         if (failDelete) error("storage failure")
