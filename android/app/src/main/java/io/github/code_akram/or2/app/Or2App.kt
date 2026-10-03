@@ -96,6 +96,7 @@ import io.github.code_akram.or2.paste.SharePickerSheet
 import io.github.code_akram.or2.paste.imageFromUri
 import io.github.code_akram.or2.paste.restoredShare
 import io.github.code_akram.or2.paste.savedShare
+import io.github.code_akram.or2.paste.shareNote
 import io.github.code_akram.or2.session.HostTrustDialog
 import io.github.code_akram.or2.session.SessionScreen
 import io.github.code_akram.or2.terminal.TerminalThumbnail
@@ -406,14 +407,22 @@ fun Or2App(
     }
 
     // --- images shared from another app: the open terminal they go to ------------------------------
-    // Saved state: a rotation while the picker is open keeps the image (its read grant belongs to the activity).
-    // A recreation after the process died drops it (`restoredShare`): the terminals it was for are gone.
+    // Saved state: a rotation while the picker is open keeps the images (their read grants belong to the activity).
+    // A recreation after the process died drops them (`restoredShare`): the terminals they were for are gone.
+    // One question for the whole share; what it does not send (unreadable items, more than MAX_IMAGES) is said.
     val shareOffer by actions.imageShares.request.collectAsStateWithLifecycle()
-    var sharing by rememberSaveable(stateSaver = SHARE_SAVER) { mutableStateOf<Uri?>(null) }
+    var sharing by rememberSaveable(stateSaver = SHARE_SAVER) { mutableStateOf<List<Uri>?>(null) }
     LaunchedEffect(shareOffer) {
         if (shareOffer == null) return@LaunchedEffect
-        val uri = actions.imageShares.take() ?: return@LaunchedEffect
-        if (connections.shareTargets().isEmpty()) actions.message(NO_TERMINAL_FOR_IMAGE) else sharing = uri
+        val share = actions.imageShares.take() ?: return@LaunchedEffect
+        when {
+            share.images.isEmpty() -> actions.message(shareNote(share))
+            connections.shareTargets().isEmpty() -> actions.message(NO_TERMINAL_FOR_IMAGE)
+            else -> {
+                sharing = share.images
+                shareNote(share)?.let(actions.message)
+            }
+        }
     }
 
     // Leaving and returning: see the contract's reattach, battery and reconnect rules. The flags
@@ -609,9 +618,9 @@ fun Or2App(
             dismiss = { homePicker = null },
         )
     }
-    // The share picker: the open terminals, the last used first. A pick shows that terminal and uploads the image to it.
+    // The share picker: the open terminals, the last used first. A pick shows that terminal and queues the images there.
     val appContext = LocalContext.current.applicationContext
-    sharing?.let { uri ->
+    sharing?.let { uris ->
         val targets = remember(terminals) { connections.shareTargets() }
         if (targets.isEmpty()) {
             LaunchedEffect(Unit) {
@@ -625,7 +634,7 @@ fun Or2App(
                     sharing = null
                     connections.terminal(target.id)?.let { terminal ->
                         resumeTerminal(terminal.id, replace = NavStack.decode(saved).current is Destination.Terminal)
-                        terminal.imagePaste?.start(imageFromUri(appContext, uri))
+                        for (uri in uris) terminal.imagePaste?.start(imageFromUri(appContext, uri))
                     }
                 },
                 dismiss = { sharing = null },
@@ -669,10 +678,10 @@ private val AgentPaneSaver: Saver<AgentPaneKey?, Array<String>> = Saver(
     restore = { AgentPaneKey.fromParts(it) },
 )
 
-/** A pending shared image as saved state, with the process that took it ([savedShare], [restoredShare]). */
-private val SHARE_SAVER: Saver<Uri?, Array<String>> = Saver(
-    save = { uri -> uri?.let { savedShare(it.toString()) } },
-    restore = { saved -> restoredShare(saved)?.let(Uri::parse) },
+/** A pending share's images as saved state, with the process that took them ([savedShare], [restoredShare]). */
+private val SHARE_SAVER: Saver<List<Uri>?, Array<String>> = Saver(
+    save = { uris -> uris?.let { savedShare(*it.map(Uri::toString).toTypedArray()) } },
+    restore = { saved -> restoredShare(saved)?.map(Uri::parse) },
 )
 
 /** The Home card for the last terminal: what it was and how it was reached. */
