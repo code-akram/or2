@@ -342,10 +342,11 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   sheet: a segmented control (`herdr` / `tmux`; there is no `Open` tab) with a trailing **Shell** pill
   (`surfaceTrack`, the `>_` prompt glyph before the label, its only meaning) that opens a plain shell; the UDP line
   under them when it applies (see "UDP blocked"); below, the herdr tab's sessions or the tmux tab's list. **herdr:**
-  each running session the app watches (its live view, the inbox's source) is a section header with its name (the
-  default session by its name alone, never `(default)`), then one `surfaceRaisedRow` card: a 44 dp `Whole session`
-  row (`● Open` at its end when the session has a terminal), then its agents under small muted mono workspace
-  headers (herdr's workspace order; in one, by tab then pane), or a muted `No agents`. An agent row (56 dp) is its
+  each running session the app watches (its live view, the inbox's source) is one `surfaceRaisedRow` card: first the
+  session's own row, named as a tmux row is (its name, the default session by its name alone, never `(default)`,
+  then `4 agents` / `1 agent` / `no agents` in muted mono; `● Open` at its end when the session has a terminal; a tap
+  opens the session as it is), then its agents under small muted mono workspace headers (herdr's workspace order; in
+  one, by tab then pane). Never app words such as "Whole session" (owner, 2026-10-03). An agent row (56 dp) is its
   label (the inbox's) over its directory in muted mono small (the path's end kept), with its status dot and word at
   the right in the inbox's colours (`Working` pulses, `Blocked` is in `attention`); a tap opens it exactly as
   an inbox row does. Sessions without a live view (not running, or a host whose agents are not watched) follow in

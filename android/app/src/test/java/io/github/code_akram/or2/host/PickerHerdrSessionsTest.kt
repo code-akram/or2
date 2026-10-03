@@ -73,7 +73,7 @@ class PickerHerdrSessionsTest {
         val sessions = pickerHerdrSessions(listOf(archive, spike, default), mapOf("or2-spike" to view()))
         // The live ones first, then the others in the listing's order.
         assertEquals(listOf("or2-spike", "archive", "default"), sessions.map { it.label })
-        assertEquals(emptyList<PickerWorkspace>(), sessions[0].workspaces) // "No agents" under Whole session.
+        assertEquals(emptyList<PickerWorkspace>(), sessions[0].workspaces) // "no agents" on the session's row.
         assertNull(sessions[1].workspaces) // Not running: one row.
         assertFalse(sessions[1].running)
         assertNull(sessions[2].workspaces) // Running but not watched (yet): one row too.

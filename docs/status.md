@@ -90,7 +90,7 @@ until the caller acknowledges, as a real host does.
 1. **The owner's QA of the streamlined v0.1.2 candidate** on the phone (installed 2026-10-03):
    1. Home: each host's terminals inside its card; × closes (herdr/tmux one tap, a shell asks); a tap on the host
       opens the picker (connecting first); `⋯` for Connect/Disconnect, Edit, Delete; `Connect all`.
-   2. Picker: the herdr tab lists each session's agents by workspace (a tap opens that agent), `Whole session`; tmux
+   2. Picker: the herdr tab lists each session's agents by workspace (a tap opens that agent); the session's row (`default · 4 agents`) opens it whole; tmux
       re-read on every opening, Refresh with a spinner; `● Open` on a session already open.
    3. Terminal: Back and the orange disc go Home; the green disc's Terminals sheet (× per row, Copy screen,
       Gestures & shortcuts); toolbar fits (⇧Tab, `/`, `@`; Copy/Clear while selecting).

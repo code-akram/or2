@@ -22,7 +22,7 @@ Each release's notes are in [docs/releases/](docs/releases/).
   together; one that fails is skipped and reported, and Cancel stops the lot.
 - The session picker's herdr tab lists the agents of each running session, grouped by workspace, each with its
   status and directory, as the inbox shows them; tapping one opens it as the inbox does (its pane focused, the
-  session's terminal reused). `Whole session` opens the session as it is, and a session with no agents says so.
+  session's terminal reused). The session's own row (its name and agent count, as a tmux row shows its windows) opens it as it is.
 
 ### Changed
 

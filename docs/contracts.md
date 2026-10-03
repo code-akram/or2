@@ -5611,3 +5611,8 @@ and their tests/gallery).
   Refresh); the tmux tab's keeps `Try Refresh.`
 - Outside the lane's files: `app/Or2App.kt` and `app/HomeRoute.kt` (the shared `openAgent`), the device fakes'
   `UiPort.focused`, and `docs/ui.md`'s picker paragraph.
+
+**Owner, on the phone (2026-10-03):** *"don't use the title `Whole session`; that's not how terminal lovers would
+like to see this app."* The session's own row is now named as a tmux row is: the session's name (the default one
+`default`), then `4 agents` / `1 agent` / `no agents` in muted mono; the separate section header and the `No agents`
+line are gone. Tags (`herdr:<name>`, `herdr-open:<name>`, `open-mark:herdr:<name>`) are unchanged.

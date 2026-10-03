@@ -57,7 +57,6 @@ import io.github.code_akram.or2.ui.Or2Icons
 import io.github.code_akram.or2.ui.Or2Sheet
 import io.github.code_akram.or2.ui.Or2Type
 import io.github.code_akram.or2.ui.PillButton
-import io.github.code_akram.or2.ui.SectionHeader
 import io.github.code_akram.or2.ui.Segmented
 import io.github.code_akram.or2.ui.Spinner
 import io.github.code_akram.or2.ui.StatusDot
@@ -161,7 +160,7 @@ fun pickerWorkspaces(view: HerdrView): List<PickerWorkspace> {
 /**
  * The session picker over Home (a host card's header opens it): a segmented control (herdr, tmux) with a "Shell" pill
  * (the `>_` glyph) that opens a plain shell, and one grouped list below. The herdr tab lists each running session's
- * agents from the host's live views ([herdrViews], by session: null for the default one) under a `Whole session` row;
+ * agents from the host's live views ([herdrViews], by session: null for the default one) under the session's own row (its name and agent count);
  * tapping an agent is [openAgent]. A session that already has an open terminal is marked `● Open` ([open]): choosing
  * it switches to that terminal. The tmux tab is read again whenever it is shown ([tmuxShown]) and has Refresh, with a
  * spinner beside it while [refreshing]. Hosts without tmux or herdr, failed listings and errors are explained in muted
@@ -321,8 +320,8 @@ private fun Marker(
 private fun OpenMarker(tag: String) = Marker(Or2Colors.Accent, "Open", Modifier.testTag(tag))
 
 /**
- * The herdr tab: each live session (see [pickerHerdrSessions]) under its name, as one card of a `Whole session` row
- * and its agents by workspace; then the sessions without a live view as single rows, in one card.
+ * The herdr tab: each live session (see [pickerHerdrSessions]) as one card: its own row (its name, its agent count),
+ * then its agents by workspace; then the sessions without a live view as single rows, in one card.
  */
 @Composable
 private fun HerdrList(
@@ -369,28 +368,26 @@ private fun HerdrList(
 }
 
 /**
- * A running herdr session with a live view: its name as a section header, then one card: `Whole session` (the
- * session's terminal as it is; `● Open` when it has one) and the session's agents under small muted workspace
- * headers, or `No agents`.
+ * A running herdr session with a live view, as one card: the session's own row, named as tmux names its sessions (its
+ * name, then how many agents it has, in mono: the session's terminal as it is, `● Open` when it has one), then its
+ * agents under small muted workspace headers.
  */
 @Composable
 private fun LiveSession(session: PickerHerdrSession, isOpen: Boolean, first: Boolean, whole: () -> Unit, agent: (String) -> Unit) {
-    Column(Modifier.testTag("herdr-session:${session.label}")) {
-        // As the Terminals sheet heads each host's group.
-        SectionHeader(session.label, topGap = if (first) 0.dp else 8.dp)
+    Column(Modifier.padding(top = if (first) 0.dp else 8.dp).testTag("herdr-session:${session.label}")) {
         GroupCard(color = Or2Colors.SurfaceRaisedRow) {
+            val workspaces = session.workspaces.orEmpty()
+            val agents = workspaces.sumOf { it.agents.size }
             SheetRow(
-                "herdr:${session.label}", "Whole session", null, whole, "herdr-open:${session.label}",
+                "herdr:${session.label}", session.label,
+                when (agents) {
+                    0 -> "no agents"
+                    1 -> "1 agent"
+                    else -> "$agents agents"
+                },
+                whole, "herdr-open:${session.label}",
                 marker = if (isOpen) ({ OpenMarker("open-mark:herdr:${session.label}") }) else null,
             )
-            val workspaces = session.workspaces.orEmpty()
-            if (workspaces.isEmpty()) {
-                GroupDivider()
-                Text(
-                    "No agents", style = Or2Type.Secondary, color = Or2Colors.TextMuted,
-                    modifier = Modifier.padding(horizontal = Or2Dimens.Gutter, vertical = 10.dp).testTag("herdr-no-agents:${session.label}"),
-                )
-            }
             workspaces.forEach { workspace ->
                 GroupDivider()
                 workspace.label?.let {

@@ -130,11 +130,14 @@ class SessionPickerDeviceTest {
         compose.onNodeWithText("Working", useUnmergedTree = true).assertIsDisplayed()
         compose.onNodeWithText("Blocked", useUnmergedTree = true).assertIsDisplayed()
         compose.onNodeWithText("default (default)").assertDoesNotExist()
-        // Whole session keeps the session's row: marked Open here, and opened without a pane.
+        // The session's own row is its name and its agent count, as a tmux row is its name and its windows: marked Open
+        // here, and opened without a pane.
         compose.onNodeWithTag("open-mark:herdr:default", useUnmergedTree = true).assertIsDisplayed()
-        compose.onAllNodesWithText("Whole session", useUnmergedTree = true).assertCountEquals(2) // default and work.
-        // A running session without agents says so; a stopped one is its one row, as before.
-        compose.onNodeWithTag("herdr-no-agents:work").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Whole session", useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithText("default", useUnmergedTree = true).assertIsDisplayed()
+        // A running session without agents says so on its row; a stopped one is its one row, as before.
+        compose.onNodeWithTag("herdr-open:work").performScrollTo()
+        compose.onNodeWithText("no agents", useUnmergedTree = true).assertIsDisplayed()
         compose.onNodeWithTag("herdr-open:old").performScrollTo().assertIsNotEnabled()
         // The herdr tab is live: no Refresh here.
         compose.onNodeWithTag("host-refresh").assertDoesNotExist()

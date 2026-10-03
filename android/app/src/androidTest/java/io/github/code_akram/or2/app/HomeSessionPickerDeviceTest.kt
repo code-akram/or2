@@ -240,7 +240,7 @@ class HomeSessionPickerDeviceTest {
             assertEquals(listOf<Pair<String?, String>>(null to "w1:p2"), port.focused)
             assertEquals(listOf<TerminalTarget>(TerminalTarget.Herdr(null, "w1:p2")), port.sessions.map { it.first })
         }
-        // Back Home, Whole session shows that terminal as it is: no second client, no focus.
+        // Back Home, the session's own row shows that terminal as it is: no second client, no focus.
         compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
         waitFor("home-list")
         compose.onNodeWithTag("host:7").performClick()
