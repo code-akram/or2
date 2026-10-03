@@ -34,10 +34,12 @@ use tokio::time::Instant;
 
 use crate::herdr::{self, HerdrObserver, HerdrWatchDriver, HerdrWatchHandle};
 use crate::keys::{ClientKey, KeyError};
+use crate::remote::RemoteError;
 use crate::session::{
     self, CloseReason, HostKeyPrompt, SessionDriver, SessionHandle, SessionObserver,
 };
 use crate::term::TerminalSize;
+use crate::tmux::TmuxError;
 use crate::transport::{Endpoint, EndpointError};
 use crate::trust::HostKey;
 
@@ -353,6 +355,73 @@ pub enum HostError {
     TooLarge,
 }
 
+/// A failure to reach the host: `Closed` once the connection is gone, else a failed command.
+impl From<RemoteError> for HostError {
+    fn from(error: RemoteError) -> Self {
+        match error {
+            RemoteError::Closed => Self::Closed,
+            error => Self::CommandFailed {
+                message: error.to_string(),
+            },
+        }
+    }
+}
+
+impl From<TmuxError> for HostError {
+    fn from(error: TmuxError) -> Self {
+        match error {
+            TmuxError::Remote(error) => error.into(),
+            TmuxError::Failed(message) => Self::CommandFailed { message },
+        }
+    }
+}
+
+impl From<herdr::HerdrError> for HostError {
+    fn from(error: herdr::HerdrError) -> Self {
+        match error {
+            herdr::HerdrError::PaneNotFound => Self::PaneNotFound,
+            herdr::HerdrError::Remote(error) => error.into(),
+            error @ herdr::HerdrError::Failed(_) => Self::CommandFailed {
+                message: error.to_string(),
+            },
+        }
+    }
+}
+
+/// A program the capability probe looks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Program {
+    Tmux,
+    Herdr,
+    MoshServer,
+}
+
+impl Program {
+    /// Its name, as [`HostError::NotInstalled`] reports it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Tmux => "tmux",
+            Self::Herdr => "herdr",
+            Self::MoshServer => "mosh-server",
+        }
+    }
+}
+
+impl HostCapabilities {
+    /// The absolute path of `program`, or [`HostError::NotInstalled`] when the probe found none.
+    pub fn program(&self, program: Program) -> Result<&str, HostError> {
+        match program {
+            Program::Tmux => &self.tmux,
+            Program::Herdr => &self.herdr,
+            Program::MoshServer => &self.mosh_server,
+        }
+        .as_deref()
+        .ok_or_else(|| HostError::NotInstalled {
+            program: program.name().into(),
+        })
+    }
+}
+
 /// The largest image [`HostHandle::upload_image`] sends (20 MiB).
 pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
@@ -644,28 +713,22 @@ impl HostHandle {
     /// The host's programs and locale, probed once per connection (the driver caches them),
     /// with herdr's session list read afresh on every call.
     pub async fn capabilities(&self) -> Result<HostCapabilities, HostError> {
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
-        self.send(HostCommand::Capabilities { reply })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::Capabilities { reply })
+            .await
     }
 
     /// The path of `mosh-server` on the host, `None` when it is not installed. Resolved by the
     /// program probe alone (one exec round trip, cached per connection), never by herdr's
     /// session listing, so a transport choice that awaits it is not held up by a slow herdr.
     pub async fn mosh_server(&self) -> Result<Option<String>, HostError> {
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
-        self.send(HostCommand::MoshServer { reply })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::MoshServer { reply })
+            .await
     }
 
     /// tmux sessions, most recently active first; empty when no tmux server runs.
     pub async fn list_tmux_sessions(&self) -> Result<Vec<TmuxSession>, HostError> {
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
-        self.send(HostCommand::ListTmux { reply })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::ListTmux { reply })
+            .await
     }
 
     /// Focuses `pane_id` in herdr `session` (`None` is the default session): herdr's focus is
@@ -679,19 +742,17 @@ impl HostHandle {
         session: Option<String>,
         pane_id: String,
     ) -> Result<(), HostError> {
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
         if !session.as_deref().is_none_or(is_valid_herdr_session_name)
             || !is_valid_herdr_pane_id(&pane_id)
         {
             return Err(HostError::InvalidName);
         }
-        self.send(HostCommand::FocusHerdrPane {
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::FocusHerdrPane {
             session,
             pane_id,
             reply,
-        })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        })
+        .await
     }
 
     /// Stops the `mosh-server` with process id `pid` on the host, which an earlier client left
@@ -702,13 +763,14 @@ impl HostHandle {
     /// touched. `Err` when the stop could not run (the host had no free channel, answered too
     /// slowly or closed): the caller keeps the pid and tries again on the next connection.
     pub async fn stop_mosh_server(&self, pid: u32) -> Result<(), HostError> {
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
         if pid == 0 {
             return Err(HostError::InvalidName);
         }
-        self.send(HostCommand::StopMoshServer { pid, reply })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::StopMoshServer {
+            pid,
+            reply,
+        })
+        .await
     }
 
     /// Scrolls the history of what `target` shows, without the mouse (contracts.md,
@@ -745,16 +807,14 @@ impl HostHandle {
         {
             return Ok(());
         }
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
-        self.send(HostCommand::ScrollTarget {
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::ScrollTarget {
             target,
             pane_id,
             client_id,
             scroll,
             reply,
-        })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        })
+        .await
     }
 
     /// Moves what a terminal on `target` shows (a gesture or a shortcut): for tmux the window,
@@ -791,16 +851,14 @@ impl HostHandle {
         if target == TerminalTarget::Shell {
             return Ok(());
         }
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
-        self.send(HostCommand::Navigate {
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::Navigate {
             target,
             pane_id,
             client_id,
             nav,
             reply,
-        })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        })
+        .await
     }
 
     /// Sends `text` to `agent` in herdr pane `pane_id` of `session` (`None` is the default
@@ -847,17 +905,15 @@ impl HostHandle {
         if text.len() > herdr::MAX_REPLY_BYTES {
             return Err(HostError::TooLarge);
         }
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
-        self.send(HostCommand::ReplyToPane {
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::ReplyToPane {
             session,
             pane_id,
             agent,
             text,
             deadline: tokio::time::Instant::now() + QUERY_TIMEOUT,
             reply,
-        })?;
-        await_reply(response, QUERY_TIMEOUT).await
+        })
+        .await
     }
 
     /// Uploads an image for an agent to read (contracts.md, "Image paste"): `bytes` go over
@@ -883,14 +939,13 @@ impl HostHandle {
             return Err(HostError::TooLarge);
         }
         let timeout = upload_timeout(bytes.len());
-        let (reply, response) = oneshot::channel();
-        self.require_connected()?;
-        self.send(HostCommand::UploadImage {
-            bytes,
-            extension,
-            reply,
-        })?;
-        let uploaded = await_reply(response, timeout).await?;
+        let uploaded = self
+            .query(timeout, |reply| HostCommand::UploadImage {
+                bytes,
+                extension,
+                reply,
+            })
+            .await?;
         // Taken, in the step that received it (nothing awaits in between): the host keeps the
         // image. A caller dropped before this never acknowledges it, and the host removes it.
         // A caller that comes for the path only after the host stopped waiting for its
@@ -917,6 +972,19 @@ impl HostHandle {
         let (handle, driver) = herdr::channel(observer);
         self.send(HostCommand::WatchHerdr { session, driver })?;
         Ok(handle)
+    }
+
+    /// Sends the query `command` builds around its reply sender, on a connected host, and waits
+    /// for the answer for at most `timeout` ([`await_reply`]).
+    async fn query<T>(
+        &self,
+        timeout: Duration,
+        command: impl FnOnce(oneshot::Sender<Result<T, HostError>>) -> HostCommand,
+    ) -> Result<T, HostError> {
+        let (reply, response) = oneshot::channel();
+        self.require_connected()?;
+        self.send(command(reply))?;
+        await_reply(response, timeout).await
     }
 
     fn require_connected(&self) -> Result<(), HostError> {

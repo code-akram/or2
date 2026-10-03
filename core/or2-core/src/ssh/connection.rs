@@ -44,15 +44,15 @@ use super::upload;
 use crate::herdr::{self, HerdrState, HerdrUnavailable, HerdrWatchDriver};
 use crate::host::{
     HostCapabilities, HostCommand, HostConnectRequest, HostDriver, HostError, HostHandle,
-    HostObserver, HostState, TargetNav, TargetScroll, TerminalTarget, TerminalTransport,
-    TmuxSession, UserCancel,
+    HostObserver, HostState, Program, TargetNav, TargetScroll, TerminalTarget, TerminalTransport,
+    UserCancel,
 };
 use crate::mosh;
 use crate::probe;
 use crate::remote::{ExecOutput, OUTPUT_CAP, RemoteError, RemoteHost, SecretBytes};
 use crate::session::{CloseReason, HostKeyPrompt, SessionDriver, SessionFailure};
 use crate::term::TerminalSize;
-use crate::tmux::{self, TmuxError};
+use crate::tmux;
 use crate::transport::{
     ADDRESS_TIMEOUT, DatagramTransport, RACE_STAGGER, RaceReport, RaceTiming, Transport, race_with,
     seconds,
@@ -1002,6 +1002,7 @@ fn dispatch<D: DatagramTransport>(
     mosh: &MoshContext<'_, D>,
     uploads: &Arc<upload::Uploads>,
 ) {
+    let host = Arc::clone(host);
     match command {
         HostCommand::OpenTerminal {
             target,
@@ -1009,90 +1010,44 @@ fn dispatch<D: DatagramTransport>(
             size,
             driver,
             ..
-        } => spawn_terminal(host, target, size, driver, closing, tracker),
+        } => spawn_terminal(&host, target, size, driver, closing, tracker),
         HostCommand::OpenTerminal {
             target,
             transport: TerminalTransport::Mosh,
             size,
             deadline,
             driver,
-        } => spawn_mosh(host, target, size, deadline, driver, closing, mosh),
-        HostCommand::Capabilities { reply } => {
-            let host = Arc::clone(host);
-            let (mut closing, tracker) = (closing.clone(), tracker.clone());
-            runtime().spawn(async move {
-                let _tracker = tracker;
-                // Programs and locale are the cached probe; herdr's session list is read
-                // again so `running` and new sessions show, and a failed read reports the
-                // last list that was read, not the one from connect time.
-                let query = async {
-                    let cached = host.capabilities().await.map_err(host_error)?;
-                    host.sessions
-                        .capabilities(&*host, cached)
-                        .await
-                        .map_err(host_error)
-                };
-                // A host that closes mid-query drops `reply`: the caller sees `Closed`.
-                tokio::select! {
-                    result = query => { let _ = reply.send(result); }
-                    _ = closed_reason(&mut closing) => {}
-                }
-            });
-        }
-        HostCommand::MoshServer { reply } => {
-            let host = Arc::clone(host);
-            let (mut closing, tracker) = (closing.clone(), tracker.clone());
-            runtime().spawn(async move {
-                let _tracker = tracker;
-                // The program probe alone: never held up by herdr's listing.
-                let query = async {
-                    let programs = host.programs().await.map_err(host_error)?;
-                    Ok(programs.mosh_server.clone())
-                };
-                tokio::select! {
-                    result = query => { let _ = reply.send(result); }
-                    _ = closed_reason(&mut closing) => {}
-                }
-            });
-        }
-        HostCommand::ListTmux { reply } => {
-            let host = Arc::clone(host);
-            let (mut closing, tracker) = (closing.clone(), tracker.clone());
-            runtime().spawn(async move {
-                let _tracker = tracker;
-                tokio::select! {
-                    result = list_tmux(&host) => { let _ = reply.send(result); }
-                    _ = closed_reason(&mut closing) => {}
-                }
-            });
-        }
+        } => spawn_mosh(&host, target, size, deadline, driver, closing, mosh),
+        HostCommand::Capabilities { reply } => spawn_query(closing, tracker, reply, async move {
+            // Programs and locale are the cached probe; herdr's session list is read again so
+            // `running` and new sessions show, and a failed read reports the last list that
+            // was read, not the one from connect time.
+            let cached = host.capabilities().await?;
+            Ok(host.sessions.capabilities(&*host, cached).await?)
+        }),
+        // The program probe alone: never held up by herdr's listing.
+        HostCommand::MoshServer { reply } => spawn_query(closing, tracker, reply, async move {
+            Ok(host.programs().await?.mosh_server.clone())
+        }),
+        HostCommand::ListTmux { reply } => spawn_query(closing, tracker, reply, async move {
+            let path = host.programs().await?.program(Program::Tmux)?;
+            Ok(tmux::list_sessions(&*host, path).await?)
+        }),
         HostCommand::FocusHerdrPane {
             session,
             pane_id,
             reply,
-        } => {
-            let host = Arc::clone(host);
-            let (mut closing, tracker) = (closing.clone(), tracker.clone());
-            runtime().spawn(async move {
-                let _tracker = tracker;
-                tokio::select! {
-                    result = focus_herdr_pane(&host, session, pane_id) => { let _ = reply.send(result); }
-                    _ = closed_reason(&mut closing) => {}
-                }
-            });
-        }
+        } => spawn_query(closing, tracker, reply, async move {
+            // One `pane.focus` through the probed herdr path.
+            let path = host.programs().await?.program(Program::Herdr)?;
+            Ok(host
+                .focus_pane(path, session.as_deref(), &pane_id, false)
+                .await?)
+        }),
         HostCommand::StopMoshServer { pid, reply } => {
-            let host = Arc::clone(host);
-            let (mut closing, tracker) = (closing.clone(), tracker.clone());
-            runtime().spawn(async move {
-                let _tracker = tracker;
-                tokio::select! {
-                    result = mosh::terminate(&*host, pid) => {
-                        let _ = reply.send(result.map_err(host_error));
-                    }
-                    _ = closed_reason(&mut closing) => {}
-                }
-            });
+            spawn_query(closing, tracker, reply, async move {
+                Ok(mosh::terminate(&*host, pid).await?)
+            })
         }
         HostCommand::ScrollTarget {
             target,
@@ -1100,34 +1055,18 @@ fn dispatch<D: DatagramTransport>(
             client_id,
             scroll,
             reply,
-        } => {
-            let host = Arc::clone(host);
-            let (mut closing, tracker) = (closing.clone(), tracker.clone());
-            runtime().spawn(async move {
-                let _tracker = tracker;
-                tokio::select! {
-                    result = scroll_target(&host, target, pane_id, client_id, scroll) => { let _ = reply.send(result); }
-                    _ = closed_reason(&mut closing) => {}
-                }
-            });
-        }
+        } => spawn_query(closing, tracker, reply, async move {
+            scroll_target(&host, target, pane_id, client_id, scroll).await
+        }),
         HostCommand::Navigate {
             target,
             pane_id,
             client_id,
             nav,
             reply,
-        } => {
-            let host = Arc::clone(host);
-            let (mut closing, tracker) = (closing.clone(), tracker.clone());
-            runtime().spawn(async move {
-                let _tracker = tracker;
-                tokio::select! {
-                    result = navigate(&host, target, pane_id, client_id, nav) => { let _ = reply.send(result); }
-                    _ = closed_reason(&mut closing) => {}
-                }
-            });
-        }
+        } => spawn_query(closing, tracker, reply, async move {
+            navigate(&host, target, pane_id, client_id, nav).await
+        }),
         HostCommand::ReplyToPane {
             session,
             pane_id,
@@ -1135,79 +1074,78 @@ fn dispatch<D: DatagramTransport>(
             text,
             deadline,
             mut reply,
-        } => {
-            let host = Arc::clone(host);
-            let (mut closing, tracker) = (closing.clone(), tracker.clone());
-            runtime().spawn(async move {
-                let _tracker = tracker;
-                // A caller that stopped waiting (cancelled, timed out) closes `reply`: the reply
-                // sends nothing more (a request that sends is never cut short). A host that
-                // closes drops it mid-way.
-                let result = {
-                    let target = herdr::Reply {
-                        session: session.as_deref(),
-                        pane_id: &pane_id,
-                        agent: &agent,
-                        text: &text,
-                    };
-                    let cancelled = reply.closed();
-                    tokio::select! {
-                        result = reply_to_pane(&host, target, deadline, cancelled) => Some(result),
-                        _ = closed_reason(&mut closing) => None,
-                    }
+        } => spawn_until_closed(closing, tracker, async move {
+            // A caller that stopped waiting (cancelled, timed out) closes `reply`: the reply
+            // sends nothing more (a request that sends is never cut short).
+            let result = {
+                let target = herdr::Reply {
+                    session: session.as_deref(),
+                    pane_id: &pane_id,
+                    agent: &agent,
+                    text: &text,
                 };
-                if let Some(result) = result {
-                    let _ = reply.send(result);
-                }
-            });
-        }
+                reply_to_pane(&host, target, deadline, reply.closed()).await
+            };
+            let _ = reply.send(result);
+        }),
         HostCommand::UploadImage {
             bytes,
             extension,
             mut reply,
         } => {
-            let (host, uploads) = (Arc::clone(host), Arc::clone(uploads));
-            let (mut closing, tracker) = (closing.clone(), tracker.clone());
-            runtime().spawn(async move {
-                let _tracker = tracker;
-                // A caller that stopped waiting (cancelled, timed out) closes `reply`: the upload
-                // stops and cleans up after itself. A host that closes drops it mid-way.
-                let result = {
-                    let cancelled = reply.closed();
-                    tokio::select! {
-                        result = uploads.upload_image(&host, bytes, &extension, cancelled) => Some(result),
-                        _ = closed_reason(&mut closing) => None,
-                    }
-                };
-                if let Some(result) = result {
-                    let sweep = result.as_ref().ok().map(upload::Uploaded::sweep);
-                    upload::deliver(reply, result).await;
-                    // Old images go once the path is delivered, never on the upload's way.
-                    if let Some(sweep) = sweep {
-                        tokio::select! {
-                            () = sweep.run() => {}
-                            _ = closed_reason(&mut closing) => {}
-                        }
-                    }
+            let uploads = Arc::clone(uploads);
+            spawn_until_closed(closing, tracker, async move {
+                // A caller that stopped waiting (cancelled, timed out) closes `reply`: the
+                // upload stops and cleans up after itself.
+                let result = uploads
+                    .upload_image(&host, bytes, &extension, reply.closed())
+                    .await;
+                let sweep = result.as_ref().ok().map(upload::Uploaded::sweep);
+                upload::deliver(reply, result).await;
+                // Old images go once the path is delivered, never on the upload's way.
+                if let Some(sweep) = sweep {
+                    sweep.run().await;
                 }
             });
         }
+        // Losing the race with `closing` drops the watch, which closes it: `Closed` is
+        // delivered once.
         HostCommand::WatchHerdr { session, driver } => {
-            let host = Arc::clone(host);
-            let (mut closing, tracker) = (closing.clone(), tracker.clone());
-            runtime().spawn(async move {
-                let _tracker = tracker;
-                // Losing the race drops the watch, which closes it: `Closed` is delivered once.
-                tokio::select! {
-                    () = watch_herdr(host, session, driver) => {}
-                    _ = closed_reason(&mut closing) => {}
-                }
-            });
+            spawn_until_closed(closing, tracker, watch_herdr(host, session, driver));
         }
         HostCommand::ApproveHostKey { .. }
         | HostCommand::RejectHostKey
         | HostCommand::Disconnect => {}
     }
+}
+
+/// Runs `task` on the network runtime, holding `tracker`, until it ends or the host closes
+/// (which drops it, and with it any reply sender it holds: the caller sees `Closed`).
+fn spawn_until_closed(
+    closing: &Closing,
+    tracker: &mpsc::Sender<()>,
+    task: impl Future<Output = ()> + Send + 'static,
+) {
+    let (mut closing, tracker) = (closing.clone(), tracker.clone());
+    runtime().spawn(async move {
+        let _tracker = tracker;
+        tokio::select! {
+            () = task => {}
+            _ = closed_reason(&mut closing) => {}
+        }
+    });
+}
+
+/// A query: `query`'s answer goes to `reply`, unless the host closes first.
+fn spawn_query<T: Send + 'static>(
+    closing: &Closing,
+    tracker: &mpsc::Sender<()>,
+    reply: oneshot::Sender<Result<T, HostError>>,
+    query: impl Future<Output = Result<T, HostError>> + Send + 'static,
+) {
+    spawn_until_closed(closing, tracker, async move {
+        let _ = reply.send(query.await);
+    });
 }
 
 /// What a mosh terminal needs beyond what every command gets.
@@ -1271,53 +1209,6 @@ fn spawn_terminal(
         });
 }
 
-fn host_error(error: RemoteError) -> HostError {
-    match error {
-        RemoteError::Closed => HostError::Closed,
-        error => HostError::CommandFailed {
-            message: error.to_string(),
-        },
-    }
-}
-
-async fn list_tmux(host: &SshHost) -> Result<Vec<TmuxSession>, HostError> {
-    let capabilities = host.programs().await.map_err(host_error)?;
-    let Some(path) = &capabilities.tmux else {
-        return Err(HostError::NotInstalled {
-            program: "tmux".into(),
-        });
-    };
-    tmux::list_sessions(host, path)
-        .await
-        .map_err(|error| match error {
-            TmuxError::Remote(error) => host_error(error),
-            TmuxError::Failed(message) => HostError::CommandFailed { message },
-        })
-}
-
-/// `HostHandle::focus_herdr_pane`: one `pane.focus` through the probed herdr path.
-async fn focus_herdr_pane(
-    host: &Arc<SshHost>,
-    session: Option<String>,
-    pane_id: String,
-) -> Result<(), HostError> {
-    let capabilities = host.programs().await.map_err(host_error)?;
-    let Some(path) = &capabilities.herdr else {
-        return Err(HostError::NotInstalled {
-            program: "herdr".into(),
-        });
-    };
-    host.focus_pane(path, session.as_deref(), &pane_id, false)
-        .await
-        .map_err(|error| match error {
-            herdr::HerdrError::PaneNotFound => HostError::PaneNotFound,
-            herdr::HerdrError::Remote(error) => host_error(error),
-            error @ herdr::HerdrError::Failed(_) => HostError::CommandFailed {
-                message: error.to_string(),
-            },
-        })
-}
-
 /// `HostHandle::reply_to_pane`: `agent.prompt`, or the text and Enter typed in one request,
 /// through the probed herdr path. Waits for the program probe only, never for herdr's session
 /// listing. `cancelled` resolves when the caller stops waiting.
@@ -1327,13 +1218,8 @@ async fn reply_to_pane(
     deadline: tokio::time::Instant,
     cancelled: impl std::future::Future<Output = ()>,
 ) -> Result<herdr::ReplyRoute, HostError> {
-    let capabilities = host.programs().await.map_err(host_error)?;
-    let Some(path) = &capabilities.herdr else {
-        return Err(HostError::NotInstalled {
-            program: "herdr".into(),
-        });
-    };
-    herdr::reply_in(
+    let path = host.programs().await?.program(Program::Herdr)?;
+    Ok(herdr::reply_in(
         &**host,
         path,
         host.sessions.directory(),
@@ -1341,14 +1227,7 @@ async fn reply_to_pane(
         deadline,
         cancelled,
     )
-    .await
-    .map_err(|error| match error {
-        herdr::HerdrError::PaneNotFound => HostError::PaneNotFound,
-        herdr::HerdrError::Remote(error) => host_error(error),
-        error @ herdr::HerdrError::Failed(_) => HostError::CommandFailed {
-            message: error.to_string(),
-        },
-    })
+    .await?)
 }
 
 /// `HostHandle::scroll_target`: tmux through exec, herdr through `pane.scroll`, each with the
@@ -1360,20 +1239,14 @@ async fn scroll_target(
     client_id: Option<String>,
     scroll: TargetScroll,
 ) -> Result<(), HostError> {
-    let capabilities = host.programs().await.map_err(host_error)?;
-    let missing = |program: &str| HostError::NotInstalled {
-        program: program.into(),
-    };
+    let capabilities = host.programs().await?;
     match target {
         TerminalTarget::Shell => Ok(()),
         TerminalTarget::Tmux { session_name } => {
-            let path = capabilities
-                .tmux
-                .as_deref()
-                .ok_or_else(|| missing("tmux"))?;
+            let path = capabilities.program(Program::Tmux)?;
             // The session the terminal's client shows, as `navigate` resolves it.
             let client_id = client_id.filter(|_| capabilities.tmux_records_clients);
-            tmux::scroll(
+            Ok(tmux::scroll(
                 &**host,
                 path,
                 &host.tmux_clients,
@@ -1381,18 +1254,11 @@ async fn scroll_target(
                 client_id.as_deref(),
                 scroll,
             )
-            .await
-            .map_err(|error| match error {
-                TmuxError::Remote(error) => host_error(error),
-                TmuxError::Failed(message) => HostError::CommandFailed { message },
-            })
+            .await?)
         }
         TerminalTarget::Herdr { session, .. } => {
-            let path = capabilities
-                .herdr
-                .as_deref()
-                .ok_or_else(|| missing("herdr"))?;
-            herdr::scroll_pane_in(
+            let path = capabilities.program(Program::Herdr)?;
+            Ok(herdr::scroll_pane_in(
                 &**host,
                 path,
                 host.sessions.directory(),
@@ -1401,14 +1267,7 @@ async fn scroll_target(
                 pane_id.as_deref(),
                 scroll,
             )
-            .await
-            .map_err(|error| match error {
-                herdr::HerdrError::PaneNotFound => HostError::PaneNotFound,
-                herdr::HerdrError::Remote(error) => host_error(error),
-                error @ herdr::HerdrError::Failed(_) => HostError::CommandFailed {
-                    message: error.to_string(),
-                },
-            })
+            .await?)
         }
     }
 }
@@ -1421,17 +1280,11 @@ async fn navigate(
     client_id: Option<String>,
     nav: TargetNav,
 ) -> Result<(), HostError> {
-    let capabilities = host.programs().await.map_err(host_error)?;
-    let not_installed = |program: &str| HostError::NotInstalled {
-        program: program.into(),
-    };
+    let capabilities = host.programs().await?;
     match target {
         TerminalTarget::Shell => Ok(()),
         TerminalTarget::Tmux { session_name } => {
-            let path = capabilities
-                .tmux
-                .as_ref()
-                .ok_or_else(|| not_installed("tmux"))?;
+            let path = capabilities.program(Program::Tmux)?;
             // A tmux that cannot record clients attached without the step (`plan`): nothing
             // is recorded under the id, so the terminal's client is unknown.
             let client_id = client_id.filter(|_| capabilities.tmux_records_clients);
@@ -1445,19 +1298,12 @@ async fn navigate(
                 client_id.as_deref(),
                 nav,
             )
-            .await
-            .map(|_: tmux::NavOutcome| ())
-            .map_err(|error| match error {
-                TmuxError::Remote(error) => host_error(error),
-                TmuxError::Failed(message) => HostError::CommandFailed { message },
-            })
+            .await?;
+            Ok(())
         }
         TerminalTarget::Herdr { session, .. } => {
-            let path = capabilities
-                .herdr
-                .as_ref()
-                .ok_or_else(|| not_installed("herdr"))?;
-            herdr::navigate_in(
+            let path = capabilities.program(Program::Herdr)?;
+            Ok(herdr::navigate_in(
                 &**host,
                 path,
                 host.sessions.directory(),
@@ -1465,14 +1311,7 @@ async fn navigate(
                 pane_id.as_deref(),
                 nav,
             )
-            .await
-            .map_err(|error| match error {
-                herdr::HerdrError::PaneNotFound => HostError::PaneNotFound,
-                herdr::HerdrError::Remote(error) => host_error(error),
-                error @ herdr::HerdrError::Failed(_) => HostError::CommandFailed {
-                    message: error.to_string(),
-                },
-            })
+            .await?)
         }
     }
 }
