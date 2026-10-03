@@ -92,7 +92,10 @@ class SpacesDeviceTest {
         compose.runOnUiThread {
             runBlocking { holder.connect(uiHost(), byteArrayOf(1)) }
             port.native = HostState.Connected(0u)
+            // Told as Rust tells it: only a reported Connected starts the host's watches.
+            port.hostListener!!.onHostStateChanged(HostState.Connected(0u))
         }
+        compose.waitUntil(5_000) { holder.host(1)?.state?.value is HostState.Connected }
         return holder
     }
 
