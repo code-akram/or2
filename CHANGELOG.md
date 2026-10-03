@@ -20,6 +20,9 @@ Each release's notes are in [docs/releases/](docs/releases/).
 - Several images at once: pick up to 10 in the photo picker or share several from another app. Each terminal has
   one queue that uploads them one after another (an image added meanwhile joins it), then inserts all their paths
   together; one that fails is skipped and reported, and Cancel stops the lot.
+- The session picker's herdr tab lists the agents of each running session, grouped by workspace, each with its
+  status and directory, as the inbox shows them; tapping one opens it as the inbox does (its pane focused, the
+  session's terminal reused). `Whole session` opens the session as it is, and a session with no agents says so.
 
 ### Changed
 
@@ -62,6 +65,9 @@ Each release's notes are in [docs/releases/](docs/releases/).
   shell asks first, since its programs end with it. A closed terminal is marked `Closed` on its thumbnail.
 - The session picker has two tabs, herdr and tmux; a session that already has a terminal in or2 is marked
   `● Open`, and choosing it switches to that terminal. The line about mosh's UDP being blocked is in the picker.
+- The picker reads the tmux sessions again each time it opens and whenever its tmux tab is shown, with a small
+  spinner while it does; Refresh is on the tmux tab only and shows the same spinner. herdr's default session is
+  listed by its name alone (no `(default)`).
 - The terminal's green disc opens **Terminals**: every open terminal by host, each with its `×`, then **Copy
   screen** and **Gestures & shortcuts**. System Back from a terminal goes Home, as the orange disc does.
 - Going back to an open terminal (a thumbnail, the Terminals sheet, the picker, a reattach) shows it as it is;

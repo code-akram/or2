@@ -5581,3 +5581,33 @@ and their tests/gallery).
 - **Tests.** JVM: grouping by session and workspace, labels, status mapping, the default-session label, an agent tap
   calling the agent path with host/session/pane, `Whole session` keeping the reuse rule. Device: the herdr tab with
   agents from fakes (rows, tap opens the terminal focused), the tmux spinner. Gallery: `picker-herdr` shows agents.
+
+**Implemented (branch `v012/picker-agents`).** Kotlin only. Where the spec was silent:
+
+- **Layout.** Each live session is a `SectionHeader` with its name (as the Terminals sheet heads a host), then one
+  `surfaceRaisedRow` card: `Whole session` (tags `herdr:<name>` / `herdr-open:<name>`, the session row's own, so
+  `● Open` and the reuse rule are unchanged), then per workspace a muted mono-small header
+  (`herdr-workspace:<name>:<label>`) and its agent rows (`herdr-agent:<name>:<pane>`, the status
+  `herdr-agent-status:<name>:<pane>`), or `No agents` (`herdr-no-agents:<name>`). Sessions without a live view keep
+  today's single rows, in one card **after** the live ones (`pickerHerdrSessions`: live first, each part in the
+  listing's order), so a plain row never reads as part of the session above it. A live view counts as running
+  whatever the cached probe said.
+- **Agent rows.** `agentLabel(agent, pane.agent)`, else `agent`; the cwd is the agent's, else its pane's, in mono
+  small with the path's end kept (`StartEllipsis`); the status is the picker's marker (`● Working`: the Inbox's
+  `statusColor` / `statusLabel`; Working pulses, Blocked's word is `attention`); 56 dp with a cwd. Workspaces follow
+  herdr's numbers (empty ones left out), agents by tab then pane; agents in no listed workspace come last without
+  a header.
+- **The default session's label** is its listed name (the owner's is `default`); a default session named otherwise
+  shows that name. Its view is the one keyed null (`herdrViews()`), and it opens with a null session.
+- **Agent path.** `Or2App.openAgent(hostId, hostLabel, session, paneId)` is the one function behind the Inbox row
+  and the picker (`OpenAgent`, through `HomeRoute` and `HomePickerSheet`): `message(null)`, then
+  `launchOpenAgent`. `PickerChoices` (`app/HostPicker.kt`) holds where each choice goes, the sheet closing first.
+- **tmux re-reads.** The source reads on the picker's opening (it lives as long as the sheet), when the tmux tab is
+  shown (`tmuxShown`, skipped while a read runs, so opening on the tmux tab reads once) and on Refresh (which also
+  re-probes; a read in flight is restarted). `refreshing` (the 14 dp spinner beside Refresh, `refresh-spinner`) is
+  a re-probe or a read after the first answer; until that answer `tmux-spinner` (16 dp) stands in place of the
+  list. Each read and probe tracks itself by a token, so a cancelled one never clears its successor's spinner.
+- **Words.** The herdr tab's probe error reads `Could not query the host. Refresh it from the tmux tab.` (it has no
+  Refresh); the tmux tab's keeps `Try Refresh.`
+- Outside the lane's files: `app/Or2App.kt` and `app/HomeRoute.kt` (the shared `openAgent`), the device fakes'
+  `UiPort.focused`, and `docs/ui.md`'s picker paragraph.
