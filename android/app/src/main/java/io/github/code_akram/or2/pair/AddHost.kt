@@ -2,13 +2,11 @@ package io.github.code_akram.or2.pair
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.ui.ActionCard
-import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Icons
 import io.github.code_akram.or2.ui.Or2Sheet
 
@@ -64,6 +62,6 @@ fun AddHostChooser(easyPair: () -> Unit, manual: () -> Unit, modifier: Modifier 
 @Composable
 fun AddHostSheet(easyPair: () -> Unit, manual: () -> Unit, dismiss: () -> Unit) {
     Or2Sheet(dismiss, title = null, done = null, modifier = Modifier.testTag("add-host-sheet")) {
-        AddHostChooser(easyPair, manual, Modifier.padding(horizontal = Or2Dimens.Gutter).padding(bottom = Or2Dimens.Gutter))
+        AddHostChooser(easyPair, manual)
     }
 }
