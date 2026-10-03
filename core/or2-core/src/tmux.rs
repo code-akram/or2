@@ -120,12 +120,7 @@ pub async fn scroll<H: RemoteHost>(
     if output.success() || stderr.contains("not in a mode") {
         return Ok(());
     }
-    let first = stderr.lines().next().unwrap_or("").trim();
-    Err(TmuxError::Failed(if first.is_empty() {
-        format!("exit status {:?}", output.status)
-    } else {
-        first.chars().take(200).collect()
-    }))
+    Err(failure(&output))
 }
 
 /// Sessions, most recently active first (ties by name). No server, or a server without
@@ -142,12 +137,7 @@ pub async fn list_sessions<H: RemoteHost>(
     if no_server(&stderr) {
         return Ok(Vec::new());
     }
-    let first = stderr.lines().next().unwrap_or("").trim();
-    Err(TmuxError::Failed(if first.is_empty() {
-        format!("exit status {:?}", output.status)
-    } else {
-        first.chars().take(200).collect()
-    }))
+    Err(failure(&output))
 }
 
 /// What tmux says when there is nothing to list: no server running, a stale or missing
@@ -339,14 +329,9 @@ fn nothing_to_do(stderr: &str) -> bool {
         || stderr.contains("can't find previous session")
 }
 
+/// tmux ran and failed: what it said.
 fn failure(output: &ExecOutput) -> TmuxError {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let first = stderr.lines().next().unwrap_or("").trim();
-    TmuxError::Failed(if first.is_empty() {
-        format!("exit status {:?}", output.status)
-    } else {
-        first.chars().take(200).collect()
-    })
+    TmuxError::Failed(output.stderr_line())
 }
 
 /// The tmux clients that session moves have switched, per terminal (by client id), for one

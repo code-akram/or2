@@ -28,9 +28,12 @@ use crate::tmux;
 /// How long herdr's session listing may take before it counts as failed.
 pub const HERDR_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Fixed, with no `'` and no `\` (the rendering contract of `render_script`; a test enforces
-/// it). Prints `or2:<name>:<value>` lines. Unknown output is ignored by [`parse`].
-pub const PROBE_SCRIPT: &str = r#"
+/// The shell function both scripts find a program with: `or2_find <name>` sets `or2_path` to its
+/// absolute path from `command -v`, else from the usual user-local and package manager
+/// directories, else to nothing.
+macro_rules! or2_find {
+    () => {
+        r#"
 or2_find() {
   or2_path=$(command -v "$1" 2>/dev/null)
   case "$or2_path" in
@@ -43,7 +46,15 @@ or2_find() {
       ;;
   esac
 }
-or2_find tmux
+"#
+    };
+}
+
+/// Fixed, with no `'` and no `\` (the rendering contract of `render_script`; a test enforces
+/// it). Prints `or2:<name>:<value>` lines. Unknown output is ignored by [`parse`].
+pub const PROBE_SCRIPT: &str = concat!(
+    or2_find!(),
+    r#"or2_find tmux
 echo "or2:tmux:$or2_path"
 if [ -n "$or2_path" ]; then echo "or2:tmux-version:$("$or2_path" -V 2>/dev/null </dev/null)"; fi
 or2_find herdr
@@ -62,25 +73,15 @@ done
 if [ -n "$or2_found" ]; then or2_loc=$or2_found; elif [ -n "$or2_first" ]; then or2_loc=$or2_first; fi
 echo "or2:locale:$or2_loc"
 echo "or2:end"
-"#;
+"#
+);
 
 /// Finds herdr like [`PROBE_SCRIPT`] and runs its `session list --json` in the same exec:
 /// `or2:herdr:<path>`, then (when found) `or2:list-begin`, herdr's stdout, and
 /// `or2:list-end:<status>`. Same rendering contract: no `'`, no `\`.
-pub const HERDR_SCRIPT: &str = r#"
-or2_find() {
-  or2_path=$(command -v "$1" 2>/dev/null)
-  case "$or2_path" in
-    /*) ;;
-    *)
-      or2_path=
-      for or2_dir in "$HOME/.local/bin" "$HOME/.cargo/bin" /opt/homebrew/bin /usr/local/bin /usr/bin /bin "$HOME/.nix-profile/bin" /run/current-system/sw/bin; do
-        if [ -f "$or2_dir/$1" ] && [ -x "$or2_dir/$1" ]; then or2_path="$or2_dir/$1"; break; fi
-      done
-      ;;
-  esac
-}
-or2_find herdr
+pub const HERDR_SCRIPT: &str = concat!(
+    or2_find!(),
+    r#"or2_find herdr
 echo "or2:herdr:$or2_path"
 if [ -n "$or2_path" ]; then
   echo "or2:list-begin"
@@ -89,7 +90,8 @@ if [ -n "$or2_path" ]; then
   echo
   echo "or2:list-end:$or2_status"
 fi
-"#;
+"#
+);
 
 /// The locale reported when the host lists no UTF-8 one.
 const FALLBACK_LOCALE: &str = "en_US.UTF-8";
