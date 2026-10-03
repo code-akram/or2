@@ -30,8 +30,17 @@ Each release's notes are in [docs/releases/](docs/releases/).
 - A herdr terminal is called `herdr` (or `herdr <session>`), not after the pane it was opened on. Home's session
   card shows the working directory, else the agent (or the directory) herdr has in front, never `user@host`; a
   connected host's card shows the address in use. The picker's `Recent` tab is now `Open`.
-- The toolbar has `⇧Tab` (Claude Code's mode cycle, which Gboard cannot send), `/` and `@` after History; `/` and
+- The toolbar has `⇧Tab` (Claude Code's mode cycle, which Gboard cannot send), `/` and `@` after Paste; `/` and
   `@` go into the composer at its cursor while it is open.
+- The terminal toolbar fits a phone without scrolling: the Panes key is gone (the header's green disc opens the same
+  sheet) and so is History (drag down to scroll back; the round button returns to the live screen). While text is
+  selected, Copy and Clear take the place of `⇧Tab`, `/` and `@`. The arrow pad's symbol row no longer repeats `/`.
+- The shortcuts sheet is now **Gestures & shortcuts**: what a tap, a long press, a drag, the swipes and a pinch do
+  comes first, then the keyboard shortcuts.
+- Closing the composer gives the keys back to the terminal, and the arrow pad and the composer no longer stay open
+  together: opening one closes the other.
+- Cards in a sheet sit a step above the sheet instead of below it (the sessions, shortcuts and share sheets drew
+  them darker).
 - "Send N lines?" and "Paste N lines?" are asked only while the program would run the lines one at a time; a
   program with bracketed paste on (a shell's line editor, an agent) gets them as one paste, and the toolbar's
   Paste is one bracketed paste there too.
@@ -54,6 +63,7 @@ Each release's notes are in [docs/releases/](docs/releases/).
 - Tapping a second agent of a herdr session (inbox or notification) no longer opens a second herdr client next to
   the first, both showing the same focused pane: every way into herdr reuses the session's open terminal, after
   focusing the agent's pane. Duplicates already open are left alone.
+- A message of several lines sent from the composer buzzes once, on the confirmation's **Send**, not twice.
 
 ## [0.1.1] - 2026-10-02
 
