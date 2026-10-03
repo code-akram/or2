@@ -5665,3 +5665,15 @@ the same way (`agy` → `antigravity-cli`); a kind without one (e.g. `amp`, `gem
   (Codex with herdr 0.9.3, whose session report herdr refuses) shows nothing new either; the release notes explain it.
 - **Tests:** Rust: the allowlist, the exec's argv, exit codes, not installed. JVM: the kind → id mapping, which rows
   and notifications offer it, the confirm and outcome texts. Device (compile): the Inbox action.
+
+**Codex (researched 2026-10-03).** Codex 0.160 runs its `SessionStart` hooks inside a shared, long-lived app-server
+daemon, not in the pane's own Codex process; the daemon keeps the `HERDR_PANE_ID` of the pane it was first started
+from, so its hook reports name a pane that may be gone, and herdr's `pane.report_agent_session` answers
+`pane_not_found` (or, if that pane still exists, binds the session to the wrong pane). Seen on the owner's host: the
+daemon carried `w1:pK`, which no longer existed; every Codex report since 2026-10-02 failed. Upstream:
+herdrdev/herdr#4649 (open, `needs-upstream-fix`, tracking openai/codex#48500, #44902, #48880, #24638). Workaround:
+`[features] daemon_auto_start = false` in `~/.codex/config.toml`, stop the running daemon when no session uses it, and
+run Codex with `--no-daemon`. **Lane Pair** adds: when `codex` is installed and its config does not set
+`daemon_auto_start = false`, one `Info` line under the Reply step: `codex: Reply may not work while Codex runs its
+shared daemon (herdr#4649)` then the workaround lines. It changes nothing in Codex's config. **Lane App** shows nothing
+new for an agent whose integration is installed but has no session (the Codex case), as above.

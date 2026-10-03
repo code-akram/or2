@@ -88,7 +88,7 @@ until the caller acknowledges, as a real host does.
 
 1. **v0.1.3, "zero-config Reply"** (in progress, contracts.md "# v0.1.3: zero-config Reply"): `or2-pair` checks `herdr integration status` and installs
    the missing integrations for the agents on the host with one confirmation; the app says why a notification has
-   no Reply. File the herdr issue: Codex's `pane.report_agent_session` is refused (see above).
+   no Reply. Codex: known upstream (herdrdev/herdr#4649: Codex runs its hooks in a shared daemon that keeps a stale `HERDR_PANE_ID`); workaround `daemon_auto_start = false` + `codex --no-daemon`.
 2. **The deferred M3 acceptance**, deferred by the owner (2026-10-03) until they clear it: mobile data, the Wi-Fi to mobile handover, and
    unplugged (Doze) background runs. This is v0 acceptance step 3, still never tested.
 3. **The rest of the roadmap.**
