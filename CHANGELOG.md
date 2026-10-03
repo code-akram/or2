@@ -8,6 +8,23 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+### Added
+
+- `or2-pair` sets up Reply for the agents on the host: after the checks it asks herdr which of its integrations
+  are installed and, for the agents found on the host whose integration is missing or outdated, asks once
+  (`Set up Reply for pi, opencode? [Y/n]`) and runs `herdr integration install` for each, saying how each went;
+  running sessions load it when they next start. Without a terminal, with `--check` or `--manual`, or on no, it
+  prints the commands instead. Agents already set up are one line (`Reply ready for claude, codex`). Nothing in
+  it stops the pairing.
+- `or2-pair` says when Codex's shared daemon will keep Reply from working (herdr#4649) and how to turn it off;
+  it changes nothing in Codex's config.
+
+### Changed
+
+- `or2-pair` without herdr is a warning, not a note: it says that or2's agents inbox, notifications and Reply need
+  it, and gives herdr's own install command (`curl -fsSL https://herdr.dev/install.sh | sh`, or Homebrew, mise,
+  Nix), which it never runs.
+
 ## [0.1.2] - 2026-10-03
 
 Reply to an agent from its notification, image paste (several at once, about a second each), and one simpler

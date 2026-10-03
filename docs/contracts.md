@@ -5650,6 +5650,20 @@ the same way (`agy` → `antigravity-cli`); a kind without one (e.g. `amp`, `gem
 - **Tests:** the status parser on real 0.9.3 output (current, not installed, experimental, an outdated line, garbage),
   the executable mapping, the prompt (yes, no, non-TTY), an install failure, herdr missing per platform, the rail text.
   `tests/flow.rs` covers the step with a scripted `herdr`.
+- **Implemented (branch `v013/pair-reply`).** `core/or2-pair/src/reply.rs`, a step of `run.rs` after the checks are
+  drawn (and after a failed check has stopped the run) and before the code question; the checks still only look.
+  `hints::Commands` gained `exec` (exit status, stdout and stderr apart). Decisions where the above was silent:
+  `--check` and `--manual` run the step but never ask or install (they promise no change: commands printed);
+  "a terminal" is standard input being one (`Env::interactive`), so the test host, whose code comes from a pipe,
+  never asks; Enter, `y` or `yes` is yes, anything else (or the end of input) is no; outdated agents are named
+  `<id> (outdated)` in the question; a failed install's line is the first non-empty line of its stderr (else stdout),
+  with `run it yourself: herdr integration install <id>`; "running sessions … load it" names only the agents set up;
+  an id herdr reports that is not in the list is taken to have an executable of the same name; status and each
+  install get 15 s; on Windows the missing-herdr line points at herdr's docs only (no `curl | sh`). The Codex note
+  shows whenever herdr and `codex` are found and `~/.codex/config.toml` (not `$CODEX_HOME`) does not set the key
+  (`[features]`, a dotted `features.daemon_auto_start` or an inline `features = {…}`), even when herdr's status
+  could not be read. The binary's tests set `OR2_PAIR_TEST_PROGRAM_DIRS` (`test-support` only) so the machine's own
+  herdr and agents are never run.
 
 ## Lane App: Enable Reply from the phone (FFI API 19, Kotlin)
 
