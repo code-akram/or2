@@ -25,6 +25,7 @@ use crate::frame::{
     TerminalModes, Underline,
 };
 use crate::input::{Key, KeyInput, Modifiers, ViewportScroll};
+use crate::session::Command;
 use crate::term::TerminalSize;
 
 /// Default terminal colours: Catppuccin Mocha (MIT), the same palette the app UI uses. A remote
@@ -575,6 +576,24 @@ impl TerminalEngine {
         let one = self.mouse_bytes(MouseAction::Press, button, column, row)?;
         let count = rows.unsigned_abs().min(u32::from(self.size.rows()));
         Ok(one.repeat(count as usize))
+    }
+
+    /// What an input command writes to the program, encoded with the terminal's modes (the one
+    /// encoding of the SSH pump and the mosh driver): typed text, a submit's text (its Enter is
+    /// the caller's, later) or a paste, a key, a scroll's navigation keys or wheel events, a
+    /// click. Possibly empty. `None` for a command that writes nothing (resize, full frame, roam,
+    /// disconnect).
+    pub fn input_bytes(&mut self, command: &Command) -> Result<Option<Vec<u8>>, TerminalError> {
+        Ok(Some(match command {
+            Command::Text(text) => crate::input::text_bytes(text),
+            Command::Submit(text) | Command::Paste(text) => self.submit_text_bytes(text)?,
+            Command::Key(key) => self.encode_key(key)?,
+            Command::Scroll(scroll) => self.scroll(*scroll)?,
+            Command::MouseClick { column, row } => self.mouse_click(*column, *row)?,
+            Command::Resize(_) | Command::FullFrame | Command::Roam | Command::Disconnect => {
+                return Ok(None);
+            }
+        }))
     }
 
     /// A tap while the program tracks the mouse: a left-button press, then its release, at the

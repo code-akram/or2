@@ -23,7 +23,6 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::{Instant, sleep, sleep_until, timeout_at};
 
-use crate::input::text_bytes;
 use crate::session::{CloseReason, Command, SessionDriver, SessionFailure, SessionState};
 use crate::submit::SubmitSequencer;
 use crate::transport::DatagramTransport;
@@ -352,9 +351,17 @@ fn apply_input(
     connected: bool,
     submits: &mut SubmitSequencer,
 ) -> Result<(), SessionFailure> {
+    if let Some(bytes) = session
+        .terminal()
+        .live()
+        .engine()
+        .input_bytes(&command)
+        .map_err(internal)?
+        && !bytes.is_empty()
+    {
+        session.send_input(&bytes);
+    }
     match command {
-        // Handled by the caller, which owns the link.
-        Command::Disconnect => {}
         // The network changed: rotate to a new socket now.
         Command::Roam => session.request_rebind(),
         Command::Resize(size) => {
@@ -365,67 +372,15 @@ fn apply_input(
                 publish(driver, session)?;
             }
         }
-        Command::Text(text) => session.send_input(&text_bytes(&text)),
-        Command::Submit(text) => {
-            let bytes = session
-                .terminal()
-                .live()
-                .engine()
-                .submit_text_bytes(&text)
-                .map_err(internal)?;
-            if !bytes.is_empty() {
-                session.send_input(&bytes);
-            }
-            submits.arm();
-        }
-        // A submit's text without its Enter.
-        Command::Paste(text) => {
-            let bytes = session
-                .terminal()
-                .live()
-                .engine()
-                .submit_text_bytes(&text)
-                .map_err(internal)?;
-            if !bytes.is_empty() {
-                session.send_input(&bytes);
-            }
-        }
-        Command::Key(key) => {
-            let bytes = session
-                .terminal()
-                .live()
-                .engine()
-                .encode_key(&key)
-                .map_err(internal)?;
-            session.send_input(&bytes);
-        }
-        Command::Scroll(scroll) => {
-            let bytes = session
-                .terminal()
-                .live()
-                .engine()
-                .scroll(scroll)
-                .map_err(internal)?;
-            if !bytes.is_empty() {
-                session.send_input(&bytes);
-            }
-            publish(driver, session)?;
-        }
-        Command::MouseClick { column, row } => {
-            let bytes = session
-                .terminal()
-                .live()
-                .engine()
-                .mouse_click(column, row)
-                .map_err(internal)?;
-            if !bytes.is_empty() {
-                session.send_input(&bytes);
-            }
-        }
+        // Its Enter follows, after the delay.
+        Command::Submit(_) => submits.arm(),
+        Command::Scroll(_) => publish(driver, session)?,
         Command::FullFrame => {
             session.terminal().live().engine().request_full_frame();
             publish(driver, session)?;
         }
+        // Input is written above; a disconnect is the caller's, which owns the link.
+        _ => {}
     }
     Ok(())
 }

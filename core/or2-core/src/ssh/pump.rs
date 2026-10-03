@@ -229,6 +229,11 @@ impl TerminalPump {
     }
 
     fn run(&mut self, driver: &mut SessionDriver, command: Command) -> Result<(), SessionFailure> {
+        if let Some(bytes) = self.terminal.input_bytes(&command).map_err(internal)?
+            && !bytes.is_empty()
+        {
+            let _ = self.writes.send(Write::Bytes(bytes));
+        }
         match command {
             Command::Resize(new_size) => {
                 self.size.send_replace(new_size);
@@ -238,47 +243,14 @@ impl TerminalPump {
                     self.publish(driver)?;
                 }
             }
-            Command::Text(text) => {
-                let _ = self
-                    .writes
-                    .send(Write::Bytes(crate::input::text_bytes(&text)));
-            }
-            Command::Submit(text) => {
-                let bytes = self.terminal.submit_text_bytes(&text).map_err(internal)?;
-                if !bytes.is_empty() {
-                    let _ = self.writes.send(Write::Bytes(bytes));
-                }
-                self.submits.arm();
-            }
-            // A submit's text without its Enter.
-            Command::Paste(text) => {
-                let bytes = self.terminal.submit_text_bytes(&text).map_err(internal)?;
-                if !bytes.is_empty() {
-                    let _ = self.writes.send(Write::Bytes(bytes));
-                }
-            }
-            Command::Key(key) => {
-                let bytes = self.terminal.encode_key(&key).map_err(internal)?;
-                let _ = self.writes.send(Write::Bytes(bytes));
-            }
-            Command::Scroll(scroll) => {
-                let bytes = self.terminal.scroll(scroll).map_err(internal)?;
-                if !bytes.is_empty() {
-                    let _ = self.writes.send(Write::Bytes(bytes));
-                }
-                self.publish(driver)?;
-            }
-            Command::MouseClick { column, row } => {
-                let bytes = self.terminal.mouse_click(column, row).map_err(internal)?;
-                if !bytes.is_empty() {
-                    let _ = self.writes.send(Write::Bytes(bytes));
-                }
-            }
+            // Its Enter follows, after the delay.
+            Command::Submit(_) => self.submits.arm(),
+            Command::Scroll(_) => self.publish(driver)?,
             Command::FullFrame => {
                 self.terminal.request_full_frame();
                 self.publish(driver)?;
             }
-            Command::Roam | Command::Disconnect => {}
+            _ => {}
         }
         Ok(())
     }
