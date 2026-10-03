@@ -6,14 +6,13 @@ Updated 2026-10-03.
 
 ## Where it stands
 
-- **Released: [v0.1.2](releases/v0.1.2.md)** (2026-10-03, tag `v0.1.2`, versionCode 3, FFI API 18): the signed APK
-  (SHA-256 `7a8c9733…b8d6`) and `or2-pair` for Linux x86_64/aarch64 (static) and macOS Intel/Apple silicon, after
-  [v0.1.1](releases/v0.1.1.md) and [v0.1.0](releases/v0.1.0.md) (2026-10-02). The owner's QA passed in full; the
-  install one-liner was checked against the release.
-- **The owner's phone runs v0.1.2**, the published APK, installed in place (hosts and keys kept).
-- **On `main`, not released: the v0.1.3 candidate** (`7fe5266` or later; versionName still 0.1.2, FFI API 19):
-  zero-config Reply (contracts.md "# v0.1.3: zero-config Reply"), Codex-reviewed (two P3 fixed). The owner's phone
-  runs it as a signed build (2026-10-03 22:11), awaiting QA.
+- **Released: [v0.1.3](releases/v0.1.3.md)** (2026-10-03, tag `v0.1.3`, versionCode 4, FFI API 19): zero-config
+  Reply. The signed APK (SHA-256 `172fad74…7b5d`) and `or2-pair` for Linux x86_64/aarch64 (static) and macOS Intel/Apple
+  silicon; the downloaded APK and the install one-liner were checked against the release. Earlier:
+  [v0.1.2](releases/v0.1.2.md) (2026-10-03), [v0.1.1](releases/v0.1.1.md) and [v0.1.0](releases/v0.1.0.md) (2026-10-02).
+- **The owner's phone runs v0.1.3**, the published APK, installed in place (hosts and keys kept). The owner's QA
+  passed.
+- `main` has nothing unreleased yet.
 
 ### In v0.1.2
 
@@ -88,7 +87,7 @@ until the caller acknowledges, as a real host does.
 
 ## Next, in order
 
-1. **v0.1.3, "zero-config Reply"** (in progress, contracts.md "# v0.1.3: zero-config Reply"): `or2-pair` checks `herdr integration status` and installs
+1. **Done in v0.1.3: zero-config Reply** (contracts.md "# v0.1.3: zero-config Reply"): `or2-pair` checks `herdr integration status` and installs
    the missing integrations for the agents on the host with one confirmation; the app says why a notification has
    no Reply. Codex: known upstream (herdrdev/herdr#4649: Codex runs its hooks in a shared daemon that keeps a stale `HERDR_PANE_ID`); workaround `daemon_auto_start = false` + `codex --no-daemon`.
 2. **The deferred M3 acceptance**, deferred by the owner (2026-10-03) until they clear it: mobile data, the Wi-Fi to mobile handover, and
