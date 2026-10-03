@@ -103,8 +103,22 @@ class TerminalInputTest {
             Triple("a\n\rb", 3, true), Triple("界😀", 1, false),
         ).forEach { (text, lines, confirm) ->
             assertEquals(lines, pasteLineCount(text))
-            assertEquals(confirm, pasteNeedsConfirmation(text))
+            assertEquals(confirm, pasteNeedsConfirmation(text, bracketedPaste = false))
+            // With bracketed paste on the lines arrive as one paste: nothing is asked.
+            assertFalse(pasteNeedsConfirmation(text, bracketedPaste = true))
         }
+    }
+
+    @Test fun shiftTabIsExactlyShiftTabAndLeavesTheLatchesArmed() {
+        input.toggleCtrl()
+        input.toggleAlt()
+        input.exactKey(TerminalKey.Tab, KeyModifiers(true, false, false, false))
+        assertEquals(listOf(KeyInput(TerminalKey.Tab, KeyModifiers(true, false, false, false))), keys)
+        assertTrue(input.ctrl && input.alt)
+        // The next key still takes them.
+        input.key(TerminalKey.Character("/"))
+        assertEquals(KeyInput(TerminalKey.Character("/"), KeyModifiers(false, true, true, false)), keys.last())
+        assertFalse(input.ctrl || input.alt)
     }
 
     @Test fun hardwareNavigationFunctionAndUnicodeMappingsAreDistinct() {

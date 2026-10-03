@@ -304,7 +304,8 @@ mod tests {
             modes,
             TerminalModes {
                 mouse_tracking: true,
-                alternate_screen: false
+                alternate_screen: false,
+                bracketed_paste: false,
             }
         );
         terminal.apply_diff(1, 2, b"\x1b[1;1Hvi", 0).unwrap();
@@ -341,5 +342,26 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// mosh's server relays bracketed paste (DECSET 2004) in its diffs: frames report it as over
+    /// SSH, on and off.
+    #[test]
+    fn bracketed_paste_from_the_server_reaches_frames() {
+        let mut terminal = ClientTerminal::new(GhosttyScreen::new(size(20, 3)).unwrap());
+        let bracketed = |terminal: &mut ClientTerminal<GhosttyScreen>| {
+            terminal
+                .live()
+                .engine()
+                .frame()
+                .unwrap()
+                .modes()
+                .bracketed_paste
+        };
+        assert!(!bracketed(&mut terminal));
+        terminal.apply_diff(0, 1, b"\x1b[?2004h$ ", 0).unwrap();
+        assert!(bracketed(&mut terminal));
+        terminal.apply_diff(1, 2, b"\x1b[?2004l", 0).unwrap();
+        assert!(!bracketed(&mut terminal));
     }
 }

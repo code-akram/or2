@@ -49,6 +49,12 @@ class TerminalInput(
         }
     }
 
+    /**
+     * Sends [key] with exactly [modifiers]: the latches neither apply nor clear (the toolbar's `⇧Tab`, which is
+     * Shift+Tab whatever is armed).
+     */
+    fun exactKey(key: TerminalKey, modifiers: KeyModifiers) = sendKey(KeyInput(key, modifiers))
+
     fun key(key: TerminalKey, modifiers: KeyModifiers = KeyModifiers(false, false, false, false)) {
         val input = KeyInput(key, modifiers.copy(ctrl = modifiers.ctrl || ctrl, alt = modifiers.alt || alt))
         ctrl = false
@@ -75,7 +81,12 @@ fun pasteLineCount(text: String): Int {
     return lines
 }
 
-fun pasteNeedsConfirmation(text: String): Boolean = pasteLineCount(text) > 1
+/**
+ * Whether a multi-line send (the composer's "Send N lines?") or paste (the toolbar's "Paste N lines?") is confirmed
+ * first: only while the program has bracketed paste off ([bracketedPaste], `TerminalModes.bracketed_paste`), where
+ * its lines really run one at a time. With it on the text arrives as one paste (and a send presses Enter once).
+ */
+fun pasteNeedsConfirmation(text: String, bracketedPaste: Boolean): Boolean = !bracketedPaste && pasteLineCount(text) > 1
 
 /** Android constants are inlined so the mapping is also exercised in ordinary JVM tests. */
 fun terminalKey(keyCode: Int, unicode: Int): TerminalKey? = when (keyCode) {

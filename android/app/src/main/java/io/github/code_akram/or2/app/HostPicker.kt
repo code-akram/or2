@@ -118,7 +118,7 @@ internal fun HomePickerSheet(
     )
 }
 
-/** The open terminals of one host, for its picker's Recent tab and the host screen's list. */
+/** The open terminals of one host, for its picker's Open tab and the host screen's list. */
 @Composable
 internal fun hostTerminalItems(terminals: List<ActiveTerminal>): List<HostTerminalItem> = terminals.map { terminal ->
     key(terminal.id) {

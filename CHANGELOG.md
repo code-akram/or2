@@ -27,7 +27,16 @@ Each release's notes are in [docs/releases/](docs/releases/).
   stand apart from the terminal behind them; the extras row has accent labels.
 - A tap on a program that tracks the mouse (herdr, tmux with mouse on) is a click at that cell, so the program's own
   buttons work; a link still opens, and the keyboard key still opens the keyboard.
-- FFI API 16 (`Session.mouse_click`, `Session.paste_text`, `HostConnection.reply_to_pane`, `upload_image`).
+- A herdr terminal is called `herdr` (or `herdr <session>`), not after the pane it was opened on. Home's session
+  card shows the working directory, else the agent (or the directory) herdr has in front, never `user@host`; a
+  connected host's card shows the address in use. The picker's `Recent` tab is now `Open`.
+- The toolbar has `⇧Tab` (Claude Code's mode cycle, which Gboard cannot send), `/` and `@` after History; `/` and
+  `@` go into the composer at its cursor while it is open.
+- "Send N lines?" and "Paste N lines?" are asked only while the program would run the lines one at a time; a
+  program with bracketed paste on (a shell's line editor, an agent) gets them as one paste, and the toolbar's
+  Paste is one bracketed paste there too.
+- FFI API 17 (`Session.mouse_click`, `Session.paste_text`, `HostConnection.reply_to_pane`, `upload_image`,
+  `TerminalModes.bracketed_paste`).
 
 ### Fixed
 
@@ -39,6 +48,9 @@ Each release's notes are in [docs/releases/](docs/releases/).
 - An agent that finishes its turn now notifies even when herdr reports it `idle` rather than `done`. herdr does
   that for a pane it counts as seen, which or2 makes it by opening it, so the usual flow (open the agent from the
   phone, send, lock the phone) never notified before.
+- Tapping a second agent of a herdr session (inbox or notification) no longer opens a second herdr client next to
+  the first, both showing the same focused pane: every way into herdr reuses the session's open terminal, after
+  focusing the agent's pane. Duplicates already open are left alone.
 
 ## [0.1.1] - 2026-10-02
 

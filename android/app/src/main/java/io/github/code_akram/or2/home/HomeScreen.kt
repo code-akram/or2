@@ -69,7 +69,10 @@ import io.github.code_akram.or2.ui.TextAction
 import io.github.code_akram.or2.ui.TopBar
 import io.github.code_akram.or2.ui.scrolledUnder
 
-/** An open terminal as the SESSIONS section shows it; [preview] draws its live thumbnail. */
+/**
+ * An open terminal as the SESSIONS section shows it: [detail] is the line under its title ([sessionDetail], possibly
+ * empty), [preview] draws its live thumbnail.
+ */
 class HomeSession(
     val id: Long, val hostLabel: String, val title: String, val detail: String, val transport: Transport,
     val preview: @Composable (Modifier) -> Unit,
@@ -310,7 +313,7 @@ fun HostCardView(card: HostCard, onClick: () -> Unit, onLongClick: () -> Unit, o
                     status.asleep ->
                         Text("Asleep", style = Or2Type.Secondary, color = Or2Colors.TextMuted, maxLines = 1, modifier = Modifier.testTag("host-asleep:${host.id}"))
                     else ->
-                        Text(hostAddressLine(host), style = Or2Type.Mono, color = Or2Colors.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(card.address, style = Or2Type.Mono, color = Or2Colors.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 status.detail?.let {
                     Text(it, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, maxLines = 4, modifier = Modifier.testTag("host-detail-lines:${host.id}"))

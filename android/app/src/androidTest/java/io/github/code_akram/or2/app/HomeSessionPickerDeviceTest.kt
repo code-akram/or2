@@ -154,7 +154,7 @@ class HomeSessionPickerDeviceTest {
         report(HostState.Authenticating)
         compose.onNodeWithTag("picker-progress").assertTextEquals("Authenticating…")
         report(HostState.Connected(0u))
-        // The same sheet, now with herdr, tmux and Recent.
+        // The same sheet, now with herdr, tmux and Open.
         waitFor("herdr-open:default")
         compose.onNodeWithTag("picker-gate").assertDoesNotExist()
         compose.onNodeWithTag("picker-tab:1").performClick()

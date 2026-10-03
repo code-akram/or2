@@ -65,13 +65,16 @@ import io.github.code_akram.or2.home.HomeResume
 import io.github.code_akram.or2.home.HomeScreen
 import io.github.code_akram.or2.home.HomeSession
 import io.github.code_akram.or2.home.HostCard
+import io.github.code_akram.or2.home.hostAddressLine
 import io.github.code_akram.or2.home.hostCardStatus
+import io.github.code_akram.or2.home.sessionDetail
 import io.github.code_akram.or2.home.tapConnects
 import io.github.code_akram.or2.host.HostScreen
 import io.github.code_akram.or2.hosts.HostFormScreen
 import io.github.code_akram.or2.inbox.InboxScreen
 import io.github.code_akram.or2.inbox.InboxState
 import io.github.code_akram.or2.inbox.dialogForOtherHost
+import io.github.code_akram.or2.inbox.herdrViews
 import io.github.code_akram.or2.inbox.hostStates
 import io.github.code_akram.or2.inbox.inbox
 import io.github.code_akram.or2.inbox.linkStatus
@@ -199,6 +202,7 @@ fun Or2App(
     val pending by remember(connections) { connections.pendingHostKeys() }.collectAsStateWithLifecycle(emptyList())
 
     val transports by remember(connections) { connections.transports() }.collectAsStateWithLifecycle(emptyMap())
+    val herdrViews by remember(connections) { connections.herdrViews() }.collectAsStateWithLifecycle(emptyMap())
     val closedStates by remember(connections) { connections.terminalClosedStates() }.collectAsStateWithLifecycle(emptyMap())
     val last by actions.reattach.last.collectAsStateWithLifecycle()
     val keepAliveStep by actions.battery.step.collectAsStateWithLifecycle()
@@ -487,18 +491,20 @@ fun Or2App(
             } else when (current) {
                 Destination.Home -> {
                     val blockedByHost = inbox.groups.filter { it.status == AgentStatus.BLOCKED }.flatMap { it.items }.groupingBy { it.hostId }.eachCount()
-                    val sessions = remember(terminals, inbox, connections, transports) {
+                    val sessions = remember(terminals, inbox, herdrViews, connections, transports) {
                         terminals.map { terminal ->
+                            val herdr = terminal.target as? TerminalTarget.Herdr
                             HomeSession(
                                 terminal.id, terminal.host.label, terminal.title,
-                                inbox.cwdOf(terminal) ?: (terminal.host.username + "@" + terminal.host.addresses.first().hostname),
+                                sessionDetail(inbox.cwdOf(terminal), herdr?.let { herdrViews[terminal.host.id to it.session] }),
                                 (transports[terminal.id] ?: terminal.transport.value).display(),
                             ) { thumbnail -> TerminalThumbnail(terminal, connections, thumbnail) }
                         }
                     }
                     val cards = hosts.map { host ->
                         val state = states[host.id]
-                        HostCard(host, hostCardStatus(state, host.id in unlocking, blockedByHost[host.id] ?: 0, host.sleeps, host.addresses), linkStatus(state, host.sleeps))
+                        HostCard(host, hostCardStatus(state, host.id in unlocking, blockedByHost[host.id] ?: 0, host.sleeps, host.addresses), linkStatus(state, host.sleeps),
+                            hostAddressLine(host, state))
                     }
                     val connectable = cards.filter { it.host.keyId != null && it.link.canConnect }
                     HomeScreen(

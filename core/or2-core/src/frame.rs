@@ -137,13 +137,17 @@ pub struct Scrollback {
     pub offset: u64,
 }
 
-/// Terminal modes Kotlin routes a vertical swipe by (contracts.md, "Wheel-aware scrolling").
+/// Terminal modes Kotlin routes a vertical swipe by (contracts.md, "Wheel-aware scrolling") and
+/// asks before a multi-line send by (bracketed paste).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TerminalModes {
     /// The program asked for mouse reports (DECSET 9, 1000, 1002 or 1003).
     pub mouse_tracking: bool,
     /// The alternate screen is the active one.
     pub alternate_screen: bool,
+    /// The program has bracketed paste (DECSET 2004) on: pasted or submitted text arrives as one
+    /// paste, not as lines typed one at a time (contracts.md, "One terminal per herdr session").
+    pub bracketed_paste: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -715,6 +719,7 @@ mod tests {
         let mouse = TerminalModes {
             mouse_tracking: true,
             alternate_screen: true,
+            bracketed_paste: false,
         };
         let mut mailbox = FrameMailbox::default();
         mailbox.publish(full(4, 3, "a")).unwrap();

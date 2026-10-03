@@ -30,10 +30,12 @@ sealed interface Activation {
 
 /**
  * Every way into a terminal that runs `herdr` for one pane (`TerminalTarget.Herdr` with a pane id):
- * the inbox, the session switcher, a Home thumbnail and the host screen's recent list. herdr's
+ * the inbox, a notification, the session switcher, a Home thumbnail and the host screen's open list. herdr's
  * focus is shared state, so a terminal that was already open shows whichever pane is focused
  * *now*; each of these paths therefore awaits `focus_herdr_pane` before the terminal is shown, and
- * shows nothing for a pane that has gone (`PaneNotFound`) or that could not be focused.
+ * shows nothing for a pane that has gone (`PaneNotFound`) or that could not be focused. For the same
+ * reason a herdr session has one terminal per host: every herdr open (picker, inbox, notification,
+ * reattach) reuses the one already open on that session, whatever pane it was opened on ([openFor]).
  *
  * The suspend functions return an [Activation]; the `launch*` variants run one at a time (a newer
  * request supersedes the older wait; a focus already sent still happens), expose [pending] for
@@ -49,8 +51,8 @@ class TerminalActivations(private val connections: HostConnections, private val 
     private var generation = 0
 
     /**
-     * An agent tapped in the inbox: reuses the terminal already open for it (after focusing its pane
-     * again) or opens a new one. A new terminal and the pane focus **start together**: the terminal's own
+     * An agent tapped in the inbox or a notification: reuses the terminal already open on its herdr session
+     * ([openFor], whatever pane it was opened on, after focusing this one) or opens a new one. A new terminal and the pane focus **start together**: the terminal's own
      * focus joins the one in flight (Rust shares it), and the wait ends when both are done. A pane that
      * cannot be focused (it vanished) leaves no terminal: the one that was opened is dismissed, and so is
      * one whose wait was cancelled.
@@ -70,8 +72,8 @@ class TerminalActivations(private val connections: HostConnections, private val 
     }
 
     /**
-     * The terminal for [target] on [active]: an open one is reused (a herdr pane is focused again
-     * first); otherwise a new one is opened while its pane (if any) is being focused. Timing marks go to
+     * The terminal for [target] on [active]: an open one is reused ([openFor]; a target's herdr pane is
+     * focused first); otherwise a new one is opened while its pane (if any) is being focused. Timing marks go to
      * [span]. Throws what the focus or the open threw, after dismissing a terminal it had opened.
      */
     private suspend fun openOrReuse(
@@ -80,7 +82,7 @@ class TerminalActivations(private val connections: HostConnections, private val 
         val timing = connections.timing
         val herdr = target as? TerminalTarget.Herdr
         val paneId = herdr?.paneId
-        connections.findOpenTerminal(hostId, target)?.let { existing ->
+        openFor(hostId, target)?.let { existing ->
             if (herdr != null && paneId != null) {
                 connections.focusHerdrPane(active, herdr.session, paneId)
                 timing.mark(span, "focused")
@@ -111,20 +113,26 @@ class TerminalActivations(private val connections: HostConnections, private val 
     /**
      * The session picker's reuse rule (the host screen's picker and the one over Home): the terminal already open on
      * [hostId] that a choice of [target] brings to the front instead of opening a second one, or null to open a new
-     * one. A tmux session reuses the open terminal on that session; a herdr session (no pane) the open herdr terminal
-     * on that session, whatever pane it was opened on (one opened without a pane first); a herdr pane the open
-     * terminal on that pane (the inbox tap's rule, [openOrReuse]); a shell never. A closed terminal, or one being
-     * closed, is never reused ([HostConnections.openTerminals]).
+     * one. A tmux session reuses the open terminal on that session; a herdr session or pane the open herdr terminal
+     * on that session ([openFor]); a shell never.
      */
-    fun reusable(hostId: Long, target: TerminalTarget): ActiveTerminal? = when (target) {
-        TerminalTarget.Shell -> null
-        is TerminalTarget.Tmux -> connections.findOpenTerminal(hostId, target)
-        is TerminalTarget.Herdr -> if (target.paneId != null) {
-            connections.findOpenTerminal(hostId, target)
-        } else {
+    fun reusable(hostId: Long, target: TerminalTarget): ActiveTerminal? =
+        if (target == TerminalTarget.Shell) null else openFor(hostId, target)
+
+    /**
+     * The one reuse rule of every open (picker, inbox, notification, reattach): the terminal already open on [hostId]
+     * for [target], or null. A herdr target, with a pane or without, reuses the open herdr terminal on its session
+     * whatever pane that was opened on, one opened without a pane first: herdr's focus is shared, so a second client
+     * on the same session would only show the same focused pane. Anything else reuses a terminal on exactly that
+     * target. A closed terminal, or one being closed, is never reused ([HostConnections.openTerminals]); duplicates
+     * opened before this rule are left alone.
+     */
+    private fun openFor(hostId: Long, target: TerminalTarget): ActiveTerminal? = when (target) {
+        is TerminalTarget.Herdr -> {
             val open = connections.openTerminals(hostId) { it is TerminalTarget.Herdr && it.session == target.session }
             open.firstOrNull { (it.target as TerminalTarget.Herdr).paneId == null } ?: open.firstOrNull()
         }
+        else -> connections.findOpenTerminal(hostId, target)
     }
 
     /**

@@ -362,11 +362,14 @@ fun shareTargets(terminals: List<ActiveTerminal>): List<ActiveTerminal> = termin
     .filter { !it.retired && !it.disconnectRequested && it.state.value == SessionState.Connected }
     .sortedByDescending { it.shownAt }
 
-/** Short label for a terminal target: `shell`, `tmux main`, `herdr work w1:p2`. */
+/**
+ * Short label for a terminal target: `shell`, `tmux main`, `herdr` (the default session) or `herdr work`. A herdr
+ * terminal is its session's one terminal whatever pane it was opened on, so its pane is no part of the title.
+ */
 fun targetTitle(target: TerminalTarget): String = when (target) {
     TerminalTarget.Shell -> "shell"
     is TerminalTarget.Tmux -> "tmux ${target.sessionName}"
-    is TerminalTarget.Herdr -> "herdr" + (target.session?.let { " $it" } ?: "") + (target.paneId?.let { " $it" } ?: "")
+    is TerminalTarget.Herdr -> "herdr" + (target.session?.let { " $it" } ?: "")
 }
 
 /** The user's own closing of a host or terminal (disconnect, close, delete, remote shell exit). */

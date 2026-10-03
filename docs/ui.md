@@ -323,15 +323,16 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   unlock) `Not connected` with **Unlock and connect**; a host without a key **Select a key**, which opens the
   host form. Choosing a target opens the terminal exactly as from the host screen; dismissing leaves Home as it
   was (a connect already started carries on, and the card shows it). The sheet: a
-  segmented control (`herdr` / `tmux` / `Recent`) with a trailing **Shell** pill (`surfaceTrack`,
+  segmented control (`herdr` / `tmux` / `Open`) with a trailing **Shell** pill (`surfaceTrack`,
   the `>_` prompt glyph before the label) that opens a plain shell; below, one grouped list of herdr sessions (`● Running`), tmux sessions (`●
-  Attached`, with a "new session" field) or, under Recent, the open terminals of the host. A herdr
+  Attached`, with a "new session" field) or, under Open, the open terminals of the host. A herdr
   row is title-only (44 dp) with its state at the right (`● Running`, or a dim `● Not running` and a
   muted title for a stopped one), never as a second caption line as well. The "Refresh" row's icon
   starts at the rows' text inset. **One terminal per tmux or herdr session:** choosing a tmux session or a herdr
   session that already has an open terminal on that host brings that terminal to the front instead of opening a
-  second one (a herdr terminal opened on one of the session's panes counts, and its pane is focused again first);
-  **Shell** always opens a new shell; a terminal that has closed is never reused (a fresh one opens). Recent
+  second one (a herdr terminal opened on one of the session's panes counts, and its pane is focused again first;
+  an agent from the inbox or a notification reuses it too, after focusing that agent's pane);
+  **Shell** always opens a new shell; a terminal that has closed is never reused (a fresh one opens). Open
   resumes the terminal chosen.
 - **Terminal screen:** the terminal sits in a full-height card with a 24 dp top radius: the terminal
   header (below), then the terminal edge to edge with a thin `accent` scroll indicator on the right. The
@@ -386,8 +387,10 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   30 dp wide (text keys as wide as their label) and 30 dp tall inside a 40 dp tall pill, each with
   a 34 x 40 dp touch box (the platform grows the hit area to 48 dp):
   `Ctrl`, `Esc`, `Tab` as mono text, then icon keys (arrow pad, panes, paste, history; tap pages
-  up into the scrollback, hold jumps to the bottom), then, apart, the composer and keyboard
-  toggles without key backgrounds. A latched `Ctrl` draws in `accent` until it has been used for
+  up into the scrollback, hold jumps to the bottom), then `⇧Tab` (Shift+Tab to the terminal, whatever is
+  latched: Claude Code's mode cycle, which Gboard cannot send), `/` and `@` as mono text (into the composer at
+  its cursor while it is open, else typed into the terminal, taking a latched `Ctrl`), then, apart, the composer
+  and keyboard toggles without key backgrounds. A latched `Ctrl` draws in `accent` until it has been used for
   one key; `Alt` lives in the arrow pad's extras row. While text is selected `Copy` and `Clear`
   join the row. Horizontally scrollable when it overflows.
 - **Arrow pad:** the arrow key expands a floating 3×3 cluster above the toolbar: Backspace,
@@ -413,7 +416,8 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   path for blocked agents. The text is cleared only when it was sent: after a dropped session it
   stays to
   resend. Several lines are confirmed ("Send N lines? They will run as typed") like a multi-line
-  paste. An uploaded image's path joins the text after a space (contracts.md, "Image paste"); a
+  paste, and both only while the program has bracketed paste off: with it on the lines arrive as one paste
+  (and one Enter for a send), so nothing is asked. An uploaded image's path joins the text after a space (contracts.md, "Image paste"); a
   keyboard's image (a clipboard screenshot, a GIF keyboard) committed into the text is uploaded the
   same way. Snippets and dictation are not implemented.
 

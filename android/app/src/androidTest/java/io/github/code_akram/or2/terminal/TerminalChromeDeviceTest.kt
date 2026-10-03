@@ -29,6 +29,7 @@ import org.junit.Assert.assertNull
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.down
@@ -40,6 +41,7 @@ import io.github.code_akram.or2.Or2TestRunner
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.SessionException
 import io.github.code_akram.or2.ffi.KeyInput
+import io.github.code_akram.or2.ffi.KeyModifiers
 import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalFrame
@@ -463,6 +465,58 @@ class TerminalChromeDeviceTest {
             assertTrue(session.texts.isEmpty() && session.keys.isEmpty())
         }
         compose.onNodeWithTag("composer-send").assertIsNotEnabled() // Cleared once it went out.
+    }
+
+    /** The program has bracketed paste on (a shell's line editor, an agent's TUI): its frames say so. */
+    private fun bracketedPasteOn() {
+        compose.waitForIdle()
+        compose.runOnUiThread {
+            val frame = terminalVisualFrame(20u, 13u, CursorShape.BAR)
+            assertTrue(terminalView().grid.apply(frame.copy(modes = TerminalModes(false, false, bracketedPaste = true))))
+        }
+    }
+
+    @Test
+    fun severalLinesGoOutWithoutAskingWhileTheProgramHasBracketedPasteOn() {
+        show(composer = true)
+        bracketedPasteOn()
+        compose.onNodeWithTag("composer-input").performTextInput("first\nsecond")
+        compose.onNodeWithTag("composer-send").performClick()
+        compose.onNodeWithText("Send 2 lines?").assertDoesNotExist()
+        compose.runOnIdle {
+            // One submit: Rust writes the lines as one paste, then one Enter.
+            assertEquals(listOf("first\nsecond"), session.submits)
+            assertTrue(session.texts.isEmpty() && session.keys.isEmpty())
+        }
+        compose.onNodeWithTag("composer-send").assertIsNotEnabled()
+    }
+
+    @Test
+    fun shiftTabSlashAndAtFollowHistoryAndGoWhereTheyShould() {
+        show()
+        // ⇧Tab is Shift+Tab whatever is latched, and leaves the latch for the next key.
+        compose.onNodeWithTag("key:Ctrl").performClick().assert(armed())
+        compose.onNodeWithTag("key:ShiftTab").performScrollTo().assertTextContains("⇧Tab").performClick()
+        compose.runOnIdle { assertEquals(listOf(KeyInput(TerminalKey.Tab, KeyModifiers(true, false, false, false))), session.keys) }
+        compose.onNodeWithTag("key:Ctrl").performScrollTo().assert(armed())
+        // `/` with the composer closed is a key into the terminal: it takes the latch (Ctrl+/).
+        compose.onNodeWithTag("key:Slash").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(KeyInput(TerminalKey.Character("/"), KeyModifiers(false, true, false, false)), session.keys.last()) }
+        compose.onNodeWithTag("key:Ctrl").performScrollTo().assert(off())
+        compose.onNodeWithTag("key:At").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(TerminalKey.Character("@"), session.keys.last().key) }
+        // The composer open: `@` and `/` go into it at the cursor, nothing to the terminal.
+        session.keys.clear()
+        compose.onNodeWithTag("key:Composer").performClick()
+        compose.onNodeWithTag("composer-input").performTextInput("ask ")
+        compose.onNodeWithTag("key:At").performScrollTo().performClick()
+        compose.onNodeWithTag("key:Slash").performScrollTo().performClick()
+        compose.onNodeWithTag("composer-input").assertTextContains("ask @/")
+        compose.runOnIdle { assertTrue(session.keys.isEmpty() && session.texts.isEmpty()) }
+        // They follow History in the row, in this order.
+        compose.waitForIdle()
+        val left = listOf("History", "ShiftTab", "Slash", "At").map { compose.onNodeWithTag("key:$it").fetchSemanticsNode().positionInRoot.x }
+        assertEquals(left.sorted(), left)
     }
 
     @Test

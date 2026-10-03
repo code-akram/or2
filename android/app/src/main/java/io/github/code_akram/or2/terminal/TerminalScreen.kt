@@ -196,9 +196,10 @@ fun TerminalScreen(
             tab = { view.input.key(TerminalKey.Tab) },
             togglePad = { chrome.padOpen = !chrome.padOpen },
             panes = openPanes,
+            // One paste when the program has bracketed paste on (nothing to confirm then); typed otherwise.
             paste = {
                 val text = clipboardText()
-                if (pasteNeedsConfirmation(text)) pendingPaste = text else view.paste(text)
+                if (pasteNeedsConfirmation(text, view.grid.modes.bracketedPaste)) pendingPaste = text else view.pasteText(text)
             },
             history = { view.pageUp() },
             jumpToBottom = { view.jumpToBottom() },
@@ -212,6 +213,8 @@ fun TerminalScreen(
             },
             copy = { view.copySelection() },
             clearSelection = { view.clearSelection() },
+            shiftTab = { view.input.exactKey(TerminalKey.Tab, KeyModifiers(true, false, false, false)) },
+            type = { text -> if (chrome.composerOpen) chrome.typeInComposer(text) else view.input.key(TerminalKey.Character(text)) },
         )
         val shortcut by rememberUpdatedState<(TerminalShortcut) -> Unit> { pressed ->
             when (pressed) {
@@ -271,9 +274,10 @@ fun TerminalScreen(
                     canSend = sessionState == SessionState.Connected,
                     attach = attach,
                     receiveImage = receiveImage,
-                    // Several lines would run as typed, so they are confirmed like a multi-line paste.
+                    // Several lines would run as typed, so they are confirmed like a multi-line paste; with bracketed
+                    // paste on they arrive as one paste and one Enter, and nothing is asked.
                     send = { text ->
-                        if (pasteNeedsConfirmation(text)) {
+                        if (pasteNeedsConfirmation(text, view.grid.modes.bracketedPaste)) {
                             pendingSend = text
                             false
                         } else {

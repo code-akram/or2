@@ -23,6 +23,7 @@ import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.contractProbeHost
 import io.github.code_akram.or2.ffi.generateEd25519Key
 import io.github.code_akram.or2.inbox.INBOX_STATUS_ORDER
+import io.github.code_akram.or2.inbox.herdrViews
 import io.github.code_akram.or2.inbox.inbox
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.flow.first
@@ -97,6 +98,10 @@ class HostConnectionsProbeTest {
                     assertNull(pane.session) // Default session: opened without a name.
                     assertEquals(setOf<String?>(null, "or2-probe"), inbox.groups.flatMap { it.items }.map { it.session }.toSet())
                     withTimeout(5000) { active.watches.value.forEach { it.state.first { state -> state is HerdrState.Live } } }
+                    // Home's session cards read every live view by host and session, whatever the inbox shows.
+                    val views = withTimeout(5000) { holder.herdrViews().first { it.size == 2 } }
+                    assertEquals(setOf<Pair<Long, String?>>(host.id to null, host.id to "or2-probe"), views.keys)
+                    assertNotNull(views.getValue(host.id to null).focusedPaneId)
 
                     // Terminals: several on the one connection, each with its own lifecycle and frames.
                     val shell = holder.openTerminal(active, TerminalTarget.Shell)
