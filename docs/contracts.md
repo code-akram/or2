@@ -3661,7 +3661,8 @@ no test runs the real command.
 ## Agent notifications (lane Notify)
 
 Kotlin only, no FFI change. The roadmap rule: **exactly one notification per Blocked or Done edge**
-(`HerdrAgent.state_change_seq` advancing into `Blocked` or `Done`), **none while that pane is on
+(`HerdrAgent.state_change_seq` advancing into `Blocked` or `Done`, or into `Idle` after `Working`: see
+"The rule" below), **none while that pane is on
 screen** (its terminal is the visible one and the app is resumed), **tap opens the pane** (through
 `launchOpenAgent`, the same path as an inbox tap).
 
@@ -3693,8 +3694,19 @@ screen** (its terminal is the visible one and the app is resumed), **tap opens t
   or failed, then came back: that first view is a baseline too). A later view posts when a pane's
   `state_change_seq` is greater than the one last seen and its status is `Blocked` or `Done`; a pane
   first seen in a later view (no earlier seq) is baselined, never notified; a seq that went backwards
-  (herdr restarted under a live watch) is no advance. `Idle` and `Unknown` never notify, and `Done` →
+  (herdr restarted under a live watch) is no advance. `Unknown` never notifies, and `Done` →
   `Idle` keeps the notification (only `Working`, opening and disappearing cancel it, as written).
+  **Idle after Working is a Done edge** (fix, 2026-10-03): herdr reports a finished turn as `Idle`
+  instead of `Done` when the pane counts as seen, and a `pane.focus` (or2 opening the pane) makes it
+  seen, so the usual flow (open the agent from the phone, send, lock the phone) ended in `Idle` and
+  never notified. Observed on the owner's host (herdr 0.9.3): a focused Claude Code pane went
+  `working` → `idle` with the seq advancing by one, twice, and no notification arrived. So an
+  advance into `Idle` posts `Done` when this watch saw the pane `Working` since it last settled
+  (`Blocked`, `Done` or `Idle`; `Unknown` settles nothing, a repeat view changes nothing). An `Idle`
+  never preceded by `Working` on this watch (a baseline, an `Unknown` flap, `Done` or `Blocked` then
+  `Idle`) still never notifies. Tests: `aTurnHerdrReportsAsIdleNotifiesDone`,
+  `anIdleNotReachedFromWorkingNeverNotifies`,
+  `aTurnWorkingAtTheBaselineThatEndsIdleNotifiesUnlessOnScreen`.
 - **On screen** is reported by `Or2App`: the visible `Destination.Terminal`'s host and target while the
   lifecycle is `RESUMED`, else null. A herdr terminal shows herdr's focused pane (shared state), so the
   pane on screen is the session view's `focused_pane_id`, falling back to the target's pane id before

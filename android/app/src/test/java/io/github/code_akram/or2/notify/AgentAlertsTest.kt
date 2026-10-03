@@ -99,13 +99,62 @@ class AgentAlertsTest {
         deliver(view(agent("w1:p1", AgentStatus.DONE, 3u)))
         assertEquals(listOf("post w1:p1 Needs input", "post w1:p1 Done"), sink.events)
         assertEquals(setOf(AgentPaneKey(1, null, "w1:p1")), alerts.active)
-        // Idle, Unknown and Working edges never notify.
+        // Idle (not after Working), Unknown and Working edges never notify.
         deliver(view(agent("w1:p1", AgentStatus.IDLE, 4u)))
         deliver(view(agent("w1:p1", AgentStatus.UNKNOWN, 5u)))
         assertEquals(2, sink.posted.size)
         // A sequence that went backwards (herdr restarted under the watch) is no advance.
         deliver(view(agent("w1:p1", AgentStatus.BLOCKED, 1u)))
         assertEquals(2, sink.posted.size)
+    }
+
+    @Test
+    fun aTurnHerdrReportsAsIdleNotifiesDone() {
+        // herdr reports a finished turn as Idle when the pane counts as seen (or2 focused it): Done all the same.
+        deliver(view(agent("w1:p1", AgentStatus.IDLE, 1u)))
+        deliver(view(agent("w1:p1", AgentStatus.WORKING, 2u)))
+        deliver(view(agent("w1:p1", AgentStatus.IDLE, 3u)))
+        assertEquals(listOf("post w1:p1 Done"), sink.events)
+        // Re-deliveries of that Idle post nothing more.
+        repeat(2) { deliver(view(agent("w1:p1", AgentStatus.IDLE, 3u), focused = "w1:p9")) }
+        assertEquals(1, sink.posted.size)
+        // An Unknown between Working and Idle settles nothing: still the end of a turn.
+        deliver(view(agent("w1:p1", AgentStatus.WORKING, 4u)))
+        deliver(view(agent("w1:p1", AgentStatus.UNKNOWN, 5u)))
+        deliver(view(agent("w1:p1", AgentStatus.IDLE, 6u)))
+        assertEquals(listOf("post w1:p1 Done", "cancel w1:p1", "post w1:p1 Done"), sink.events)
+    }
+
+    @Test
+    fun anIdleNotReachedFromWorkingNeverNotifies() {
+        // Baselined Idle, then Unknown and Idle flapping: no turn finished.
+        deliver(view(agent("w1:p1", AgentStatus.IDLE, 1u)))
+        deliver(view(agent("w1:p1", AgentStatus.UNKNOWN, 2u)))
+        deliver(view(agent("w1:p1", AgentStatus.IDLE, 3u)))
+        assertTrue(sink.events.isEmpty())
+        // Done, then seen (Idle): the Done was the alert, and it stays up.
+        deliver(view(agent("w1:p1", AgentStatus.WORKING, 4u)))
+        deliver(view(agent("w1:p1", AgentStatus.DONE, 5u)))
+        deliver(view(agent("w1:p1", AgentStatus.IDLE, 6u)))
+        // Blocked, then the dialog dismissed (Idle): the Blocked was the alert.
+        deliver(view(agent("w1:p1", AgentStatus.WORKING, 7u)))
+        deliver(view(agent("w1:p1", AgentStatus.BLOCKED, 8u)))
+        deliver(view(agent("w1:p1", AgentStatus.IDLE, 9u)))
+        assertEquals(listOf("post w1:p1 Done", "cancel w1:p1", "post w1:p1 Needs input"), sink.events)
+    }
+
+    @Test
+    fun aTurnWorkingAtTheBaselineThatEndsIdleNotifiesUnlessOnScreen() {
+        // Working when the watch started: its end is seen live.
+        deliver(view(agent("w1:p1", AgentStatus.WORKING, 1u), agent("w1:p2", AgentStatus.WORKING, 1u)))
+        alerts.screenChanged(OnScreen(1, TerminalTarget.Herdr(null, "w1:p2")))
+        deliver(view(agent("w1:p1", AgentStatus.IDLE, 2u), agent("w1:p2", AgentStatus.IDLE, 2u)))
+        assertEquals(listOf("post w1:p1 Done"), sink.events)
+        // A new watch (a reconnect) baselines again: an Idle it never saw Working is not a turn it saw end.
+        val again = Any()
+        deliver(view(agent("w1:p1", AgentStatus.IDLE, 2u)), watch = again)
+        deliver(view(agent("w1:p1", AgentStatus.IDLE, 3u)), watch = again)
+        assertEquals(1, sink.posted.size)
     }
 
     @Test

@@ -33,6 +33,9 @@ Each release's notes are in [docs/releases/](docs/releases/).
   with a hairline that appears once content scrolls under it.
 - After scrolling a herdr or tmux pane with a swipe that went to the program as wheel events, the scroll-to-bottom
   button now shows and returns the pane to its live screen; typing first returns it too.
+- An agent that finishes its turn now notifies even when herdr reports it `idle` rather than `done`. herdr does
+  that for a pane it counts as seen, which or2 makes it by opening it, so the usual flow (open the agent from the
+  phone, send, lock the phone) never notified before.
 
 ## [0.1.1] - 2026-10-02
 

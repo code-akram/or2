@@ -155,10 +155,15 @@ interface AgentAlertSink {
 /** The terminal on screen in a resumed app: the host and the target it runs. */
 data class OnScreen(val hostId: Long, val target: TerminalTarget)
 
-/** `Needs input` (Blocked) or `Done`; null for every other status, which never notifies. */
-fun alertText(status: AgentStatus): String? = when (status) {
+/**
+ * `Needs input` (Blocked) or `Done`; null for every other status, which never notifies. `Idle` is `Done` too when the
+ * pane was [worked] (seen `Working` since it last settled): herdr reports a finished turn as `Idle` instead of `Done`
+ * when the pane counts as seen, which a `pane.focus` (or2 opening it) makes it (owner report, 2026-10-03).
+ */
+fun alertText(status: AgentStatus, worked: Boolean = false): String? = when (status) {
     AgentStatus.BLOCKED -> "Needs input"
     AgentStatus.DONE -> "Done"
+    AgentStatus.IDLE -> if (worked) "Done" else null
     else -> null
 }
 
@@ -171,7 +176,8 @@ fun alertText(status: AgentStatus): String? = when (status) {
  *   too.
  * - A later view in which a pane's `state_change_seq` advanced and its status is `Blocked` or `Done` posts one
  *   notification for that pane (replacing its earlier one), unless the alerts are switched off ([enabled]) or the
- *   pane is on screen.
+ *   pane is on screen. So does an advance into `Idle` when this watch saw the pane `Working` since it last settled
+ *   (`Blocked`, `Done` or `Idle`; `Unknown` settles nothing): a finished turn herdr counts as seen ([alertText]).
  * - A pane's notification is cancelled when the pane goes back to `Working`, disappears from its session's view, is
  *   shown on screen ([screenChanged]) or opened from the notification ([opened]); all are cancelled when the alerts
  *   are switched off ([enabledChanged]).
@@ -196,8 +202,8 @@ class AgentAlerts(
     private val nonces: ReplyNonces = ReplyNonces(MemoryPrefStore()),
     private val enabled: () -> Boolean = { true },
 ) : HerdrObserver {
-    /** Per watch object (a new connection makes new ones): each pane's last seen sequence number. */
-    private val baselines = WeakHashMap<Any, Map<String, ULong>>()
+    /** Per watch object (a new connection makes new ones): what it last saw of each pane. */
+    private val baselines = WeakHashMap<Any, Map<String, Seen>>()
 
     /** The focused pane of every live session view, by host id and session. */
     private val focused = mutableMapOf<Pair<Long, String?>, String?>()
@@ -224,14 +230,15 @@ class AgentAlerts(
         }
         focused[hostId to session] = view.focusedPaneId
         val previous = baselines[watch]
-        val seen = view.agents.associate { it.paneId to it.stateChangeSeq }
+        val seen = view.agents.associate { it.paneId to seen(it, previous?.get(it.paneId)) }
         baselines[watch] = seen
         for (agent in view.agents) {
             val key = AgentPaneKey(hostId, session, agent.paneId)
             // Another agent in this pane id now: the notification was about one that is gone.
             if (agents[key]?.let { !sameAgent(it, agent) } == true) cancel(key)
+            val before = previous?.get(agent.paneId)
             if (agent.status == AgentStatus.WORKING) {
-                if (previous?.get(agent.paneId) == agent.stateChangeSeq) {
+                if (before?.seq == agent.stateChangeSeq) {
                     cancel(key)
                 } else {
                     forget(key)
@@ -239,9 +246,8 @@ class AgentAlerts(
                 }
                 continue
             }
-            val text = alertText(agent.status) ?: continue
-            val before = previous?.get(agent.paneId) ?: continue
-            if (agent.stateChangeSeq <= before) continue
+            if (before == null || agent.stateChangeSeq <= before.seq) continue
+            val text = alertText(agent.status, before.worked) ?: continue
             when {
                 isOnScreen(key) -> cancel(key)
                 enabled() -> post(AgentAlert(key, agentName(agent), text, hostLabel, agent = identity(agent)))
@@ -303,6 +309,20 @@ class AgentAlerts(
         alert.agent?.let { agents[alert.key] = it }
         sink.post(alert.copy(nonce = nonces.issue(alert.key)))
     }
+
+    /** What a watch saw of a pane: its sequence number, and whether it was `Working` since it last settled. */
+    private data class Seen(val seq: ULong, val worked: Boolean)
+
+    /** [agent] as seen now, after [before]: a repeat (same seq) keeps what was seen; `Unknown` carries it over. */
+    private fun seen(agent: HerdrAgent, before: Seen?) = Seen(
+        agent.stateChangeSeq,
+        when {
+            before != null && agent.stateChangeSeq == before.seq -> before.worked
+            agent.status == AgentStatus.WORKING -> true
+            agent.status == AgentStatus.UNKNOWN -> before?.worked == true
+            else -> false
+        },
+    )
 
     private fun isOnScreen(key: AgentPaneKey): Boolean {
         val shown = screen ?: return false

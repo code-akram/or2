@@ -2,7 +2,7 @@
 
 Read this first when picking the work up. The details are in [design](design.md) (checklists),
 [contracts](contracts.md) (what the code must do), [roadmap](roadmap.md) and [build](build.md).
-Updated 2026-10-02, end of day.
+Updated 2026-10-03.
 
 ## Where it stands
 
@@ -46,32 +46,27 @@ Updated 2026-10-02, end of day.
 - The device suite passes: 150 tests. The two notification-posting tests skip, because the phone refuses
   the permission to a test build.
 
-## Open bug: no agent notifications arrive (owner report, 2026-10-02 evening)
+## Fixed: finished turns that herdr reports as Idle never notified (2026-10-03)
 
-The owner gets **no agent notifications** on the phone (the v0.1.2 candidate). Read-only checks of the phone the
-same evening:
-- `POST_NOTIFICATIONS` is granted (user-set), and app ops allow it.
-- The `agents` channel exists with `IMPORTANCE_HIGH` (4). It is not blocked, and the app's notifications are
-  on.
-- The ongoing `connections` notification shows normally.
-- **The `agents` channel has never posted anything** (`mLastNotificationUpdateTimeMs=0`).
+The owner's report (2026-10-02 evening: no agent notifications) turned out to be partial. Posting works: the owner
+replied from an or2 notification on 2026-10-03. But a finished turn notified only when herdr reported it
+**Done**. herdr reports **Idle** instead when the pane counts as *seen*, and a `pane.focus` (or2 opening the pane)
+makes it seen, so the usual flow (open the agent from the phone, send, lock the phone) ended in Idle, which the
+edge rule ignored. Seen live on the owner's host (herdr 0.9.3): a focused Claude Code pane went `working` → `idle`
+with `state_change_seq` advancing by one, twice, and no notification arrived either time.
 
-So Android is not blocking them: **or2 never posts one.** Suspects, in the order to check:
-1. Is the edge rule ever met? Notifications go out only on a `state_change_seq` advance into
-   Blocked or Done, observed by a live watch, never on the first snapshot after a connect. Do the herdr
-   reports of the owner's Claude Code panes advance `state_change_seq` the way the code expects?
-2. Over-eager "on screen" suppression.
-3. A host's `showInInbox` flag, or the Settings switch.
-4. The v0.1.2 identity rule, which affects only the Reply action, not posting.
+The fix (Kotlin only): an advance into Idle posts `Done` when the watch saw the pane Working since it last
+settled; an Idle not reached from Working still never notifies. The contract ("Agent notifications", "The rule")
+and three JVM tests cover it. It still needs the owner's eyes on the phone with a signed build.
 
-Start with a debug build as the `.devicetest` app paired to the Mac, or with a temporary log of the alert
-decisions, and watch an agent go Working → Blocked/Done. The device tests can't post (the permission is
-refused to test builds), so this was never seen end to end. Fix it before releasing v0.1.2, because Reply
-depends on it.
+Found on the way: the JVM test `anImageUploadCrossesTheFfiAndItsPathIsPastedBracketedWithoutEnter` failed on
+`main` since `1064526`, because the FFI probe dropped the upload's acknowledgement receiver. The probe now keeps it
+until the caller acknowledges, as a real host does.
 
-## Next, in order (tomorrow morning)
+## Next, in order
 
-0. **Fix the open notification bug above** (Reply cannot be tested without a notification).
+0. **Install a signed build with the Idle fix** on the owner's phone and check that a finished turn notifies
+   (open an agent from the phone, send, lock the phone).
 1. **The owner's QA of the v0.1.2 candidate** on the phone:
    1. Reply from a notification. Include a reply to an agent waiting at an approval dialog (Claude Code's
       "Do you want to …?"), and note exactly what a typed reply does there.
@@ -88,7 +83,15 @@ depends on it.
       one-liner. [build](build.md), "Releases", has the details.
 3. **The deferred M3 acceptance**, when the owner approves it: mobile data, the Wi-Fi to mobile handover, and
    unplugged (Doze) background runs. This is v0 acceptance step 3, still never tested.
-4. **The rest of the roadmap.**
+4. **Keyboard (owner idea, 2026-10-03; not decided).** An in-app keyboard in or2's look, with Ctrl, Esc,
+   Tab, arrows and the pane, paste and history keys in one layout, replacing the system keyboard, the toolbar and
+   the arrow pad. No library does for a keyboard what libghostty does for the terminal, but the parts exist:
+   our own Compose layout (Unexpected Keyboard, GPL-3.0-only, as the reference), CleverKeys' on-device glide
+   typing (GPL-3.0-only, Kotlin), Android's spell-checker API or AOSP LatinIME's dictionary engine, and
+   sherpa-onnx for dictation. Moshi's Android app keeps the system keyboard and polishes a toolbar. Steps: the
+   owner tries CleverKeys as the system keyboard for a few days; then a spike under `spikes/` (Compose layout
+   and CleverKeys' decoder, in the gallery); then the decision: everywhere, terminal only, or the toolbar pass.
+5. **The rest of the roadmap.**
    - Next items: scanning for SSH servers, recent directories, app lock.
    - M4: history sheet, ntfy, dictation, Wake-on-LAN.
    - M5: Chat View, diff viewer, web preview.
