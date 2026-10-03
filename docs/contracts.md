@@ -5314,6 +5314,50 @@ title; the transparent arrow pad). Four lanes own disjoint files; each fixes its
 - **Tests:** update every Home, host-screen, picker and switcher device test to the new model (compile in the
   gate); JVM tests for the pending-open unification, the close rules, `● Open` marking, Back.
 
+**Implemented (branch `v012/lane-a-ui`).** Where the plan was silent:
+
+- **Host card.** One `Or2Card`: the header row is the click target (`host:<id>`, tap = picker, long press = menu,
+  the state description on it); the `⋯` is a 44 dp `IconAction` (`host-menu:<id>`, "Options for <host>") with a new
+  `Or2Icons.More`. The thumbnails sit 12 dp in from the card's sides and bottom, 38 % of the card wide; the host pill
+  is gone from them (the card names the host): the transport pill is at the top left and the `×`
+  (`session-close:<id>`) at the top right. A closed terminal shows a muted `Closed` pill in place of the transport,
+  its preview dimmed to 50 %. The menu's **Connect** only connects (the header is the way to the picker). `Connect
+  all` is `Chip`-sized `accent` text on the HOSTS header's line, hidden while an unlock runs.
+- **Close rules** (`TerminalActivations.close`, `closeAsks(target, closed)`): one function for Home's `×`, the
+  Terminals sheet's `×`, Ctrl+Shift+W and the closed strip's Close. Only an *open* shell asks (a closed one has
+  nothing left to end); Ctrl+Shift+W on an open shell asks too. Closing the terminal on screen returns Home; closing
+  another from the sheet leaves the sheet open.
+- **Re-activation.** `reuse`, `launchReuse` and `needsFocus` are gone: a thumbnail, the sheet, a share pick and the
+  reattach `Show` navigate directly. A reattach `Reopen` that finds the session's terminal open shows it as it is;
+  one that opens a new terminal on a remembered pane target still awaits that open's own focus (as an agent's).
+  `openAgent` and `reopen` share `activate(…, focusReused)`.
+- **Picker.** `● Open` (`open-mark:herdr:<name>` / `open-mark:tmux:<name>`, `accent` dot) replaces the row's
+  Running/Attached marker; herdr's default session counts by `null` or by its listed name (`OpenSessions.of`). The
+  UDP line is `picker-udp-blocked`, under the tabs, only with the lists (never with the gate).
+- **Terminals sheet.** One section header per host (also with one host), then 44 dp rows (`terminal-tab:<id>`,
+  `● Current`, `terminal-row-close:<id>`); `terminals-copy-screen` copies the grid's rows (a wrapped row joined to
+  the next, trailing blanks trimmed; nothing for an empty grid) and closes the sheet, relying on Android's own
+  copied confirmation (minSdk 34); `terminals-shortcuts` opens the existing shortcuts sheet. A terminal that never
+  connected shows the same grouped list (with its `×`) in place of the old Close pill. To read the visible grid,
+  `TerminalChromeState` gained `screen` (set by `TerminalScreen` while its view is composed) and `SessionScreen`
+  hoists the chrome state.
+- **Navigation.** `NavStack.backOrHome()` from any terminal is Home. `afterPaired` / `afterKeepAlive` return Home
+  and `Or2App` opens that host's picker (`homePicker`) as it connects. A saved `host:N` decodes to Home, and what
+  was under it is dropped (Home is only ever the bottom).
+- **Pending open.** `PendingOpen` (`Resume` / `Agent`, with `started`) and `pendingStep(state, busy, started)`:
+  connected opens; an unlock running or a host on its way waits; once nothing runs, one not started connects, one
+  started gives up. An agent tap on a connected host opens at once (`agentOpenStart`). The reconnect chip's pending
+  is already started (its own connect).
+- **Or2App split:** `HomeRoute`, `rememberResume` (`app/Resume.kt`), `ImageShareRoute` (`app/Shares.kt`) and one
+  `Notices` overlay (`app/Notices.kt`) in one order everywhere: message, progress, chip, unlock (the unlock card now
+  shows over a terminal too). The host-key dialog is the first pending prompt (no host screen to skip).
+- **Host form.** The Delete row is its own grouped card under the footnote, off while busy; a deleted host's form
+  lands on Home.
+- Outside lane A's files: `ui/Icons.kt` (`More`), `terminal/TerminalChrome.kt` and `terminal/TerminalScreen.kt`
+  (the `screen` grid, three lines), `androidTest/ui/TopEdgeDeviceTest.kt` (gallery names), and the tests of the
+  removed API. Left for others: `StatusChip` (`ui/Components.kt`) and `dialogForOtherHost` (`inbox/InboxModel.kt`)
+  are now used only by tests.
+
 ## Lane B: terminal and UI code (Kotlin: `terminal/*`, `ui/*`, `paste/*`, `keys/*`, `pair/*`, `notify/*`,
 ## `session/TerminalHeader.kt`, `session/SessionMessages.kt`, the gallery for these)
 
