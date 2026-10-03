@@ -608,8 +608,8 @@ impl HostConnection {
     /// contracts.md, "Image paste"). The bytes go over SFTP on this host's connection (no new
     /// connection, no shell command) to `~/.cache/or2/images/or2-<UTC yyyyMMdd-HHmmss>-<6
     /// hex>.<extension>`: the directory created `0700`, the file `0600`, written to a temporary
-    /// name and renamed. Each upload first removes that directory's `or2-*` files older than
-    /// seven days (best effort). `extension` is `png`, `jpg`, `jpeg`, `gif` or `webp` (any case),
+    /// name and renamed. Once its path is delivered, an upload removes that directory's `or2-*`
+    /// files older than seven days (best effort, at most hourly). `extension` is `png`, `jpg`, `jpeg`, `gif` or `webp` (any case),
     /// else `InvalidName`, as is an empty image; more than 20 MiB is `TooLarge`; both are refused
     /// before anything is sent. `SftpUnavailable` when the host has no SFTP subsystem,
     /// `CommandFailed` for other failures (a reason without paths), `Closed` when the connection

@@ -5197,3 +5197,54 @@ Owner QA on the phone found these. Placeholders only: no real host details in te
 - **Tests.** Rust, in-process SFTP server with a per-request delay: the round-trip bound above
   (counted or timed), a reused session, a dropped session reopened once, the sweep after delivery and
   rate-limited, and every existing safety test unchanged and green.
+
+**Implemented (branch `v012/upload-speed`).** Rust only (`ssh/upload.rs`, the host driver); no FFI change,
+API stays 16 (only `upload_image`'s doc comment changed). Every check of "Image paste" and its fixes is kept, with
+its error message.
+
+- **Round trips, measured** (in-process server, a relay holding every reply back 20 ms and counting how many
+  replies each request waited for; an existing private directory, a 100 KB image): **27 before** on every upload
+  (each opened its own session), **11** on a new session (channel open, subsystem, init and 8 SFTP waves) and
+  **8** on a reused one. The waves: the three `lstat`s of the directory parts and a `stat` of `~/.cache` (in case
+  it is a symbolic link) together; `open`; `fsetstat`; `fstat` with the parts again (now checked with the
+  owner, after the file); the writes (up to 16 in flight, so one wave up to 512 KiB); `close` with the parts
+  again (the check before the rename); `rename`; `realpath`.
+- **Batches keep the checks' order.** A batch's answers are checked in the order the sequential code checked
+  them, so the first problem and its message are the same. `fsetstat` then `fstat` stays two steps (the
+  `fstat` checks what the `fsetstat` did), the directory reads after the file's create are sent once it is
+  made, and the re-check before the rename once every write was answered. Only when a part is missing or wrong
+  does the upload fall back to the part-by-part path (create, `setstat`, check each before going below it),
+  unchanged. A batch that failed for want of a session (not a server status) fails the upload at once,
+  without the fallback, so nothing more is sent on a dead session.
+- **The session** (`upload::Uploads`) is the host driver's, one per connection: opened by the first upload,
+  reused by the next ones (a `tokio` mutex: one upload at a time; the path's delivery and the sweep run after
+  the lock is released), dropped with the driver (and the upload tasks, which end with `closing`), which
+  closes its channel. **Decision: "fails at the transport level"** is a request that got no answer: the
+  session's stream ended or closed (`IO`, `UnexpectedBehavior`, `UnexpectedPacket`), or a request timed out.
+  Such a session is dropped; when nothing was made yet (no temporary file's create sent) and the upload was
+  not cancelled, the upload starts again on a new session, once. A server's error status keeps the session. A
+  cancelled upload keeps it too, unless its cleanup gets no answer in 2 s.
+- **Handles on a kept session.** A session now outlives its upload, so whatever ends an upload early also
+  closes the temporary file's handle (with the removal, 2 s), and a sweep that hits its 5 s bound closes its
+  listing's handle; before, both went with the session.
+- **The sweep** (`upload::Sweep`) runs in the upload's driver task once `deliver` is done (taken or not), for
+  an upload that succeeded, with that upload's owner and the phone's clock at that moment; it ends with the
+  connection. **Decision:** at most one sweep starts per session per hour (`SWEEP_INTERVAL`, counted when it
+  starts, so one that failed or timed out counts too); a new session sweeps again at its first upload.
+- **Tests.** In-process (`ssh/connection_tests.rs`; `sftp_test_server.rs` gains `relay` and `Link`:
+  `Quirks::latency`, the round-trip count, and `sftp_hang_ups`, which hangs up a session at its next request
+  but `init`): `an_upload_into_an_existing_directory_waits_for_few_round_trips` (at most 12 new, 9 reused),
+  `a_session_that_fails_under_an_upload_is_reopened_once` (one hang-up: reopened and done; two: failed after one
+  reopen, nothing left behind; the next upload opens a new session),
+  `the_sweep_runs_after_the_path_is_delivered_at_most_hourly_per_session` (the `opendir` after the image's
+  `realpath`, no second sweep on the session, a new session sweeps again),
+  `a_cancelled_upload_closes_its_file_and_leaves_the_session_to_the_next`,
+  `the_kept_session_closes_its_channel_when_dropped`, `upload::tests::a_session_sweeps_at_most_once_an_hour`.
+  **Adjusted** because they asserted the old order: `an_upload_makes_a_private_directory_and_a_private_file_through_a_rename`
+  (asserted the SFTP channel closed after the upload; now that the second upload reuses the session and its
+  channel stays open), `an_upload_sweeps_old_or2_files_once_delivered_and_makes_an_existing_directory_private`
+  (was `an_upload_first_sweeps_…`: it waits for the sweep now; the same files go and stay),
+  `the_directories_are_checked_again_before_the_rename` (it swapped the directory once the sweep's `opendir` was
+  seen; now once the first write is, which the test server logs), and the sshd suite's
+  `an_image_uploads_over_internal_sftp_into_a_private_cache_directory` (a second upload on the same connection,
+  then the old file swept by a new connection's upload). Every other upload and safety test is unchanged.

@@ -1431,7 +1431,8 @@ fn an_image_uploads_over_internal_sftp_into_a_private_cache_directory() {
     require_sshd!();
     // SFTP starts in the fixture's home (`-d`), never the real one.
     let sshd = Sshd::with_config(false, "Subsystem sftp internal-sftp -d {home}");
-    let live = Live::with_key(sshd, &ClientKey::generate_ed25519(""));
+    let key = ClientKey::generate_ed25519("");
+    let live = Live::with_key(sshd, &key);
     let home = fs::canonicalize(live.sshd.home()).unwrap();
     let bytes: Vec<u8> = (0..150_000).map(|index| (index * 7 % 253) as u8).collect();
     let path = block_on(live.host.upload_image(bytes.clone(), "jpg")).unwrap();
@@ -1448,7 +1449,14 @@ fn an_image_uploads_over_internal_sftp_into_a_private_cache_directory() {
     let names: Vec<_> = fs::read_dir(&directory).unwrap().collect();
     assert_eq!(names.len(), 1);
 
-    // An old upload goes with the next one; a recent one stays.
+    // A second upload on the connection's session.
+    let second = block_on(live.host.upload_image(b"\x89PNG".to_vec(), "png")).unwrap();
+    live.host.disconnect();
+    assert_eq!(closed(&live.states), CloseReason::Disconnected);
+
+    // An old upload goes after a later upload (contracts.md, "Upload speed": once its path is
+    // delivered, at most once per SFTP session and hour, so here the next connection's); a
+    // recent one stays.
     let old = directory.join("or2-20000101-000000-000000.png");
     fs::write(&old, b"old").unwrap();
     fs::File::options()
@@ -1457,11 +1465,28 @@ fn an_image_uploads_over_internal_sftp_into_a_private_cache_directory() {
         .unwrap()
         .set_modified(std::time::SystemTime::now() - Duration::from_secs(8 * 24 * 3600))
         .unwrap();
-    let second = block_on(live.host.upload_image(b"\x89PNG".to_vec(), "png")).unwrap();
-    assert!(!old.exists(), "swept");
-    assert!(std::path::Path::new(&path).exists() && std::path::Path::new(&second).exists());
-    live.host.disconnect();
-    assert_eq!(closed(&live.states), CloseReason::Disconnected);
+    let (observer, states, _log) = host_observer();
+    let host = connect_host(
+        request(
+            &key,
+            &[(lo(), live.sshd.port)],
+            std::slice::from_ref(&live.sshd.host),
+        ),
+        observer,
+    );
+    assert_eq!(next(&states), HostState::Authenticating);
+    assert_eq!(next(&states), HostState::Connected { address_index: 0 });
+    let third = block_on(host.upload_image(b"GIF89a".to_vec(), "gif")).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while old.exists() {
+        assert!(std::time::Instant::now() < deadline, "swept");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    for kept in [&path, &second, &third] {
+        assert!(std::path::Path::new(kept).exists(), "{kept}");
+    }
+    host.disconnect();
+    assert_eq!(closed(&states), CloseReason::Disconnected);
 }
 
 #[test]

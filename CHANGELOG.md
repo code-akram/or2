@@ -37,6 +37,9 @@ Each release's notes are in [docs/releases/](docs/releases/).
   Paste is one bracketed paste there too.
 - FFI API 17 (`Session.mouse_click`, `Session.paste_text`, `HostConnection.reply_to_pane`, `upload_image`,
   `TerminalModes.bracketed_paste`).
+- Image upload is much faster on a distant host: a host's uploads share one SFTP session, its independent checks
+  go out together, and old images are swept after the path is in, so an upload into an existing directory waits
+  for 8 round trips instead of 27 (11 for the first on a connection).
 
 ### Fixed
 
