@@ -18,9 +18,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -35,10 +37,16 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.connection.UDP_BLOCKED_LINE
-import io.github.code_akram.or2.ffi.HostCapabilities
+import io.github.code_akram.or2.ffi.AgentStatus
+import io.github.code_akram.or2.ffi.HerdrAgent
 import io.github.code_akram.or2.ffi.HerdrSessionInfo
+import io.github.code_akram.or2.ffi.HerdrView
+import io.github.code_akram.or2.ffi.HostCapabilities
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TmuxSession
+import io.github.code_akram.or2.inbox.agentLabel
+import io.github.code_akram.or2.inbox.statusColor
+import io.github.code_akram.or2.inbox.statusLabel
 import io.github.code_akram.or2.ui.GroupCard
 import io.github.code_akram.or2.ui.GroupDivider
 import io.github.code_akram.or2.ui.ListRow
@@ -49,6 +57,7 @@ import io.github.code_akram.or2.ui.Or2Icons
 import io.github.code_akram.or2.ui.Or2Sheet
 import io.github.code_akram.or2.ui.Or2Type
 import io.github.code_akram.or2.ui.PillButton
+import io.github.code_akram.or2.ui.SectionHeader
 import io.github.code_akram.or2.ui.Segmented
 import io.github.code_akram.or2.ui.Spinner
 import io.github.code_akram.or2.ui.StatusDot
@@ -90,13 +99,75 @@ data class OpenSessions(val herdr: Set<String?> = emptySet(), val tmux: Set<Stri
     }
 }
 
+/** One agent under its herdr session in the picker: [label] ([agentLabel]), its status and its pane's cwd. */
+data class PickerAgent(val paneId: String, val label: String, val status: AgentStatus, val cwd: String?)
+
+/** The agents of one herdr workspace, under its [label] (null: herdr names no workspace for them). */
+data class PickerWorkspace(val label: String?, val agents: List<PickerAgent>)
+
+/**
+ * One herdr session as the picker lists it. [workspaces] is null when the app has no live view of it (its host's
+ * sessions are not watched, it is not running, its watch has not answered yet): then it is one row, as before agents
+ * were listed. A live session with no agents has an empty list.
+ */
+data class PickerHerdrSession(val info: HerdrSessionInfo, val workspaces: List<PickerWorkspace>?) {
+    /** What opens it (`TerminalTarget.Herdr`, `openAgent`): null for herdr's default session, never its listed name. */
+    val session: String? get() = if (info.isDefault) null else info.name
+
+    /** Its name as listed; the default session has no `(default)` suffix. */
+    val label: String get() = info.name
+
+    val live: Boolean get() = workspaces != null
+
+    /** A live view means it runs, whatever the (cached) capability probe said. */
+    val running: Boolean get() = live || info.running
+}
+
+/**
+ * The herdr tab's sessions from the host's [listed] sessions and its live [views] (keyed as `herdrViews()` keys them:
+ * null for the default session): the live ones first with their agents, then the others as single rows, each part in
+ * the listing's order.
+ */
+fun pickerHerdrSessions(listed: List<HerdrSessionInfo>, views: Map<String?, HerdrView>): List<PickerHerdrSession> {
+    val sessions = listed.map { info ->
+        PickerHerdrSession(info, views[if (info.isDefault) null else info.name]?.let(::pickerWorkspaces))
+    }
+    return sessions.filter { it.live } + sessions.filterNot { it.live }
+}
+
+/**
+ * A live view's agents grouped by workspace in herdr's workspace order (workspaces without agents left out), each
+ * group by tab, then pane, so a new view never reshuffles the rows; agents in no listed workspace come last.
+ */
+fun pickerWorkspaces(view: HerdrView): List<PickerWorkspace> {
+    val tabs = view.tabs.associateBy { it.tabId }
+    val panes = view.panes.associateBy { it.paneId }
+    fun rows(agents: List<HerdrAgent>) = agents
+        .sortedWith(compareBy<HerdrAgent>({ tabs[it.tabId]?.number ?: UInt.MAX_VALUE }, { it.paneId }))
+        .map { agent ->
+            val pane = panes[agent.paneId]
+            PickerAgent(agent.paneId, agentLabel(agent, pane?.agent) ?: "agent", agent.status, agent.cwd ?: pane?.cwd)
+        }
+    val workspaces = view.workspaces.sortedBy { it.number }
+    val grouped = workspaces.mapNotNull { workspace ->
+        view.agents.filter { it.workspaceId == workspace.workspaceId }.takeIf { it.isNotEmpty() }
+            ?.let { PickerWorkspace(workspace.label.takeIf { label -> label.isNotBlank() }, rows(it)) }
+    }
+    val known = workspaces.map { it.workspaceId }.toSet()
+    val stray = view.agents.filter { it.workspaceId !in known }
+    return if (stray.isEmpty()) grouped else grouped + PickerWorkspace(null, rows(stray))
+}
+
 /**
  * The session picker over Home (a host card's header opens it): a segmented control (herdr, tmux) with a "Shell" pill
- * (the `>_` glyph) that opens a plain shell, and one grouped list below. A session that already has an open terminal
- * is marked `● Open` ([open]): choosing it switches to that terminal. Hosts without tmux or herdr, failed listings and
- * errors are explained in muted text, never hidden; so is mosh's UDP being blocked ([udpBlocked]), under the tabs.
- * While [gate] is set (the host is not connected yet) the sheet shows it instead: the host's progress, or why it is
- * not connected with [gateAction]'s pill; the lists follow in the same sheet once the gate is null.
+ * (the `>_` glyph) that opens a plain shell, and one grouped list below. The herdr tab lists each running session's
+ * agents from the host's live views ([herdrViews], by session: null for the default one) under a `Whole session` row;
+ * tapping an agent is [openAgent]. A session that already has an open terminal is marked `● Open` ([open]): choosing
+ * it switches to that terminal. The tmux tab is read again whenever it is shown ([tmuxShown]) and has Refresh, with a
+ * spinner beside it while [refreshing]. Hosts without tmux or herdr, failed listings and errors are explained in muted
+ * text, never hidden; so is mosh's UDP being blocked ([udpBlocked]), under the tabs. While [gate] is set (the host is
+ * not connected yet) the sheet shows it instead: the host's progress, or why it is not connected with [gateAction]'s
+ * pill; the lists follow in the same sheet once the gate is null.
  */
 @Composable
 fun SessionPickerSheet(
@@ -115,9 +186,16 @@ fun SessionPickerSheet(
     /** The host's name: nothing else on screen says which host the sheet is for. */
     title: String? = null,
     udpBlocked: Boolean = false,
+    herdrViews: Map<String?, HerdrView> = emptyMap(),
+    openAgent: (session: String?, paneId: String) -> Unit = { _, _ -> },
+    refreshing: Boolean = false,
+    tmuxShown: () -> Unit = {},
 ) {
     var chosen by remember { mutableStateOf(initialTab) }
     val tab = chosen ?: if (caps != null && caps.herdr == null && caps.tmux != null) PickerTab.TMUX else PickerTab.HERDR
+    val lists = gate == null
+    val shown by rememberUpdatedState(tmuxShown)
+    LaunchedEffect(tab, lists) { if (lists && tab == PickerTab.TMUX) shown() }
     // A fixed minimum height keeps the segmented control where the thumb left it when the tab changes.
     val minHeight = (LocalConfiguration.current.screenHeightDp * 0.4f).dp
     Or2Sheet(dismiss, title = null, done = null, scrollable = false) {
@@ -153,18 +231,12 @@ fun SessionPickerSheet(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 when (tab) {
-                    PickerTab.HERDR -> HerdrList(caps, capsError, open, openHerdr)
-                    PickerTab.TMUX -> TmuxPane(caps, capsError, tmux, open, openTmux)
-                }
-                Row(
-                    // The icon starts at the rows' text inset (their 12 dp padding inside the card, less the glyph's own margin).
-                    Modifier.clickable(role = Role.Button, onClick = refresh)
-                        .padding(start = Or2Dimens.Gutter - 2.dp, end = Or2Dimens.Gutter, top = 8.dp, bottom = 8.dp).testTag("host-refresh"),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(Or2Icons.Refresh, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.TextMuted)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Refresh", style = Or2Type.Body, color = Or2Colors.TextMuted)
+                    PickerTab.HERDR -> HerdrList(caps, capsError, herdrViews, open, openHerdr, openAgent)
+                    PickerTab.TMUX -> {
+                        TmuxPane(caps, capsError, tmux, open, openTmux)
+                        // Only here: the herdr tab is live already. It re-reads tmux and re-probes (new herdr sessions).
+                        RefreshRow(refresh, refreshing)
+                    }
                 }
                 Spacer(Modifier.height(12.dp))
             }
@@ -234,11 +306,13 @@ private fun SheetRow(
 }
 
 @Composable
-private fun Marker(color: Color, text: String, modifier: Modifier = Modifier) {
+private fun Marker(
+    color: Color, text: String, modifier: Modifier = Modifier, pulsing: Boolean = false, textColor: Color = Or2Colors.TextMuted,
+) {
     Row(modifier, verticalAlignment = Alignment.CenterVertically) {
-        StatusDot(color)
+        StatusDot(color, pulsing = pulsing)
         Spacer(Modifier.width(6.dp))
-        Text(text, style = Or2Type.Secondary, color = Or2Colors.TextMuted)
+        Text(text, style = Or2Type.Secondary, color = textColor)
     }
 }
 
@@ -246,33 +320,134 @@ private fun Marker(color: Color, text: String, modifier: Modifier = Modifier) {
 @Composable
 private fun OpenMarker(tag: String) = Marker(Or2Colors.Accent, "Open", Modifier.testTag(tag))
 
+/**
+ * The herdr tab: each live session (see [pickerHerdrSessions]) under its name, as one card of a `Whole session` row
+ * and its agents by workspace; then the sessions without a live view as single rows, in one card.
+ */
 @Composable
-private fun HerdrList(caps: HostCapabilities?, capsError: String?, open: OpenSessions, choose: (String?) -> Unit) {
+private fun HerdrList(
+    caps: HostCapabilities?, capsError: String?, views: Map<String?, HerdrView>, open: OpenSessions,
+    choose: (String?) -> Unit, openAgent: (String?, String) -> Unit,
+) {
     when {
-        capsError != null -> Muted("Could not query the host. Try Refresh.")
+        // No Refresh on this tab: the tmux tab's re-probes the host.
+        capsError != null -> Muted("Could not query the host. Refresh it from the tmux tab.")
         caps == null -> Muted("Checking the host…")
         caps.herdr == null -> Muted("herdr is not installed on this host.", Modifier.testTag("herdr-missing"))
         caps.herdrSessions.isEmpty() -> Muted("No herdr sessions.")
-        else -> GroupCard(color = Or2Colors.SurfaceRaisedRow) {
-            caps.herdrSessions.forEachIndexed { index, session ->
-                if (index > 0) GroupDivider()
-                val isOpen = open.has(session)
-                SheetRow(
-                    "herdr:${session.name}", session.name + if (session.isDefault) " (default)" else "",
-                    // The state is the marker at the right, never a second caption line as well.
-                    null,
-                    // The default session is opened without a name, never by its listed name.
-                    { choose(if (session.isDefault) null else session.name) }, "herdr-open:${session.name}",
-                    enabled = session.running || isOpen,
-                    marker = {
-                        when {
-                            isOpen -> OpenMarker("open-mark:herdr:${session.name}")
-                            session.running -> Marker(Or2Colors.Done, "Running")
-                            else -> Marker(Or2Colors.Subtle, "Not running")
-                        }
-                    },
+        else -> {
+            val sessions = pickerHerdrSessions(caps.herdrSessions, views)
+            val (live, plain) = sessions.partition { it.live }
+            live.forEachIndexed { index, session ->
+                LiveSession(session, open.has(session.info), first = index == 0, { choose(session.session) }) { pane ->
+                    openAgent(session.session, pane)
+                }
+            }
+            if (plain.isNotEmpty()) GroupCard(Modifier.padding(top = if (live.isEmpty()) 0.dp else 8.dp), color = Or2Colors.SurfaceRaisedRow) {
+                plain.forEachIndexed { index, session ->
+                    if (index > 0) GroupDivider()
+                    val isOpen = open.has(session.info)
+                    SheetRow(
+                        "herdr:${session.label}", session.label,
+                        // The state is the marker at the right, never a second caption line as well.
+                        null,
+                        // The default session is opened without a name, never by its listed name.
+                        { choose(session.session) }, "herdr-open:${session.label}",
+                        enabled = session.running || isOpen,
+                        marker = {
+                            when {
+                                isOpen -> OpenMarker("open-mark:herdr:${session.label}")
+                                session.running -> Marker(Or2Colors.Done, "Running")
+                                else -> Marker(Or2Colors.Subtle, "Not running")
+                            }
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * A running herdr session with a live view: its name as a section header, then one card: `Whole session` (the
+ * session's terminal as it is; `● Open` when it has one) and the session's agents under small muted workspace
+ * headers, or `No agents`.
+ */
+@Composable
+private fun LiveSession(session: PickerHerdrSession, isOpen: Boolean, first: Boolean, whole: () -> Unit, agent: (String) -> Unit) {
+    Column(Modifier.testTag("herdr-session:${session.label}")) {
+        // As the Terminals sheet heads each host's group.
+        SectionHeader(session.label, topGap = if (first) 0.dp else 8.dp)
+        GroupCard(color = Or2Colors.SurfaceRaisedRow) {
+            SheetRow(
+                "herdr:${session.label}", "Whole session", null, whole, "herdr-open:${session.label}",
+                marker = if (isOpen) ({ OpenMarker("open-mark:herdr:${session.label}") }) else null,
+            )
+            val workspaces = session.workspaces.orEmpty()
+            if (workspaces.isEmpty()) {
+                GroupDivider()
+                Text(
+                    "No agents", style = Or2Type.Secondary, color = Or2Colors.TextMuted,
+                    modifier = Modifier.padding(horizontal = Or2Dimens.Gutter, vertical = 10.dp).testTag("herdr-no-agents:${session.label}"),
                 )
             }
+            workspaces.forEach { workspace ->
+                GroupDivider()
+                workspace.label?.let {
+                    Text(
+                        it, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(start = Or2Dimens.Gutter, end = Or2Dimens.Gutter, top = 8.dp)
+                            .testTag("herdr-workspace:${session.label}:$it"),
+                    )
+                }
+                workspace.agents.forEachIndexed { index, item ->
+                    if (index > 0) GroupDivider()
+                    AgentRow(session.label, item) { agent(item.paneId) }
+                }
+            }
+        }
+    }
+}
+
+/** An agent: its label and its pane's cwd (muted, the path's end kept), its status dot and word at the right. */
+@Composable
+private fun AgentRow(session: String, agent: PickerAgent, open: () -> Unit) {
+    val blocked = agent.status == AgentStatus.BLOCKED
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = if (agent.cwd != null) Or2Dimens.RowMinSubtitle else Or2Dimens.RowMin)
+            .clickable(role = Role.Button, onClick = open).testTag("herdr-agent:$session:${agent.paneId}")
+            .padding(horizontal = Or2Dimens.Gutter, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(agent.label, style = Or2Type.RowLabel, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            agent.cwd?.let {
+                Text(it, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, maxLines = 1, overflow = TextOverflow.StartEllipsis)
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        Marker(
+            statusColor(agent.status), statusLabel(agent.status), Modifier.testTag("herdr-agent-status:$session:${agent.paneId}"),
+            pulsing = agent.status == AgentStatus.WORKING, textColor = if (blocked) Or2Colors.Attention else Or2Colors.TextMuted,
+        )
+    }
+}
+
+/** Refresh (the tmux tab's last row), with a spinner beside it while a re-read or a re-probe runs. */
+@Composable
+private fun RefreshRow(refresh: () -> Unit, refreshing: Boolean) {
+    Row(
+        // The icon starts at the rows' text inset (their 12 dp padding inside the card, less the glyph's own margin).
+        Modifier.clickable(role = Role.Button, onClick = refresh)
+            .padding(start = Or2Dimens.Gutter - 2.dp, end = Or2Dimens.Gutter, top = 8.dp, bottom = 8.dp).testTag("host-refresh"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Or2Icons.Refresh, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.TextMuted)
+        Spacer(Modifier.width(6.dp))
+        Text("Refresh", style = Or2Type.Body, color = Or2Colors.TextMuted)
+        if (refreshing) {
+            Spacer(Modifier.width(8.dp))
+            Spinner(Modifier.testTag("refresh-spinner"), size = 14.dp)
         }
     }
 }
@@ -285,7 +460,11 @@ private fun TmuxPane(caps: HostCapabilities?, capsError: String?, tmux: TmuxList
         caps.tmux == null -> Muted("tmux is not installed on this host.", Modifier.testTag("tmux-missing"))
         else -> {
             when (tmux) {
-                TmuxList.Loading -> Muted("Loading sessions…")
+                // Until the first answer: a spinner where the list will be (a later read keeps the list, see RefreshRow).
+                TmuxList.Loading -> Box(
+                    Modifier.fillMaxWidth().heightIn(min = Or2Dimens.RowMin).padding(horizontal = Or2Dimens.Gutter),
+                    contentAlignment = Alignment.CenterStart,
+                ) { Spinner(Modifier.testTag("tmux-spinner")) }
                 is TmuxList.Failed -> Muted(tmux.message, color = Or2Colors.Danger)
                 is TmuxList.Loaded -> {
                     if (tmux.sessions.isEmpty()) Muted("No tmux sessions yet.")

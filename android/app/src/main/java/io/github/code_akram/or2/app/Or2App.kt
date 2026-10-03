@@ -209,6 +209,13 @@ fun Or2App(
         activations.launchOpen(active, target) { enter(it, replace = false) }
     }
 
+    // An explicit agent request (an Inbox row, an agent in the picker): its pane is focused first, then its session's
+    // terminal is shown.
+    fun openAgent(hostId: Long, hostLabel: String, session: String?, paneId: String) {
+        actions.message(null)
+        activations.launchOpenAgent(hostId, hostLabel, session, paneId) { enter(it, replace = false) }
+    }
+
     val resume = rememberResume(
         hosts, terminals, states, busy, loaded, currentTerminal, connections, actions,
         AppNavigation(stack = { NavStack.decode(saved) }, navigate = ::navigate, enter = ::enter), ::connect,
@@ -229,18 +236,14 @@ fun Or2App(
                 Destination.Home -> HomeRoute(
                     hosts, keys.size, terminals, states, inbox, connections, busy, unlocking, actions, resume,
                     picker = homePicker, setPicker = { homePicker = it },
-                    connect = ::connect, openTerminal = ::openTerminal, show = { show(it) },
+                    connect = ::connect, openTerminal = ::openTerminal, openAgent = ::openAgent, show = { show(it) },
                     push = { navigate(nav.push(it)) }, addHost = { addSheet = true }, easyPair = ::easyPair, manualHost = ::manualHost,
                 )
                 Destination.Inbox -> InboxScreen(
                     inbox, busy,
                     connectAll = { connect(inbox.hosts.map { it.host }) },
                     connect = { connect(listOf(it)) },
-                    // An explicit agent request: its pane is focused first, then its session's terminal is shown.
-                    openAgent = { item ->
-                        actions.message(null)
-                        activations.launchOpenAgent(item.hostId, item.hostLabel, item.session, item.paneId) { enter(it, replace = false) }
-                    },
+                    openAgent = { item -> openAgent(item.hostId, item.hostLabel, item.session, item.paneId) },
                     openHome = { navigate(nav.top(Destination.Home)) },
                     openKeys = { navigate(nav.push(Destination.Keys)) },
                     easyPair = ::easyPair, manualHost = ::manualHost,
