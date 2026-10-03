@@ -235,7 +235,7 @@ class UiGalleryActivity : ComponentActivity() {
             "terminal-herdr-wheel" -> Terminal(target = "herdr personal w1:p2", herdrWheelAway = true)
             "terminal-composer" -> Terminal(composer = true)
             "terminal-attach" -> Terminal(composer = true, images = true)
-            "terminal-uploading" -> Terminal(target = "tmux main", images = true, upload = UploadState.Uploading)
+            "terminal-uploading" -> Terminal(target = "tmux main", images = true, upload = UploadState.Uploading())
             "terminal-upload-failed" -> Terminal(target = "tmux main", images = true,
                 upload = UploadState.Failed("SFTP is not available on this host"))
             "share-picker" -> Box(Modifier.fillMaxSize()) {

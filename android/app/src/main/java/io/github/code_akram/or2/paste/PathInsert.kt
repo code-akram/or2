@@ -35,5 +35,14 @@ fun pathInsertion(path: String): String {
     return " " + shellQuote(path)
 }
 
+/**
+ * What is inserted for several [paths] at once (a queue run, contracts.md, "Several images at once"): each
+ * [pathInsertion] in order, so `" /a.png /b.jpg"`. Refuses any path that is not [insertablePath].
+ */
+fun pathsInsertion(paths: List<String>): String = paths.joinToString("") { pathInsertion(it) }
+
 /** The composer's [text] with [path] inserted at its end. */
 fun composerWithPath(text: String, path: String): String = text + pathInsertion(path)
+
+/** The composer's [text] with [paths] inserted at its end, in order ([pathsInsertion]). */
+fun composerWithPaths(text: String, paths: List<String>): String = text + pathsInsertion(paths)

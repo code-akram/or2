@@ -3,6 +3,8 @@ package io.github.code_akram.or2.paste
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.InputStream
@@ -129,6 +131,8 @@ fun <I> imagePreparation(
     return {
         val bytes = try {
             if (!readableImageScheme(scheme)) throw ImageRefused(UNREADABLE)
+            // Already cancelled (a queue dropped before it reached this image): stop before anything is opened.
+            currentCoroutineContext().ensureActive()
             readImage(source(), timeout, readers)
         } finally {
             released()

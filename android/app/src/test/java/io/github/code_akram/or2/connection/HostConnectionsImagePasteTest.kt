@@ -61,7 +61,7 @@ class HostConnectionsImagePasteTest {
         assertTrue(paste.start { image })
         advanceUntilIdle()
         assertEquals(listOf("png" to 5), rig.port.uploads)
-        assertEquals("/home/u/.cache/or2/images/or2-1.png", paste.paths.first())
+        assertEquals(listOf("/home/u/.cache/or2/images/or2-1.png"), paste.paths.first())
         assertEquals(UploadState.Idle, paste.state.value)
     }
 
@@ -92,7 +92,7 @@ class HostConnectionsImagePasteTest {
         rig.port.uploadGate = CompletableDeferred()
         terminal.imagePaste!!.start { image }
         advanceUntilIdle()
-        assertEquals(UploadState.Uploading, terminal.imagePaste!!.state.value)
+        assertEquals(UploadState.Uploading(), terminal.imagePaste!!.state.value)
         rig.holder.dismissTerminal(terminal)
         advanceUntilIdle()
         assertEquals(UploadState.Idle, terminal.imagePaste!!.state.value)
