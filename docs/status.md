@@ -6,15 +6,14 @@ Updated 2026-10-03.
 
 ## Where it stands
 
-- **Released: [v0.1.1](releases/v0.1.1.md)** (2026-10-02, after [v0.1.0](releases/v0.1.0.md) the same day): the
-  signed APK and `or2-pair` for Linux x86_64/aarch64 (static) and macOS Intel/Apple silicon.
-- **On `main`, not released: the v0.1.2 candidate** (`3c667b2` or later). The app's `versionName` is still
-  `0.1.1` (`versionCode 2`); the bump to 0.1.2 happens at release time. The
-  [CHANGELOG](../CHANGELOG.md) "Unreleased" section lists everything, and FFI `API_VERSION` is 18.
-- **The owner's phone runs that candidate** (installed 2026-10-03 18:38, with agents in the picker) as the signed release build: an in-place
-  update, so the hosts and keys are kept. It awaits the owner's QA of the streamlined UI (below).
+- **Released: [v0.1.2](releases/v0.1.2.md)** (2026-10-03, tag `v0.1.2`, versionCode 3, FFI API 18): the signed APK
+  (SHA-256 `7a8c9733…b8d6`) and `or2-pair` for Linux x86_64/aarch64 (static) and macOS Intel/Apple silicon, after
+  [v0.1.1](releases/v0.1.1.md) and [v0.1.0](releases/v0.1.0.md) (2026-10-02). The owner's QA passed in full; the
+  install one-liner was checked against the release.
+- **The owner's phone runs v0.1.2**, the published APK, installed in place (hosts and keys kept).
+- `main` has nothing unreleased yet.
 
-### In the v0.1.2 candidate
+### In v0.1.2
 
 - **Reply from an agent notification.** It sends to the agent's pane through herdr, with no terminal open.
   - The reply is tied to the exact agent instance: herdr's `agent_session` id, or the name of an agent herdr
@@ -87,22 +86,10 @@ until the caller acknowledges, as a real host does.
 
 ## Next, in order
 
-1. **The owner's QA of the streamlined v0.1.2 candidate** on the phone (installed 2026-10-03):
-   1. Home: each host's terminals inside its card; × closes (herdr/tmux one tap, a shell asks); a tap on the host
-      opens the picker (connecting first); `⋯` for Connect/Disconnect, Edit, Delete; `Connect all`.
-   2. Picker: the herdr tab lists each session's agents by workspace (a tap opens that agent); the session's row (`default · 4 agents`) opens it whole; tmux
-      re-read on every opening, Refresh with a spinner; `● Open` on a session already open.
-   3. Terminal: Back and the orange disc go Home; the green disc's Terminals sheet (× per row, Copy screen,
-      Gestures & shortcuts); toolbar fits (⇧Tab, `/`, `@`; Copy/Clear while selecting).
-   4. Images: several from the picker and from Share; the strip's `Uploading image 2 of 4…`; about 1 s per image.
-   5. Multi-line composer text to an agent goes without the "Send N lines?" dialog.
-   6. Notifications and Reply (Claude Code, pi; Codex only while herdr accepts its session report).
-2. **Fix what the QA finds**, then **release v0.1.2**:
-   1. Bump `core/Cargo.toml` to 0.1.2 (then `cargo update --workspace --offline`), the app to
-      `versionName 0.1.2` / `versionCode 3`, and the version `NativeContractTest` expects.
-   2. Write `docs/releases/v0.1.2.md` and turn "Unreleased" into `[0.1.2]`.
-   3. Build and sign, put the SHA-256 in the notes, tag and push, `gh release upload`, then test the
-      one-liner. [build](build.md), "Releases", has the details.
+1. **v0.1.3, "zero-config Reply"** (owner to confirm): `or2-pair` checks `herdr integration status` and installs
+   the missing integrations for the agents on the host with one confirmation; the app says why a notification has
+   no Reply. File the herdr issue: Codex's `pane.report_agent_session` is refused (see above).
+2. **Keyboard:** the owner tries CleverKeys; then the spike (item 4 below).
 3. **The deferred M3 acceptance**, when the owner approves it: mobile data, the Wi-Fi to mobile handover, and
    unplugged (Doze) background runs. This is v0 acceptance step 3, still never tested.
 4. **Keyboard (owner idea, 2026-10-03; not decided).** An in-app keyboard in or2's look, with Ctrl, Esc,
