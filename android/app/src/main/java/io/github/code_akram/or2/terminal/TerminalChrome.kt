@@ -69,6 +69,7 @@ import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -103,6 +104,15 @@ class TerminalChromeState(padOpen: Boolean = false, composerOpen: Boolean = fals
      */
     fun composerSent(sent: String) {
         composerText = composerAfterSend(composerText, sent)
+    }
+
+    /** [text] typed into the composer at its cursor (over its selection, if any), the cursor after it: a toolbar key. */
+    fun typeInComposer(text: String) {
+        composer.edit {
+            val start = selection.min
+            replace(start, selection.max, text)
+            selection = TextRange(start + text.length)
+        }
     }
 }
 
@@ -164,17 +174,22 @@ class ToolbarState(
     val ctrl: Boolean, val alt: Boolean, val selecting: Boolean, val padOpen: Boolean, val composerOpen: Boolean,
 )
 
+/**
+ * What the toolbar's keys do. [shiftTab] sends Shift+Tab to the terminal whatever is latched (Claude Code's mode
+ * cycle, which Gboard cannot send); [type] types a character (`/`, `@`) into the composer at its cursor while it is
+ * open, else into the terminal.
+ */
 class ToolbarActions(
     val toggleCtrl: () -> Unit, val toggleAlt: () -> Unit, val escape: () -> Unit, val tab: () -> Unit,
     val togglePad: () -> Unit, val panes: () -> Unit, val paste: () -> Unit, val history: () -> Unit,
     val jumpToBottom: () -> Unit, val toggleComposer: () -> Unit, val toggleKeyboard: () -> Unit,
-    val copy: () -> Unit, val clearSelection: () -> Unit,
+    val copy: () -> Unit, val clearSelection: () -> Unit, val shiftTab: () -> Unit, val type: (String) -> Unit,
 )
 
 /**
  * The floating key pill: `Ctrl`, `Alt`, `Esc`, `Tab` as mono text, then icon keys (arrow pad,
- * panes, paste, history), then, apart, the composer and keyboard toggles without key
- * backgrounds. It scrolls horizontally when it overflows.
+ * panes, paste, history), then `⇧Tab`, `/` and `@` as mono text, then, apart, the composer and keyboard
+ * toggles without key backgrounds. It scrolls horizontally when it overflows.
  */
 @Composable
 fun KeyToolbar(
@@ -204,6 +219,9 @@ fun KeyToolbar(
             ToolKey("Paste", actions.paste, tracked("Paste"), icon = Or2Icons.Paste)
             ToolKey("History: page up, hold for the bottom", actions.history, tracked("History"), icon = Or2Icons.History,
                 onLongClick = actions.jumpToBottom)
+            ToolKey("Shift+Tab", actions.shiftTab, tracked("ShiftTab"), label = "⇧Tab")
+            ToolKey("Slash", { actions.type("/") }, tracked("Slash"), label = "/")
+            ToolKey("At sign", { actions.type("@") }, tracked("At"), label = "@")
         }
         Spacer(Modifier.width(4.dp))
         ToolKey("Composer", actions.toggleComposer, tracked("Composer"), icon = Or2Icons.Chat, framed = false, active = state.composerOpen)
