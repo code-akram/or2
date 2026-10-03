@@ -12,6 +12,7 @@ use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, DuplexStream};
 use tokio::sync::{mpsc, oneshot};
 
+use super::connection::HostEvent;
 use super::pump::{connection_error, describe, lost};
 use crate::keys::ClientKey;
 use crate::session::{HostKeyPrompt, SessionFailure};
@@ -90,15 +91,6 @@ fn with_host_key_algorithms(key: Vec<Algorithm>) -> Arc<client::Config> {
     })
 }
 
-/// An untrusted host key waits for the user: the driver answers `reply`.
-pub(crate) struct HostKeyRequest {
-    pub(crate) prompt: HostKeyPrompt,
-    pub(crate) reply: oneshot::Sender<bool>,
-}
-
-/// The transport's read side ended (EOF or error) while russh may be stuck awaiting the user.
-pub(crate) struct TransportEnd(pub(crate) SessionFailure);
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ClientError {
     #[error(transparent)]
@@ -107,11 +99,11 @@ pub(crate) enum ClientError {
     Certificate,
 }
 
-/// The russh handler. `E` is the driver's event type, so one handler serves both M1's session
-/// driver and the host driver.
-pub(crate) struct Client<E> {
+/// The russh handler of a host connection (and of pairing, which runs on the same machinery):
+/// an untrusted host key goes to the driver as [`HostEvent::HostKey`] and waits for its answer.
+pub(crate) struct Client {
     pub(crate) trusted: Vec<HostKey>,
-    pub(crate) events: mpsc::Sender<E>,
+    pub(crate) events: mpsc::Sender<HostEvent>,
     pub(crate) checked: bool,
     /// Told why the SSH session ended, once, if it ends after the handshake. Hosts use it to
     /// notice loss that no channel is awaiting.
@@ -121,8 +113,8 @@ pub(crate) struct Client<E> {
     pub(crate) reader_gate: Arc<std::sync::Mutex<Option<TestReaderGate>>>,
 }
 
-impl<E> Client<E> {
-    pub(crate) fn new(trusted: Vec<HostKey>, events: mpsc::Sender<E>) -> Self {
+impl Client {
+    pub(crate) fn new(trusted: Vec<HostKey>, events: mpsc::Sender<HostEvent>) -> Self {
         Self {
             trusted,
             events,
@@ -137,7 +129,7 @@ impl<E> Client<E> {
 #[cfg(test)]
 pub(crate) type TestReaderGate = (oneshot::Sender<()>, oneshot::Receiver<()>);
 
-impl<E: From<HostKeyRequest> + Send + 'static> client::Handler for Client<E> {
+impl client::Handler for Client {
     type Error = ClientError;
 
     #[cfg(test)]
@@ -175,16 +167,13 @@ impl<E: From<HostKeyRequest> + Send + 'static> client::Handler for Client<E> {
         self.checked = true;
         let (reply, decision) = oneshot::channel();
         self.events
-            .send(
-                HostKeyRequest {
-                    prompt: HostKeyPrompt {
-                        presented: presented.clone(),
-                        previously_trusted: self.trusted.clone(),
-                    },
-                    reply,
-                }
-                .into(),
-            )
+            .send(HostEvent::HostKey(
+                HostKeyPrompt {
+                    presented: presented.clone(),
+                    previously_trusted: self.trusted.clone(),
+                },
+                reply,
+            ))
             .await
             .map_err(|_| russh::Error::Disconnect)?;
         let approved = decision.await.unwrap_or(false);
@@ -267,19 +256,19 @@ pub(crate) async fn authenticate<H: client::Handler>(
 
 /// russh awaits `check_server_key` inside its reader, so while the user decides it cannot
 /// notice the peer hanging up. Relay the transport through a bounded in-memory pipe instead:
-/// the relay keeps reading the transport, reports its end as [`TransportEnd`], and closes the
+/// the relay keeps reading the transport, reports its end as [`HostEvent::TransportEnded`], and
+/// closes the
 /// pipe so russh sees EOF too. Returns russh's end of the pipe and the relay future, which
 /// finishes when either direction ends and must be polled alongside the SSH connection.
-pub(crate) fn relay<S, E>(
+pub(crate) fn relay<S>(
     stream: S,
-    events: mpsc::Sender<E>,
+    events: mpsc::Sender<HostEvent>,
 ) -> (
     DuplexStream,
     impl std::future::Future<Output = Result<(u64, u64), std::io::Error>>,
 )
 where
     S: AsyncRead + AsyncWrite + Unpin,
-    E: From<TransportEnd>,
 {
     let (ssh_stream, pipe) = tokio::io::duplex(PIPE_BYTES);
     let relay = async move {
@@ -296,7 +285,7 @@ where
                         error.kind()
                     )),
                 };
-                let _ = events.send(TransportEnd(failure).into()).await;
+                let _ = events.send(HostEvent::TransportEnded(failure)).await;
                 result
             },
             tokio::io::copy(&mut pipe_read, &mut write),

@@ -291,8 +291,7 @@ impl TerminalPump {
 
 /// The network task's half once the channel runs its program: forwards channel output as
 /// [`Event::Output`] and the write queue to the channel, concurrently, until the channel ends.
-/// `shutdown` resolving closes the channel and ends with `Disconnected`; M1 passes a future
-/// that never resolves because dropping the whole connection closes it.
+/// `shutdown` resolving closes the channel and ends with `Disconnected`.
 ///
 /// The channel ending with an exit status or signal is `RemoteExited`; ending without one is
 /// loss.

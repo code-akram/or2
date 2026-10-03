@@ -35,9 +35,7 @@ use tokio::sync::{OnceCell, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 
-use super::client::{
-    Client, HostKeyRequest, TransportEnd, authenticate, config, handshake_failure, relay,
-};
+use super::client::{Client, authenticate, config, handshake_failure, relay};
 use super::mosh_session;
 use super::pump::{CHANNEL_CLOSE_GRACE, connection_error, internal, lost};
 use super::runtime;
@@ -105,6 +103,7 @@ const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 /// From the network task to the host thread. Pairing ([`super::pair_client`]) runs on the same
 /// connection machinery and answers only the host-key and transport-end events.
 pub(super) enum HostEvent {
+    /// An untrusted host key waits for the user: the driver answers on the sender.
     HostKey(HostKeyPrompt, oneshot::Sender<bool>),
     Authenticating,
     Connected {
@@ -112,26 +111,15 @@ pub(super) enum HostEvent {
         peer: Option<SocketAddr>,
         host: Arc<SshHost>,
     },
+    /// The transport's read side ended (EOF or error) while russh may be stuck awaiting the user.
     TransportEnded(SessionFailure),
     Closed(CloseReason),
-}
-
-impl From<HostKeyRequest> for HostEvent {
-    fn from(request: HostKeyRequest) -> Self {
-        HostEvent::HostKey(request.prompt, request.reply)
-    }
-}
-
-impl From<TransportEnd> for HostEvent {
-    fn from(end: TransportEnd) -> Self {
-        HostEvent::TransportEnded(end.0)
-    }
 }
 
 /// The established SSH connection. Shared (`Arc`) by terminal channels, queries and herdr
 /// watches; it is the [`RemoteHost`] they talk to.
 pub(super) struct SshHost {
-    handle: Handle<Client<HostEvent>>,
+    handle: Handle<Client>,
     exec_timeout: Duration,
     /// The program probe (programs and locale), cached the moment its script returns.
     programs: OnceCell<HostCapabilities>,
@@ -203,7 +191,7 @@ impl SshHost {
     /// Wraps an authenticated connection. The caller ends the connection's opens
     /// ([`SshHost::end_opens`]) when it is done with it.
     pub(super) fn new(
-        handle: Handle<Client<HostEvent>>,
+        handle: Handle<Client>,
         exec_timeout: Duration,
         #[cfg(test)] reader_gate: Arc<Mutex<Option<super::client::TestReaderGate>>>,
     ) -> Arc<Self> {

@@ -1,7 +1,7 @@
 //! One terminal session on a host connection: a PTY channel running the login shell, tmux or
 //! herdr (contracts.md, "Terminal sessions on a host").
 //!
-//! Exactly M1's session semantics on a channel instead of a whole connection. The caller's
+//! The session lifecycle of every terminal, on a channel of the host's connection. The caller's
 //! thread (`or2-terminal`) runs [`drive`], which owns the libghostty engine and the
 //! [`SessionDriver`]; [`channel_task`] on the network runtime owns the SSH channel. They talk
 //! through the shared [`TerminalPump`] / [`pump_channel`] event and write queues.
