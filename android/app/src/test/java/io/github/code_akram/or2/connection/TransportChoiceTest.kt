@@ -93,10 +93,10 @@ class TransportChoiceTest {
     @Test
     fun linkHealthGreysOnlyPastFiveSeconds() {
         assertNull(linkStaleLabel(null))
-        assertNull(linkStaleLabel(LinkHealth(300uL, 300uL)))
-        assertNull(linkStaleLabel(LinkHealth(5000uL, 9000uL))) // Exactly five seconds is still fine.
-        assertEquals("Last heard 5 s ago", linkStaleLabel(LinkHealth(5001uL, 5001uL)))
-        assertEquals("Last heard 12 s ago", linkStaleLabel(LinkHealth(12_400uL, 20_000uL)))
-        assertNull(linkStaleLabel(LinkHealth(400uL, 400uL))) // Recovered.
+        assertNull(linkStaleLabel(LinkHealth(300uL)))
+        assertNull(linkStaleLabel(LinkHealth(5000uL))) // Exactly five seconds is still fine.
+        assertEquals("Last heard 5 s ago", linkStaleLabel(LinkHealth(5001uL)))
+        assertEquals("Last heard 12 s ago", linkStaleLabel(LinkHealth(12_400uL)))
+        assertNull(linkStaleLabel(LinkHealth(400uL))) // Recovered.
     }
 }

@@ -164,7 +164,6 @@ pub struct KeyInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum ViewportScroll {
-    Top,
     Bottom,
     /// Negative moves up into history.
     Delta {
@@ -217,7 +216,6 @@ impl TryFrom<KeyInput> for core_input::KeyInput {
 impl From<ViewportScroll> for core_input::ViewportScroll {
     fn from(scroll: ViewportScroll) -> Self {
         match scroll {
-            ViewportScroll::Top => Self::Top,
             ViewportScroll::Bottom => Self::Bottom,
             ViewportScroll::Delta { rows } => Self::Delta(rows),
             ViewportScroll::Wheel { rows, column, row } => Self::Wheel { rows, column, row },
@@ -248,15 +246,12 @@ impl From<TerminalTransport> for CoreTransport {
 pub struct LinkHealth {
     /// Milliseconds since anything at all arrived from the server.
     pub since_heard_ms: u64,
-    /// Milliseconds since the server acknowledged something the client sent.
-    pub since_ack_ms: u64,
 }
 
 impl From<CoreLinkHealth> for LinkHealth {
     fn from(health: CoreLinkHealth) -> Self {
         Self {
             since_heard_ms: health.since_heard_ms,
-            since_ack_ms: health.since_ack_ms,
         }
     }
 }

@@ -177,7 +177,6 @@ async fn bootstrap_subscribes_then_snapshots_then_subscribes_per_pane() {
     );
     let view = &views[0];
     assert_eq!(view.version, 1);
-    assert_eq!(view.protocol, 22);
     assert_eq!(view.focused_pane_id.as_deref(), Some("w2:p2"));
     assert_eq!(view.workspaces.len(), 2);
     assert_eq!(view.tabs.len(), 2);
@@ -192,6 +191,34 @@ async fn a_named_session_uses_its_own_socket() {
     let harness = Harness::start(&host, Some("work"));
     harness.live().await;
     assert!(host.opened().iter().all(|path| path == WORK_SOCKET));
+    harness.stop().await;
+}
+
+/// What the app does not read is not projected, so a snapshot that differs only there (a
+/// workspace's aggregate status, a pane's scroll position) is read but not delivered again.
+#[tokio::test(start_paused = true)]
+async fn a_change_the_app_does_not_read_is_not_delivered() {
+    let host = host_with(&two_panes());
+    let harness = Harness::start(&host, None);
+    harness.live().await;
+    sleep(Duration::from_secs(1)).await;
+    let before = host.snapshots_served();
+    let unread = two_panes()
+        .replacen(
+            r#""agent_status":"unknown"}"#,
+            r#""agent_status":"working"}"#,
+            1,
+        )
+        .replace(
+            r#""offset_from_bottom":0,"max"#,
+            r#""offset_from_bottom":3,"max"#,
+        );
+    assert_ne!(unread, two_panes());
+    host.script_snapshots(vec![Step::reply(&unread)]);
+    host.emit(fixture("events_lifecycle.jsonl").lines().next().unwrap());
+    sleep(Duration::from_secs(1)).await;
+    assert!(host.snapshots_served() > before, "the change was read");
+    assert_eq!(harness.views().len(), 1, "and not delivered");
     harness.stop().await;
 }
 
@@ -499,7 +526,6 @@ async fn a_newer_protocol_with_unknown_fields_and_values_still_projects() {
     let harness = Harness::start(&host, None);
     harness.live().await;
     let view = harness.latest_view().unwrap();
-    assert_eq!(view.protocol, 23);
     assert_eq!(view.agents.len(), 2);
     assert_eq!(view.agents[0].status, AgentStatus::Blocked);
     assert_eq!(view.agents[1].status, AgentStatus::Unknown);

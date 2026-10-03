@@ -57,8 +57,8 @@ class AgentNotificationsDeviceTest {
         .firstOrNull { it.tag == key.tag && it.id == AgentNotifications.NOTIFICATION_ID }?.notification
 
     private fun view(status: AgentStatus, seq: ULong) = HerdrView(
-        1uL, 22u, null, emptyList(), emptyList(), emptyList(),
-        listOf(HerdrAgent(key.paneId, "w1:t1", "w1", "Claude Code", "claude", "Claude Code", status, "/work", null, false, seq, "term_1", CLAUDE)),
+        1uL, null, emptyList(), emptyList(), emptyList(),
+        listOf(HerdrAgent(key.paneId, "w1:t1", "w1", "Claude Code", "claude", "Claude Code", status, "/work", seq, "term_1", CLAUDE)),
     )
 
     @Test

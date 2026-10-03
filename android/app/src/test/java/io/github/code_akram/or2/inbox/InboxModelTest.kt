@@ -33,12 +33,12 @@ import org.junit.Test
 class InboxModelTest {
     private fun agent(pane: String, status: AgentStatus, workspace: String = "w1", tab: String = "w1:t1", name: String? = "Claude Code",
         cwd: String? = "/work/$pane") =
-        HerdrAgent(pane, tab, workspace, name, "claude", name, status, cwd, null, false, 1uL, "term_$pane")
+        HerdrAgent(pane, tab, workspace, name, "claude", name, status, cwd, 1uL, "term_$pane")
 
     private fun view(vararg agents: HerdrAgent) = HerdrView(
-        1uL, 22u, null,
-        listOf(HerdrWorkspace("w1", 1u, "alpha", true, AgentStatus.IDLE), HerdrWorkspace("w2", 2u, "beta", false, AgentStatus.IDLE)),
-        listOf(HerdrTab("w1:t1", "w1", 1u, "editor", true, AgentStatus.IDLE), HerdrTab("w2:t1", "w2", 1u, "tests", false, AgentStatus.IDLE)),
+        1uL, null,
+        listOf(HerdrWorkspace("w1", 1u, "alpha"), HerdrWorkspace("w2", 2u, "beta")),
+        listOf(HerdrTab("w1:t1", "w1", 1u, "editor"), HerdrTab("w2:t1", "w2", 1u, "tests")),
         emptyList(), agents.toList(),
     )
 
@@ -98,13 +98,13 @@ class InboxModelTest {
     @Test
     fun agentNamePrefersTheDisplayNameThenNameThenAgentThenAPlaceholder() {
         fun named(display: String?, name: String?, kind: String?) =
-            HerdrAgent("p", "t", "w", name, kind, display, AgentStatus.IDLE, null, null, false, 0uL, "term_p")
+            HerdrAgent("p", "t", "w", name, kind, display, AgentStatus.IDLE, null, 0uL, "term_p")
         assertEquals("Display", agentName(named("Display", "name", "kind")))
         assertEquals("name", agentName(named(null, "name", "kind")))
         assertEquals("kind", agentName(named(null, null, "kind")))
         assertEquals("agent", agentName(named("", null, null)))
         // A pane whose workspace or tab is unknown still lists, without labels.
-        val orphan = buildInbox(listOf(source("Box", 1, HerdrView(1uL, 22u, null, emptyList(), emptyList(), emptyList(), listOf(agent("x:p", AgentStatus.IDLE)))))).single().items.single()
+        val orphan = buildInbox(listOf(source("Box", 1, HerdrView(1uL, null, emptyList(), emptyList(), emptyList(), listOf(agent("x:p", AgentStatus.IDLE)))))).single().items.single()
         assertNull(orphan.workspaceLabel)
         assertNull(orphan.tabLabel)
     }
@@ -123,7 +123,7 @@ class InboxModelTest {
 
     @Test
     fun herdrNoteExplainsMissingOrUnavailableHerdr() {
-        val caps = HostCapabilities("/t", "/h", null, "C.UTF-8", emptyList())
+        val caps = HostCapabilities("/t", "/h", null, emptyList())
         assertEquals("Checking the host…", herdrNote(null, null, emptyList()))
         assertTrue(herdrNote(null, "boom", emptyList())!!.startsWith("Could not query"))
         assertEquals("herdr is not installed", herdrNote(caps.copy(herdr = null), null, emptyList()))
@@ -148,7 +148,7 @@ class InboxModelTest {
         val holder = HostConnections({ request, listener ->
             listeners[request.addresses[0].host] = listener
             FakePort().also {
-                it.caps = HostCapabilities("/t", "/h", null, "C.UTF-8", listOf(HerdrSessionInfo("default", true, true)))
+                it.caps = HostCapabilities("/t", "/h", null, listOf(HerdrSessionInfo("default", true, true)))
                 ports[request.addresses[0].host] = it
             }
         }, FakeTrust(), dispatcher, dispatcher)

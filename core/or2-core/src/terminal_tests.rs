@@ -170,7 +170,12 @@ fn alternate_screen_and_scrollback_golden() {
         frame.rows().iter().map(text).collect::<Vec<_>>(),
         ["L2      ", "L3      ", "L4      "]
     );
-    assert!(terminal.scroll(ViewportScroll::Top).unwrap().is_empty());
+    assert!(
+        terminal
+            .scroll(ViewportScroll::Delta(-100))
+            .unwrap()
+            .is_empty()
+    );
     let frame = terminal.frame().unwrap();
     assert_eq!(
         frame.scrollback(),

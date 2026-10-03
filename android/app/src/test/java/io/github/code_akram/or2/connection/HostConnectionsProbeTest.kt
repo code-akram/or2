@@ -230,7 +230,7 @@ class HostConnectionsProbeTest {
                         if (6000uL in seen) listOf("Last heard 6 s ago") else emptyList(),
                         health.mapNotNull(::linkStaleLabel),
                     )
-                    assertEquals("Last heard 6 s ago", linkStaleLabel(LinkHealth(6000uL, 9000uL)))
+                    assertEquals("Last heard 6 s ago", linkStaleLabel(LinkHealth(6000uL)))
                     assertEquals(400uL, mosh.linkHealth.value?.sinceHeardMs)
                     assertNull(linkStaleLabel(mosh.linkHealth.value))
 

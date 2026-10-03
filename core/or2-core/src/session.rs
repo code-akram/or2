@@ -593,7 +593,7 @@ mod tests {
             Err(SessionError::NotConnected)
         );
         assert_eq!(
-            handle.scroll(ViewportScroll::Top),
+            handle.scroll(ViewportScroll::Bottom),
             Err(SessionError::NotConnected)
         );
         assert_eq!(handle.request_full_frame(), Err(SessionError::NotConnected));

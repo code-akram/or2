@@ -320,7 +320,6 @@ pub struct HostCapabilities {
     pub tmux: Option<String>,
     pub herdr: Option<String>,
     pub mosh_server: Option<String>,
-    pub utf8_locale: String,
     pub herdr_sessions: Vec<HerdrSessionInfo>,
 }
 
@@ -330,7 +329,6 @@ impl From<core::HostCapabilities> for HostCapabilities {
             tmux: caps.tmux,
             herdr: caps.herdr,
             mosh_server: caps.mosh_server,
-            utf8_locale: caps.utf8_locale,
             herdr_sessions: caps
                 .herdr_sessions
                 .into_iter()
@@ -344,13 +342,12 @@ impl From<core::HostCapabilities> for HostCapabilities {
     }
 }
 
+/// A tmux session on the host; `list_tmux_sessions` returns them most recently active first.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct TmuxSession {
     pub name: String,
     pub windows: u32,
     pub attached_clients: u32,
-    pub created_unix: i64,
-    pub activity_unix: i64,
 }
 
 impl From<core::TmuxSession> for TmuxSession {
@@ -359,8 +356,6 @@ impl From<core::TmuxSession> for TmuxSession {
             name: session.name,
             windows: session.windows,
             attached_clients: session.attached_clients,
-            created_unix: session.created_unix,
-            activity_unix: session.activity_unix,
         }
     }
 }
@@ -818,8 +813,7 @@ mod tests {
             created_unix: -1,
             activity_unix: i64::MAX,
         });
-        assert_eq!((tmux.windows, tmux.created_unix), (3, -1));
-        assert_eq!(tmux.activity_unix, i64::MAX);
+        assert_eq!((tmux.windows, tmux.attached_clients), (3, 1));
         assert_eq!(
             core::TargetScroll::from(TargetScroll::Up { lines: 3 }),
             core::TargetScroll::Up { lines: 3 }

@@ -64,8 +64,8 @@ class UiPort(
 ) : HostPort {
     var hostListener: HostListener? = null
     var native: HostState = HostState.Connecting
-    var caps = HostCapabilities("/usr/bin/tmux", "/usr/bin/herdr", null, "C.UTF-8", listOf(HerdrSessionInfo("default", true, true)))
-    var tmux = listOf(TmuxSession("main", 2u, 1u, 0L, 10L))
+    var caps = HostCapabilities("/usr/bin/tmux", "/usr/bin/herdr", null, listOf(HerdrSessionInfo("default", true, true)))
+    var tmux = listOf(TmuxSession("main", 2u, 1u))
     val sessions = mutableListOf<Pair<TerminalTarget, UiSession>>()
     val watchListeners = mutableListOf<HerdrListener>()
 

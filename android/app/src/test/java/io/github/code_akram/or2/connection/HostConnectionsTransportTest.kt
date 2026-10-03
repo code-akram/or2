@@ -288,7 +288,7 @@ class HostConnectionsTransportTest {
 
         // The background session's frames and health do not reach the terminal before the swap.
         sessionListener(rig, 1).onFrameReady()
-        sessionListener(rig, 1).onLinkHealth(LinkHealth(300uL, 300uL))
+        sessionListener(rig, 1).onLinkHealth(LinkHealth(300uL))
         advanceUntilIdle()
         assertEquals(beforeSwap, drawn())
         assertNull(terminal.linkHealth.value)
@@ -317,10 +317,10 @@ class HostConnectionsTransportTest {
         assertEquals(afterSwap, drawn())
         assertEquals(SessionState.Connected, terminal.state.value)
         sessionListener(rig, 1).onFrameReady()
-        sessionListener(rig, 1).onLinkHealth(LinkHealth(400uL, 400uL))
+        sessionListener(rig, 1).onLinkHealth(LinkHealth(400uL))
         advanceUntilIdle()
         assertEquals(afterSwap + 1, drawn())
-        assertEquals(LinkHealth(400uL, 400uL), terminal.linkHealth.value)
+        assertEquals(LinkHealth(400uL), terminal.linkHealth.value)
 
         // UDP works now: the next tmux terminal opens over mosh directly.
         rig.holder.openTerminal(rig.active, TerminalTarget.Tmux("next"))
@@ -554,7 +554,7 @@ class HostConnectionsTransportTest {
         val rig = rig()
         val terminal = rig.holder.openTerminal(rig.active, shell)
         val mosh = rig.port.terminals[0].third
-        sessionListener(rig, 0).onLinkHealth(LinkHealth(300uL, 300uL))
+        sessionListener(rig, 0).onLinkHealth(LinkHealth(300uL))
         advanceUntilIdle()
         assertEquals(300uL, terminal.linkHealth.value?.sinceHeardMs)
 
@@ -573,7 +573,7 @@ class HostConnectionsTransportTest {
 
         // The replaced attempt can no longer speak for the terminal.
         sessionListener(rig, 0).onStateChanged(SessionState.Connected)
-        sessionListener(rig, 0).onLinkHealth(LinkHealth(9000uL, 9000uL))
+        sessionListener(rig, 0).onLinkHealth(LinkHealth(9000uL))
         advanceUntilIdle()
         assertEquals(SessionState.Connecting, terminal.state.value)
         assertNull(terminal.linkHealth.value)
@@ -666,9 +666,9 @@ class HostConnectionsTransportTest {
         val rig = rig()
         val terminal = rig.holder.openTerminal(rig.active, shell)
         assertNull(terminal.linkHealth.value)
-        sessionListener(rig, 0).onLinkHealth(LinkHealth(6000uL, 9000uL))
+        sessionListener(rig, 0).onLinkHealth(LinkHealth(6000uL))
         advanceUntilIdle()
-        assertEquals(LinkHealth(6000uL, 9000uL), terminal.linkHealth.value)
+        assertEquals(LinkHealth(6000uL), terminal.linkHealth.value)
         assertEquals("Last heard 6 s ago", linkStaleLabel(terminal.linkHealth.value))
 
         // A closed session hears nothing: the stale line must not outlive it.

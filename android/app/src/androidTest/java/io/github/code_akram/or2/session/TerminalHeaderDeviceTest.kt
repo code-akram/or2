@@ -89,7 +89,7 @@ class TerminalHeaderDeviceTest {
         assertCentredOnTheCard()
         assertClearOfTheSides()
         // A stale link widens the right side: the title gives way on both sides and stays centred.
-        compose.runOnUiThread { health = LinkHealth(12_300uL, 12_300uL) }
+        compose.runOnUiThread { health = LinkHealth(12_300uL) }
         compose.onNodeWithTag("terminal-link").assertIsDisplayed()
         assertCentredOnTheCard()
         assertClearOfTheSides()

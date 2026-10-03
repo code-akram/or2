@@ -60,7 +60,6 @@ fn status(wire: &WireStatus) -> AgentStatus {
 pub fn project(snapshot: &SessionSnapshot) -> HerdrView {
     HerdrView {
         version: 0,
-        protocol: snapshot.protocol,
         focused_pane_id: snapshot.focused_pane_id.clone(),
         workspaces: snapshot
             .workspaces
@@ -69,8 +68,6 @@ pub fn project(snapshot: &SessionSnapshot) -> HerdrView {
                 workspace_id: workspace.workspace_id.clone(),
                 number: workspace.number,
                 label: workspace.label.clone(),
-                focused: workspace.focused,
-                agent_status: status(&workspace.agent_status),
             })
             .collect(),
         tabs: snapshot
@@ -81,8 +78,6 @@ pub fn project(snapshot: &SessionSnapshot) -> HerdrView {
                 workspace_id: tab.workspace_id.clone(),
                 number: tab.number,
                 label: tab.label.clone(),
-                focused: tab.focused,
-                agent_status: status(&tab.agent_status),
             })
             .collect(),
         panes: snapshot
@@ -90,14 +85,8 @@ pub fn project(snapshot: &SessionSnapshot) -> HerdrView {
             .iter()
             .map(|pane| Pane {
                 pane_id: pane.pane_id.clone(),
-                tab_id: pane.tab_id.clone(),
-                workspace_id: pane.workspace_id.clone(),
-                label: pane.label.clone(),
                 agent: pane.agent.clone(),
-                agent_status: status(&pane.agent_status),
                 cwd: pane.cwd.clone(),
-                title: pane.title.clone(),
-                focused: pane.focused,
             })
             .collect(),
         agents: snapshot
@@ -112,8 +101,6 @@ pub fn project(snapshot: &SessionSnapshot) -> HerdrView {
                 display_agent: agent.display_agent.clone(),
                 status: status(&agent.agent_status),
                 cwd: agent.cwd.clone(),
-                title: agent.title.clone(),
-                focused: agent.focused,
                 state_change_seq: agent.state_change_seq,
                 terminal_id: agent.terminal_id.clone(),
                 agent_session: agent.agent_session.as_ref().map(|session| AgentSession {
@@ -153,7 +140,6 @@ mod tests {
         let snapshot = parse_snapshot(&result_of(&fixture("snapshot_two_panes.json"))).unwrap();
         let view = project(&snapshot);
         assert_eq!(view.version, 0);
-        assert_eq!(view.protocol, 22);
         assert_eq!(view.focused_pane_id.as_deref(), Some("w2:p2"));
         assert_eq!(
             view.workspaces,
@@ -162,15 +148,11 @@ mod tests {
                     workspace_id: "w1".into(),
                     number: 1,
                     label: "~".into(),
-                    focused: false,
-                    agent_status: AgentStatus::Unknown
                 },
                 Workspace {
                     workspace_id: "w2".into(),
                     number: 2,
                     label: "ws-one".into(),
-                    focused: true,
-                    agent_status: AgentStatus::Unknown
                 }
             ]
         );
@@ -182,8 +164,6 @@ mod tests {
                 workspace_id: "w2".into(),
                 number: 1,
                 label: "1".into(),
-                focused: true,
-                agent_status: AgentStatus::Unknown
             }
         );
         assert_eq!(view.panes.len(), 3);
@@ -191,14 +171,8 @@ mod tests {
             view.panes[2],
             Pane {
                 pane_id: "w2:p2".into(),
-                tab_id: "w2:t1".into(),
-                workspace_id: "w2".into(),
-                label: None,
                 agent: None,
-                agent_status: AgentStatus::Unknown,
                 cwd: Some("/tmp".into()),
-                title: None,
-                focused: true
             }
         );
         assert!(view.agents.is_empty());
@@ -215,10 +189,7 @@ mod tests {
     fn agents_and_unknown_fields_and_values_are_tolerated() {
         let snapshot = parse_snapshot(&result_of(&fixture("snapshot_agents_future.json"))).unwrap();
         let view = project(&snapshot);
-        assert_eq!(view.protocol, 23, "newer protocols are accepted");
-        // An enum value from the future is Unknown, not a parse failure.
-        assert_eq!(view.workspaces[0].agent_status, AgentStatus::Unknown);
-        assert_eq!(view.tabs[0].agent_status, AgentStatus::Working);
+        assert_eq!(snapshot.protocol, 23, "newer protocols are accepted");
         assert_eq!(
             view.agents,
             [
@@ -231,8 +202,6 @@ mod tests {
                     display_agent: Some("Claude Code".into()),
                     status: AgentStatus::Blocked,
                     cwd: Some("/work/project".into()),
-                    title: Some("fix the build".into()),
-                    focused: true,
                     state_change_seq: 7,
                     terminal_id: "term_a".into(),
                     // A kind this build does not know is kept as herdr named it.
@@ -249,10 +218,9 @@ mod tests {
                     name: None,
                     agent: None,
                     display_agent: None,
+                    // An enum value from the future is Unknown, not a parse failure.
                     status: AgentStatus::Unknown,
                     cwd: None,
-                    title: None,
-                    focused: false,
                     state_change_seq: 0,
                     terminal_id: "term_b".into(),
                     agent_session: None,
@@ -260,10 +228,7 @@ mod tests {
                 }
             ]
         );
-        assert_eq!(view.panes[0].label.as_deref(), Some("main"));
         assert_eq!(view.panes[0].agent.as_deref(), Some("claude"));
-        assert_eq!(view.panes[0].agent_status, AgentStatus::Blocked);
-        assert_eq!(view.panes[0].title.as_deref(), Some("fix the build"));
     }
 
     #[test]

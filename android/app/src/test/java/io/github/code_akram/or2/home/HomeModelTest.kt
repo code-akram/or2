@@ -89,13 +89,13 @@ class HomeModelTest {
     }
 
     private fun pane(id: String, agent: String? = null, cwd: String? = null) =
-        HerdrPane(id, "w1:t1", "w1", null, agent, AgentStatus.IDLE, cwd, null, false)
+        HerdrPane(id, agent, cwd)
 
     private fun agent(pane: String, name: String?, display: String? = name, cwd: String? = null) =
-        HerdrAgent(pane, "w1:t1", "w1", name, name?.lowercase(), display, AgentStatus.WORKING, cwd, null, false, 1u, "term_$pane", null)
+        HerdrAgent(pane, "w1:t1", "w1", name, name?.lowercase(), display, AgentStatus.WORKING, cwd, 1u, "term_$pane", null)
 
     private fun view(focused: String?, panes: List<HerdrPane>, agents: List<HerdrAgent> = emptyList()) =
-        HerdrView(1u, 1u, focused, emptyList(), emptyList(), panes, agents)
+        HerdrView(1u, focused, emptyList(), emptyList(), panes, agents)
 
     @Test
     fun aSessionCardShowsItsWorkingDirectoryElseWhatItsHerdrSessionShowsElseNothing() {

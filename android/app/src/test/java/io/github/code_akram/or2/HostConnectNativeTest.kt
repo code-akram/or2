@@ -80,7 +80,6 @@ class HostConnectNativeTest {
 
                     // Suspend queries across the real FFI.
                     val capabilities = runBlocking { host.capabilities() }
-                    assertTrue(capabilities.utf8Locale.lowercase().contains("utf"))
                     capabilities.tmux?.let { assertTrue(it.startsWith("/")) }
                     // The fixture's tmux socket directory is private and empty: no server.
                     if (capabilities.tmux != null) assertTrue(runBlocking { host.listTmuxSessions() }.isEmpty())

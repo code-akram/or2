@@ -669,7 +669,6 @@ mod tests {
     fn view(label: &str) -> HerdrView {
         HerdrView {
             version: 0,
-            protocol: 22,
             focused_pane_id: Some(label.to_owned()),
             workspaces: Vec::new(),
             tabs: Vec::new(),

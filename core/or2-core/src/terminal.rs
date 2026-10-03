@@ -538,7 +538,6 @@ impl TerminalEngine {
         };
         if self.terminal.active_screen()? == Screen::Primary {
             self.terminal.scroll_viewport(match scroll {
-                ViewportScroll::Top => ScrollViewport::Top,
                 ViewportScroll::Bottom => ScrollViewport::Bottom,
                 ViewportScroll::Delta(rows) | ViewportScroll::Wheel { rows, .. } => {
                     ScrollViewport::Delta(rows as isize)
@@ -547,7 +546,6 @@ impl TerminalEngine {
             return Ok(Vec::new());
         }
         let (key, count) = match scroll {
-            ViewportScroll::Top => (Key::Home, 1),
             ViewportScroll::Bottom => (Key::End, 1),
             ViewportScroll::Delta(rows) | ViewportScroll::Wheel { rows, .. } if rows < 0 => {
                 (Key::ArrowUp, rows.unsigned_abs())

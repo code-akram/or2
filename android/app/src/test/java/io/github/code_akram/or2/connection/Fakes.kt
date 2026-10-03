@@ -109,7 +109,7 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     var nativeState: HostState = HostState.Connecting
     var approved: String? = null
     var destroyed = false
-    var caps = HostCapabilities("/usr/bin/tmux", "/usr/bin/herdr", null, "C.UTF-8", listOf(HerdrSessionInfo("default", true, true)))
+    var caps = HostCapabilities("/usr/bin/tmux", "/usr/bin/herdr", null, listOf(HerdrSessionInfo("default", true, true)))
     var capsFailure: Exception? = null
     /** While set, the capability probe is unanswered: `capabilities()` waits for it to complete. */
     var capsGate: CompletableDeferred<Unit>? = null

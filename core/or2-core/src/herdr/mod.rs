@@ -242,7 +242,6 @@ mod tests {
     fn view(version: u64) -> HerdrView {
         HerdrView {
             version,
-            protocol: 22,
             focused_pane_id: None,
             workspaces: Vec::new(),
             tabs: Vec::new(),

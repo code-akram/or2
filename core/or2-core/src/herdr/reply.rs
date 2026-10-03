@@ -863,8 +863,6 @@ mod tests {
             display_agent: None,
             status: super::super::AgentStatus::Blocked,
             cwd: None,
-            title: None,
-            focused: false,
             state_change_seq: 1,
             terminal_id: "term_w1:p1".into(),
             agent_session: Some(AgentSession {

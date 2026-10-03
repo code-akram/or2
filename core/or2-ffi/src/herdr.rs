@@ -21,8 +21,6 @@ pub struct HerdrWorkspace {
     pub workspace_id: String,
     pub number: u32,
     pub label: String,
-    pub focused: bool,
-    pub agent_status: AgentStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -31,21 +29,13 @@ pub struct HerdrTab {
     pub workspace_id: String,
     pub number: u32,
     pub label: String,
-    pub focused: bool,
-    pub agent_status: AgentStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct HerdrPane {
     pub pane_id: String,
-    pub tab_id: String,
-    pub workspace_id: String,
-    pub label: Option<String>,
     pub agent: Option<String>,
-    pub agent_status: AgentStatus,
     pub cwd: Option<String>,
-    pub title: Option<String>,
-    pub focused: bool,
 }
 
 /// The agent instance a notification's reply is for (API 16; `HostConnection.reply_to_pane`):
@@ -109,8 +99,6 @@ pub struct HerdrAgent {
     pub display_agent: Option<String>,
     pub status: AgentStatus,
     pub cwd: Option<String>,
-    pub title: Option<String>,
-    pub focused: bool,
     pub state_change_seq: u64,
     /// herdr's id of the pane's terminal (API 16): a pane id reused for a new terminal (herdr
     /// restarted) is a new pane. A reply names it ([`AgentIdentity`]).
@@ -128,7 +116,6 @@ pub struct HerdrAgent {
 pub struct HerdrView {
     /// Increases with every delivered view of one watch.
     pub version: u64,
-    pub protocol: u32,
     pub focused_pane_id: Option<String>,
     pub workspaces: Vec<HerdrWorkspace>,
     pub tabs: Vec<HerdrTab>,
@@ -178,8 +165,6 @@ impl From<core::Workspace> for HerdrWorkspace {
             workspace_id: w.workspace_id,
             number: w.number,
             label: w.label,
-            focused: w.focused,
-            agent_status: w.agent_status.into(),
         }
     }
 }
@@ -191,8 +176,6 @@ impl From<core::Tab> for HerdrTab {
             workspace_id: t.workspace_id,
             number: t.number,
             label: t.label,
-            focused: t.focused,
-            agent_status: t.agent_status.into(),
         }
     }
 }
@@ -201,14 +184,8 @@ impl From<core::Pane> for HerdrPane {
     fn from(p: core::Pane) -> Self {
         Self {
             pane_id: p.pane_id,
-            tab_id: p.tab_id,
-            workspace_id: p.workspace_id,
-            label: p.label,
             agent: p.agent,
-            agent_status: p.agent_status.into(),
             cwd: p.cwd,
-            title: p.title,
-            focused: p.focused,
         }
     }
 }
@@ -226,8 +203,6 @@ impl From<core::Agent> for HerdrAgent {
             display_agent: a.display_agent,
             status: a.status.into(),
             cwd: a.cwd,
-            title: a.title,
-            focused: a.focused,
             state_change_seq: a.state_change_seq,
             terminal_id: a.terminal_id,
         }
@@ -238,7 +213,6 @@ impl From<core::HerdrView> for HerdrView {
     fn from(view: core::HerdrView) -> Self {
         Self {
             version: view.version,
-            protocol: view.protocol,
             focused_pane_id: view.focused_pane_id,
             workspaces: view.workspaces.into_iter().map(Into::into).collect(),
             tabs: view.tabs.into_iter().map(Into::into).collect(),
@@ -324,33 +298,22 @@ mod tests {
     fn maps_every_state_and_the_view_losslessly() {
         let view = core::HerdrView {
             version: 7,
-            protocol: 22,
             focused_pane_id: Some("p1".into()),
             workspaces: vec![core::Workspace {
                 workspace_id: "w1".into(),
                 number: 1,
                 label: "main".into(),
-                focused: true,
-                agent_status: core::AgentStatus::Blocked,
             }],
             tabs: vec![core::Tab {
                 tab_id: "t1".into(),
                 workspace_id: "w1".into(),
                 number: 2,
                 label: "tab".into(),
-                focused: false,
-                agent_status: core::AgentStatus::Done,
             }],
             panes: vec![core::Pane {
                 pane_id: "p1".into(),
-                tab_id: "t1".into(),
-                workspace_id: "w1".into(),
-                label: None,
                 agent: Some("claude".into()),
-                agent_status: core::AgentStatus::Working,
                 cwd: Some("/x".into()),
-                title: None,
-                focused: true,
             }],
             agents: vec![core::Agent {
                 pane_id: "p1".into(),
@@ -361,8 +324,6 @@ mod tests {
                 display_agent: Some("Claude".into()),
                 status: core::AgentStatus::Unknown,
                 cwd: None,
-                title: Some("t".into()),
-                focused: true,
                 state_change_seq: u64::MAX,
                 terminal_id: "term_1".into(),
                 agent_session: Some(core::AgentSession {
@@ -375,14 +336,12 @@ mod tests {
         let HerdrState::Live { view: mapped } = core::HerdrState::Live { view }.into() else {
             panic!("expected Live");
         };
-        assert_eq!((mapped.version, mapped.protocol), (7, 22));
+        assert_eq!(mapped.version, 7);
         assert_eq!(mapped.focused_pane_id.as_deref(), Some("p1"));
-        assert_eq!(mapped.workspaces[0].agent_status, AgentStatus::Blocked);
         assert_eq!(mapped.workspaces[0].label, "main");
         assert_eq!(mapped.tabs[0].number, 2);
-        assert_eq!(mapped.tabs[0].agent_status, AgentStatus::Done);
         assert_eq!(mapped.panes[0].agent.as_deref(), Some("claude"));
-        assert_eq!(mapped.panes[0].agent_status, AgentStatus::Working);
+        assert_eq!(mapped.panes[0].cwd.as_deref(), Some("/x"));
         assert_eq!(mapped.agents[0].display_agent.as_deref(), Some("Claude"));
         assert_eq!(mapped.agents[0].status, AgentStatus::Unknown);
         assert_eq!(mapped.agents[0].state_change_seq, u64::MAX);
