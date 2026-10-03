@@ -1,5 +1,6 @@
 package io.github.code_akram.or2.inbox
 
+import androidx.compose.ui.graphics.Color
 import io.github.code_akram.or2.connection.ActiveHost
 import io.github.code_akram.or2.connection.HerdrSessionWatch
 import io.github.code_akram.or2.connection.HostConnections
@@ -15,6 +16,7 @@ import io.github.code_akram.or2.ffi.HostCapabilities
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.session.hostStateMessage
+import io.github.code_akram.or2.ui.Or2Colors
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOf
@@ -56,6 +58,32 @@ fun linkStatus(state: HostState?, sleeps: Boolean = false): LinkStatus = when (s
 fun isSleepFailure(failure: SessionFailure): Boolean =
     failure is SessionFailure.ConnectionLost || failure is SessionFailure.Unreachable || failure is SessionFailure.TimedOut
 
+/**
+ * The connection in words, for a host whose [link] was read from [state] (null: it has no connection): an asleep or
+ * unconnected host says just that, any other state explains itself (a failure its cause).
+ */
+fun linkMessage(link: LinkStatus, state: HostState?): String =
+    if (link == LinkStatus.ASLEEP || state == null) link.label else hostStateMessage(state)
+
+/** The colour of a host's status dot; null where none is drawn (not connected, asleep). */
+fun linkStatusColor(link: LinkStatus): Color? = when (link) {
+    LinkStatus.NOT_CONNECTED, LinkStatus.ASLEEP -> null
+    LinkStatus.CONNECTING -> Or2Colors.Accent
+    LinkStatus.NEEDS_HOST_KEY -> Or2Colors.Attention
+    LinkStatus.CONNECTED -> Or2Colors.Done
+    LinkStatus.FAILED -> Or2Colors.Danger
+}
+
+/**
+ * An agent's label: herdr's display name, else its name, else its agent id, else [paneAgent] (the agent herdr names
+ * on the pane itself); null when none is set.
+ */
+fun agentLabel(agent: HerdrAgent?, paneAgent: String? = null): String? =
+    listOfNotNull(agent?.displayAgent, agent?.name, agent?.agent, paneAgent).firstOrNull { it.isNotBlank() }
+
+/** "Claude Code" style name for an inbox row or an alert: [agentLabel], else a placeholder. */
+fun agentName(agent: HerdrAgent): String = agentLabel(agent) ?: "agent"
+
 /** One agent row of the inbox. */
 data class InboxItem(
     val hostId: Long,
@@ -93,10 +121,6 @@ fun statusLabel(status: AgentStatus) = when (status) {
     AgentStatus.IDLE -> "Idle"
     AgentStatus.UNKNOWN -> "Unknown"
 }
-
-/** "Claude Code" style name: herdr's display name, else its agent id, else a placeholder. */
-fun agentName(agent: HerdrAgent): String =
-    listOfNotNull(agent.displayAgent, agent.name, agent.agent).firstOrNull { it.isNotBlank() } ?: "agent"
 
 /**
  * Agents across all sources, grouped by status in [INBOX_STATUS_ORDER] (empty groups omitted).
@@ -181,14 +205,13 @@ fun HostConnections.inbox(hosts: Flow<List<Host>>): Flow<InboxState> =
 
 private fun hostFlow(host: Host, active: ActiveHost?): Flow<Pair<InboxHostRow, List<InboxSource>>> {
     if (active == null) {
-        return flowOf(InboxHostRow(host, LinkStatus.NOT_CONNECTED, LinkStatus.NOT_CONNECTED.label, null, 0) to emptyList())
+        return flowOf(InboxHostRow(host, LinkStatus.NOT_CONNECTED, linkMessage(LinkStatus.NOT_CONNECTED, null), null, 0) to emptyList())
     }
     return combine(active.state, active.capabilities, active.capabilitiesError, active.liveViews(host)) { state, caps, capsError, views ->
         val link = linkStatus(state, host.sleeps)
         val sources = if (link == LinkStatus.CONNECTED) views.mapNotNull { it.third } else emptyList()
         val note = if (link == LinkStatus.CONNECTED) herdrNote(caps, capsError, views.map { it.first.name to it.second }) else null
-        val message = if (link == LinkStatus.ASLEEP) LinkStatus.ASLEEP.label else hostStateMessage(state)
-        InboxHostRow(host, link, message, note, sources.sumOf { it.view.agents.size }) to sources
+        InboxHostRow(host, link, linkMessage(link, state), note, sources.sumOf { it.view.agents.size }) to sources
     }
 }
 

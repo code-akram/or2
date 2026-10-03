@@ -103,6 +103,11 @@ class InboxModelTest {
         assertEquals("name", agentName(named(null, "name", "kind")))
         assertEquals("kind", agentName(named(null, null, "kind")))
         assertEquals("agent", agentName(named("", null, null)))
+        // The label: the pane's own agent comes last, and nothing at all is null.
+        assertEquals("kind", agentLabel(named(null, null, "kind"), paneAgent = "pane-agent"))
+        assertEquals("pane-agent", agentLabel(named(" ", null, null), paneAgent = "pane-agent"))
+        assertEquals("pane-agent", agentLabel(null, paneAgent = "pane-agent"))
+        assertNull(agentLabel(null))
         // A pane whose workspace or tab is unknown still lists, without labels.
         val orphan = buildInbox(listOf(source("Box", 1, HerdrView(1uL, 22u, null, emptyList(), emptyList(), emptyList(), listOf(agent("x:p", AgentStatus.IDLE)))))).single().items.single()
         assertNull(orphan.workspaceLabel)
@@ -119,6 +124,21 @@ class InboxModelTest {
         assertEquals(LinkStatus.CONNECTED, linkStatus(HostState.Connected(1u)))
         assertEquals(LinkStatus.NOT_CONNECTED, linkStatus(HostState.Closed(CloseReason.Disconnected)))
         assertEquals(LinkStatus.FAILED, linkStatus(HostState.Closed(CloseReason.Failed(SessionFailure.TimedOut))))
+    }
+
+    @Test
+    fun theLinkMessageAndColourFollowTheStatus() {
+        assertEquals("Not connected", linkMessage(LinkStatus.NOT_CONNECTED, null))
+        val lost = HostState.Closed(CloseReason.Failed(SessionFailure.TimedOut))
+        assertEquals("Asleep", linkMessage(linkStatus(lost, sleeps = true), lost))
+        assertEquals(io.github.code_akram.or2.session.hostStateMessage(lost), linkMessage(linkStatus(lost), lost))
+        assertEquals(io.github.code_akram.or2.session.hostStateMessage(HostState.Connecting), linkMessage(LinkStatus.CONNECTING, HostState.Connecting))
+        // No dot for a host that is not connected or asleep; one per status otherwise, each its own.
+        assertNull(linkStatusColor(LinkStatus.NOT_CONNECTED))
+        assertNull(linkStatusColor(LinkStatus.ASLEEP))
+        val dots = listOf(LinkStatus.CONNECTING, LinkStatus.NEEDS_HOST_KEY, LinkStatus.CONNECTED, LinkStatus.FAILED).map(::linkStatusColor)
+        assertTrue(dots.all { it != null })
+        assertEquals(4, dots.toSet().size)
     }
 
     @Test
