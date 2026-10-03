@@ -8,10 +8,10 @@ Updated 2026-10-03.
 
 - **Released: [v0.1.1](releases/v0.1.1.md)** (2026-10-02, after [v0.1.0](releases/v0.1.0.md) the same day): the
   signed APK and `or2-pair` for Linux x86_64/aarch64 (static) and macOS Intel/Apple silicon.
-- **On `main`, not released: the v0.1.2 candidate** (`4c8ec1a` or later). The app's `versionName` is still
+- **On `main`, not released: the v0.1.2 candidate** (`3c667b2` or later). The app's `versionName` is still
   `0.1.1` (`versionCode 2`); the bump to 0.1.2 happens at release time. The
   [CHANGELOG](../CHANGELOG.md) "Unreleased" section lists everything, and FFI `API_VERSION` is 18.
-- **The owner's phone runs that candidate** (installed 2026-10-03 18:06) as the signed release build: an in-place
+- **The owner's phone runs that candidate** (installed 2026-10-03 18:38, with agents in the picker) as the signed release build: an in-place
   update, so the hosts and keys are kept. It awaits the owner's QA of the streamlined UI (below).
 
 ### In the v0.1.2 candidate
@@ -90,7 +90,8 @@ until the caller acknowledges, as a real host does.
 1. **The owner's QA of the streamlined v0.1.2 candidate** on the phone (installed 2026-10-03):
    1. Home: each host's terminals inside its card; × closes (herdr/tmux one tap, a shell asks); a tap on the host
       opens the picker (connecting first); `⋯` for Connect/Disconnect, Edit, Delete; `Connect all`.
-   2. Picker: herdr and tmux tabs, Shell; `● Open` on a session already open, which switches to it.
+   2. Picker: the herdr tab lists each session's agents by workspace (a tap opens that agent), `Whole session`; tmux
+      re-read on every opening, Refresh with a spinner; `● Open` on a session already open.
    3. Terminal: Back and the orange disc go Home; the green disc's Terminals sheet (× per row, Copy screen,
       Gestures & shortcuts); toolbar fits (⇧Tab, `/`, `@`; Copy/Clear while selecting).
    4. Images: several from the picker and from Share; the strip's `Uploading image 2 of 4…`; about 1 s per image.
