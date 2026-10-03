@@ -25,6 +25,9 @@ Each release's notes are in [docs/releases/](docs/releases/).
 - A tap on a program that tracks the mouse (herdr, tmux with mouse on) is a click at that cell, so the program's own
   buttons work; a link still opens, and the keyboard key still opens the keyboard.
 - FFI API 16 (`Session.mouse_click`, `Session.paste_text`, `HostConnection.reply_to_pane`, `upload_image`).
+- Image upload is much faster on a distant host: a host's uploads share one SFTP session, its independent checks
+  go out together, and old images are swept after the path is in, so an upload into an existing directory waits
+  for 8 round trips instead of 27 (11 for the first on a connection).
 
 ### Fixed
 
