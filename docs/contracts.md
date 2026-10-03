@@ -5743,3 +5743,39 @@ never does, and a `#` inside a string is no comment (`reply.rs`, `the_codex_daem
 
 **Wording (lead, on the phone):** the confirmation's title already asks (`Enable Reply?`), so its body only says what
 happens: `or2 installs herdr's pi integration on archlinux. Restart pi afterwards.`
+
+# v0.1.4: the herdr Spaces sheet, and agents named as herdr names them (owner request, 2026-10-03)
+
+The owner, in a herdr terminal on the phone: herdr's own `switch` text (top right of herdr's compact status bar, which
+opens herdr's folded sidebar) is unintuitive; they want an or2 control by the header's two discs. And: *"why can't we
+read the agent workspace, tab, pane names? that'll help identify the target agent, just like herdr."* herdr reports
+spaces (`workspace.label`: `~`, `code`, `or2`), tabs (`tab.label`, numbers unless renamed), an agent's `name` (when
+started by name) and the **agent's terminal title** (`terminal_title_stripped`: the task an agent is on, e.g.
+`Repository context gathering`, `Review v013 brief | or2`, `π - cliproxyapi.service - akram`). The last is what
+herdr's sidebar shows and the best way to tell two agents apart; the streamline removed it from the FFI (lane D)
+because no screen read it then. One lane (Rust and Kotlin).
+
+- **The title comes back (FFI API 20).** `HerdrAgent.title`: herdr's `terminal_title_stripped`, trimmed, with a
+  leading spinner or status glyph and its following space removed (Claude Code animates one: Braille spinners
+  U+2800–U+28FF, `✳ ✶ ✻ ✽ ✢ · * ●` and similar single symbols), capped at 120 characters, empty → absent. A view whose
+  only change is an agent title is delivered at most once per second per session (the newest wins), so a spinner
+  never churns the UI; any other change is delivered at once, as today. Generated types are untouched (projection in
+  `herdr/project.rs` / `view.rs`, FFI `herdr.rs`).
+- **Agents named herdr-style, everywhere an agent appears** (Inbox row, the picker's agent rows, the Spaces sheet,
+  notifications): the agent label as today (name, else display name, else kind), then the title on its own line in
+  muted text when there is one and it is not the same as the label; then `space · tab` and the folder as today.
+  A notification's text is `Needs input` / `Done`, followed by ` · <title>` when there is one.
+- **The Spaces disc.** A third header disc right after the orange (Home) and green (Terminals) ones, same size and
+  spacing, in `accent` (blue), with a grid/spaces glyph; shown only on a herdr terminal (absent for shell and tmux, so
+  those headers do not change). Description `Spaces`.
+- **The Spaces sheet** (`Or2Sheet`, title `Spaces`, the session name muted under it when it is not the default):
+  from the terminal's live herdr view, each space (herdr's order) as a small section header with its label; under it
+  one card with its tabs (herdr's order), each tab a row `tab <label>`, and under each tab its panes that hold an
+  agent as agent rows (status dot and word in the Inbox colours, label, title); the focused tab and pane marked
+  `● Current`. Tapping a tab focuses it, tapping an agent focuses its pane, through the existing focus path
+  (`TerminalActivations` / `focusHerdrPane`, or herdr's tab focus if the API has one; else the tab's first pane),
+  and closes the sheet; the terminal shows it as herdr draws it. Spaces with no tabs are left out. Nothing else in
+  the sheet (no create, rename or close: herdr does those).
+- **Tests.** Rust: the title projection (glyph stripping, cap, empty), the title-only throttle, other changes
+  undelayed. JVM: label/title lines, the notification text, the sheet's grouping and current marks, a tap's focus
+  call. Device (compile + run): the disc only on herdr terminals, the sheet, a tap. Gallery: `spaces`.
