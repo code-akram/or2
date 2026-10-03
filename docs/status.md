@@ -59,6 +59,20 @@ The fix (Kotlin only): an advance into Idle posts `Done` when the watch saw the 
 settled; an Idle not reached from Working still never notifies. The contract ("Agent notifications", "The rule")
 and three JVM tests cover it. It still needs the owner's eyes on the phone with a signed build.
 
+**Confirmed on the phone (2026-10-03):** the signed build with the fix notifies for Claude Code and pi panes.
+
+**Reply needs herdr's integration for the agent** (owner QA, 2026-10-03). A notification has Reply only when
+herdr reports the agent's `agent_session` (or the agent was started by name), and herdr learns the session from its
+integration hook inside the agent (`herdr integration status` lists them). Without the integration, the agent still
+notifies (herdr reads its state from the screen) but never gets Reply, with no hint why. On the Linux host:
+- `pi` had no integration. Installing it (`herdr integration install pi`) and restarting pi gave it Reply.
+- `codex` has its integration, but herdr answers every one of its `pane.report_agent_session` reports with an
+  error (in `~/.config/herdr/herdr-server.log`, `outcome="error"`, no reason, every report since 2026-10-02).
+  The same request sent by hand afterwards was accepted, so Codex has Reply until it restarts. Not or2's bug:
+  report it to herdr upstream with those log lines.
+- Proposed (v0.1.3): `or2-pair` checks `herdr integration status` for the agents installed on the host and
+  installs the missing ones with one confirmation; the app says why a notification has no Reply.
+
 Found on the way: the JVM test `anImageUploadCrossesTheFfiAndItsPathIsPastedBracketedWithoutEnter` failed on
 `main` since `1064526`, because the FFI probe dropped the upload's acknowledgement receiver. The probe now keeps it
 until the caller acknowledges, as a real host does.
