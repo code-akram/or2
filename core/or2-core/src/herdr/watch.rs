@@ -530,6 +530,9 @@ impl<H: RemoteHost> Watch<H> {
         let mut first_read = Some(requests);
 
         let mut subscribed = PaneKeys::new();
+        // The panes herdr refused a subscription for (not for a vanished pane): asked again
+        // only once the panes differ.
+        let mut refused: Option<PaneKeys> = None;
         let mut rejected = 0;
         let mut last_read: Option<Instant> = None;
         loop {
@@ -557,7 +560,7 @@ impl<H: RemoteHost> Watch<H> {
                 self.install(project::project(&snapshot));
 
                 let panes = project::pane_keys(&snapshot);
-                if !panes.is_subset(&subscribed) {
+                if !panes.is_subset(&subscribed) && refused.as_ref() != Some(&panes) {
                     let id = self.request_id();
                     match self
                         .pump(subscribe(&*host, &socket, &id, &panes, timeout))
@@ -566,6 +569,7 @@ impl<H: RemoteHost> Watch<H> {
                         Ok(stream) => {
                             self.events = Some(stream);
                             subscribed = panes;
+                            refused = None;
                             rejected = 0;
                             // Events between the read and the new subscription are gone.
                             self.dirty = true;
@@ -578,10 +582,13 @@ impl<H: RemoteHost> Watch<H> {
                             self.dirty = true;
                         }
                         // Any other rejection is not about a vanished pane, so re-reading the
-                        // panes cannot help. The view stays live on the lifecycle stream that
-                        // is still open; per-pane status events are missing until a later
-                        // read (the next invalidation) is accepted.
-                        Err(WireError::Herdr { code, .. }) if code != PANE_NOT_FOUND => {}
+                        // panes cannot help, nor can asking again for the same ones. The view
+                        // stays live on the lifecycle stream that is still open; per-pane
+                        // status events are missing until a read finds other panes and their
+                        // subscription is accepted.
+                        Err(WireError::Herdr { code, .. }) if code != PANE_NOT_FOUND => {
+                            refused = Some(panes);
+                        }
                         Err(error) => return Err(exit_for_wire(error)),
                     }
                 }

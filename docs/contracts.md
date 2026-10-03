@@ -822,8 +822,9 @@ socket; tests isolate it with `TMUX_TMPDIR` in the environment the commands run 
     retries; the fourth consecutive rejection fails the attempt (`Failed`). Only the
     `pane_not_found` error code means a pane vanished. Any other rejection of the per-pane
     request leaves the view `Live` on the stream that is still open (agent status then changes
-    only through lifecycle-driven reads, and the request is tried again with every later read),
-    so a persistent rejection cannot make the view flap between `Live` and `Unavailable`.
+    only through lifecycle-driven reads, and the request is tried again only once a read finds
+    other panes), so a persistent rejection cannot make the view flap between `Live` and
+    `Unavailable`.
   - *Connect cost.* The first view is installed after one subscribe and one snapshot, as in
     the contract sequence, and **nothing else delays it**: the socket comes from the directory (no
     listing), the subscription's stream and the snapshot's stream are **opened together** (the

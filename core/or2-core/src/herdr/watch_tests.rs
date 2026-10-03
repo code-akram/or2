@@ -897,6 +897,48 @@ async fn a_pane_subscription_the_server_keeps_rejecting_leaves_the_view_live() {
     );
 }
 
+/// A pane subscription herdr rejects for another reason than a vanished pane is not asked again
+/// on every invalidation (it used to be, each read costing a refused request): only once the
+/// panes have changed.
+#[tokio::test(start_paused = true)]
+async fn a_rejected_pane_subscription_is_asked_again_only_when_the_panes_change() {
+    let host = host_with(&two_panes());
+    let mut script = vec![None];
+    script.extend((0..50).map(|_| Some(("invalid_request", "cannot subscribe"))));
+    host.script_subscribes(script);
+    let harness = Harness::start(&host, None);
+    harness.live().await;
+    sleep(Duration::from_secs(1)).await;
+    let subscribes = || {
+        host.served()
+            .iter()
+            .filter(|s| matches!(s, Served::Subscribe { .. }))
+            .count()
+    };
+    assert_eq!(subscribes(), 2, "the lifecycle one, and the rejected one");
+
+    // Invalidations over the same panes: each is read, none is subscribed again.
+    let before = host.snapshots_served();
+    let event = fixture("events_lifecycle.jsonl");
+    let event = event.lines().next().unwrap();
+    for _ in 0..3 {
+        host.emit(event);
+        sleep(Duration::from_millis(300)).await;
+    }
+    assert_eq!(host.snapshots_served() - before, 3);
+    assert_eq!(subscribes(), 2);
+
+    // Other panes: their subscription is asked for.
+    host.script_snapshots(vec![Step::reply(&fixture(
+        "snapshot_one_pane_renamed.json",
+    ))]);
+    host.emit(event);
+    harness
+        .until("a new subscription", |_| subscribes() == 3)
+        .await;
+    harness.stop().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_slow_server_times_out_and_is_failed() {
     let host = FakeHost::new();
