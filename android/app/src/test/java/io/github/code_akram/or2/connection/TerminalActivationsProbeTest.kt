@@ -50,16 +50,18 @@ class TerminalActivationsProbeTest {
                     val activations = holder.activations
 
                     val a = activations.openAgent(host.id, host.label, null, "w1:p1") as Activation.Ready
+                    // B is in A's session: A's terminal is that session's one terminal, shown after B was focused.
                     val b = activations.openAgent(host.id, host.label, null, "w1:p2") as Activation.Ready
+                    assertSame(a.terminal, b.terminal)
                     val other = activations.openAgent(host.id, host.label, "or2-probe", "w2:p1") as Activation.Ready
-                    assertEquals(3, holder.terminals.value.size)
-                    for (terminal in listOf(a, b, other)) withTimeout(5000) { terminal.terminal.state.first { it == SessionState.Connected } }
+                    assertEquals(2, holder.terminals.value.size)
+                    for (terminal in listOf(a, other)) withTimeout(5000) { terminal.terminal.state.first { it == SessionState.Connected } }
 
-                    // A to B to A: the open terminal for A is reused after its pane was focused again.
+                    // A to B to A: the same terminal, after A's pane was focused again.
                     val again = activations.openAgent(host.id, host.label, null, "w1:p1") as Activation.Ready
                     assertSame(a.terminal, again.terminal)
-                    assertEquals(3, holder.terminals.value.size)
-                    assertEquals(Activation.Ready(b.terminal), activations.reuse(b.terminal))
+                    assertEquals(2, holder.terminals.value.size)
+                    assertEquals(Activation.Ready(a.terminal), activations.reuse(a.terminal))
                     assertEquals(Activation.Ready(other.terminal), activations.reuse(other.terminal))
 
                     // Any other pane is gone: the explicit message, and no terminal is opened for it.
@@ -67,7 +69,7 @@ class TerminalActivationsProbeTest {
                         val failed = activations.openAgent(host.id, host.label, null, gone) as Activation.Failed
                         assertEquals("That agent's pane no longer exists in herdr. Refresh the inbox.", failed.message)
                     }
-                    assertEquals(3, holder.terminals.value.size)
+                    assertEquals(2, holder.terminals.value.size)
 
                     // A terminal that is open for a pane that has since gone is not shown again either.
                     val stale = holder.openTerminal(active, TerminalTarget.Herdr(null, "w9:p9"))
