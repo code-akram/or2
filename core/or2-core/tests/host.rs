@@ -22,7 +22,7 @@ use common::{Grid, Proxy, Sshd, sshd_ready, tmux_ready};
 use or2_core::herdr::{HerdrObserver, HerdrState, HerdrUnavailable};
 use or2_core::host::{
     HerdrSessionInfo, HostConnectRequest, HostError, HostHandle, HostObserver, HostState,
-    TerminalTarget,
+    TerminalTarget, TerminalTransport,
 };
 use or2_core::input::{Key, KeyInput, Modifiers};
 use or2_core::keys::ClientKey;
@@ -212,7 +212,9 @@ impl Live {
             .host
             .open_terminal(
                 target,
+                TerminalTransport::Ssh,
                 TerminalSize::new(columns, rows).unwrap(),
+                None,
                 Arc::new(SessionObs {
                     tag: tag.into(),
                     tx,
@@ -879,7 +881,9 @@ fn user_disconnect_closes_terminals_and_watches_before_the_host_with_disconnecte
         live.host
             .open_terminal(
                 TerminalTarget::Shell,
+                TerminalTransport::Ssh,
                 TerminalSize::new(80, 24).unwrap(),
+                None,
                 Arc::new(SessionObs {
                     tag: "late".into(),
                     tx: mpsc::channel().0,
@@ -964,7 +968,9 @@ fn losing_the_connection_closes_terminals_and_the_host_with_the_same_failure() {
     let handle = host
         .open_terminal(
             TerminalTarget::Shell,
+            TerminalTransport::Ssh,
             TerminalSize::new(80, 24).unwrap(),
+            None,
             Arc::new(SessionObs {
                 tag: "t".into(),
                 tx,
@@ -1001,7 +1007,9 @@ fn losing_the_connection_closes_terminals_and_the_host_with_the_same_failure() {
     assert_eq!(
         host.open_terminal(
             TerminalTarget::Shell,
+            TerminalTransport::Ssh,
             TerminalSize::new(80, 24).unwrap(),
+            None,
             Arc::new(SessionObs {
                 tag: "late".into(),
                 tx: mpsc::channel().0,
@@ -1036,7 +1044,9 @@ fn names_are_validated_before_anything_runs() {
         let (tx, states) = mpsc::channel();
         let result = live.host.open_terminal(
             target,
+            TerminalTransport::Ssh,
             TerminalSize::new(80, 24).unwrap(),
+            None,
             Arc::new(SessionObs {
                 tag: "x".into(),
                 tx,
@@ -1362,7 +1372,9 @@ fn herdr_terminals_run_the_probed_herdr_with_the_session_and_report_a_failed_foc
                     session: session.map(Into::into),
                     pane_id: pane.map(Into::into),
                 },
+                TerminalTransport::Ssh,
                 TerminalSize::new(80, 24).unwrap(),
+                None,
                 Arc::new(SessionObs {
                     tag: tag.into(),
                     tx,

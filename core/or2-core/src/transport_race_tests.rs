@@ -105,7 +105,7 @@ impl Transport for Fake {
 
 async fn run(fake: &Arc<Fake>) -> (Result<usize, RaceFailure>, u64) {
     let start = Instant::now();
-    let result = race(fake, &fake.addresses(), RACE_STAGGER).await;
+    let result = race_with(fake, &fake.addresses(), RaceTiming::default(), None).await;
     (
         result.map(|raced| raced.index),
         start.elapsed().as_millis() as u64,
@@ -209,7 +209,7 @@ async fn dropping_the_race_cancels_every_attempt() {
     let addresses = fake.addresses();
     let result = tokio::time::timeout(
         Duration::from_millis(300),
-        race(&fake, &addresses, RACE_STAGGER),
+        race_with(&fake, &addresses, RaceTiming::default(), None),
     )
     .await;
     assert!(result.is_err());
@@ -317,7 +317,9 @@ async fn a_no_route_failure_hands_over_to_the_next_address_at_once() {
         Endpoint::new("b", 2).unwrap(),
     ];
     let start = Instant::now();
-    let raced = race(&transport, &addresses, RACE_STAGGER).await.unwrap();
+    let raced = race_with(&transport, &addresses, RaceTiming::default(), None)
+        .await
+        .unwrap();
     assert_eq!(raced.index, 1);
     assert_eq!(
         start.elapsed(),

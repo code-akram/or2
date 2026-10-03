@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use common::{Sshd, sshd_ready, tmux_ready};
 use or2_core::host::{
     HostConnectRequest, HostObserver, HostState, NavDirection, TargetNav, TargetScroll,
-    TerminalTarget,
+    TerminalTarget, TerminalTransport,
 };
 use or2_core::keys::ClientKey;
 use or2_core::session::{SessionObserver, SessionState};
@@ -162,7 +162,9 @@ fn tmux_moves_windows_panes_and_the_terminal_client_between_sessions() {
     let terminal = host
         .open_terminal(
             target.clone(),
+            TerminalTransport::Ssh,
             TerminalSize::new(80, 24).unwrap(),
+            None,
             Arc::new(SessionObs(tx)),
         )
         .unwrap();
@@ -331,7 +333,9 @@ fn two_terminals_on_one_tmux_session_each_move_only_their_own_client() {
         let terminal = host
             .open_terminal(
                 target.clone(),
+                TerminalTransport::Ssh,
                 TerminalSize::new(80, 24).unwrap(),
+                None,
                 Arc::new(SessionObs(tx)),
             )
             .unwrap();
@@ -552,7 +556,9 @@ fn an_old_tmux_attaches_plainly_and_its_session_moves_do_nothing() {
     let terminal = host
         .open_terminal(
             target.clone(),
+            TerminalTransport::Ssh,
             TerminalSize::new(80, 24).unwrap(),
+            None,
             Arc::new(SessionObs(tx)),
         )
         .unwrap();

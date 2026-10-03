@@ -2,7 +2,7 @@
 //!
 //! The host's SSH connection is only the bootstrap: `mosh::bootstrap` runs `mosh-server` over
 //! it (with the target's command, after the herdr pane focus), then the session runs over UDP,
-//! pinned to the address the SSH connection reached ([`HostHandle::peer_addr`]). From then on
+//! pinned to the IP the SSH connection's TCP connection reached. From then on
 //! the session does not need the SSH connection, so **losing the host connection leaves the
 //! session running**; only a user disconnect of the host ends it (`Disconnected`, with mosh's
 //! shutdown handshake so the server exits). Whoever starts the server also owes its cleanup:
@@ -19,8 +19,6 @@
 //! (the shutdown handshake) and [`CLEANUP_BUDGET`] (`terminate`), [`CLOSE_BUDGET`] in all. That
 //! is what the host driver waits for the mosh sessions, beyond the grace of its other
 //! terminals.
-//!
-//! [`HostHandle::peer_addr`]: crate::host::HostHandle::peer_addr
 
 use std::future::Future;
 use std::net::SocketAddr;

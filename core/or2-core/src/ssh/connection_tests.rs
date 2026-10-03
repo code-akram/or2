@@ -780,7 +780,6 @@ fn finish(
 }
 
 struct Fixture {
-    port: u16,
     handle: HostHandle,
     states: sync::Receiver<(HostState, std::thread::ThreadId)>,
     shared: Arc<Shared>,
@@ -921,7 +920,6 @@ impl Fixture {
             Some(tap),
         );
         Self {
-            port,
             handle,
             states,
             shared,
@@ -1091,7 +1089,9 @@ fn a_host_without_tmux_or_herdr_reports_not_installed_everywhere_without_opening
             .handle
             .open_terminal(
                 target,
+                TerminalTransport::Ssh,
                 TerminalSize::new(80, 24).unwrap(),
+                None,
                 Arc::new(SessionRecorder(tx)),
             )
             .unwrap();
@@ -1151,10 +1151,11 @@ fn a_mosh_terminal_on_a_host_without_mosh_server_is_not_installed_before_anythin
             let (tx, states) = sync::channel();
             let _session = fixture
                 .handle
-                .open_terminal_with(
+                .open_terminal(
                     target,
                     TerminalTransport::Mosh,
                     TerminalSize::new(80, 24).unwrap(),
+                    None,
                     Arc::new(SessionRecorder(tx)),
                 )
                 .unwrap();
@@ -1181,7 +1182,9 @@ fn open_shell(fixture: &Fixture) -> (crate::session::SessionHandle, sync::Receiv
         .handle
         .open_terminal(
             TerminalTarget::Shell,
+            TerminalTransport::Ssh,
             TerminalSize::new(80, 24).unwrap(),
+            None,
             Arc::new(SessionRecorder(tx)),
         )
         .unwrap();
@@ -1903,35 +1906,6 @@ fn a_failed_session_listing_reports_the_last_list_read_not_the_one_from_connect_
 }
 
 #[test]
-fn the_host_reports_the_address_its_tcp_connection_reached_once_connected() {
-    let fixture = Fixture::start(HostOptions::default(), PROBE_WITH_TMUX, true);
-    assert_eq!(next(&fixture.states), HostState::Authenticating);
-    assert_eq!(
-        next(&fixture.states),
-        HostState::Connected { address_index: 0 }
-    );
-    // Set before `Connected` is reported, so a caller that saw it can read it (mosh pins its
-    // UDP traffic to this IP instead of resolving the host name again).
-    assert_eq!(
-        fixture.handle.peer_addr(),
-        Some(std::net::SocketAddr::from((
-            std::net::Ipv4Addr::LOCALHOST,
-            fixture.port
-        )))
-    );
-    fixture.handle.disconnect();
-    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
-}
-
-#[test]
-fn a_host_that_never_connected_has_no_peer_address() {
-    let (observer, states) = recorder();
-    let handle = connect_host(request(&[("127.0.0.1", dead_port())], &[]), observer);
-    let _ = closed(&states);
-    assert_eq!(handle.peer_addr(), None);
-}
-
-#[test]
 fn focusing_a_herdr_pane_goes_through_the_probed_herdr_and_reports_a_vanished_pane() {
     let fixture = Fixture::connected_with(Duration::from_secs(5), PROBE_WITH_HERDR);
     let focus = |session: Option<&str>, pane: &str| {
@@ -2070,13 +2044,14 @@ fn a_terminal_given_up_while_its_focus_waits_closes_the_channel_opened_beside_it
     let (tx, states) = sync::channel();
     let terminal = fixture
         .handle
-        .open_terminal_with(
+        .open_terminal(
             TerminalTarget::Herdr {
                 session: None,
                 pane_id: Some("w2:p1".into()),
             },
             TerminalTransport::Ssh,
             TerminalSize::new(80, 24).unwrap(),
+            None,
             Arc::new(SessionRecorder(tx)),
         )
         .unwrap();
@@ -2114,13 +2089,14 @@ fn late_open_confirmation_closes(within_grace: bool) {
     let (tx, states) = sync::channel();
     let terminal = fixture
         .handle
-        .open_terminal_with(
+        .open_terminal(
             TerminalTarget::Herdr {
                 session: None,
                 pane_id: Some("w2:p1".into()),
             },
             TerminalTransport::Ssh,
             TerminalSize::new(80, 24).unwrap(),
+            None,
             Arc::new(SessionRecorder(tx)),
         )
         .unwrap();
@@ -2187,13 +2163,14 @@ fn an_open_the_server_never_confirms_ends_with_the_connection() {
     let (tx, states) = sync::channel();
     let terminal = fixture
         .handle
-        .open_terminal_with(
+        .open_terminal(
             TerminalTarget::Herdr {
                 session: None,
                 pane_id: Some("w2:p1".into()),
             },
             TerminalTransport::Ssh,
             TerminalSize::new(80, 24).unwrap(),
+            None,
             Arc::new(SessionRecorder(tx)),
         )
         .unwrap();
@@ -2737,10 +2714,11 @@ fn a_terminal_disconnect_with_a_full_queue_still_closes_its_channel_once_the_que
     let (tx, states) = sync::channel();
     let terminal = fixture
         .handle
-        .open_terminal_with(
+        .open_terminal(
             TerminalTarget::Shell,
             TerminalTransport::Ssh,
             TerminalSize::new(80, 24).unwrap(),
+            None,
             Arc::new(SessionRecorder(tx)),
         )
         .unwrap();

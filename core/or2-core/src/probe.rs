@@ -94,22 +94,6 @@ fi
 /// The locale reported when the host lists no UTF-8 one.
 const FALLBACK_LOCALE: &str = "en_US.UTF-8";
 
-/// Runs [`PROBE_SCRIPT`] and [`HERDR_SCRIPT`] on `host` at once and parses the answers. A
-/// script that fails to run is an error; a missing program is `None` in the result; a herdr that
-/// cannot list its sessions (hung, failing, garbage) is found with no sessions. Only a
-/// connection that closes mid-probe fails the second script.
-pub async fn probe<H: RemoteHost>(host: &H) -> Result<HostCapabilities, RemoteError> {
-    probe_entries(host).await.map(|(caps, _)| caps)
-}
-
-/// [`probe`], also returning the session listing the second script read (`None` when herdr is
-/// missing or its listing failed), with the sockets the host driver's [`Directory`] needs.
-pub async fn probe_entries<H: RemoteHost>(
-    host: &H,
-) -> Result<(HostCapabilities, Option<Vec<SessionEntry>>), RemoteError> {
-    probe_within(host, HERDR_LIST_TIMEOUT, probe_programs(host)).await
-}
-
 /// The program probe alone: [`PROBE_SCRIPT`]'s programs and locale, `herdr_sessions` empty.
 /// One exec round trip, never held up by herdr's session listing: the host driver caches it
 /// apart from the listing, so a terminal open (which needs only a program's path) and
@@ -129,8 +113,12 @@ pub async fn probe_programs<H: RemoteHost>(host: &H) -> Result<HostCapabilities,
 /// cache of it, which publishes its answer to every waiter the moment [`PROBE_SCRIPT`] returns)
 /// and [`HERDR_SCRIPT`] in its own exec at the same time, the listing bounded by
 /// `herdr_limit`. The listing only fills `herdr_sessions`; nothing that needs a program's path
-/// waits for it.
-pub(crate) async fn probe_within<H: RemoteHost>(
+/// waits for it. Also returns the listing itself (`None` when herdr is missing or its listing
+/// failed), with the sockets the host driver's [`Directory`] needs. A script that fails to run
+/// is an error; a missing program is `None`; a herdr that cannot list its sessions (hung,
+/// failing, garbage) is found with no sessions. Only a connection that closes mid-probe fails
+/// the second script.
+pub async fn probe_within<H: RemoteHost>(
     host: &H,
     herdr_limit: Duration,
     programs: impl Future<Output = Result<HostCapabilities, RemoteError>>,
@@ -173,24 +161,6 @@ fn parse_herdr_listing(output: &str) -> Option<Vec<SessionEntry>> {
     let (listing, end) = rest.rsplit_once("\nor2:list-end:")?;
     let status: u32 = end.lines().next()?.trim().parse().ok()?;
     herdr::parse_listing(Some(status), listing.as_bytes(), b"").ok()
-}
-
-/// Lists herdr's sessions through [`herdr::list_sessions`] (the one parser of
-/// `<herdr> session list --json`), giving up after [`HERDR_LIST_TIMEOUT`] (`TimedOut`). A failing
-/// herdr, or output that is not herdr's session list, is `Io`; a closed connection stays
-/// `Closed`.
-pub async fn herdr_sessions<H: RemoteHost>(
-    host: &H,
-    herdr: &str,
-) -> Result<Vec<HerdrSessionInfo>, RemoteError> {
-    let entries = tokio::time::timeout(HERDR_LIST_TIMEOUT, herdr::list_sessions(host, herdr))
-        .await
-        .map_err(|_| RemoteError::TimedOut)?;
-    match entries {
-        Ok(entries) => Ok(entries.iter().map(session_info).collect()),
-        Err(DiscoveryError::Remote(error)) => Err(error),
-        Err(other) => Err(RemoteError::Io(other.to_string())),
-    }
 }
 
 /// The last session list read successfully, kept apart from the probe's immutable programs and
@@ -299,6 +269,17 @@ mod tests {
     use super::*;
     use crate::remote::{ExecOutput, render_script};
     use std::sync::Mutex;
+
+    /// The whole probe as a connection runs it, with its listing.
+    async fn probe_entries<H: RemoteHost>(
+        host: &H,
+    ) -> Result<(HostCapabilities, Option<Vec<SessionEntry>>), RemoteError> {
+        probe_within(host, HERDR_LIST_TIMEOUT, probe_programs(host)).await
+    }
+
+    async fn probe<H: RemoteHost>(host: &H) -> Result<HostCapabilities, RemoteError> {
+        probe_entries(host).await.map(|(caps, _)| caps)
+    }
 
     #[test]
     fn the_script_renders_as_sh_dash_c_without_quotes_or_backslashes() {
@@ -444,16 +425,6 @@ mod tests {
         assert_eq!(caps.herdr.as_deref(), Some("/fake/herdr"));
         assert_eq!(caps.utf8_locale, "C.UTF-8");
         assert!(caps.herdr_sessions.is_empty());
-        assert_eq!(
-            herdr_sessions(
-                &Stub {
-                    herdr: Herdr::Hangs
-                },
-                "/fake/herdr"
-            )
-            .await,
-            Err(RemoteError::TimedOut)
-        );
     }
 
     #[tokio::test]
@@ -476,26 +447,6 @@ mod tests {
                 is_default: true
             }],
             "name, running and default come from herdr::list_sessions; the rest is dropped"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_listing_failure_is_io_and_a_closed_connection_stays_closed() {
-        for herdr in [Herdr::Fails, Herdr::Sessions("{\"sessions\":7}")] {
-            assert!(matches!(
-                herdr_sessions(&Stub { herdr }, "/fake/herdr").await,
-                Err(RemoteError::Io(_))
-            ));
-        }
-        assert_eq!(
-            herdr_sessions(
-                &Stub {
-                    herdr: Herdr::ConnectionGone
-                },
-                "/fake/herdr"
-            )
-            .await,
-            Err(RemoteError::Closed)
         );
     }
 

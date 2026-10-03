@@ -459,7 +459,7 @@ impl HostConnection {
         listener: Box<dyn SessionListener>,
     ) -> Result<Arc<Session>, HostError> {
         let size = TerminalSize::new(columns, rows).map_err(|_| HostError::EmptyDimension)?;
-        let handle = self.handle.open_terminal_within(
+        let handle = self.handle.open_terminal(
             target.into(),
             transport.into(),
             size,

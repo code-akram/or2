@@ -314,7 +314,7 @@ impl Live {
         self.open_raw_within(tag, target, transport, size, None)
     }
 
-    /// [`Live::open_raw`] with a budget for the whole mosh start (`open_terminal_within`).
+    /// [`Live::open_raw`] with a budget for the whole mosh start (`open_terminal`).
     fn open_raw_within(
         &self,
         tag: &str,
@@ -327,7 +327,7 @@ impl Live {
         let health = Arc::new(Mutex::new(Vec::new()));
         let handle = self
             .host
-            .open_terminal_within(
+            .open_terminal(
                 target,
                 transport,
                 TerminalSize::new(size.0, size.1).unwrap(),
@@ -495,10 +495,11 @@ fn losing_the_host_connection_keeps_the_mosh_session_alive_and_usable() {
     mosh.wait("roamed-44");
     assert_eq!(
         live.host
-            .open_terminal_with(
+            .open_terminal(
                 TerminalTarget::Shell,
                 TerminalTransport::Mosh,
                 TerminalSize::new(80, 24).unwrap(),
+                None,
                 Arc::new(SessionObs {
                     tag: "late".into(),
                     tx: mpsc::channel().0,

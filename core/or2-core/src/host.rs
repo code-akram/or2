@@ -26,7 +26,6 @@
 //! bootstrap `mosh-server`, so **losing the connection leaves it running**; a user disconnect
 //! still closes it (`Disconnected`, with mosh's shutdown handshake so the server exits).
 
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -527,8 +526,6 @@ struct Shared {
     state: Mutex<HostState>,
     /// See [`UserCancel`].
     user_cancel: watch::Sender<bool>,
-    /// The remote address the winning TCP connection reached; set before `Connected`.
-    peer: Mutex<Option<SocketAddr>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -539,7 +536,6 @@ pub fn channel(observer: Arc<dyn HostObserver>) -> (HostHandle, HostDriver) {
     let shared = Arc::new(Shared {
         state: Mutex::new(HostState::Connecting),
         user_cancel: watch::channel(false).0,
-        peer: Mutex::new(None),
     });
     let (sender, receiver) = mpsc::unbounded_channel();
     (
@@ -573,15 +569,6 @@ impl Drop for HostHandle {
 impl HostHandle {
     pub fn state(&self) -> HostState {
         lock(&self.shared.state).clone()
-    }
-
-    /// The remote address the host's TCP connection actually reached (the winner of address
-    /// racing, after name resolution), once it is `Connected`; `None` before that, and for a
-    /// transport that cannot say. This is the address mosh must send its UDP datagrams to:
-    /// the host name may resolve to other addresses, now or later, which are not this
-    /// session's `mosh-server`. Only the IP is meaningful for UDP (the port is the SSH one).
-    pub fn peer_addr(&self) -> Option<SocketAddr> {
-        *lock(&self.shared.peer)
     }
 
     pub fn approve_host_key(&self, fingerprint: &str) -> Result<(), HostError> {
@@ -618,35 +605,17 @@ impl HostHandle {
         let _ = self.commands.send(HostCommand::Disconnect);
     }
 
-    /// Opens a terminal session on the host. The returned session starts in `Connecting` and
-    /// reaches `Connected` once its channel is open; failures close it.
+    /// Opens a terminal session on the host over `transport`. The returned session starts in
+    /// `Connecting` and reaches `Connected` once its channel is open (SSH) or the server's first
+    /// datagram authenticates (mosh); failures close it.
+    ///
+    /// `budget` is for a mosh terminal: it must be `Connected` within `budget` **of this call**
+    /// (the deadline is absolute, so the probe, the pane focus, the bootstrap, the socket and
+    /// the first authenticated datagram all spend from the same allowance), else it closes
+    /// `Failed { TimedOut }` after stopping the server it may have started. `None` keeps the
+    /// host's own `mosh_connect_timeout`, counted from the end of the bootstrap. Ignored for SSH
+    /// terminals.
     pub fn open_terminal(
-        &self,
-        target: TerminalTarget,
-        size: TerminalSize,
-        observer: Arc<dyn SessionObserver>,
-    ) -> Result<SessionHandle, HostError> {
-        self.open_terminal_with(target, TerminalTransport::Ssh, size, observer)
-    }
-
-    /// [`HostHandle::open_terminal`] with the choice of how the terminal reaches the host.
-    pub fn open_terminal_with(
-        &self,
-        target: TerminalTarget,
-        transport: TerminalTransport,
-        size: TerminalSize,
-        observer: Arc<dyn SessionObserver>,
-    ) -> Result<SessionHandle, HostError> {
-        self.open_terminal_within(target, transport, size, None, observer)
-    }
-
-    /// [`HostHandle::open_terminal_with`] with a budget for a mosh terminal: it must be
-    /// `Connected` within `budget` **of this call** (the deadline is absolute, so the probe,
-    /// the pane focus, the bootstrap, the socket and the first authenticated datagram all
-    /// spend from the same allowance), else it closes `Failed { TimedOut }` after stopping
-    /// the server it may have started. `None` keeps the host's own `mosh_connect_timeout`,
-    /// counted from the end of the bootstrap. Ignored for SSH terminals.
-    pub fn open_terminal_within(
         &self,
         target: TerminalTarget,
         transport: TerminalTransport,
@@ -1015,12 +984,6 @@ impl HostDriver {
         self.shared.user_cancel.subscribe()
     }
 
-    /// Records the address the winning connection reached, to be set before the move to
-    /// `Connected` so a handle that sees `Connected` can read it.
-    pub fn set_peer_addr(&self, peer: Option<SocketAddr>) {
-        *lock(&self.shared.peer) = peer;
-    }
-
     /// Moves to `next` and notifies the observer. On `Closed` further commands are refused,
     /// those already queued are failed (terminals close with the host's reason, watches close,
     /// queries see `Closed`), and the observer is released afterwards.
@@ -1344,7 +1307,9 @@ mod tests {
             handle
                 .open_terminal(
                     TerminalTarget::Shell,
+                    TerminalTransport::Ssh,
                     size(),
+                    None,
                     Arc::new(SessionRecorder::default())
                 )
                 .err(),
@@ -1415,7 +1380,13 @@ mod tests {
         );
         assert_eq!(
             handle
-                .open_terminal(TerminalTarget::Shell, size(), sessions.clone())
+                .open_terminal(
+                    TerminalTarget::Shell,
+                    TerminalTransport::Ssh,
+                    size(),
+                    None,
+                    sessions.clone()
+                )
                 .err(),
             Some(HostError::NotConnected)
         );
@@ -1436,7 +1407,9 @@ mod tests {
             session_name: "a:b".into(),
         };
         assert_eq!(
-            handle.open_terminal(bad, size(), sessions.clone()).err(),
+            handle
+                .open_terminal(bad, TerminalTransport::Ssh, size(), None, sessions.clone())
+                .err(),
             Some(HostError::InvalidName)
         );
         assert_eq!(
@@ -2040,7 +2013,13 @@ mod tests {
         let watches = Arc::new(WatchRecorder::default());
         assert_eq!(
             handle
-                .open_terminal(TerminalTarget::Shell, size(), sessions.clone())
+                .open_terminal(
+                    TerminalTarget::Shell,
+                    TerminalTransport::Ssh,
+                    size(),
+                    None,
+                    sessions.clone()
+                )
                 .err(),
             Some(HostError::Closed)
         );
@@ -2095,15 +2074,16 @@ mod tests {
         let sessions = Arc::new(SessionRecorder::default());
         let before = Instant::now();
         let _plain = handle
-            .open_terminal_with(
+            .open_terminal(
                 TerminalTarget::Shell,
                 TerminalTransport::Mosh,
                 size(),
+                None,
                 sessions.clone(),
             )
             .unwrap();
         let _budgeted = handle
-            .open_terminal_within(
+            .open_terminal(
                 TerminalTarget::Shell,
                 TerminalTransport::Mosh,
                 size(),
@@ -2136,7 +2116,7 @@ mod tests {
         };
         let open = |target: &TerminalTarget, transport| {
             handle
-                .open_terminal_with(target.clone(), transport, size(), sessions.clone())
+                .open_terminal(target.clone(), transport, size(), None, sessions.clone())
                 .unwrap()
         };
         let first = open(&tmux, TerminalTransport::Ssh);
@@ -2171,7 +2151,13 @@ mod tests {
             pane_id: Some("w1:p2".into()),
         };
         let terminal = handle
-            .open_terminal(target.clone(), size(), sessions.clone())
+            .open_terminal(
+                target.clone(),
+                TerminalTransport::Ssh,
+                size(),
+                None,
+                sessions.clone(),
+            )
             .unwrap();
         let watch = handle
             .watch_herdr(Some("work".into()), watches.clone())
@@ -2218,7 +2204,13 @@ mod tests {
         // Opened but not yet picked up when the host closes: closed with the host's reason.
         let user_closed = Arc::new(SessionRecorder::default());
         let queued = handle
-            .open_terminal(TerminalTarget::Shell, size(), user_closed.clone())
+            .open_terminal(
+                TerminalTarget::Shell,
+                TerminalTransport::Ssh,
+                size(),
+                None,
+                user_closed.clone(),
+            )
             .unwrap();
         let queued_watch = handle
             .watch_herdr(None, Arc::new(WatchRecorder::default()))
@@ -2238,7 +2230,13 @@ mod tests {
         connect(&mut driver);
         let lost = Arc::new(SessionRecorder::default());
         let queued = handle
-            .open_terminal(TerminalTarget::Shell, size(), lost.clone())
+            .open_terminal(
+                TerminalTarget::Shell,
+                TerminalTransport::Ssh,
+                size(),
+                None,
+                lost.clone(),
+            )
             .unwrap();
         let reason = CloseReason::Failed(SessionFailure::ConnectionLost("gone".into()));
         driver.close(reason.clone());

@@ -6,7 +6,7 @@
 //! next try, a name can resolve to an IPv6 link-local address that no app socket can use without
 //! a scope, and one dead address in the middle holds everything behind it. This module resolves
 //! once (retrying a `.local` name), drops what cannot work, and races the rest the way
-//! [`race`](super::race) races a host's addresses, so a person reads *why* an endpoint failed.
+//! [`race_with`](super::race_with) races a host's addresses, so a person reads *why* an endpoint failed.
 //!
 //! Resolution and connection are traits ([`Resolver`], [`Connector`]) so every rule is tested
 //! against a scripted resolver on a paused clock.

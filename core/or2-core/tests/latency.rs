@@ -389,7 +389,7 @@ fn open_on_pane(
 ) -> (or2_core::session::SessionHandle, Duration) {
     let (tx, states) = mpsc::channel();
     let terminal = host
-        .open_terminal_within(
+        .open_terminal(
             TerminalTarget::Herdr {
                 session: None,
                 pane_id: Some(pane.into()),
@@ -469,7 +469,7 @@ fn a_terminal_on_a_vanished_pane_fails_and_leaves_no_mosh_server_behind() {
     for transport in [TerminalTransport::Mosh, TerminalTransport::Ssh] {
         let (tx, states) = mpsc::channel();
         let terminal = host
-            .open_terminal_within(
+            .open_terminal(
                 TerminalTarget::Herdr {
                     session: None,
                     pane_id: Some("w9:p9".into()),
@@ -532,7 +532,7 @@ fn ssh_terminal_on_a_pane() -> Duration {
     let started = Instant::now();
     let (tx, states) = mpsc::channel();
     let terminal = host
-        .open_terminal_within(
+        .open_terminal(
             TerminalTarget::Herdr {
                 session: None,
                 pane_id: Some("w2:p1".into()),
@@ -580,7 +580,7 @@ fn open_pending(
 ) {
     let (tx, states) = mpsc::channel();
     let terminal = host
-        .open_terminal_within(
+        .open_terminal(
             TerminalTarget::Herdr {
                 session: None,
                 pane_id: Some("w2:p1".into()),

@@ -899,7 +899,6 @@ async fn drive<T: Transport, D: DatagramTransport>(
                     }
                     HostEvent::Connected { address_index, peer, host } => {
                         timing = false;
-                        driver.set_peer_addr(peer);
                         peer_addr = peer;
                         if let Some(tap) = tap.take() {
                             let _ = tap.send(Arc::clone(&host));

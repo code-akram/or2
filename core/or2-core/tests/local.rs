@@ -8,8 +8,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use or2_core::host::HerdrSessionInfo;
-use or2_core::probe::probe;
+use or2_core::host::{HerdrSessionInfo, HostCapabilities};
+use or2_core::probe::{HERDR_LIST_TIMEOUT, probe_programs, probe_within};
 use or2_core::remote::{ExecOutput, LocalHost, RemoteError, RemoteHost};
 use or2_core::tmux;
 
@@ -81,6 +81,13 @@ fn hermetic(dir: &Path) -> Hermetic {
         home: dir.join("home"),
         path: path_dir.to_str().unwrap().into(),
     }
+}
+
+/// The whole capability probe, as a host connection runs it.
+async fn probe<H: RemoteHost>(host: &H) -> Result<HostCapabilities, RemoteError> {
+    probe_within(host, HERDR_LIST_TIMEOUT, probe_programs(host))
+        .await
+        .map(|(caps, _)| caps)
 }
 
 #[tokio::test]
