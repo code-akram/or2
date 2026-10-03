@@ -304,6 +304,20 @@ class UiGalleryActivity : ComponentActivity() {
 
     private val caps = HostCapabilities("/usr/bin/tmux", "/home/dev/.local/bin/herdr", null, listOf(
         HerdrSessionInfo("personal", true, true), HerdrSessionInfo("work", true, false), HerdrSessionInfo("archive", false, false)))
+    /**
+     * The live herdr views of [caps]' sessions: the default one (`personal`) runs four agents in two workspaces, `work`
+     * none; `archive` is not running (one row).
+     */
+    private val pickerViews = mapOf<String?, HerdrView>(
+        null to view(
+            agent("w1:p1", AgentStatus.BLOCKED, "Claude Code", "~/code/or2"),
+            agent("w1:p2", AgentStatus.WORKING, "Codex", "~/code/or2/android/app/src/main/java/io/github/code_akram/or2"),
+            agent("w2:p1", AgentStatus.DONE, "Claude Code", "~/code/docs", tab = "w2:t1", workspace = "w2"),
+            agent("w2:p2", AgentStatus.IDLE, "Amp", "~/code/docs", tab = "w2:t1", workspace = "w2"),
+        ),
+        "work" to view(),
+    )
+
     /** A host with more herdr sessions than fit: the picker at full height, its list scrolling inside the sheet. */
     private val manyCaps = caps.copy(herdrSessions = (1..30).map { HerdrSessionInfo("session-$it", it % 3 != 0, it == 1) })
     private val tmux = TmuxList.Loaded(listOf(
@@ -394,7 +408,8 @@ class UiGalleryActivity : ComponentActivity() {
     /**
      * The session picker over Home, from a card's header: the lists for a connected host ([gate] null; the herdr session
      * `personal` and the tmux session `main` are open in or2, so marked `Open`), or the sheet before its host has
-     * connected. [udpBlocked] adds the muted line on mosh's UDP under the tabs.
+     * connected. [udpBlocked] adds the muted line on mosh's UDP under the tabs. The herdr tab shows [pickerViews]' agents
+     * (not with [many], whose sessions are not watched: one row each).
      */
     @Composable
     private fun HomePicker(variant: HomeVariant, gate: PickerGate?, many: Boolean = false, tab: PickerTab? = null, udpBlocked: Boolean = false) {
@@ -403,7 +418,7 @@ class UiGalleryActivity : ComponentActivity() {
             SessionPickerSheet(
                 if (many) manyCaps else caps, null, tmux, OpenSessions(herdr = setOf("personal"), tmux = setOf("main")),
                 openShell = {}, openTmux = {}, openHerdr = {}, refresh = {}, dismiss = {}, initialTab = tab, gate = gate, title = "workstation",
-                udpBlocked = udpBlocked,
+                udpBlocked = udpBlocked, herdrViews = if (many) emptyMap() else pickerViews,
             )
         }
     }

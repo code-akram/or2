@@ -2,11 +2,13 @@ package io.github.code_akram.or2.host
 
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.key
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -14,7 +16,12 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import io.github.code_akram.or2.MainActivity
 import io.github.code_akram.or2.connection.UDP_BLOCKED_LINE
+import io.github.code_akram.or2.ffi.AgentStatus
+import io.github.code_akram.or2.ffi.HerdrAgent
 import io.github.code_akram.or2.ffi.HerdrSessionInfo
+import io.github.code_akram.or2.ffi.HerdrTab
+import io.github.code_akram.or2.ffi.HerdrView
+import io.github.code_akram.or2.ffi.HerdrWorkspace
 import io.github.code_akram.or2.ffi.HostCapabilities
 import io.github.code_akram.or2.ffi.TmuxSession
 import io.github.code_akram.or2.ui.Or2Theme
@@ -36,10 +43,14 @@ class SessionPickerDeviceTest {
 
     private var generations = 0
 
+    /** How often the tmux tab asked for a fresh list (it is shown). */
+    private var tmuxShows = 0
+
     private fun show(
         calls: MutableList<String> = mutableListOf(), caps: HostCapabilities? = this.caps, tmux: TmuxList = this.tmux,
         capsError: String? = null, open: OpenSessions = OpenSessions(), gate: PickerGate? = null,
         actions: MutableList<GateAction> = mutableListOf(), udpBlocked: Boolean = false,
+        views: Map<String?, HerdrView> = emptyMap(), refreshing: Boolean = false, initialTab: PickerTab? = null,
     ) = compose.runOnUiThread {
         val generation = ++generations
         compose.activity.setContent {
@@ -47,9 +58,12 @@ class SessionPickerDeviceTest {
             key(generation) { Or2Theme {
                 SessionPickerSheet(
                     caps, capsError, tmux, open,
+                    initialTab = initialTab,
                     openShell = { calls += "shell" }, openTmux = { calls += "tmux:$it" }, openHerdr = { calls += "herdr:$it" },
                     refresh = { calls += "refresh" }, dismiss = { calls += "dismiss" },
                     gate = gate, gateAction = { actions += it }, title = "Build box", udpBlocked = udpBlocked,
+                    herdrViews = views, openAgent = { session, pane -> calls += "agent:$session:$pane" },
+                    refreshing = refreshing, tmuxShown = { tmuxShows++ },
                 )
             } }
         }
@@ -88,6 +102,66 @@ class SessionPickerDeviceTest {
         compose.onNodeWithTag("open-mark:tmux:main", useUnmergedTree = true).assertDoesNotExist()
         compose.onNodeWithTag("tmux-attach:build").performClick()
         compose.runOnIdle { assertEquals(listOf("herdr:null", "tmux:build"), calls) }
+    }
+
+    private fun agent(pane: String, status: AgentStatus, name: String, workspace: String = "w1") =
+        HerdrAgent(pane, "$workspace:t1", workspace, null, null, name, status, "~/code/or2", 1uL, "term_$pane")
+
+    /** The default session runs two agents in two workspaces; `work` runs none; `old` is not running. */
+    private val views = mapOf<String?, HerdrView>(
+        null to HerdrView(
+            1uL, null, listOf(HerdrWorkspace("w1", 1u, "or2"), HerdrWorkspace("w2", 2u, "docs")),
+            listOf(HerdrTab("w1:t1", "w1", 1u, "ui"), HerdrTab("w2:t1", "w2", 1u, "readme")), emptyList(),
+            listOf(agent("w1:p1", AgentStatus.WORKING, "Claude Code"), agent("w2:p1", AgentStatus.BLOCKED, "Codex", workspace = "w2")),
+        ),
+        "work" to HerdrView(1uL, null, emptyList(), emptyList(), emptyList(), emptyList()),
+    )
+
+    @Test
+    fun theHerdrTabListsEachRunningSessionsAgentsUnderAWholeSessionRow() {
+        val calls = mutableListOf<String>()
+        show(calls, views = views, open = OpenSessions(herdr = setOf(null)))
+        // The default session by its name, its agents by workspace, each with its status word.
+        compose.onNodeWithTag("herdr-session:default").assertIsDisplayed()
+        compose.onNodeWithTag("herdr-workspace:default:or2", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag("herdr-workspace:default:docs", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("Claude Code", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag("herdr-agent-status:default:w1:p1", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("Working", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("Blocked", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("default (default)").assertDoesNotExist()
+        // Whole session keeps the session's row: marked Open here, and opened without a pane.
+        compose.onNodeWithTag("open-mark:herdr:default", useUnmergedTree = true).assertIsDisplayed()
+        compose.onAllNodesWithText("Whole session", useUnmergedTree = true).assertCountEquals(2) // default and work.
+        // A running session without agents says so; a stopped one is its one row, as before.
+        compose.onNodeWithTag("herdr-no-agents:work").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("herdr-open:old").performScrollTo().assertIsNotEnabled()
+        // The herdr tab is live: no Refresh here.
+        compose.onNodeWithTag("host-refresh").assertDoesNotExist()
+        compose.onNodeWithTag("herdr-agent:default:w2:p1").performScrollTo().performClick()
+        compose.onNodeWithTag("herdr-open:default").performScrollTo().performClick()
+        compose.onNodeWithTag("herdr-open:work").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(listOf("agent:null:w2:p1", "herdr:null", "herdr:work"), calls) }
+    }
+
+    @Test
+    fun tmuxShowsASpinnerUntilItsFirstAnswerThenBesideRefreshWhileReadingAgain() {
+        tmuxShows = 0
+        show(tmux = TmuxList.Loading)
+        compose.onNodeWithTag("tmux-spinner").assertDoesNotExist() // The herdr tab.
+        compose.runOnIdle { assertEquals(0, tmuxShows) }
+        pickerTab(1)
+        compose.onNodeWithTag("tmux-spinner").assertIsDisplayed()
+        compose.onNodeWithTag("refresh-spinner", useUnmergedTree = true).assertDoesNotExist()
+        compose.runOnIdle { assertEquals(1, tmuxShows) } // Shown: read again.
+        // A later read keeps the list, with the spinner beside Refresh.
+        show(refreshing = true, initialTab = PickerTab.TMUX)
+        compose.onNodeWithTag("tmux-attach:main").assertIsDisplayed()
+        compose.onNodeWithTag("tmux-spinner").assertDoesNotExist()
+        compose.onNodeWithTag("refresh-spinner", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
+        compose.runOnIdle { assertEquals(2, tmuxShows) }
+        show(refreshing = false, initialTab = PickerTab.TMUX)
+        compose.onNodeWithTag("refresh-spinner", useUnmergedTree = true).assertDoesNotExist()
     }
 
     @Test
@@ -131,6 +205,8 @@ class SessionPickerDeviceTest {
         show(caps = null, tmux = TmuxList.Loading)
         compose.onNodeWithText("Checking the host…", substring = true).assertIsDisplayed()
         show(capsError = "probe failed")
+        compose.onNodeWithText("Could not query the host. Refresh it from the tmux tab.").assertIsDisplayed()
+        pickerTab(1)
         compose.onNodeWithText("Could not query the host. Try Refresh.").assertIsDisplayed()
     }
 
