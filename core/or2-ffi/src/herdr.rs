@@ -147,6 +147,37 @@ pub enum HerdrState {
     Closed,
 }
 
+/// What `herdr integration status` says of one integration (API 19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum HerdrIntegrationState {
+    /// Installed, the version this herdr ships.
+    Current,
+    /// Installed, an older version: installing again updates it.
+    Outdated,
+    NotInstalled,
+}
+
+/// One of herdr's agent integrations on the host (API 19): `id` is one of the ids
+/// `HostConnection.install_herdr_integration` takes. No path: they name the user's home.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct HerdrIntegration {
+    pub id: String,
+    pub state: HerdrIntegrationState,
+}
+
+impl From<core::Integration> for HerdrIntegration {
+    fn from(integration: core::Integration) -> Self {
+        Self {
+            id: integration.id,
+            state: match integration.state {
+                core::IntegrationState::Current => HerdrIntegrationState::Current,
+                core::IntegrationState::Outdated => HerdrIntegrationState::Outdated,
+                core::IntegrationState::NotInstalled => HerdrIntegrationState::NotInstalled,
+            },
+        }
+    }
+}
+
 impl From<core::AgentStatus> for AgentStatus {
     fn from(status: core::AgentStatus) -> Self {
         match status {

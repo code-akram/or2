@@ -41,6 +41,7 @@ import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.hosts.HostFormScreen
+import io.github.code_akram.or2.inbox.EnableReplyDialog
 import io.github.code_akram.or2.inbox.InboxScreen
 import io.github.code_akram.or2.inbox.InboxState
 import io.github.code_akram.or2.inbox.hostStates
@@ -49,6 +50,8 @@ import io.github.code_akram.or2.inbox.pendingHostKeys
 import io.github.code_akram.or2.keys.KeysScreen
 import io.github.code_akram.or2.notify.AgentAlertSettings
 import io.github.code_akram.or2.notify.AgentOpenRequests
+import io.github.code_akram.or2.notify.EnableReplyRequest
+import io.github.code_akram.or2.notify.EnableReplyRequests
 import io.github.code_akram.or2.notify.OnScreen
 import io.github.code_akram.or2.pair.AddHostSheet
 import io.github.code_akram.or2.pair.KeepAliveScreen
@@ -108,6 +111,12 @@ class AppActions(
     val setAgentAlerts: (Boolean) -> Unit = {},
     /** An agent notification's tap: the pane to open, its host connected first when it is not. */
     val agentOpens: AgentOpenRequests = AgentOpenRequests(),
+    /**
+     * Enable Reply (an Inbox row's, a notification's): the request waiting for its confirmation, and what runs once it
+     * is confirmed (the install over the host's live connection, its outcome as the message).
+     */
+    val enableReplies: EnableReplyRequests = EnableReplyRequests(),
+    val enableReply: (EnableReplyRequest) -> Unit = {},
     /** The terminal on screen while the app is resumed, else null: its herdr pane gets no notification. */
     val onScreen: (OnScreen?) -> Unit = {},
     /** Images shared from another app: the user picks the open terminal each goes to. */
@@ -247,6 +256,7 @@ fun Or2App(
                     openHome = { navigate(nav.top(Destination.Home)) },
                     openKeys = { navigate(nav.push(Destination.Keys)) },
                     easyPair = ::easyPair, manualHost = ::manualHost,
+                    enableReply = { item -> item.enableReplyRequest?.let(actions.enableReplies::request) },
                 )
                 Destination.About -> AboutRoute(back = ::pop, openLicenses = { navigate(nav.push(Destination.Licenses)) })
                 Destination.Licenses -> LicensesRoute(back = ::pop)
@@ -324,9 +334,21 @@ fun Or2App(
         connect(listOf(host))
     }
     // A host-key prompt needs an answer wherever the user is, one dialog at a time (over the picker too).
-    pending.firstOrNull()?.let { (active, prompt) ->
+    val trustPrompt = pending.firstOrNull()
+    trustPrompt?.let { (active, prompt) ->
         HostTrustDialog(prompt, busy, { actions.approve(active, prompt) }, { actions.reject(active) },
             hostLabel = hosts.find { it.id == active.host.id }?.label ?: active.host.label)
+    }
+    // Enable Reply asks once, wherever the user is (a notification's action lands on any screen); a host-key prompt
+    // comes first. Nothing is installed before Enable.
+    val enableAsk by actions.enableReplies.request.collectAsStateWithLifecycle()
+    enableAsk?.takeIf { trustPrompt == null }?.let { ask ->
+        val request = ask.copy(hostLabel = hosts.find { it.id == ask.hostId }?.label ?: ask.hostLabel)
+        EnableReplyDialog(
+            request,
+            enable = { actions.enableReplies.take()?.let { actions.enableReply(request) } },
+            dismiss = { actions.enableReplies.take() },
+        )
     }
 }
 

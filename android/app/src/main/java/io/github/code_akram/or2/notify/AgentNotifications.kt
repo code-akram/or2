@@ -21,7 +21,9 @@ import java.util.UUID
 /**
  * Posts agent alerts ([AgentAlertSink]) on the `agents` channel: one notification per pane (tag [AgentPaneKey.tag],
  * id [NOTIFICATION_ID]), whose tap opens [MainActivity] with the pane ([openIntent]) and whose Reply action sends
- * text to the agent ([replyIntent], [AgentReplies]). Nothing is posted without `POST_NOTIFICATIONS`.
+ * text to the agent ([replyIntent], [AgentReplies]); an agent without Reply whose herdr integration is missing gets
+ * **Enable Reply** instead, which opens the app to its confirmation ([enableReplyIntent]). Nothing is posted without
+ * `POST_NOTIFICATIONS`.
  */
 class AgentNotifications(private val context: Context, private val store: PrefStore) : AgentAlertSink {
     private val manager get() = context.getSystemService(NotificationManager::class.java)
@@ -69,8 +71,13 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
             .setWhen(now)
             .setAutoCancel(true)
             .setContentIntent(open)
-        // Only an agent instance herdr identifies can be answered from here: any other is opened to reply.
-        if (alert.agent != null) builder.addAction(replyAction(alert))
+        // Only an agent instance herdr identifies can be answered from here: any other is opened to reply, and one whose
+        // integration is missing offers to set it up instead (in the app, after a confirmation).
+        if (alert.agent != null) {
+            builder.addAction(replyAction(alert))
+        } else if (alert.enableReplyRequest != null) {
+            builder.addAction(enableReplyAction(alert))
+        }
         if (alert.outcome != null) builder.setOnlyAlertOnce(true)
         alert.reply?.let { reply ->
             val agent = Person.Builder().setName(alert.title).build()
@@ -104,8 +111,27 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
             .build()
     }
 
+    /**
+     * The **Enable Reply** action: opens [MainActivity] to its confirmation ([enableReplyIntent]); nothing is installed
+     * from the notification. Immutable and one-shot, its data carries this post's capability (the pane's nonce, taken
+     * once by `AgentAlerts.admitEnableReply`) and the app's token is in its extras, as a tap's is.
+     */
+    private fun enableReplyAction(alert: AgentAlert): Notification.Action {
+        val enable = PendingIntent.getActivity(
+            context, alert.key.tag.hashCode(), enableReplyIntent(context, alert, token(store)),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_ONE_SHOT,
+        )
+        return Notification.Action.Builder(Icon.createWithResource(context, R.drawable.ic_stat_or2), ENABLE_REPLY, enable).build()
+    }
+
     companion object {
         const val CHANNEL_ID = "agents"
+
+        /** The label of the notification's action, and of the Inbox row's. */
+        const val ENABLE_REPLY = "Enable Reply"
+        const val ACTION_ENABLE_REPLY = "io.github.code_akram.or2.action.ENABLE_REPLY"
+        private const val ENABLE_SCHEME = "or2-agent-enable"
+        private const val EXTRA_INTEGRATION = "io.github.code_akram.or2.extra.INTEGRATION"
 
         /** The id of every agent notification; the pane is in the tag. The service's notification is 1, untagged. */
         const val NOTIFICATION_ID = 2
@@ -202,12 +228,56 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
             )
         }
 
+        /**
+         * The **Enable Reply** action's intent: [MainActivity] (brought to the front when it runs); its data is the pane's
+         * tag with this post's capability as the fragment (each post's pending intent distinct); the app's [token]; the
+         * integration to install; and what the confirmation names (the agent's label, the host's).
+         */
+        fun enableReplyIntent(context: Context, alert: AgentAlert, token: String): Intent =
+            Intent(context, MainActivity::class.java)
+                .setAction(ACTION_ENABLE_REPLY)
+                .setData(Uri.fromParts(ENABLE_SCHEME, alert.key.tag, alert.nonce))
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                .putExtra(EXTRA_TOKEN, token)
+                .putExtra(EXTRA_INTEGRATION, alert.enableReply)
+                .putExtra(EXTRA_TITLE, alert.title)
+                .putExtra(EXTRA_HOST, alert.subText)
+
+        /**
+         * The Enable Reply an intent asks for ([enableReplyIntent]), with its pane and capability, or null for any other
+         * intent. The activity is exported, so it must carry the app's own token, as a tap does.
+         */
+        fun enableReplyOf(intent: Intent?, store: PrefStore): EnableReplyAsk? {
+            if (intent?.action != ACTION_ENABLE_REPLY || intent.data?.scheme != ENABLE_SCHEME) return null
+            return enableReplyFrom(
+                intent.data?.schemeSpecificPart, intent.data?.fragment, intent.getStringExtra(EXTRA_INTEGRATION),
+                intent.getStringExtra(EXTRA_TITLE), intent.getStringExtra(EXTRA_HOST),
+                intent.getStringExtra(EXTRA_TOKEN), store.getString(TOKEN_KEY),
+            )
+        }
+
         /** The id of the tap [intent] carries ([openIntent]), or null. */
         fun tapOf(intent: Intent?): String? = intent?.getStringExtra(EXTRA_TAP)
 
         /** The app's token for its notification taps, made once. */
         fun token(store: PrefStore): String = store.getString(TOKEN_KEY) ?: UUID.randomUUID().toString().also { store.putString(TOKEN_KEY, it) }
     }
+}
+
+/** A notification's **Enable Reply**: the pane it came from, its capability, and what to ask. */
+data class EnableReplyAsk(val key: AgentPaneKey, val nonce: String?, val request: EnableReplyRequest)
+
+/**
+ * An Enable Reply intent's ask from its parts ([AgentNotifications.enableReplyIntent]): the token must be the app's own,
+ * the tag a pane's, and the integration one of [HerdrIntegrations.IDS]; else null.
+ */
+fun enableReplyFrom(
+    tag: String?, nonce: String?, integration: String?, title: String?, host: String?, token: String?, expected: String?,
+): EnableReplyAsk? {
+    if (expected == null || token != expected || tag == null) return null
+    val key = AgentPaneKey.fromTag(tag)?.takeIf { it.hostId > 0 && it.paneId.isNotEmpty() } ?: return null
+    if (integration == null || integration !in HerdrIntegrations.IDS) return null
+    return EnableReplyAsk(key, nonce, EnableReplyRequest(key.hostId, host.orEmpty(), title.orEmpty().ifEmpty { "agent" }, integration))
 }
 
 /** A notification tap's pane from its extras: the token must be the app's own, and host and pane must be named. */

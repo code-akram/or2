@@ -6,6 +6,9 @@ import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.data.TrustStore
 import io.github.code_akram.or2.ffi.AgentIdentity
 import io.github.code_akram.or2.ffi.CloseReason
+import io.github.code_akram.or2.ffi.HerdrAgent
+import io.github.code_akram.or2.ffi.HerdrIntegration
+import io.github.code_akram.or2.ffi.HerdrIntegrationState
 import io.github.code_akram.or2.ffi.HerdrListener
 import io.github.code_akram.or2.ffi.HerdrState
 import io.github.code_akram.or2.ffi.HerdrUnavailable
@@ -30,6 +33,8 @@ import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.ffi.TmuxSession
 import io.github.code_akram.or2.ffi.connectHost
 import io.github.code_akram.or2.hosts.connectionAffectedBy
+import io.github.code_akram.or2.notify.HerdrIntegrations
+import io.github.code_akram.or2.notify.enableReplyFor
 import io.github.code_akram.or2.paste.ImagePaste
 import io.github.code_akram.or2.terminal.SessionRoute
 import io.github.code_akram.or2.terminal.TargetScroller
@@ -127,6 +132,16 @@ interface HostPort : AutoCloseable {
      * Cancelling stops the upload.
      */
     suspend fun uploadImage(bytes: ByteArray, extension: String): String
+
+    /**
+     * API 19: installs herdr's integration [id] on the host (`<herdr> integration install <id>`, one exec within the
+     * exec timeout); [id] must be one of herdr 0.9.3's (`InvalidName` otherwise, nothing sent). `NotInstalled` without
+     * herdr, `CommandFailed` with the first line of its stderr when it fails.
+     */
+    suspend fun installHerdrIntegration(id: String)
+
+    /** API 19: `herdr integration status` for the ids [installHerdrIntegration] takes. `NotInstalled` without herdr. */
+    suspend fun herdrIntegrations(): List<HerdrIntegration>
 }
 
 class NativeHostPort(private val connection: HostConnection) : HostPort {
@@ -151,6 +166,8 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
     override suspend fun replyToPane(session: String?, paneId: String, agent: AgentIdentity, text: String) =
         connection.replyToPane(session, paneId, agent, text)
     override suspend fun uploadImage(bytes: ByteArray, extension: String) = connection.uploadImage(bytes, extension)
+    override suspend fun installHerdrIntegration(id: String) = connection.installHerdrIntegration(id)
+    override suspend fun herdrIntegrations() = connection.herdrIntegrations()
     override fun close() = connection.close()
 }
 
@@ -229,6 +246,20 @@ class ActiveHost internal constructor(val host: Host) {
 
     /** SSH terminals waiting for [probingTerminal]'s verdict before trying mosh in the background themselves. */
     internal val awaitingVerdict = mutableListOf<ActiveTerminal>()
+
+    /**
+     * herdr's integrations on the host (`herdr integration status`) by id, read on this connection once a live view
+     * shows an agent that could use one ([HostConnections.enableReplyFor]); null until read, or when herdr could not
+     * say. An install from the app marks its id current.
+     */
+    internal val mutableIntegrations = MutableStateFlow<Map<String, HerdrIntegrationState>?>(null)
+    val integrations = mutableIntegrations.asStateFlow()
+
+    /** The integrations are to be read (again) when a view next needs them: a new connection, or a [HostConnections.refresh]. */
+    internal var integrationsStale = true
+
+    /** A read of the integrations is running on this connection. */
+    internal var readingIntegrations = false
 
     /** Whether herdr watches should run: the host's inbox flag, which can change on a live connection. */
     internal var watching = host.showInInbox
@@ -804,6 +835,7 @@ class HostConnections(
     suspend fun refresh(current: ActiveHost) {
         if (current.state.value !is HostState.Connected) return
         if (current.mutableMoshServer.value == null && !current.askingMoshServer) scope.launch { askMoshServer(current) }
+        current.integrationsStale = true
         probe(current)
     }
 
@@ -858,6 +890,7 @@ class HostConnections(
                         watch.mutableState.value = state
                         // A stopped watch (its connection is over) has nothing more to say to the observer.
                         if (watch.handle != null) herdrObserver?.herdrStateChanged(current.host, watch, state)
+                        if (state is HerdrState.Live && watch.handle != null) readIntegrationsFor(current, port, state.view.agents)
                         // The first herdr view of the host is when its inbox rows can appear.
                         if (state is HerdrState.Live && !current.timedLive) {
                             current.timedLive = true
@@ -895,6 +928,49 @@ class HostConnections(
      */
     suspend fun replyToPane(hostId: Long, session: String?, paneId: String, agent: AgentIdentity, text: String): ReplyRoute =
         currentPort(hostId, requireConnected = true).replyToPane(session, paneId, agent, text)
+
+    /**
+     * Reads herdr's integrations on [current] (`herdr_integrations`, one exec) when they are stale and [agents] holds
+     * one that could use one (no session, a kind with an integration): at most once per connection and [refresh], not
+     * again after a failure until then. Nothing for a host whose agents all have Reply.
+     */
+    private fun readIntegrationsFor(current: ActiveHost, port: HostPort, agents: List<HerdrAgent>) {
+        if (!current.integrationsStale || current.readingIntegrations || current.retired) return
+        if (agents.none { it.replyIdentity == null && HerdrIntegrations.forKind(it.agent) != null }) return
+        current.integrationsStale = false
+        current.readingIntegrations = true
+        scope.launch {
+            try {
+                val list = port.herdrIntegrations()
+                if (owns(current)) current.mutableIntegrations.value = list.associate { it.id to it.state }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // herdr could not say (an older herdr, a slow host): what was known stays, and nothing new is offered.
+            } finally {
+                current.readingIntegrations = false
+            }
+        }
+    }
+
+    /**
+     * The integration to offer for [agent] on [hostId]'s connection (Enable Reply: [enableReplyFor] with the host's
+     * known integrations), or null for nothing new.
+     */
+    fun enableReplyFor(hostId: Long, agent: HerdrAgent): String? =
+        enableReplyFor(agent, mutableHosts.value[hostId]?.mutableIntegrations?.value)
+
+    /**
+     * Enable Reply, confirmed (API 19, `install_herdr_integration`): installs herdr's integration [id] on [hostId]'s
+     * live connection (only one that is up now; nothing connects from here), then marks it current there, so the
+     * offer goes. Throws [HostException.NotConnected] without one, and the install's own [HostException] otherwise.
+     */
+    suspend fun installHerdrIntegration(hostId: Long, id: String) {
+        val current = mutableHosts.value[hostId]
+        currentPort(hostId, requireConnected = true).installHerdrIntegration(id)
+        if (current == null || !owns(current)) return
+        current.mutableIntegrations.value = current.mutableIntegrations.value.orEmpty() + (id to HerdrIntegrationState.CURRENT)
+    }
 
     /**
      * Scrolls [terminal]'s tmux or herdr history (`scroll_target`) over its host's current connection

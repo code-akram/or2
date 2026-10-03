@@ -3,6 +3,13 @@ package io.github.code_akram.or2.inbox
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
+import io.github.code_akram.or2.notify.EnableReplyRequest
+import io.github.code_akram.or2.ui.Or2Dialog
+import io.github.code_akram.or2.ui.Or2Shapes
+import io.github.code_akram.or2.ui.TextAction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -78,6 +85,8 @@ fun InboxScreen(
     /** The add-host chooser's two cards, shown when no host shows agents here. */
     easyPair: () -> Unit = {},
     manualHost: () -> Unit = {},
+    /** A row's **Enable Reply** ([InboxItem.enableReply]): asks to confirm, then installs herdr's integration. */
+    enableReply: (InboxItem) -> Unit = {},
 ) {
     val connectable = state.hosts.filter {
         it.host.keyId != null && it.link.canConnect
@@ -132,7 +141,7 @@ fun InboxScreen(
                         )
                     }
                 }
-                items(group.items, key = { inboxItemTag(it) }) { item -> AgentRow(item, openAgent) }
+                items(group.items, key = { inboxItemTag(it) }) { item -> AgentRow(item, openAgent, enableReply) }
             }
             if (state.hosts.isNotEmpty()) {
                 item(key = "hosts-header") {
@@ -185,8 +194,24 @@ private fun HostStatusRow(row: InboxHostRow, busy: Boolean, connect: () -> Unit)
     }
 }
 
+/**
+ * "Enable Reply?": the one confirmation before or2 installs herdr's integration for an agent on its host, from an
+ * Inbox row or a notification's action, over whatever is on screen.
+ */
 @Composable
-private fun AgentRow(item: InboxItem, open: (InboxItem) -> Unit) {
+fun EnableReplyDialog(request: EnableReplyRequest, enable: () -> Unit, dismiss: () -> Unit) {
+    Or2Dialog(
+        onDismiss = dismiss, title = "Enable Reply?", modifier = Modifier.testTag("enable-reply-dialog"),
+        confirm = { TextAction("Enable", enable, modifier = Modifier.testTag("enable-reply-confirm")) },
+        dismiss = { TextAction("Cancel", dismiss, color = Or2Colors.Text, modifier = Modifier.testTag("enable-reply-cancel")) },
+    ) { Text(request.question) }
+}
+
+/** Test tag of an agent row's **Enable Reply** action. */
+fun enableReplyTag(item: InboxItem) = "inbox-enable-reply:${item.hostId}:${item.session ?: "-"}:${item.paneId}"
+
+@Composable
+private fun AgentRow(item: InboxItem, open: (InboxItem) -> Unit, enableReply: (InboxItem) -> Unit) {
     val blocked = item.status == AgentStatus.BLOCKED
     Or2Card(
         Modifier.testTag(inboxItemTag(item)), onClick = { open(item) },
@@ -209,8 +234,19 @@ private fun AgentRow(item: InboxItem, open: (InboxItem) -> Unit) {
                 }
             }
             Spacer(Modifier.width(8.dp))
-            Text(statusLabel(item.status), style = Or2Type.Secondary, color = if (blocked) Or2Colors.Attention else Or2Colors.TextMuted,
-                modifier = Modifier.testTag("status-chip"))
+            Column(horizontalAlignment = Alignment.End) {
+                Text(statusLabel(item.status), style = Or2Type.Secondary, color = if (blocked) Or2Colors.Attention else Or2Colors.TextMuted,
+                    modifier = Modifier.testTag("status-chip"))
+                // No Reply from this agent's notifications until herdr's integration for it is set up: one tap asks.
+                if (item.enableReply != null) {
+                    Text(
+                        "Enable Reply", style = Or2Type.Secondary, color = Or2Colors.Accent, maxLines = 1,
+                        modifier = Modifier.padding(top = 2.dp).clip(Or2Shapes.Pill)
+                            .clickable(role = Role.Button) { enableReply(item) }
+                            .padding(horizontal = 4.dp, vertical = 2.dp).testTag(enableReplyTag(item)),
+                    )
+                }
+            }
         }
     }
 }

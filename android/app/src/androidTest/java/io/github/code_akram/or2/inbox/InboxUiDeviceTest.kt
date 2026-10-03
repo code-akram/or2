@@ -21,6 +21,7 @@ import io.github.code_akram.or2.connection.uiHost
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.HerdrAgent
+import io.github.code_akram.or2.ffi.HerdrIntegrationState
 import io.github.code_akram.or2.ffi.HerdrTab
 import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HerdrWorkspace
@@ -92,6 +93,45 @@ class InboxUiDeviceTest {
             assertEquals("work", opened!!.session)
             assertEquals(1L, opened!!.hostId)
         }
+    }
+
+    @Test
+    fun anAgentWithoutReplyOffersEnableReplyWhichAsksBeforeAnythingRuns() {
+        val pi = HerdrAgent("w1:p4", "w1:t1", "w1", null, "pi", "pi", AgentStatus.IDLE, "/work/w1:p4", 1uL, "term_w1:p4")
+        val groups = buildInbox(listOf(InboxSource(
+            1, "Box", null, "default", view.copy(agents = view.agents + pi),
+            mapOf("pi" to HerdrIntegrationState.NOT_INSTALLED, "claude" to HerdrIntegrationState.CURRENT),
+        )))
+        val item = groups.flatMap { it.items }.single { it.paneId == "w1:p4" }
+        var asked: InboxItem? = null
+        var opened: InboxItem? = null
+        compose.runOnUiThread {
+            compose.activity.setContent {
+                Or2Theme { InboxScreen(InboxState(listOf(row(box, LinkStatus.CONNECTED)), groups), false, {}, {}, { opened = it }, enableReply = { asked = it }) }
+            }
+        }
+        // Only pi's row has it (the Claude Code rows' integration is current), and it does not open the pane.
+        compose.onAllNodesWithText("Enable Reply").assertCountEquals(1)
+        compose.onNodeWithTag(enableReplyTag(item), useUnmergedTree = true).assertIsDisplayed().performClick()
+        compose.runOnIdle {
+            assertEquals(item, asked)
+            assertEquals(null, opened)
+        }
+        // The confirmation says what it installs where; Cancel installs nothing.
+        var enabled = 0
+        var dismissed = 0
+        compose.runOnUiThread {
+            compose.activity.setContent {
+                Or2Theme { EnableReplyDialog(item.enableReplyRequest!!, enable = { enabled++ }, dismiss = { dismissed++ }) }
+            }
+        }
+        compose.onNodeWithText(
+            "Enable Reply for pi on Box? or2 installs herdr's pi integration there. Restart pi afterwards.",
+        ).assertIsDisplayed()
+        compose.onNodeWithTag("enable-reply-cancel").performClick()
+        compose.runOnIdle { assertEquals(0 to 1, enabled to dismissed) }
+        compose.onNodeWithTag("enable-reply-confirm").performClick()
+        compose.runOnIdle { assertEquals(1, enabled) }
     }
 
     @Test

@@ -16,8 +16,8 @@ use or2_core::frame::{
     Cell, CellStyle, CellWidth, Cursor, CursorShape, Frame, Rgb, Row, Scrollback, Underline,
 };
 use or2_core::herdr::{
-    Agent, AgentIdentity, AgentSession, AgentStatus, HerdrState, HerdrView, HerdrWatchDriver, Pane,
-    ReplyRoute, Tab, Workspace,
+    Agent, AgentIdentity, AgentSession, AgentStatus, HerdrState, HerdrView, HerdrWatchDriver,
+    Integration, IntegrationState, Pane, ReplyRoute, Tab, Workspace,
 };
 use or2_core::host::TerminalTransport as CoreTransport;
 use or2_core::host::{
@@ -238,8 +238,13 @@ fn publish(driver: &mut SessionDriver, frame: Frame) {
 /// for the blocked agent's pane `w1:p1`, `Prompted` for `w1:p2` and `w2:p1`, and `PaneNotFound`
 /// for any other pane; the validation (`InvalidName`, `TooLarge` above 4 KiB) is the real one.
 /// `upload_image` (API 16) returns [`PROBE_IMAGE_DIR`]`/or2-19700101-000000-000000.<extension>`
-/// (after the handle's own checks), except for a `gif`, which is `SftpUnavailable`. Closing the
-/// host closes its terminals and watches first.
+/// (after the handle's own checks), except for a `gif`, which is `SftpUnavailable`.
+/// `herdr_integrations` (API 19) starts as `pi` not installed, `claude` and `codex` current,
+/// `opencode` outdated and `droid` not installed; `install_herdr_integration` (after the handle's
+/// allowlist) makes an integration current, except `droid`
+/// ([`PROBE_FAILING_INTEGRATION`]), which is `CommandFailed` with
+/// `error: cannot write the hook: permission denied`. Closing the host closes its terminals and
+/// watches first.
 #[uniffi::export]
 pub fn contract_probe_host(
     request: HostConnectRequest,
@@ -272,6 +277,38 @@ fn probe_capabilities() -> HostCapabilities {
                 is_default: false,
             },
         ],
+    }
+}
+
+/// The one integration whose install fails on the probe host.
+pub const PROBE_FAILING_INTEGRATION: &str = "droid";
+
+/// herdr's integrations on a probe host as it connects: the probe view's `pi` (the agent with no
+/// session) not installed, its `claude` and `codex` current, `opencode` outdated, `droid` not
+/// installed.
+fn probe_integrations() -> Vec<Integration> {
+    [
+        ("pi", IntegrationState::NotInstalled),
+        ("claude", IntegrationState::Current),
+        ("codex", IntegrationState::Current),
+        ("opencode", IntegrationState::Outdated),
+        (PROBE_FAILING_INTEGRATION, IntegrationState::NotInstalled),
+    ]
+    .into_iter()
+    .map(|(id, state)| Integration {
+        id: id.into(),
+        state,
+    })
+    .collect()
+}
+
+fn set_integration(integrations: &mut Vec<Integration>, id: &str, state: IntegrationState) {
+    match integrations.iter_mut().find(|it| it.id == id) {
+        Some(integration) => integration.state = state,
+        None => integrations.push(Integration {
+            id: id.into(),
+            state,
+        }),
     }
 }
 
@@ -337,6 +374,7 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
     let (stop_sender, stop) = watch::channel(None);
     let mut tasks = JoinSet::new();
     let focused = Arc::new(Mutex::new(PROBE_PANES[0].to_owned()));
+    let mut integrations = probe_integrations();
     loop {
         match driver.next_command().await {
             HostCommand::Capabilities { reply } => {
@@ -432,6 +470,21 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                     pane if PROBE_PANES.contains(&pane) => Ok(ReplyRoute::Prompted),
                     _ => Err(core_host::HostError::PaneNotFound),
                 });
+            }
+            HostCommand::InstallHerdrIntegration { id, reply } => {
+                // As herdr would: an install makes the integration current, except the one
+                // that fails, for tests of the outcome the app shows.
+                let _ = reply.send(if id == PROBE_FAILING_INTEGRATION {
+                    Err(core_host::HostError::CommandFailed {
+                        message: "error: cannot write the hook: permission denied".into(),
+                    })
+                } else {
+                    set_integration(&mut integrations, &id, IntegrationState::Current);
+                    Ok(())
+                });
+            }
+            HostCommand::HerdrIntegrations { reply } => {
+                let _ = reply.send(Ok(integrations.clone()));
             }
             HostCommand::WatchHerdr {
                 session,

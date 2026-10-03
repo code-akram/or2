@@ -19,6 +19,15 @@ Each release's notes are in [docs/releases/](docs/releases/).
 - `or2-pair` says when Codex's shared daemon will keep Reply from working (herdr#4649) and how to turn it off;
   it changes nothing in Codex's config.
 
+- Enable Reply from the phone: an agent with no Reply because herdr's integration for it is missing on the host
+  (pi, opencode, ...) gets **Enable Reply** in its Inbox row and in its notification. One confirmation, then or2
+  runs `herdr integration install <id>` on the host and says the outcome (`Done. Restart pi to reply to it.`).
+  The notification's action only opens the app to that confirmation. An agent whose integration is already there
+  (Codex with herdr 0.9.3) or whose kind has none shows nothing new.
+- FFI API 19: `HostConnection.install_herdr_integration(id)` (one exec through the probed herdr; the id must be one
+  of herdr 0.9.3's integrations) and `HostConnection.herdr_integrations()` (`herdr integration status`, read as
+  `HerdrIntegration { id, state }`, no paths).
+
 ### Changed
 
 - `or2-pair` without herdr is a warning, not a note: it says that or2's agents inbox, notifications and Reply need

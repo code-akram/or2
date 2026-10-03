@@ -9,12 +9,15 @@ import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HerdrAgent
+import io.github.code_akram.or2.ffi.HerdrIntegrationState
 import io.github.code_akram.or2.ffi.HerdrState
 import io.github.code_akram.or2.ffi.HerdrUnavailable
 import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HostCapabilities
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.SessionFailure
+import io.github.code_akram.or2.notify.EnableReplyRequest
+import io.github.code_akram.or2.notify.enableReplyFor
 import io.github.code_akram.or2.session.hostStateMessage
 import io.github.code_akram.or2.ui.Or2Colors
 import kotlinx.coroutines.flow.Flow
@@ -97,7 +100,15 @@ data class InboxItem(
     val workspaceLabel: String?,
     val tabLabel: String?,
     val cwd: String?,
-)
+    /**
+     * herdr's integration to offer (**Enable Reply**, [enableReplyFor]): the agent has no session, so no Reply, and its
+     * kind's integration is not installed or outdated on the host. Null: nothing new.
+     */
+    val enableReply: String? = null,
+) {
+    /** What the row's **Enable Reply** asks to confirm, or null when it has none. */
+    val enableReplyRequest: EnableReplyRequest? get() = enableReply?.let { EnableReplyRequest(hostId, hostLabel, agentName, it) }
+}
 
 /** The items of one status, in display order. */
 data class InboxGroup(val status: AgentStatus, val items: List<InboxItem>)
@@ -109,6 +120,8 @@ data class InboxSource(
     val session: String?,
     val sessionName: String,
     val view: HerdrView,
+    /** herdr's integrations on the host (`ActiveHost.integrations`), null while unknown: see [enableReplyFor]. */
+    val integrations: Map<String, HerdrIntegrationState>? = null,
 )
 
 /** Blocked agents need the user first; then work in flight, finished work, and idle panes. */
@@ -137,6 +150,7 @@ fun buildInbox(sources: List<InboxSource>): List<InboxGroup> {
                 InboxItem(
                     source.hostId, source.hostLabel, source.session, source.sessionName, agent.paneId, agentName(agent),
                     agent.status, workspaces[agent.workspaceId]?.label, tabs[agent.tabId]?.label, agent.cwd,
+                    enableReplyFor(agent, source.integrations),
                 ),
                 workspaces[agent.workspaceId]?.number ?: UInt.MAX_VALUE, tabs[agent.tabId]?.number ?: UInt.MAX_VALUE,
             )
@@ -207,9 +221,11 @@ private fun hostFlow(host: Host, active: ActiveHost?): Flow<Pair<InboxHostRow, L
     if (active == null) {
         return flowOf(InboxHostRow(host, LinkStatus.NOT_CONNECTED, linkMessage(LinkStatus.NOT_CONNECTED, null), null, 0) to emptyList())
     }
-    return combine(active.state, active.capabilities, active.capabilitiesError, active.liveViews(host)) { state, caps, capsError, views ->
+    return combine(
+        active.state, active.capabilities, active.capabilitiesError, active.liveViews(host), active.integrations,
+    ) { state, caps, capsError, views, integrations ->
         val link = linkStatus(state, host.sleeps)
-        val sources = if (link == LinkStatus.CONNECTED) views.mapNotNull { it.third } else emptyList()
+        val sources = if (link == LinkStatus.CONNECTED) views.mapNotNull { it.third?.copy(integrations = integrations) } else emptyList()
         val note = if (link == LinkStatus.CONNECTED) herdrNote(caps, capsError, views.map { it.first.name to it.second }) else null
         InboxHostRow(host, link, linkMessage(link, state), note, sources.sumOf { it.view.agents.size }) to sources
     }

@@ -5,7 +5,11 @@ import io.github.code_akram.or2.connection.FakeTrust
 import io.github.code_akram.or2.connection.HostConnections
 import io.github.code_akram.or2.connection.testHost
 import io.github.code_akram.or2.data.HostEndpoint
+import io.github.code_akram.or2.ffi.AgentIdentity
+import io.github.code_akram.or2.ffi.AgentSession
 import io.github.code_akram.or2.ffi.AgentStatus
+import io.github.code_akram.or2.ffi.HerdrIntegration
+import io.github.code_akram.or2.ffi.HerdrIntegrationState
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HerdrAgent
 import io.github.code_akram.or2.ffi.HerdrListener
@@ -210,6 +214,92 @@ class InboxModelTest {
         hosts.value = listOf(one, two.copy(record = two.record.copy(showInInbox = false)), hidden.copy(record = hidden.record.copy(showInInbox = true)))
         runCurrent()
         assertEquals(listOf("One", "Hidden"), seen.last().hosts.map { it.host.label })
+        job.cancel()
+        holder.hosts.value.keys.toList().forEach(holder::dismissHost)
+    }
+
+    /** An agent of [kind] herdr reports without a session (no Reply), or with one. */
+    private fun kindAgent(pane: String, kind: String?, session: Boolean = false) = HerdrAgent(
+        pane, "w1:t1", "w1", null, kind, kind, AgentStatus.IDLE, "/work/$pane", 1uL, "term_$pane",
+        if (session) AgentIdentity("term_$pane", kind, null, AgentSession("id", "sess_$pane")) else null,
+    )
+
+    @Test
+    fun aRowOffersEnableReplyOnlyForAnAgentWithoutReplyWhoseIntegrationIsMissing() {
+        val integrations = mapOf(
+            "pi" to HerdrIntegrationState.NOT_INSTALLED, "opencode" to HerdrIntegrationState.OUTDATED,
+            "codex" to HerdrIntegrationState.CURRENT, "claude" to HerdrIntegrationState.NOT_INSTALLED,
+        )
+        val agents = view(
+            kindAgent("w1:p1", "pi"), kindAgent("w1:p2", "opencode"), kindAgent("w1:p3", "codex"),
+            kindAgent("w1:p4", "claude", session = true), kindAgent("w1:p5", "amp"), kindAgent("w1:p6", null),
+        )
+        val rows = buildInbox(listOf(InboxSource(1, "archlinux", null, "default", agents, integrations))).single().items
+        assertEquals(listOf("pi", "opencode", null, null, null, null), rows.map { it.enableReply })
+        assertEquals(
+            "Enable Reply for pi on archlinux? or2 installs herdr's pi integration there. Restart pi afterwards.",
+            rows[0].enableReplyRequest?.question,
+        )
+        assertNull(rows[2].enableReplyRequest)
+        // Integrations not known: nothing new anywhere.
+        assertTrue(buildInbox(listOf(source("archlinux", 1, agents))).single().items.all { it.enableReply == null })
+    }
+
+    @Test
+    fun aHostsIntegrationsAreReadOnceAViewNeedsThemAndAnInstallMarksItsOwnCurrent() = runTest {
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+        val port = FakePort().also {
+            it.caps = HostCapabilities("/t", "/h", null, listOf(HerdrSessionInfo("default", true, true)))
+            it.integrations = listOf(HerdrIntegration("pi", HerdrIntegrationState.NOT_INSTALLED), HerdrIntegration("claude", HerdrIntegrationState.CURRENT))
+        }
+        var listener: HostListener? = null
+        val holder = HostConnections({ _, l -> listener = l; port }, FakeTrust(), dispatcher, dispatcher)
+        val host = testHost(1, "archlinux")
+        val seen = mutableListOf<InboxState>()
+        val job = backgroundScope.launch(dispatcher) { holder.inbox(MutableStateFlow(listOf(host))).collect { seen += it } }
+        holder.connect(host, byteArrayOf(1))
+        listener!!.onHostStateChanged(HostState.Connected(0u))
+        runCurrent()
+        val watch = port.watches.single().second
+        // Every agent has Reply (or no integration): herdr is not asked.
+        watch.onHerdrStateChanged(HerdrState.Live(view(kindAgent("w1:p1", "claude", session = true), kindAgent("w1:p2", "amp"))))
+        runCurrent()
+        assertEquals(0, port.integrationCalls)
+        // An agent without a session whose kind has an integration: asked once, however many views follow.
+        val withPi = view(kindAgent("w1:p1", "claude", session = true), kindAgent("w1:p3", "pi"))
+        watch.onHerdrStateChanged(HerdrState.Live(withPi))
+        watch.onHerdrStateChanged(HerdrState.Live(withPi.copy(version = 2uL)))
+        runCurrent()
+        assertEquals(1, port.integrationCalls)
+        assertEquals("pi", seen.last().groups.single().items.single { it.paneId == "w1:p3" }.enableReply)
+        assertEquals("pi", holder.enableReplyFor(1, kindAgent("w1:p3", "pi")))
+
+        // Enabled: installed over the live connection, and the offer goes.
+        holder.installHerdrIntegration(1, "pi")
+        runCurrent()
+        assertEquals(listOf("pi"), port.installs)
+        assertNull(seen.last().groups.single().items.single { it.paneId == "w1:p3" }.enableReply)
+        assertNull(holder.enableReplyFor(1, kindAgent("w1:p3", "pi")))
+        // A failed install says why and changes nothing.
+        port.installFailure = io.github.code_akram.or2.ffi.HostException.CommandFailed("permission denied")
+        val failed = runCatching { holder.installHerdrIntegration(1, "opencode") }.exceptionOrNull()
+        assertTrue(failed is io.github.code_akram.or2.ffi.HostException.CommandFailed)
+        assertNull(holder.host(1)?.integrations?.value?.get("opencode"))
+
+        // A refresh reads them again when a view next needs them; a failed read keeps what was known.
+        port.integrationsFailure = io.github.code_akram.or2.ffi.HostException.CommandFailed("slow")
+        holder.refresh(holder.host(1)!!)
+        watch.onHerdrStateChanged(HerdrState.Live(withPi.copy(version = 3uL)))
+        runCurrent()
+        assertEquals(2, port.integrationCalls)
+        assertEquals(HerdrIntegrationState.CURRENT, holder.host(1)?.integrations?.value?.get("pi"))
+
+        // Not connected: nothing is installed, and nothing connects for it.
+        listener!!.onHostStateChanged(HostState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("x"))))
+        runCurrent()
+        val lost = runCatching { holder.installHerdrIntegration(1, "pi") }.exceptionOrNull()
+        assertTrue(lost is io.github.code_akram.or2.ffi.HostException.NotConnected)
+        assertEquals(listOf("pi", "opencode"), port.installs)
         job.cancel()
         holder.hosts.value.keys.toList().forEach(holder::dismissHost)
     }

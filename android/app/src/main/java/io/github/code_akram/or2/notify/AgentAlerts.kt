@@ -100,11 +100,21 @@ data class AgentAlert(
      * only with the pane's current one, once. Set by [AgentAlerts] when it posts; null otherwise.
      */
     val nonce: String? = null,
+    /**
+     * herdr's integration to offer when the alert has no [agent] (no Reply): the notification's second action is then
+     * **Enable Reply**, which opens the app to its confirmation ([EnableReplyRequest]). Null: nothing new.
+     */
+    val enableReply: String? = null,
 ) {
     /** Never the reply's text, nor the Reply capability: nothing a reply says is logged. */
     override fun toString() =
         "AgentAlert(key=$key, title=$title, text=$text, subText=$subText, outcome=$outcome, " +
-            "reply=${if (reply == null) "null" else "…"}, agent=$agent, nonce=${if (nonce == null) "null" else "…"})"
+            "reply=${if (reply == null) "null" else "…"}, agent=$agent, nonce=${if (nonce == null) "null" else "…"}, " +
+            "enableReply=$enableReply)"
+
+    /** What the notification's **Enable Reply** asks to confirm, or null when it has none (it has Reply, or nothing). */
+    val enableReplyRequest: EnableReplyRequest?
+        get() = enableReply?.takeIf { agent == null }?.let { EnableReplyRequest(key.hostId, subText, title, it) }
 }
 
 /**
@@ -216,6 +226,12 @@ class AgentAlerts(
     /** The panes with a notification up, for tests and diagnostics. */
     val active: Set<AgentPaneKey> get() = posted.toSet()
 
+    /**
+     * herdr's integration to offer for an agent without Reply on a host (`HostConnections.enableReplyFor`), or null:
+     * its notification then carries **Enable Reply** instead. Nothing by default.
+     */
+    var enableReply: (hostId: Long, agent: HerdrAgent) -> String? = { _, _ -> null }
+
     override fun herdrStateChanged(host: Host, watch: HerdrSessionWatch, state: HerdrState) =
         viewChanged(watch, host.id, host.label, watch.session, (state as? HerdrState.Live)?.view)
 
@@ -250,7 +266,12 @@ class AgentAlerts(
             val text = alertText(agent.status, before.worked) ?: continue
             when {
                 isOnScreen(key) -> cancel(key)
-                enabled() -> post(AgentAlert(key, agentName(agent), text, hostLabel, agent = agent.replyIdentity))
+                enabled() -> post(
+                    AgentAlert(
+                        key, agentName(agent), text, hostLabel, agent = agent.replyIdentity,
+                        enableReply = if (agent.replyIdentity == null) enableReply(hostId, agent) else null,
+                    ),
+                )
             }
         }
         // Gone from the session: nothing left to open.
@@ -281,6 +302,14 @@ class AgentAlerts(
      * main thread.
      */
     fun admitReply(key: AgentPaneKey, nonce: String?): Boolean = key in sink.shown() && nonces.consume(key, nonce)
+
+    /**
+     * A notification's **Enable Reply** opened the app with the capability [nonce]: taken like a reply ([admitReply]:
+     * only while the notification is up, with its current nonce, once), and then the notification goes, as a tap's
+     * does. Nothing is installed here: the app asks first.
+     */
+    fun admitEnableReply(key: AgentPaneKey, nonce: String?): Boolean =
+        admitReply(key, nonce).also { if (it) opened(key) }
 
     /**
      * A reply's outcome for its pane ([alert] with [AgentAlert.outcome] set, [AgentReplies]): replaces the pane's

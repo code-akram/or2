@@ -17,6 +17,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.viewModelScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -48,6 +49,8 @@ import io.github.code_akram.or2.keys.readPrivateKey
 import io.github.code_akram.or2.keys.vaultErrorMessage
 import io.github.code_akram.or2.notify.AgentNotifications
 import io.github.code_akram.or2.notify.AgentTaps
+import io.github.code_akram.or2.notify.EnableReplyRequest
+import io.github.code_akram.or2.notify.enableReplyOutcome
 import io.github.code_akram.or2.session.hostConnectErrorMessage
 import io.github.code_akram.or2.session.hostErrorMessage
 import kotlinx.coroutines.CancellationException
@@ -97,6 +100,7 @@ class MainActivity : FragmentActivity() {
         // with the killed one's state, for a new tap. A recreation handing back a tap already taken does not repeat it.
         agentTaps = AgentTaps(savedInstanceState?.getStringArray(AGENT_TAPS))
         openAgentFrom(intent)
+        enableReplyFrom(intent)
         // A recreation hands back the intent it was started with: that share was taken already.
         if (savedInstanceState == null) shareFrom(intent)
         enableEdgeToEdge(
@@ -136,6 +140,8 @@ class MainActivity : FragmentActivity() {
             agentAlerts = app.agentAlertSettings,
             setAgentAlerts = ::setAgentAlerts,
             agentOpens = app.agentOpens,
+            enableReplies = app.enableReplies,
+            enableReply = ::runEnableReply,
             onScreen = app.agentAlerts::screenChanged,
             imageShares = imageShares,
         )
@@ -157,7 +163,20 @@ class MainActivity : FragmentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         openAgentFrom(intent)
+        enableReplyFrom(intent)
         shareFrom(intent)
+    }
+
+    /**
+     * An agent notification's **Enable Reply**: taken once (its capability, while the notification is up), the
+     * notification goes, and the UI asks to confirm over whatever is on screen. Nothing is installed before that. A
+     * recreation that hands the same intent back finds the capability spent; any other intent is ignored.
+     */
+    private fun enableReplyFrom(intent: Intent?) {
+        if (intent == null || intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
+        val ask = AgentNotifications.enableReplyOf(intent, app.prefs) ?: return
+        if (!app.agentAlerts.admitEnableReply(ask.key, ask.nonce)) return
+        app.enableReplies.request(ask.request)
     }
 
     /**
@@ -178,6 +197,17 @@ class MainActivity : FragmentActivity() {
         val pane = agentTaps.take(AgentNotifications.paneOf(intent, app.prefs), AgentNotifications.tapOf(intent), fromHistory) ?: return
         app.agentAlerts.opened(pane)
         app.agentOpens.request(pane)
+    }
+
+    /**
+     * A confirmed Enable Reply: installs herdr's integration over the host's live connection (never connecting) and says
+     * the outcome as the message. Runs in the view model's scope, so a recreation does not cut it short.
+     */
+    private fun runEnableReply(request: EnableReplyRequest) {
+        model.message(request.progress)
+        model.viewModelScope.launch {
+            model.message(enableReplyOutcome(request) { hostId, id -> app.connections.installHerdrIntegration(hostId, id) })
+        }
     }
 
     /** The Settings switch. Turned on without the notification permission, it asks for it (in context). */

@@ -1049,6 +1049,19 @@ fn dispatch<D: DatagramTransport>(
                 Ok(mosh::terminate(&*host, pid).await?)
             })
         }
+        HostCommand::InstallHerdrIntegration { id, reply } => {
+            spawn_query(closing, tracker, reply, async move {
+                // One exec through the probed herdr path; the id is from the allowlist.
+                let path = host.programs().await?.program(Program::Herdr)?;
+                herdr::install_integration(&*host, path, &id).await
+            })
+        }
+        HostCommand::HerdrIntegrations { reply } => {
+            spawn_query(closing, tracker, reply, async move {
+                let path = host.programs().await?.program(Program::Herdr)?;
+                herdr::integration_states(&*host, path).await
+            })
+        }
         HostCommand::ScrollTarget {
             target,
             pane_id,

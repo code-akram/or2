@@ -21,6 +21,7 @@ pub mod wire;
 
 mod discovery;
 mod focus;
+mod integration;
 mod navigate;
 mod project;
 mod reply;
@@ -40,6 +41,10 @@ use crate::remote::RemoteError;
 pub(crate) use discovery::parse_listing;
 pub use discovery::{Directory, DiscoveryError, SessionEntry, list_sessions};
 pub use focus::{FocusGate, focus_pane_in};
+pub use integration::{
+    INTEGRATIONS, Integration, IntegrationState, install_integration, integration_states,
+    is_integration,
+};
 pub use navigate::navigate_in;
 pub use reply::{AgentIdentity, MAX_REPLY_BYTES, OPEN_THE_PANE, Reply, ReplyRoute, reply_in};
 pub use scroll::{ScrollOffsets, next_offset, scroll_pane_in};

@@ -4,6 +4,7 @@ import io.github.code_akram.or2.ffi.AgentIdentity
 import io.github.code_akram.or2.ffi.AgentSession
 import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.CloseReason
+import io.github.code_akram.or2.ffi.HerdrIntegrationState
 import io.github.code_akram.or2.ffi.HerdrListener
 import io.github.code_akram.or2.ffi.HerdrState
 import io.github.code_akram.or2.ffi.HerdrView
@@ -549,6 +550,33 @@ class HostContractTest {
             assertEquals("open the pane to reply", refused.reason)
         }
         assertEquals(HostState.Connected(0u), host.state())
+        host.disconnect()
+        host.close()
+    }
+
+    @Test
+    fun anIntegrationInstallCrossesTheFfiWithItsAllowlistAndItsFailure() {
+        val host = connectedHost()
+        fun states() = runBlocking { host.herdrIntegrations() }.associate { it.id to it.state }
+        // The probe view's pi (no session) has no integration yet; claude and codex are current, opencode outdated.
+        assertEquals(
+            mapOf(
+                "pi" to HerdrIntegrationState.NOT_INSTALLED, "claude" to HerdrIntegrationState.CURRENT,
+                "codex" to HerdrIntegrationState.CURRENT, "opencode" to HerdrIntegrationState.OUTDATED,
+                "droid" to HerdrIntegrationState.NOT_INSTALLED,
+            ),
+            states(),
+        )
+        runBlocking { host.installHerdrIntegration("pi") }
+        assertEquals(HerdrIntegrationState.CURRENT, states()["pi"])
+        // herdr's failure, its first line.
+        val failed = assertThrows(HostException.CommandFailed::class.java) { runBlocking { host.installHerdrIntegration("droid") } }
+        assertEquals("error: cannot write the hook: permission denied", failed.reason)
+        // Only herdr's own ids are taken, checked by Rust before anything is sent.
+        for (id in listOf("", "amp", "Pi", "pi ", "cursor-agent", "pi; reboot")) {
+            assertThrows(id, HostException.InvalidName::class.java) { runBlocking { host.installHerdrIntegration(id) } }
+        }
+        assertEquals(HerdrIntegrationState.NOT_INSTALLED, states()["droid"])
         host.disconnect()
         host.close()
     }

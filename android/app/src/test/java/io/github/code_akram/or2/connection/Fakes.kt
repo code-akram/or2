@@ -268,6 +268,25 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         uploadFailure?.let { throw it }
         return "/home/u/.cache/or2/images/or2-${uploads.size}.$extension"
     }
+    /** `install_herdr_integration` ids in call order; a failure is thrown after the call is recorded. */
+    val installs = mutableListOf<String>()
+    var installFailure: Exception? = null
+    var installGate: CompletableDeferred<Unit>? = null
+    override suspend fun installHerdrIntegration(id: String) {
+        installs += id
+        installGate?.await()
+        installFailure?.let { throw it }
+    }
+
+    /** What `herdr_integrations` answers (it is counted in [integrationCalls]); [integrationsFailure] is thrown instead. */
+    var integrations = listOf<HerdrIntegration>()
+    var integrationsFailure: Exception? = null
+    var integrationCalls = 0
+    override suspend fun herdrIntegrations(): List<HerdrIntegration> {
+        integrationCalls++
+        integrationsFailure?.let { throw it }
+        return integrations
+    }
     override suspend fun focusHerdrPane(session: String?, paneId: String) {
         events += "focus:$session:$paneId"
         focusGate?.await()

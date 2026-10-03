@@ -5680,6 +5680,49 @@ the same way (`agy` → `antigravity-cli`); a kind without one (e.g. `amp`, `gem
 - **Tests:** Rust: the allowlist, the exec's argv, exit codes, not installed. JVM: the kind → id mapping, which rows
   and notifications offer it, the confirm and outcome texts. Device (compile): the Inbox action.
 
+**Implemented (branch `v013/enable-reply`).**
+
+- **Rust/FFI (API 19).** `herdr::install_integration` (`core/or2-core/src/herdr/integration.rs`) as specified; exit
+  126/127 (herdr gone since the probe) is `NotInstalled` too. *Addition:* `HostConnection.herdr_integrations()`
+  reads `<herdr> integration status` (one exec) as `HerdrIntegration { id, state: Current | Outdated | NotInstalled }`
+  for the allowlisted ids only (`(experimental)` dropped, other lines skipped, no paths cross the FFI), because "an
+  agent whose integration is installed shows nothing new" needs the state. The contract probe starts with `pi` not
+  installed, `claude` and `codex` current, `opencode` outdated, `droid` not installed; an install makes one current,
+  except `droid`, which fails with `error: cannot write the hook: permission denied`.
+- **When the status is read.** Once per connection (and again after each `refresh`), the first time a live view
+  shows an agent without a session whose kind has an integration; never for a host whose agents all have Reply. A
+  failed read offers nothing until the next refresh. A successful install marks its id current, so the offer goes
+  at once (the agent itself gets Reply when it restarts).
+- **The offer** (`notify/EnableReply.kt`, `enableReplyFor`): no `reply_identity`, a kind that maps (`cursor-agent`
+  → `cursor`, `agy` and `antigravity_cli` → `antigravity-cli`, case-insensitive), and a known state that is not
+  `Current` (not installed or outdated). Unknown state, an id this herdr does not list, or a kind without an
+  integration: nothing.
+- **Inbox.** The row's **Enable Reply** is an `accent` 12 sp text action under the status word; the dialog is
+  `EnableReplyDialog` ("Enable Reply?", **Cancel** / **Enable**). The agent label is the row's name (herdr's display
+  name), the integration its id: `Enable Reply for Claude Code on <host>? or2 installs herdr's claude integration
+  there. Restart Claude Code afterwards.`
+- **Notification.** An alert without an agent instance but with an offer gets one action, **Enable Reply**: an
+  immutable, one-shot activity PendingIntent to `MainActivity` (`ACTION_ENABLE_REPLY`, data
+  `or2-agent-enable:<tag>#<nonce>`, the app's open token, the integration, title and host). The activity takes it
+  only with the app's token, an allowlisted id and the pane's current capability (`AgentAlerts.admitEnableReply`:
+  the same one-shot nonce as Reply, while the notification is up), cancels the notification as a tap does, and
+  hands the request to `EnableReplyRequests`; the dialog shows over any screen (after a host-key prompt). Nothing is
+  installed from the notification.
+- **Outcome.** While it runs the message card says `Installing herdr's pi integration on <host>…`; then `Done. Restart
+  pi to reply to it.` or `Not enabled: <host> is not connected` (no connection, or closed; nothing connects for
+  it), `Not enabled: herdr is not installed on <host>`, the `CommandFailed` reason (80 characters at most),
+  `Not enabled: herdr has no such integration` (`InvalidName`), `Not enabled: the host did not answer` (45 s Kotlin
+  bound). It runs in the activity's view-model scope, so a rotation does not cut it short.
+- **Tests.** Rust: `herdr::integration` (allowlist, argv, exit 0/1/2/126/127, a lost connection, status of real 0.9.3
+  output with an outdated line, garbage), `host` (allowlist before anything is sent, the reply path, `Closed`),
+  `ssh::connection` (one exec through the probed herdr, stderr's first line, `NotInstalled` without herdr). JVM:
+  `EnableReplyTest` (mapping, offer, texts, outcomes, the notification's offer, the capability taken once, the
+  intent parse), `InboxModelTest` (rows; the status read once a view needs it, an install marking current, a failed
+  read, not connected), `HostContractTest` (both calls across the FFI to the probe). Device (compile):
+  `InboxUiDeviceTest` (the row's action and the dialog), `AgentNotificationsDeviceTest` (the action and its intent),
+  `TopEdgeDeviceTest` (the dialog). Gallery: `inbox` (a `pi` row with Enable Reply on build-box) and
+  `inbox-enable-reply`.
+
 **Codex (researched 2026-10-03).** Codex 0.160 runs its `SessionStart` hooks inside a shared, long-lived app-server
 daemon, not in the pane's own Codex process; the daemon keeps the `HERDR_PANE_ID` of the pane it was first started
 from, so its hook reports name a pane that may be gone, and herdr's `pane.report_agent_session` answers
