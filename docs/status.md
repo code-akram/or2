@@ -12,7 +12,10 @@ Updated 2026-10-03.
   [v0.1.2](releases/v0.1.2.md) (2026-10-03), [v0.1.1](releases/v0.1.1.md) and [v0.1.0](releases/v0.1.0.md) (2026-10-02).
 - **The owner's phone runs v0.1.3**, the published APK, installed in place (hosts and keys kept). The owner's QA
   passed.
-- `main` has nothing unreleased yet.
+- **On `main`, not released: the v0.1.4 candidate** (`d7e7d69` or later; versionName still 0.1.3, FFI API 20): the
+  Spaces sheet (a blue disc on herdr terminals) and agents named herdr-style (task titles back), Codex-reviewed (one P2
+  fixed: bidi/invisible characters stripped from host text). The owner's phone runs it as a signed build
+  (2026-10-04 00:52), awaiting QA.
 
 ### In v0.1.2
 
