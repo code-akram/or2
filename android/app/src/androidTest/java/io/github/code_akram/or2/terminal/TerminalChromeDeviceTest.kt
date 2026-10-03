@@ -382,6 +382,21 @@ class TerminalChromeDeviceTest {
     }
 
     @Test
+    fun aHoistedChromeStateReadsTheVisibleScreensText() {
+        val chrome = TerminalChromeState()
+        show(chrome = chrome)
+        compose.waitForIdle()
+        compose.runOnUiThread {
+            assertTrue(terminalView().grid.apply(terminalVisualFrame(20u, 13u, CursorShape.BAR)))
+            // One line per row, trailing blanks dropped: what the Terminals sheet's Copy screen copies.
+            val lines = chrome.screenText().lines()
+            assertEquals(13, lines.size)
+            assertEquals("Canvas styles (debug", lines.first())
+            assertEquals("Resolved FG / BG", lines.last())
+        }
+    }
+
+    @Test
     fun closingTheComposerGivesTheKeysBackToTheTerminal() {
         show()
         compose.onNodeWithTag("key:Composer").performClick()
