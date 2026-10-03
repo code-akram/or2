@@ -250,7 +250,10 @@ class InboxModelTest {
         val dispatcher = UnconfinedTestDispatcher(testScheduler)
         val port = FakePort().also {
             it.caps = HostCapabilities("/t", "/h", null, listOf(HerdrSessionInfo("default", true, true)))
-            it.integrations = listOf(HerdrIntegration("pi", HerdrIntegrationState.NOT_INSTALLED), HerdrIntegration("claude", HerdrIntegrationState.CURRENT))
+            it.integrations = listOf(
+                HerdrIntegration("pi", HerdrIntegrationState.NOT_INSTALLED), HerdrIntegration("claude", HerdrIntegrationState.CURRENT),
+                HerdrIntegration("opencode", HerdrIntegrationState.NOT_INSTALLED),
+            )
         }
         var listener: HostListener? = null
         val holder = HostConnections({ _, l -> listener = l; port }, FakeTrust(), dispatcher, dispatcher)
@@ -286,13 +289,16 @@ class InboxModelTest {
         assertTrue(failed is io.github.code_akram.or2.ffi.HostException.CommandFailed)
         assertNull(holder.host(1)?.integrations?.value?.get("opencode"))
 
-        // A refresh reads them again when a view next needs them; a failed read keeps what was known.
+        // A refresh reads them again when a view next needs them; a failed read forgets what was known (it may be stale:
+        // opencode installed on the host meanwhile), so nothing is offered until a read succeeds.
+        assertEquals("opencode", holder.enableReplyFor(1, kindAgent("w1:p4", "opencode")))
         port.integrationsFailure = io.github.code_akram.or2.ffi.HostException.CommandFailed("slow")
         holder.refresh(holder.host(1)!!)
         watch.onHerdrStateChanged(HerdrState.Live(withPi.copy(version = 3uL)))
         runCurrent()
         assertEquals(2, port.integrationCalls)
-        assertEquals(HerdrIntegrationState.CURRENT, holder.host(1)?.integrations?.value?.get("pi"))
+        assertNull(holder.host(1)?.integrations?.value)
+        assertNull(holder.enableReplyFor(1, kindAgent("w1:p4", "opencode")))
 
         // Not connected: nothing is installed, and nothing connects for it.
         listener!!.onHostStateChanged(HostState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("x"))))

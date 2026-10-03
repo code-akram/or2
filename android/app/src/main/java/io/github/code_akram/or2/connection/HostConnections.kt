@@ -932,7 +932,8 @@ class HostConnections(
     /**
      * Reads herdr's integrations on [current] (`herdr_integrations`, one exec) when they are stale and [agents] holds
      * one that could use one (no session, a kind with an integration): at most once per connection and [refresh], not
-     * again after a failure until then. Nothing for a host whose agents all have Reply.
+     * again after a failure until then; a failed read forgets what was known, so nothing is offered. Nothing for a host
+     * whose agents all have Reply.
      */
     private fun readIntegrationsFor(current: ActiveHost, port: HostPort, agents: List<HerdrAgent>) {
         if (!current.integrationsStale || current.readingIntegrations || current.retired) return
@@ -946,7 +947,9 @@ class HostConnections(
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
-                // herdr could not say (an older herdr, a slow host): what was known stays, and nothing new is offered.
+                // herdr could not say (an older herdr, a slow host): what was known may be stale (an install made
+                // meanwhile), so it is forgotten and nothing is offered until a read succeeds (Codex v0.1.3 P3).
+                if (owns(current)) current.mutableIntegrations.value = null
             } finally {
                 current.readingIntegrations = false
             }

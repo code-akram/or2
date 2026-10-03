@@ -5734,3 +5734,9 @@ run Codex with `--no-daemon`. **Lane Pair** adds: when `codex` is installed and 
 `daemon_auto_start = false`, one `Info` line under the Reply step: `codex: Reply may not work while Codex runs its
 shared daemon (herdr#4649)` then the workaround lines. It changes nothing in Codex's config. **Lane App** shows nothing
 new for an agent whose integration is installed but has no session (the Codex case), as above.
+
+**Codex review of v0.1.3 (`1c81251..fcfd532`):** two P3, both fixed with tests. A failed `herdr integration status`
+read now forgets what was known (it may be stale), so nothing is offered until a read succeeds
+(`InboxModelTest.aHostsIntegrationsAreReadOnceAViewNeedsThemAndAnInstallMarksItsOwnCurrent`). `codex_daemon_off`
+counts only a bare boolean `false` at the exact key: a quoted string, or `daemon_auto_start=false` written inside one,
+never does, and a `#` inside a string is no comment (`reply.rs`, `the_codex_daemon_setting_is_found`).

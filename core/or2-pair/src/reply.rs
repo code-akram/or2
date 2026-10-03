@@ -120,37 +120,68 @@ fn parse_line(line: &str) -> Option<Integration> {
 
 /// Whether Codex's config turns its shared daemon off (`daemon_auto_start = false` under
 /// `[features]`). A line-based reading, enough for this one key: a table header, a dotted key or
-/// an inline table.
+/// an inline table. Only a bare boolean `false` at that exact key counts: a quoted string, or the
+/// words inside one, never does (Codex review v0.1.3, P3), and a `#` inside a string is no comment.
 pub fn codex_daemon_off(config: &str) -> bool {
-    let compact = |text: &str| -> String {
+    // A key's spelling: whitespace and quotes do not matter (`"features"."daemon_auto_start"`).
+    let key_of = |text: &str| -> String {
         text.chars()
             .filter(|c| !c.is_whitespace() && *c != '"' && *c != '\'')
             .collect()
     };
     let mut table = String::new();
     for line in config.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
+        let line = outside_strings(line, '#').next().unwrap_or("").trim();
         if line.starts_with('[') {
-            table = compact(line.trim_matches(['[', ']']));
+            table = key_of(line.trim_matches(['[', ']']));
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let key = compact(key);
-        let value = compact(value);
+        let key = key_of(key);
         let key = if table.is_empty() {
             key
         } else {
             format!("{table}.{key}")
         };
-        if (key == "features.daemon_auto_start" && value == "false")
-            || (key == "features" && value.contains("daemon_auto_start=false"))
+        let value = value.trim();
+        if key == "features.daemon_auto_start" && value == "false" {
+            return true;
+        }
+        if key == "features"
+            && let Some(inner) = value.strip_prefix('{').and_then(|v| v.strip_suffix('}'))
+            && outside_strings(inner, ',').any(|pair| {
+                pair.split_once('=')
+                    .is_some_and(|(k, v)| key_of(k) == "daemon_auto_start" && v.trim() == "false")
+            })
         {
             return true;
         }
     }
     false
+}
+
+/// [text] split at each [separator] that is not inside a TOML string (`"…"` with `\` escapes, or `'…'`).
+fn outside_strings(text: &str, separator: char) -> impl Iterator<Item = &str> {
+    let mut parts = Vec::new();
+    let (mut start, mut quote, mut escaped) = (0, None::<char>, false);
+    for (at, c) in text.char_indices() {
+        match quote {
+            Some('"') if escaped => escaped = false,
+            Some('"') if c == '\\' => escaped = true,
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == separator => {
+                parts.push(&text[start..at]);
+                start = at + c.len_utf8();
+            }
+            None => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts.into_iter()
 }
 
 /// Codex's config file, read best-effort: missing or unreadable is "not set".
@@ -475,6 +506,7 @@ cursor (experimental): current (v3) (/home/u/.cursor/hooks/x.sh)
             "features.daemon_auto_start = false\n",
             "features = { daemon_auto_start = false }\n",
             "[ features ]\n\"daemon_auto_start\" = false\n",
+            "features = { note = \"a, b # c\", daemon_auto_start = false }\n",
         ] {
             assert!(codex_daemon_off(off), "{off}");
         }
@@ -485,6 +517,10 @@ cursor (experimental): current (v3) (/home/u/.cursor/hooks/x.sh)
             "[other]\ndaemon_auto_start = false\n",
             "[features]\n# daemon_auto_start = false\n",
             "[features]\nsomething = 1\n[profiles]\ndaemon_auto_start = false\n",
+            // A string is not the boolean, nor are the words inside one (Codex review v0.1.3, P3).
+            "[features]\ndaemon_auto_start = \"false\"\n",
+            "features = { daemon_auto_start = true, note = \"daemon_auto_start=false\" }\n",
+            "[features]\nnote = \"x # daemon_auto_start = false\"\n",
         ] {
             assert!(!codex_daemon_off(on), "{on}");
         }
