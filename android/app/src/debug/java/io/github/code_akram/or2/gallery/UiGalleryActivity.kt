@@ -40,6 +40,7 @@ import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HerdrAgent
+import io.github.code_akram.or2.ffi.HerdrIntegrationState
 import io.github.code_akram.or2.ffi.HerdrSessionInfo
 import io.github.code_akram.or2.ffi.HerdrTab
 import io.github.code_akram.or2.ffi.HerdrView
@@ -82,7 +83,9 @@ import io.github.code_akram.or2.host.SessionPickerSheet
 import io.github.code_akram.or2.host.TmuxList
 import io.github.code_akram.or2.hosts.HostFormScreen
 import io.github.code_akram.or2.inbox.InboxHostRow
+import io.github.code_akram.or2.inbox.EnableReplyDialog
 import io.github.code_akram.or2.inbox.InboxScreen
+import io.github.code_akram.or2.notify.EnableReplyRequest
 import io.github.code_akram.or2.inbox.InboxSource
 import io.github.code_akram.or2.inbox.InboxState
 import io.github.code_akram.or2.inbox.LinkStatus
@@ -183,6 +186,10 @@ class UiGalleryActivity : ComponentActivity() {
                 action = GateAction.RETRY, enabled = true))
             "inbox" -> Inbox(empty = false)
             "inbox-empty" -> Inbox(empty = true)
+            "inbox-enable-reply" -> Box(Modifier.fillMaxSize()) {
+                Inbox(empty = false)
+                EnableReplyDialog(EnableReplyRequest(2, "build-box", "pi", "pi"), enable = {}, dismiss = {})
+            }
             "picker-herdr" -> HomePicker(HomeVariant.Sessions, gate = null, tab = PickerTab.HERDR)
             "picker-tmux" -> HomePicker(HomeVariant.Sessions, gate = null, tab = PickerTab.TMUX)
             "picker-udp" -> HomePicker(HomeVariant.Sessions, gate = null, tab = PickerTab.TMUX, udpBlocked = true)
@@ -394,7 +401,11 @@ class UiGalleryActivity : ComponentActivity() {
                     agent("w2:p1", AgentStatus.DONE, "Claude Code", "~/code/docs", tab = "w2:t1", workspace = "w2"),
                     agent("w2:p2", AgentStatus.WORKING, "Amp", "~/code/docs", tab = "w2:t1", workspace = "w2"),
                 )),
-                InboxSource(2, "build-box", "work", "work", view(agent("w1:p9", AgentStatus.IDLE, "Claude Code", "~/src/build"))),
+                // pi reports no session and its integration is missing: its row offers Enable Reply.
+                InboxSource(2, "build-box", "work", "work", view(
+                    agent("w1:p9", AgentStatus.IDLE, "Claude Code", "~/src/build"),
+                    HerdrAgent("w1:p8", "w1:t1", "w1", null, "pi", "pi", AgentStatus.BLOCKED, "~/src/build", 1uL, "term_w1:p8"),
+                ), mapOf("claude" to HerdrIntegrationState.CURRENT, "pi" to HerdrIntegrationState.NOT_INSTALLED)),
             ))
             InboxState(listOf(
                 InboxHostRow(one, LinkStatus.CONNECTED, "Connected", null, 4),
@@ -546,7 +557,7 @@ class UiGalleryActivity : ComponentActivity() {
         val screens = listOf(
             "home", "home-scrolled", "home-empty", "home-notices", "host-cards", "host-cards-scrolled", "home-options", "home-close-shell",
             "home-picker", "home-picker-many", "home-picker-connecting", "home-picker-failed",
-            "inbox", "inbox-scrolled", "inbox-empty", "picker-herdr", "picker-many", "picker-tmux", "picker-udp",
+            "inbox", "inbox-scrolled", "inbox-empty", "inbox-enable-reply", "picker-herdr", "picker-many", "picker-tmux", "picker-udp",
             "host-form", "host-form-scrolled", "host-form-new-key", "host-form-edit", "keys", "keys-scrolled", "keys-empty", "key-sheet",
             "settings", "about", "about-scrolled", "licenses", "licenses-scrolled", "license-text", "license-text-scrolled",
             "hostkey-first", "hostkey-changed", "hostkey-changed-many", "shortcuts",

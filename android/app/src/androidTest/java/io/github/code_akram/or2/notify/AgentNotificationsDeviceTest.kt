@@ -113,6 +113,35 @@ class AgentNotificationsDeviceTest {
             notifications.build(alert.copy(outcome = "Not sent: Device fixture is not connected")).extras.getCharSequence(Notification.EXTRA_TEXT).toString())
     }
 
+    /** Built, not posted: needs no `POST_NOTIFICATIONS`. */
+    @Test
+    fun anAgentWithoutReplyWhoseIntegrationIsMissingOffersEnableReplyThatOpensTheApp() {
+        val store = MemoryPrefStore()
+        val notifications = AgentNotifications(context, store)
+        val alert = AgentAlert(key, "pi", "Needs input", "Device fixture", nonce = "n1", enableReply = "pi")
+        val action = notifications.build(alert).actions.orEmpty().single()
+        assertEquals(AgentNotifications.ENABLE_REPLY, action.title.toString())
+        // No RemoteInput: it opens the app (an immutable activity intent of the app's), which asks before installing.
+        assertTrue(action.remoteInputs.isNullOrEmpty())
+        assertTrue(action.actionIntent.isActivity)
+        assertTrue(action.actionIntent.isImmutable)
+        assertEquals(context.packageName, action.actionIntent.creatorPackage)
+        // An agent with Reply keeps Reply alone; nothing to offer is no action at all.
+        assertEquals("Reply", notifications.build(alert.copy(agent = CLAUDE)).actions.single().title.toString())
+        assertTrue(notifications.build(alert.copy(enableReply = null)).actions.isNullOrEmpty())
+        // The intent carries the pane, the capability and the app's token, and is honoured; a tap's is not one.
+        val intent = AgentNotifications.enableReplyIntent(context, alert, AgentNotifications.token(store))
+        assertEquals(
+            EnableReplyAsk(key, "n1", EnableReplyRequest(key.hostId, "Device fixture", "pi", "pi")),
+            AgentNotifications.enableReplyOf(intent, store),
+        )
+        assertNull(AgentNotifications.enableReplyOf(AgentNotifications.openIntent(context, key, AgentNotifications.token(store)), store))
+        assertNull(AgentNotifications.paneOf(intent, store))
+        // Each post's capability makes its own PendingIntent.
+        val second = notifications.build(alert.copy(nonce = "n2")).actions.single().actionIntent
+        assertNotEquals(action.actionIntent, second)
+    }
+
     @Test
     fun aBlockedEdgePostsOneNotificationThatOpeningThePaneCancels() {
         assumeTrue(

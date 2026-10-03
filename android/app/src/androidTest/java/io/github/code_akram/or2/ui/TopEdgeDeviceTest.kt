@@ -179,5 +179,9 @@ class TopEdgeDeviceTest {
                 assertNothingAboveTheStatusBar(screen, name)
             }
         }
+        gallery("inbox-enable-reply") { screen ->
+            awaitStill("enable-reply-dialog")
+            assertNothingAboveTheStatusBar(screen, "inbox-enable-reply")
+        }
     }
 }
