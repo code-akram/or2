@@ -58,6 +58,8 @@ const REBIND_RETRY: Duration = Duration::from_secs(1);
 const REBIND_TIMEOUT: Duration = Duration::from_secs(3);
 /// How many datagrams are taken in one go before frames and commands get a turn.
 const MAX_DATAGRAMS_PER_TURN: usize = 64;
+/// The pause after the network refused a receive (ICMP unreachable), which ends that turn.
+const REFUSED_PAUSE: Duration = Duration::from_millis(20);
 
 /// Receives the link's health about once a second, from the driver thread. This is the hook M3
 /// uses to show "no contact for N seconds"; it must return quickly.
@@ -332,8 +334,12 @@ async fn run<T: DatagramTransport>(
                             }
                         }
                         // The network says no (a refused port, an unreachable route). mosh
-                        // keeps trying, so this is not an end; just do not spin on it.
-                        Err(_) => sleep(Duration::from_millis(20)).await,
+                        // keeps trying, so this is not an end; just do not spin on it, and end
+                        // the turn so commands (a disconnect) are not held behind refusals.
+                        Err(_) => {
+                            sleep(REFUSED_PAUSE).await;
+                            break;
+                        }
                     }
                     taken += 1;
                     if taken < MAX_DATAGRAMS_PER_TURN {
@@ -573,11 +579,13 @@ async fn goodbye<T: DatagramTransport>(
         send(link, session, &tick.datagrams);
         let wait = Duration::from_millis(session.wait_time_ms().clamp(1, 50));
         tokio::select! {
-            received = poll_fn(|cx| link.poll_recv(cx, buffer)) => {
-                if let Ok(length) = received {
+            received = poll_fn(|cx| link.poll_recv(cx, buffer)) => match received {
+                Ok(length) => {
                     let _ = session.handle_datagram(&buffer[..length]);
                 }
-            }
+                // A refusal is no answer; do not spin on it.
+                Err(_) => sleep(wait.min(REFUSED_PAUSE)).await,
+            },
             () = sleep(wait) => {}
             () = sleep_until(deadline) => {}
         }

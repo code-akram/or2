@@ -700,6 +700,71 @@ fn an_invalid_endpoint_is_refused_synchronously() {
     assert!(start(params(0, KEY, 80, 24), LOCALHOST, observer).is_err());
 }
 
+/// A socket the network refuses every datagram of: each receive reports the refusal at once.
+struct Refused(SocketAddr);
+
+impl DatagramSocket for Refused {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(MEM_CLIENT)
+    }
+
+    fn peer_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.0)
+    }
+
+    fn try_send(&self, datagram: &[u8]) -> io::Result<usize> {
+        Ok(datagram.len())
+    }
+
+    fn poll_recv(&self, _: &mut Context<'_>, _: &mut [u8]) -> Poll<io::Result<usize>> {
+        Poll::Ready(Err(io::ErrorKind::ConnectionRefused.into()))
+    }
+}
+
+struct Refusing;
+
+impl DatagramTransport for Refusing {
+    type Socket = Refused;
+
+    async fn bind(&self, endpoint: &Endpoint) -> io::Result<Refused> {
+        Ok(Refused(SocketAddr::new(
+            endpoint.host().parse().unwrap(),
+            endpoint.port(),
+        )))
+    }
+}
+
+/// Refusals are not datagrams: a receive that keeps failing pauses briefly and gives commands
+/// their turn, so a disconnect is served at once (the receive used to take up to 64 refusals
+/// in a row, 20 ms apart, about 1.3 s, before a command was looked at).
+#[tokio::test]
+async fn a_disconnect_is_not_held_up_by_a_receive_the_network_keeps_refusing() {
+    let (sender, states) = mpsc::channel();
+    let (handle, _control) = spawn(
+        Refusing,
+        params(60003, KEY, 20, 5),
+        LOCALHOST,
+        Arc::new(Recorder(Mutex::new(sender))),
+        None,
+        CONNECT_TIMEOUT,
+    )
+    .unwrap();
+    // Well inside the first run of refusals.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let asked = StdInstant::now();
+    handle.disconnect();
+    assert_eq!(
+        state(&states).await,
+        SessionState::Closed(CloseReason::Disconnected)
+    );
+    // The goodbye waits its bound for a server that never answers; nothing else may.
+    let took = asked.elapsed();
+    assert!(
+        took < GOODBYE_TIMEOUT + Duration::from_millis(400),
+        "the disconnect took {took:?}"
+    );
+}
+
 /// A transport whose sockets open only when told to (after the first `free` binds, which are
 /// immediate): a name resolver that is slow, or never answers.
 struct Gated {
