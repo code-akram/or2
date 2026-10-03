@@ -422,11 +422,15 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                 let _ = reply.send(if extension == "gif" {
                     Err(core_host::HostError::SftpUnavailable)
                 } else {
-                    // Nothing to remove: the probe's acknowledgement is not awaited.
-                    Ok(core_host::UploadedImage::new(format!(
+                    // Nothing to remove, but the acknowledgement is waited for, as a real host
+                    // does: a dropped receiver tells the caller the image was removed.
+                    let (uploaded, acknowledged) = core_host::UploadedImage::new(format!(
                         "{PROBE_IMAGE_DIR}/or2-19700101-000000-000000.{extension}"
-                    ))
-                    .0)
+                    ));
+                    tokio::spawn(async move {
+                        let _ = acknowledged.await;
+                    });
+                    Ok(uploaded)
                 });
             }
             HostCommand::ScrollTarget { reply, .. } => {
