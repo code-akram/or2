@@ -1,5 +1,7 @@
 package io.github.code_akram.or2.terminal
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
@@ -13,8 +15,12 @@ import io.github.code_akram.or2.ffi.TerminalModes
 import io.github.code_akram.or2.ui.Or2Colors
 import kotlin.math.abs
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
@@ -114,7 +120,6 @@ class TerminalChromeDeviceTest {
     }
 
     private val session = Recording()
-    private var panes = 0
 
     // The runner (Or2TestRunner) points the font-size preference at a scratch file for every device
     // test; each test here starts from the default size.
@@ -129,7 +134,7 @@ class TerminalChromeDeviceTest {
         compose.activity.setContent {
             Or2Theme {
                 TerminalScreen(session, MutableStateFlow(state), MutableSharedFlow(), Modifier.fillMaxSize(),
-                    composerHint = "Message agent…", openPanes = { panes++ }, chrome = chrome, imagePaste = images)
+                    composerHint = "Message agent…", chrome = chrome, imagePaste = images)
             }
         }
     }
@@ -203,8 +208,9 @@ class TerminalChromeDeviceTest {
         }
         session.keys.clear()
         compose.onNodeWithTag("extra:Home").performClick()
-        compose.onNodeWithTag("extra:/").performClick()
-        compose.runOnIdle { assertEquals(listOf(TerminalKey.Home, TerminalKey.Character("/")), session.keys.map { it.key }) }
+        compose.onNodeWithTag("extra:-").performClick()
+        compose.runOnIdle { assertEquals(listOf(TerminalKey.Home, TerminalKey.Character("-")), session.keys.map { it.key }) }
+        compose.onNodeWithTag("extra:/").assertDoesNotExist() // `/` is on the toolbar itself.
     }
 
     @Test
@@ -340,14 +346,82 @@ class TerminalChromeDeviceTest {
         assertTrue(session.keys.all { it.key == TerminalKey.Backspace })
     }
 
+    /** Whether the toolbar's key row could scroll: its scroll range (0 when every key fits). */
+    private fun toolbarScrollRange(): Float =
+        compose.onNodeWithTag("toolbar-keys").fetchSemanticsNode().config[SemanticsProperties.HorizontalScrollAxisRange].maxValue()
+
     @Test
-    fun theToolbarPanesAndHistoryKeysDoTheirJobs() {
+    fun theToolbarFitsA411DpWidePhoneWithoutScrollingAlsoWhileSelecting() {
+        compose.runOnUiThread {
+            compose.activity.setContent {
+                Or2Theme {
+                    Box(Modifier.requiredWidth(411.dp).fillMaxHeight()) {
+                        TerminalScreen(session, MutableStateFlow(SessionState.Connected), MutableSharedFlow(), Modifier.fillMaxSize())
+                    }
+                }
+            }
+        }
+        compose.waitForIdle()
+        // No panes key (the header's green disc opens that sheet) and no history key (a swipe pages back).
+        compose.onNodeWithTag("key:Panes").assertDoesNotExist()
+        compose.onNodeWithTag("key:History").assertDoesNotExist()
+        listOf("Ctrl", "Esc", "Tab", "Arrows", "Paste", "ShiftTab", "Slash", "At", "Composer", "Keyboard").forEach {
+            compose.onNodeWithTag("key:$it").assertIsDisplayed()
+        }
+        assertEquals(0f, toolbarScrollRange())
+        // A selection: Copy and Clear lead, the typing keys give way, and the row still fits.
+        compose.runOnUiThread {
+            val view = terminalView()
+            assertTrue(view.grid.apply(terminalVisualFrame(20u, 13u, CursorShape.BAR)))
+            view.beginSelection(CellPosition(1, 1), word = true)
+        }
+        compose.onNodeWithTag("key:Copy").assertIsDisplayed()
+        compose.onNodeWithTag("key:Clear").assertIsDisplayed()
+        compose.onNodeWithTag("key:ShiftTab").assertDoesNotExist()
+        assertEquals(0f, toolbarScrollRange())
+    }
+
+    @Test
+    fun closingTheComposerGivesTheKeysBackToTheTerminal() {
         show()
-        compose.onNodeWithTag("key:Panes").performClick()
-        compose.onNodeWithTag("key:History").performClick()
+        compose.onNodeWithTag("key:Composer").performClick()
+        compose.onNodeWithTag("composer-input").assertIsDisplayed()
+        compose.onNodeWithTag("composer-close").performClick()
+        compose.runOnIdle { assertTrue("the terminal has the keys again", terminalView().hasFocus()) }
+        // The toolbar toggle closes it the same way.
+        compose.onNodeWithTag("key:Composer").performClick()
+        compose.onNodeWithTag("key:Composer").performClick()
+        compose.onNodeWithTag("composer-input").assertDoesNotExist()
+        compose.runOnIdle { assertTrue(terminalView().hasFocus()) }
+    }
+
+    @Test
+    fun thePadAndTheComposerAreNeverOpenTogether() {
+        show()
+        compose.onNodeWithTag("key:Composer").performClick()
+        compose.onNodeWithTag("key:Arrows").performClick() // Opening the pad closes the composer ...
+        compose.onNodeWithTag("arrow-pad").assertIsDisplayed()
+        compose.onNodeWithTag("composer").assertDoesNotExist()
+        compose.runOnIdle { assertTrue(terminalView().hasFocus()) }
+        compose.onNodeWithTag("key:Composer").performClick() // ... and opening the composer closes the pad.
+        compose.onNodeWithTag("composer").assertIsDisplayed()
+        compose.onNodeWithTag("arrow-pad").assertDoesNotExist()
+    }
+
+    @Test
+    fun aConfirmedMultiLinePasteGoesOutThroughPasteText() {
+        compose.runOnUiThread {
+            compose.activity.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("test", "first\nsecond"))
+        }
+        show()
+        compose.onNodeWithTag("key:Paste").performClick()
+        compose.onNodeWithText("Paste 2 lines?").assertIsDisplayed()
+        compose.runOnIdle { assertTrue("nothing runs before the answer", session.pastes.isEmpty() && session.texts.isEmpty()) }
+        compose.onNodeWithTag("paste-confirm").performClick()
         compose.runOnIdle {
-            assertEquals(1, panes)
-            assertTrue((session.scrolls.single() as ViewportScroll.Delta).rows < 0) // Up into the scrollback.
+            // The one paste path: the session's paste_text (bracketed when the program asks), never typed text.
+            assertEquals(listOf("first\nsecond"), session.pastes)
+            assertTrue(session.texts.isEmpty() && session.keys.isEmpty())
         }
     }
 
@@ -492,7 +566,7 @@ class TerminalChromeDeviceTest {
     }
 
     @Test
-    fun shiftTabSlashAndAtFollowHistoryAndGoWhereTheyShould() {
+    fun shiftTabSlashAndAtFollowPasteAndGoWhereTheyShould() {
         show()
         // ⇧Tab is Shift+Tab whatever is latched, and leaves the latch for the next key.
         compose.onNodeWithTag("key:Ctrl").performClick().assert(armed())
@@ -513,9 +587,9 @@ class TerminalChromeDeviceTest {
         compose.onNodeWithTag("key:Slash").performScrollTo().performClick()
         compose.onNodeWithTag("composer-input").assertTextContains("ask @/")
         compose.runOnIdle { assertTrue(session.keys.isEmpty() && session.texts.isEmpty()) }
-        // They follow History in the row, in this order.
+        // They follow Paste in the row, in this order.
         compose.waitForIdle()
-        val left = listOf("History", "ShiftTab", "Slash", "At").map { compose.onNodeWithTag("key:$it").fetchSemanticsNode().positionInRoot.x }
+        val left = listOf("Paste", "ShiftTab", "Slash", "At").map { compose.onNodeWithTag("key:$it").fetchSemanticsNode().positionInRoot.x }
         assertEquals(left.sorted(), left)
     }
 

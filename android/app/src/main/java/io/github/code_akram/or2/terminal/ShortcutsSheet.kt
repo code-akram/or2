@@ -1,7 +1,6 @@
 package io.github.code_akram.or2.terminal
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -21,33 +20,40 @@ import io.github.code_akram.or2.ui.Or2Type
 import io.github.code_akram.or2.ui.SectionHeader
 
 /**
- * The compact list of hardware-keyboard shortcuts and terminal gestures (Ctrl+Shift+/): two grouped
- * cards of dense rows, the keys in small mono text and what they do in muted secondary text.
+ * The compact gestures-and-shortcuts sheet (Ctrl+Shift+/, and the Terminals sheet's row): the touch gestures first
+ * ([TouchRows], with a muted note on what the swipes move), then the hardware-keyboard shortcuts
+ * ([KeyboardShortcutRows]); grouped cards of dense rows, the gesture or keys in small mono text and what they do in
+ * muted secondary text.
  */
 @Composable
 fun ShortcutsSheet(dismiss: () -> Unit) {
-    Or2Sheet(dismiss, title = "Shortcuts", modifier = Modifier.testTag("shortcuts-sheet")) {
-        Column(Modifier.padding(horizontal = Or2Dimens.Gutter).padding(bottom = Or2Dimens.Gutter)) {
-            SectionHeader("KEYBOARD", topGap = 0.dp)
-            ShortcutGroup(KeyboardShortcutRows)
-            SectionHeader("GESTURES", topGap = 12.dp)
-            ShortcutGroup(GestureRows)
-        }
+    Or2Sheet(dismiss, title = "Gestures & shortcuts", modifier = Modifier.testTag("shortcuts-sheet")) {
+        SectionHeader("Touch", topGap = 0.dp)
+        ShortcutGroup(TouchRows, Modifier.testTag("shortcuts-touch"))
+        Text(
+            SWIPES_NOTE, style = Or2Type.Secondary, color = Or2Colors.TextMuted,
+            modifier = Modifier.padding(start = Or2Dimens.Gutter, top = 6.dp),
+        )
+        SectionHeader("Keyboard", topGap = 12.dp)
+        ShortcutGroup(KeyboardShortcutRows, Modifier.testTag("shortcuts-keyboard"))
     }
 }
 
 @Composable
-private fun ShortcutGroup(rows: List<Pair<String, String>>) {
-    GroupCard {
+private fun ShortcutGroup(rows: List<Pair<String, String>>, modifier: Modifier = Modifier) {
+    GroupCard(modifier) {
         rows.forEachIndexed { index, (keys, action) ->
             if (index > 0) GroupDivider()
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = Or2Dimens.Gutter, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(keys, style = Or2Type.MonoSmall, color = Or2Colors.Text, maxLines = 1, modifier = Modifier.width(128.dp))
+                Text(keys, style = Or2Type.MonoSmall, color = Or2Colors.Text, maxLines = 1, modifier = Modifier.width(ShortcutKeysWidth))
                 Text(action, style = Or2Type.Secondary, color = Or2Colors.TextMuted)
             }
         }
     }
 }
+
+/** The gesture or keys column: wide enough for `Two fingers ← / →` and `Ctrl+Shift+Enter` in mono 10.5 sp. */
+private val ShortcutKeysWidth = 128.dp

@@ -39,9 +39,30 @@ class TerminalShortcutsTest {
     }
 
     @Test
-    fun theSheetListsEveryShortcutAndGesture() {
+    fun theSheetListsEveryShortcut() {
         assertEquals(6, KeyboardShortcutRows.size)
         assertTrue(KeyboardShortcutRows.all { (keys, _) -> keys.startsWith("Ctrl+Shift+") })
-        assertEquals(4, GestureRows.size)
+        // One row per shortcut the matcher knows, in the same words the sheet's own row uses.
+        assertEquals("Gestures & shortcuts", KeyboardShortcutRows.toMap()["Ctrl+Shift+/"])
+    }
+
+    @Test
+    fun theTouchRowsComeFirstAndSayWhatTheViewDoes() {
+        val touch = TouchRows.toMap()
+        // Taps, in the view's order (tapAction): the keyboard or a click, a link, and a long press that selects.
+        assertEquals(TapAction.SHOW_KEYBOARD, tapAction(selecting = false, link = false, mouseTracking = false))
+        assertEquals(TapAction.CLICK, tapAction(selecting = false, link = false, mouseTracking = true))
+        assertTrue(touch.getValue("Tap").startsWith("Keyboard") && "click" in touch.getValue("Tap"))
+        assertEquals(TapAction.OPEN_LINK, tapAction(selecting = false, link = true, mouseTracking = true))
+        assertTrue("Tap a link" in touch)
+        assertTrue("Copy" in touch.getValue("Long press"))
+        // The swipes say the moves swipeNav makes: one finger left is the next window, two up the next session.
+        assertEquals(io.github.code_akram.or2.ffi.TargetNav.NextWindow, swipeNav(Swipe.LEFT))
+        assertTrue(touch.getValue("Swipe ← / →").startsWith("Next / previous window"))
+        assertEquals(io.github.code_akram.or2.ffi.TargetNav.NextSession, swipeNav(Swipe.TWO_UP))
+        assertTrue(touch.getValue("Two fingers ↑ / ↓").startsWith("Next / previous session"))
+        assertEquals("Pane to the left / right", touch.getValue("Two fingers ← / →"))
+        assertEquals("Text size", touch.getValue("Pinch"))
+        assertTrue("shell" in SWIPES_NOTE)
     }
 }

@@ -24,13 +24,6 @@ class TerminalInput(
     fun discardComposition() { composing = ""; changed() }
     fun finishComposition() { commit(composing) }
 
-    /** Clipboard paste is literal text, not a typed character with sticky modifiers. */
-    fun paste(text: String) {
-        if (text.isEmpty()) return
-        discardComposition()
-        sendText(text)
-    }
-
     fun commit(text: String) {
         discardComposition()
         if (text.isEmpty()) return

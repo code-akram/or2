@@ -113,10 +113,20 @@ object Or2Dimens {
     val Segmented = 32.dp
     val Chip = 28.dp
 
-    /** A toolbar key as drawn (a 30 dp pill) inside a 40 dp tall touch box, 4 dp wider than the key. */
+    /**
+     * A toolbar key as drawn: a 30 dp pill, at least 30 dp wide (a text key is its label plus [KeyLabelPadding] on each
+     * side), in a touch box [KeyTouchWidth] wide (4 dp wider than the key) and [KeyTouch] tall.
+     */
     val Key = 30.dp
     val KeyWidth = 30.dp
     val KeyTouch = 40.dp
+    val KeyTouchWidth = 34.dp
+    val KeyLabelPadding = 6.dp
+
+    /** The toolbar pill: [ToolbarMargin] from the screen's sides, its keys [ToolbarPadding] inside it, the toggles [ToolbarTogglesGap] apart. */
+    val ToolbarMargin = 8.dp
+    val ToolbarPadding = 6.dp
+    val ToolbarTogglesGap = 4.dp
     val PadKey = 40.dp
     val PadGap = 6.dp
     val SheetHandleWidth = 32.dp
@@ -206,7 +216,6 @@ object Or2Type {
     )
     val Mono = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 12.sp, lineHeight = 16.sp)
     val MonoSmall = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 10.5.sp, lineHeight = 16.sp)
-    val MonoLarge = TextStyle(fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 14.sp, lineHeight = 19.sp)
 
     /** The Easy pair code `7KQ4-M2XD-9PTM`: the one large element of the app, because it is read off the phone and typed on a host. */
     val PairCode = TextStyle(

@@ -128,7 +128,7 @@ fun SessionScreen(
                 uploadAction = { if (upload.uploading) paste?.cancel() else paste?.dismiss() }) {
                 // Keep the borrowed handle composed through Closed so its final frame stays visible.
                 handle?.let { TerminalScreen(it, terminal.state, terminal.frameReady, Modifier.weight(1f),
-                    composerHint = "Message " + terminal.host.label + "…", openPanes = { switcher = true },
+                    composerHint = "Message " + terminal.host.label + "…",
                     onBackground = { background = it }, onFrameDrawn = { holder.timing.terminalFrame(terminal.id) },
                     target = terminal.target, targetScroller = terminal.targetScroller, input = terminal.input,
                     // Swipes move tmux or herdr; a shell has nothing to move and keeps every touch.

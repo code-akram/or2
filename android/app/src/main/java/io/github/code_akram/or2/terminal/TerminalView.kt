@@ -2,8 +2,6 @@ package io.github.code_akram.or2.terminal
 
 import android.content.ActivityNotFoundException
 import android.content.Context
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -41,6 +39,7 @@ import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.ViewportScroll
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dimens
+import io.github.code_akram.or2.ui.copyText
 import kotlin.math.ceil
 import kotlin.math.hypot
 import kotlin.math.roundToInt
@@ -343,20 +342,12 @@ class TerminalView(context: Context) : View(context) {
         context.getSystemService(InputMethodManager::class.java).showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
     }
 
-    /** Cancel the editor as well as the overlay before sending literal clipboard text. */
-    fun paste(text: String) {
-        if (text.isEmpty()) return
-        inputConnection?.cancelComposition()
-        inputConnection = null
-        input.discardComposition()
-        context.getSystemService(InputMethodManager::class.java).restartInput(this)
-        input.paste(text)
-    }
-
     /**
-     * Pastes [text] through the session's `paste_text`: one bracketed paste when the program turned that
-     * mode on, no Enter (an uploaded image's path). Any composition is cancelled first, like [paste].
-     * Returns whether the session took it (held behind a tmux or herdr `Bottom`, it goes out after).
+     * Every paste (the toolbar's, Ctrl+Shift+V, a confirmed "Paste N lines?", an uploaded image's path) goes through
+     * the session's `paste_text`: one bracketed paste when the program turned that mode on, else the text as it is,
+     * never an Enter. It is literal text, not a typed key: a latched Ctrl or Alt stays for the next key. The editor and
+     * any composition are cancelled first, so the IME cannot commit its old text after the paste. Returns whether the
+     * session took it (held behind a tmux or herdr `Bottom`, it goes out after).
      */
     fun pasteText(text: String): Boolean {
         if (text.isEmpty()) return false
@@ -389,14 +380,8 @@ class TerminalView(context: Context) : View(context) {
     }
 
     internal fun handleKey(event: KeyEvent): Boolean {
-        // An attached keyboard's app shortcuts first (never the IME's keys); releases and repeats
-        // of a shortcut are consumed too, so none of it reaches the terminal.
-        if (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD == 0) {
-            terminalShortcut(event.keyCode, event.isCtrlPressed, event.isShiftPressed, event.isAltPressed, event.isMetaPressed)?.let { shortcut ->
-                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) onShortcut(shortcut)
-                return true
-            }
-        }
+        // An attached keyboard's app shortcuts first (never the IME's keys); none of one reaches the terminal.
+        if (consumeShortcut(event, onShortcut)) return true
         if (event.action == KeyEvent.ACTION_MULTIPLE && event.characters != null) {
             input.commit(event.characters)
             return true
@@ -554,10 +539,19 @@ class TerminalView(context: Context) : View(context) {
     }
 
     fun copySelection() {
-        selection?.let {
-            context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Terminal selection", it.text()))
-        }
+        selection?.let { copyText(context, "Terminal selection", it.text()) }
         clearSelection()
+    }
+
+    /**
+     * The text of the screen as it is shown (the scrollback position included; a selection's snapshot while one is
+     * up), one line per row with wrapped rows joined, trailing blanks and empty last lines dropped.
+     */
+    fun screenText(): String {
+        val rows = selection?.rows ?: grid.rows
+        val columns = selection?.columns ?: grid.columns
+        if (rows.isEmpty() || columns == 0) return ""
+        return TerminalSelection(rows, columns, CellPosition(0, 0), CellPosition(columns - 1, rows.size - 1)).text().trimEnd('\n')
     }
 
     private fun scrollPixels(delta: Float) {
@@ -624,17 +618,9 @@ class TerminalView(context: Context) : View(context) {
         }
     }
 
-    /** One page up into the scrollback (the toolbar's history key), routed like a swipe. */
-    fun pageUp() {
-        clearSelection()
-        scroller.forceFinished(true)
-        val page = (grid.rows.size - 1).coerceAtLeast(1)
-        scrollRows(-page)
-    }
-
     /**
-     * Back to the bottom (the scroll-to-bottom button, and holding the history key): the target's
-     * live screen when it is scrolled away, the viewport's bottom when that is.
+     * Back to the bottom (the scroll-to-bottom button): the target's live screen when it is scrolled away, the
+     * viewport's bottom when that is.
      */
     fun jumpToBottom() {
         clearSelection()

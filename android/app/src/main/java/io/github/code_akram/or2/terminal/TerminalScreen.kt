@@ -1,9 +1,7 @@
 package io.github.code_akram.or2.terminal
 
-import android.content.ClipboardManager
 import android.graphics.RectF
 import android.net.Uri
-import android.view.KeyEvent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -70,6 +68,7 @@ import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Icons
 import io.github.code_akram.or2.ui.Or2Shapes
 import io.github.code_akram.or2.ui.TextAction
+import io.github.code_akram.or2.ui.clipboardText
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -79,6 +78,15 @@ val IMAGE_PICKER = ActivityResultContracts.PickMultipleVisualMedia(MAX_IMAGES)
 
 /** What [IMAGE_PICKER] asks for: images only. */
 fun imagePickRequest(): PickVisualMediaRequest = PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+
+/** Shift alone: the toolbar's `⇧Tab`. */
+private val Shift = KeyModifiers(true, false, false, false)
+
+/**
+ * Several lines about to run as typed, asked first ([pasteNeedsConfirmation]): the composer's message ([send]) or a
+ * paste. One dialog serves both.
+ */
+private class PendingLines(val text: String, val send: Boolean)
 
 /**
  * The terminal and its input chrome: the Canvas terminal edge to edge, the arrow pad floating
@@ -90,7 +98,8 @@ fun imagePickRequest(): PickVisualMediaRequest = PickVisualMediaRequest(Activity
  * the program does not track the mouse; a small round button returns to the bottom while anything is
  * scrolled up. Every input of the view (keys, IME text, paste, the composer, the toolbar and pad,
  * wheel scrolls) goes to the terminal's [input] route, resolved at call time; [session] is only where
- * this view's frames come from.
+ * this view's frames come from. The pad and the composer are never open together; closing the
+ * composer gives the keys back to the terminal.
  */
 @Composable
 fun TerminalScreen(
@@ -99,7 +108,6 @@ fun TerminalScreen(
     frameReady: Flow<Unit>,
     modifier: Modifier = Modifier,
     composerHint: String = "Message…",
-    openPanes: () -> Unit = {},
     onBackground: (Color) -> Unit = {},
     chrome: TerminalChromeState = remember { TerminalChromeState() },
     /** A frame was drawn (reported to the timing markers, which ignore it unless a path is waiting for one). */
@@ -136,8 +144,7 @@ fun TerminalScreen(
         var ctrl by remember { mutableStateOf(false) }
         var alt by remember { mutableStateOf(false) }
         var selecting by remember { mutableStateOf(false) }
-        var pendingPaste by remember { mutableStateOf<String?>(null) }
-        var pendingSend by remember { mutableStateOf<String?>(null) }
+        var pending by remember { mutableStateOf<PendingLines?>(null) }
         var shortcutsOpen by remember { mutableStateOf(false) }
         val sessionState by state.collectAsState()
         // Images: from the Photo Picker (images only, at most MAX_IMAGES, no storage permission) or a keyboard, each
@@ -166,19 +173,21 @@ fun TerminalScreen(
         }
         val background by rememberUpdatedState(onBackground)
         val frameDrawn by rememberUpdatedState(onFrameDrawn)
-        DisposableEffect(view) {
+        DisposableEffect(view, chrome) {
             view.onFrameDrawn = { frameDrawn() }
             view.onInputChanged = { ctrl = view.input.ctrl; alt = view.input.alt }
             view.onSelectionChanged = { selecting = view.selection != null }
             view.onBackgroundChanged = { background(Color(it.toInt() or (0xff shl 24))) }
             view.onScrolledAwayChanged = { scrolledAway = it }
             scrolledAway = view.scrolledAway
+            chrome.screenText = { view.screenText() }
             onDispose {
                 view.onFrameDrawn = {}
                 view.onInputChanged = {}
                 view.onSelectionChanged = {}
                 view.onBackgroundChanged = {}
                 view.onScrolledAwayChanged = {}
+                chrome.screenText = { "" }
             }
         }
         LaunchedEffect(view, state, frameReady) {
@@ -187,46 +196,54 @@ fun TerminalScreen(
             // The terminal's scroller outlives this view: a Bottom that returns (or fails) after a swap or a return reaches it.
             if (view.targetScroller != null) launch { view.targetScroller?.awayState?.collect { view.targetScrollChanged() } }
         }
-        fun clipboardText() = context.getSystemService(ClipboardManager::class.java).primaryClip
-            ?.getItemAt(0)?.text?.toString().orEmpty()
-        val toolbar = ToolbarActions(
-            toggleCtrl = { view.input.toggleCtrl() },
-            toggleAlt = { view.input.toggleAlt() },
-            escape = { view.input.key(TerminalKey.Escape) },
-            tab = { view.input.key(TerminalKey.Tab) },
-            togglePad = { chrome.padOpen = !chrome.padOpen },
-            panes = openPanes,
-            // One paste when the program has bracketed paste on (nothing to confirm then); typed otherwise.
-            paste = {
-                val text = clipboardText()
-                if (pasteNeedsConfirmation(text, view.grid.modes.bracketedPaste)) pendingPaste = text else view.pasteText(text)
-            },
-            history = { view.pageUp() },
-            jumpToBottom = { view.jumpToBottom() },
-            toggleComposer = {
-                chrome.composerOpen = !chrome.composerOpen
-                if (chrome.composerOpen) chrome.padOpen = false
-            },
-            toggleKeyboard = {
-                val shown = ViewCompat.getRootWindowInsets(view)?.isVisible(WindowInsetsCompat.Type.ime()) == true
-                if (shown) view.hideKeyboard() else view.showKeyboard()
-            },
-            copy = { view.copySelection() },
-            clearSelection = { view.clearSelection() },
-            shiftTab = { view.input.exactKey(TerminalKey.Tab, KeyModifiers(true, false, false, false)) },
-            type = { text -> if (chrome.composerOpen) chrome.typeInComposer(text) else view.input.key(TerminalKey.Character(text)) },
-        )
+        // One paste path, the session's `paste_text`: one bracketed paste when the program has that mode on (nothing to
+        // confirm then), typed as it is otherwise, after the "Paste N lines?" confirmation for several lines.
+        fun paste(text: String) {
+            if (text.isEmpty()) return
+            if (pasteNeedsConfirmation(text, view.grid.modes.bracketedPaste)) pending = PendingLines(text, send = false) else view.pasteText(text)
+        }
+        // Closing the composer (its ×, the toolbar toggle, Ctrl+Shift+Enter, opening the pad) gives the keys back to the terminal.
+        fun closeComposer() {
+            chrome.composerOpen = false
+            view.requestFocus()
+        }
+        fun press(key: ToolbarKey) {
+            when (key) {
+                ToolbarKey.COPY -> view.copySelection()
+                ToolbarKey.CLEAR -> view.clearSelection()
+                ToolbarKey.CTRL -> view.input.toggleCtrl()
+                ToolbarKey.ESC -> view.input.key(TerminalKey.Escape)
+                ToolbarKey.TAB -> view.input.key(TerminalKey.Tab)
+                ToolbarKey.ARROWS -> {
+                    chrome.padOpen = !chrome.padOpen
+                    if (chrome.padOpen && chrome.composerOpen) closeComposer()
+                }
+                ToolbarKey.PASTE -> paste(clipboardText(context))
+                // Shift+Tab whatever is latched: the latches stay for the next key.
+                ToolbarKey.SHIFT_TAB -> view.input.exactKey(TerminalKey.Tab, Shift)
+                ToolbarKey.SLASH, ToolbarKey.AT -> {
+                    val text = key.label!!
+                    if (chrome.composerOpen) chrome.typeInComposer(text) else view.input.key(TerminalKey.Character(text))
+                }
+                ToolbarKey.COMPOSER -> if (chrome.composerOpen) {
+                    closeComposer()
+                } else {
+                    chrome.composerOpen = true
+                    chrome.padOpen = false
+                }
+                ToolbarKey.KEYBOARD -> {
+                    val shown = ViewCompat.getRootWindowInsets(view)?.isVisible(WindowInsetsCompat.Type.ime()) == true
+                    if (shown) view.hideKeyboard() else view.showKeyboard()
+                }
+            }
+        }
         val shortcut by rememberUpdatedState<(TerminalShortcut) -> Unit> { pressed ->
             when (pressed) {
                 is TerminalShortcut.SwitchTo -> switchTo(pressed.index)
                 TerminalShortcut.Close -> closeTerminal()
-                TerminalShortcut.Paste -> toolbar.paste()
+                TerminalShortcut.Paste -> press(ToolbarKey.PASTE)
                 TerminalShortcut.Copy -> if (view.selection != null) view.copySelection()
-                TerminalShortcut.Composer -> {
-                    toolbar.toggleComposer()
-                    // Closed from inside the composer: the keys go back to the terminal.
-                    if (!chrome.composerOpen) view.requestFocus()
-                }
+                TerminalShortcut.Composer -> press(ToolbarKey.COMPOSER)
                 TerminalShortcut.Help -> shortcutsOpen = true
             }
         }
@@ -240,32 +257,18 @@ fun TerminalScreen(
                 view.onSwipe = null
             }
         }
-        val pad = PadActions(
-            backspace = { view.input.key(TerminalKey.Backspace) },
-            up = { view.input.key(TerminalKey.ArrowUp) },
-            // Ctrl-U, the shell's "clear the line before the cursor".
-            clearLine = { view.input.key(TerminalKey.Character("u"), KeyModifiers(false, true, false, false)) },
-            left = { view.input.key(TerminalKey.ArrowLeft) },
-            enter = { view.input.key(TerminalKey.Enter) },
-            right = { view.input.key(TerminalKey.ArrowRight) },
-            down = { view.input.key(TerminalKey.ArrowDown) },
-            extra = { label ->
-                view.input.key(when (label) {
-                    "Home" -> TerminalKey.Home
-                    "End" -> TerminalKey.End
-                    "PgUp" -> TerminalKey.PageUp
-                    "PgDn" -> TerminalKey.PageDown
-                    else -> TerminalKey.Character(label)
-                })
-            },
-        )
         Column(modifier.fillMaxSize().windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))) {
             Box(Modifier.weight(1f)) {
                 AndroidView(factory = { view }, modifier = Modifier.fillMaxSize().clipToBounds())
                 if (scrolledAway) {
                     ScrollToBottomButton({ view.jumpToBottom() }, Modifier.align(Alignment.BottomEnd).padding(end = 4.dp, bottom = 4.dp))
                 }
-                if (chrome.padOpen) ArrowPad(pad, alt, { view.input.toggleAlt() }, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp))
+                if (chrome.padOpen) {
+                    ArrowPad(
+                        { key, modifiers -> view.input.key(key, modifiers) }, alt, { view.input.toggleAlt() },
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp),
+                    )
+                }
             }
             if (chrome.composerOpen) {
                 Composer(
@@ -278,60 +281,47 @@ fun TerminalScreen(
                     // paste on they arrive as one paste and one Enter, and nothing is asked.
                     send = { text ->
                         if (pasteNeedsConfirmation(text, view.grid.modes.bracketedPaste)) {
-                            pendingSend = text
+                            pending = PendingLines(text, send = true)
                             false
                         } else {
                             view.sendLine(text)
                         }
                     },
-                    close = { chrome.composerOpen = false },
+                    close = ::closeComposer,
                     // A hardware keyboard's shortcuts work while the composer has the keys, except
                     // paste and copy, which are the text field's own there.
                     modifier = Modifier.onPreviewKeyEvent { event ->
-                        val native = event.nativeKeyEvent
-                        val pressed = terminalShortcut(native.keyCode, native.isCtrlPressed, native.isShiftPressed, native.isAltPressed, native.isMetaPressed)
-                        if (native.flags and KeyEvent.FLAG_SOFT_KEYBOARD != 0 || pressed == null ||
-                            pressed == TerminalShortcut.Paste || pressed == TerminalShortcut.Copy
-                        ) return@onPreviewKeyEvent false
-                        if (native.action == KeyEvent.ACTION_DOWN && native.repeatCount == 0) shortcut(pressed)
-                        true
+                        consumeShortcut(event.nativeKeyEvent, { shortcut(it) }, passes = setOf(TerminalShortcut.Paste, TerminalShortcut.Copy))
                     },
                 )
             }
             KeyToolbar(
-                ToolbarState(ctrl, alt, selecting, chrome.padOpen, chrome.composerOpen), toolbar,
+                ToolbarState(ctrl, selecting, chrome.padOpen, chrome.composerOpen), ::press,
                 Modifier.onGloballyPositioned { view.toolbarBounds = it.unclippedBoundsInRoot() },
                 onKeyPositioned = { label, coordinates -> view.toolbarKeyBounds[label] = coordinates.unclippedBoundsInRoot() },
             )
         }
         if (shortcutsOpen) ShortcutsSheet(dismiss = { shortcutsOpen = false })
-        pendingSend?.let { text ->
+        pending?.let { lines ->
+            val verb = if (lines.send) "Send" else "Paste"
             Or2Dialog(
-                onDismiss = { pendingSend = null }, title = "Send ${pasteLineCount(text)} lines?",
+                onDismiss = { pending = null }, title = "$verb ${pasteLineCount(lines.text)} lines?",
                 confirm = {
-                    TextAction("Send", {
+                    TextAction(verb, {
+                        // The one haptic of a confirmed send or paste (the composer's button did not buzz).
                         haptics.performHapticFeedback(HapticFeedbackType.Confirm)
-                        pendingSend = null
-                        // Cleared only when it went out; after a drop the message stays in the composer. Only what
-                        // was sent is cleared: an image's path that arrived under the dialog stays.
-                        if (view.sendLine(text)) chrome.composerSent(text)
-                    }, modifier = Modifier.testTag("composer-send-confirm"))
+                        pending = null
+                        if (!lines.send) {
+                            view.pasteText(lines.text)
+                        } else if (view.sendLine(lines.text)) {
+                            // Cleared only when it went out; after a drop the message stays in the composer. Only what
+                            // was sent is cleared: an image's path that arrived under the dialog stays.
+                            chrome.composerSent(lines.text)
+                        }
+                    }, modifier = Modifier.testTag(if (lines.send) "composer-send-confirm" else "paste-confirm"))
                 },
-                dismiss = { TextAction("Cancel", { pendingSend = null }, color = Or2Colors.Text) },
+                dismiss = { TextAction("Cancel", { pending = null }, color = Or2Colors.Text) },
             ) { Text("They will run as typed, one line at a time.") }
-        }
-        pendingPaste?.let { text ->
-            Or2Dialog(
-                onDismiss = { pendingPaste = null }, title = "Paste ${pasteLineCount(text)} lines?",
-                confirm = {
-                    TextAction("Paste", {
-                        haptics.performHapticFeedback(HapticFeedbackType.Confirm)
-                        pendingPaste = null
-                        view.paste(text)
-                    })
-                },
-                dismiss = { TextAction("Cancel", { pendingPaste = null }, color = Or2Colors.Text) },
-            ) { Text("They will run as typed.") }
         }
     }
 }
