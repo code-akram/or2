@@ -30,9 +30,9 @@ import org.junit.Test
 class SessionPickerDeviceTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
 
-    private val caps = HostCapabilities("/usr/bin/tmux", "/usr/bin/herdr", null, "C.UTF-8", listOf(
+    private val caps = HostCapabilities("/usr/bin/tmux", "/usr/bin/herdr", null, listOf(
         HerdrSessionInfo("default", true, true), HerdrSessionInfo("work", true, false), HerdrSessionInfo("old", false, false)))
-    private val tmux = TmuxList.Loaded(listOf(TmuxSession("main", 3u, 1u, 0L, 20L), TmuxSession("build", 1u, 0u, 0L, 10L)))
+    private val tmux = TmuxList.Loaded(listOf(TmuxSession("main", 3u, 1u), TmuxSession("build", 1u, 0u)))
 
     private var generations = 0
 

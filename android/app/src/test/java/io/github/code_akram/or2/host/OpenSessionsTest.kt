@@ -10,7 +10,7 @@ import org.junit.Test
 /** The picker marks a herdr or tmux session `● Open` when it already has an open terminal in or2. */
 class OpenSessionsTest {
     private fun herdr(name: String, default: Boolean = false) = HerdrSessionInfo(name, true, default)
-    private fun tmux(name: String) = TmuxSession(name, 1u, 0u, 0L, 0L)
+    private fun tmux(name: String) = TmuxSession(name, 1u, 0u)
 
     @Test
     fun aSessionWithAnOpenTerminalIsMarkedWhateverPaneItWasOpenedOn() {
