@@ -5818,3 +5818,12 @@ because no screen read it then. One lane (Rust and Kotlin).
   The sheet collects `herdrViews()` only while it is open.
 - **Gallery:** `spaces` (a herdr terminal with the sheet over it, session `work`), and the blue disc on the herdr
   terminal screens (`terminal-long`, `terminal-herdr-wheel`); agents in `inbox` and `picker-herdr` have titles.
+
+**Codex review of v0.1.4 (`74cf2ae..a7c6663`):** one P2, fixed with a test. Host text shown in the UI could carry Unicode
+bidi and invisible formatting characters (a right-to-left override draws `review<U+202E>txt.exe` reversed, so a title could
+impersonate another), in the app and in notifications. `herdr::project::display_text` now removes control characters
+and the invisible formatting characters (bidi embeddings, overrides and isolates, LRM/RLM/ALM, zero-width space and
+non-joiner, word joiner and invisible operators, deprecated format controls, BOM, interlinear annotation marks, soft
+hyphen, Mongolian vowel separator; the zero-width joiner stays for emoji) from agent titles, space and tab labels and
+the agent's display name. Identifiers and the agent's name (Reply's identity compares it) are never altered
+(`project.rs`, `bidi_and_invisible_formatting_never_survive_into_what_is_shown`).

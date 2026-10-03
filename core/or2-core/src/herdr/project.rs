@@ -68,7 +68,7 @@ pub fn project(snapshot: &SessionSnapshot) -> HerdrView {
             .map(|workspace| Workspace {
                 workspace_id: workspace.workspace_id.clone(),
                 number: workspace.number,
-                label: workspace.label.clone(),
+                label: display_text(&workspace.label),
             })
             .collect(),
         tabs: snapshot
@@ -78,7 +78,7 @@ pub fn project(snapshot: &SessionSnapshot) -> HerdrView {
                 tab_id: tab.tab_id.clone(),
                 workspace_id: tab.workspace_id.clone(),
                 number: tab.number,
-                label: tab.label.clone(),
+                label: display_text(&tab.label),
             })
             .collect(),
         panes: snapshot
@@ -99,7 +99,7 @@ pub fn project(snapshot: &SessionSnapshot) -> HerdrView {
                 workspace_id: agent.workspace_id.clone(),
                 name: agent.name.clone(),
                 agent: agent.agent.clone(),
-                display_agent: agent.display_agent.clone(),
+                display_agent: agent.display_agent.as_deref().map(display_text),
                 status: status(&agent.agent_status),
                 cwd: agent.cwd.clone(),
                 state_change_seq: agent.state_change_seq,
@@ -118,6 +118,39 @@ pub fn project(snapshot: &SessionSnapshot) -> HerdrView {
     }
 }
 
+/// Text from the host made safe to show: control characters and the invisible Unicode formatting
+/// characters removed, so a title or a label can never reorder or hide what is drawn around it
+/// (a right-to-left override turning `review<U+202E>txt.exe` into another name; Codex review v0.1.4, P2).
+/// Removed: the bidi embeddings, overrides and isolates (U+202A–U+202E, U+2066–U+2069), the marks
+/// LRM, RLM and ALM (U+200E, U+200F, U+061C), zero-width space and non-joiner (U+200B, U+200C),
+/// the word joiner and invisible operators (U+2060–U+2064), the deprecated format controls
+/// (U+206A–U+206F), the byte-order mark (U+FEFF), the interlinear annotation marks
+/// (U+FFF9–U+FFFB), the soft hyphen (U+00AD) and the Mongolian vowel separator (U+180E). The zero-width
+/// joiner (U+200D) stays: emoji sequences need it and it moves nothing. Identifiers (pane, tab and
+/// workspace ids, an agent's name, which a reply's identity compares) are never passed through this.
+pub fn display_text(raw: &str) -> String {
+    raw.chars()
+        .filter(|&c| {
+            !c.is_control()
+                && !matches!(
+                    c,
+                    '\u{00AD}'
+                        | '\u{061C}'
+                        | '\u{180E}'
+                        | '\u{200B}'
+                        | '\u{200C}'
+                        | '\u{200E}'
+                        | '\u{200F}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2060}'..='\u{2064}'
+                        | '\u{2066}'..='\u{206F}'
+                        | '\u{FEFF}'
+                        | '\u{FFF9}'..='\u{FFFB}'
+                )
+        })
+        .collect()
+}
+
 /// The most characters of an agent title kept; the rest is cut.
 pub const TITLE_MAX_CHARS: usize = 120;
 
@@ -129,7 +162,7 @@ pub const TITLE_MAX_CHARS: usize = 120;
 /// A glyph is removed only when whitespace (or nothing) follows it, so a title that starts with
 /// a word (`π - service`, `*args`) is kept whole. What counts as a glyph is [`is_status_glyph`].
 pub fn agent_title(raw: &str) -> Option<String> {
-    let clean: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let clean = display_text(raw);
     let mut title = clean.trim();
     let mut chars = title.chars();
     if let Some(first) = chars.next()
@@ -337,6 +370,30 @@ mod tests {
         for empty in ["", "   ", "⠋", "✳  ", "\n"] {
             assert_eq!(agent_title(empty), None, "{empty:?}");
         }
+    }
+
+    #[test]
+    fn bidi_and_invisible_formatting_never_survive_into_what_is_shown() {
+        // A right-to-left override would draw `review<U+202E>txt.exe` reversed after it (Codex review v0.1.4, P2).
+        assert_eq!(
+            agent_title("review\u{202E}txt.exe"),
+            Some("reviewtxt.exe".into())
+        );
+        for hidden in [
+            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}', '\u{200E}', '\u{200F}', '\u{061C}', '\u{200B}', '\u{200C}',
+            '\u{2060}', '\u{2064}', '\u{206A}', '\u{206F}', '\u{FEFF}', '\u{FFF9}', '\u{FFFB}',
+            '\u{00AD}', '\u{180E}', '\u{0007}', '\u{009B}',
+        ] {
+            let text = format!("a{hidden}b");
+            assert_eq!(display_text(&text), "ab", "{hidden:?}");
+            assert_eq!(agent_title(&text), Some("ab".into()), "{hidden:?}");
+        }
+        // Only invisible characters: no title at all.
+        assert_eq!(agent_title("\u{202E}\u{2066}\u{200B}"), None);
+        // The zero-width joiner stays: emoji sequences need it. Other text is untouched.
+        assert_eq!(display_text("👩\u{200D}💻 ship it"), "👩\u{200D}💻 ship it");
+        assert_eq!(display_text("π - service · ~/code"), "π - service · ~/code");
     }
 
     #[test]
