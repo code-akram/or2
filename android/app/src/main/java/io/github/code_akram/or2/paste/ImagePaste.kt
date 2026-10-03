@@ -211,13 +211,14 @@ fun uploadErrorMessage(error: Exception): String = when (error) {
     else -> "Upload failed"
 }
 
-/** What the terminal card's notice strip says about an upload, with its action ([UploadNotice.action]). */
-data class UploadNotice(val notice: TerminalNotice, val action: String)
-
-fun uploadNotice(state: UploadState): UploadNotice? = when (state) {
+/**
+ * What the terminal card's notice strip says about an upload: its progress (muted, a spinner, **Cancel**) or why it
+ * failed (a warning, **Dismiss**); nothing while the queue is idle.
+ */
+fun uploadNotice(state: UploadState): TerminalNotice? = when (state) {
     UploadState.Idle -> null
-    is UploadState.Uploading -> UploadNotice(TerminalNotice(uploadingText(state), NoticeTone.Info, busy = true, closable = false), "Cancel")
-    is UploadState.Failed -> UploadNotice(TerminalNotice(state.reason, NoticeTone.Warning, busy = false, closable = false), "Dismiss")
+    is UploadState.Uploading -> TerminalNotice(uploadingText(state), NoticeTone.Info, busy = true, action = "Cancel")
+    is UploadState.Failed -> TerminalNotice(state.reason, NoticeTone.Warning, busy = false, action = "Dismiss")
 }
 
 /** `Uploading image…` for one image, `Uploading image <i> of <n>…` for several, or the moment's [TOO_MANY_IMAGES]. */

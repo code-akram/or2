@@ -33,8 +33,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -46,7 +44,6 @@ import io.github.code_akram.or2.ffi.LinkHealth
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.paste.NO_UPLOAD
-import io.github.code_akram.or2.paste.UploadNotice
 import io.github.code_akram.or2.paste.uploadNotice
 import io.github.code_akram.or2.paste.uploading
 import io.github.code_akram.or2.terminal.TerminalScreen
@@ -128,7 +125,7 @@ fun SessionScreen(
                 uploadAction = { if (upload.uploading) paste?.cancel() else paste?.dismiss() }) {
                 // Keep the borrowed handle composed through Closed so its final frame stays visible.
                 handle?.let { TerminalScreen(it, terminal.state, terminal.frameReady, Modifier.weight(1f),
-                    composerHint = "Message " + terminal.host.label + "…", openPanes = { switcher = true },
+                    composerHint = "Message " + terminal.host.label + "…",
                     onBackground = { background = it }, onFrameDrawn = { holder.timing.terminalFrame(terminal.id) },
                     target = terminal.target, targetScroller = terminal.targetScroller, input = terminal.input,
                     // Swipes move tmux or herdr; a shell has nothing to move and keeps every touch.
@@ -151,22 +148,22 @@ fun SessionScreen(
 
 /**
  * The full-height card: the [TerminalHeader] (drag handle, the two discs, the centred `host · target`
- * title, the [transport] pill) on the header's tonal step, a [NoticeStrip] under it while the session
- * is not connected (else while an image uploads or failed to: [upload], its action [uploadAction],
+ * title, the [transport] pill) on the header's tonal step, one [NoticeStrip] under it (a closed
+ * terminal's reason with **Close**, else an image upload's [upload] with its action [uploadAction],
  * Cancel or Dismiss), a `crust` hairline, and the terminal below. A drag down anywhere on the header
  * minimises. A mosh session that has not heard from the server for more than five seconds
- * ([linkHealth]) greys its pill and says how long ago, in the header row itself: nothing is ever drawn
+ * ([linkHealth]) says how long ago inside its pill (`Mosh · 12 s` in `attention`): nothing is ever drawn
  * over the terminal's rows, and a flapping link does not resize the grid (the title gives way).
  */
 @Composable
 fun TerminalCard(
     host: String, target: String, transport: Transport, state: SessionState, minimise: () -> Unit, openSwitcher: () -> Unit,
     endSession: () -> Unit, modifier: Modifier = Modifier, background: Color = Or2Colors.TerminalBackground, linkHealth: LinkHealth? = null,
-    upload: UploadNotice? = null, uploadAction: () -> Unit = {},
+    upload: TerminalNotice? = null, uploadAction: () -> Unit = {},
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val stale = linkStaleLabel(linkHealth)
-    val notice = terminalNotice(state)
+    val closed = terminalNotice(state)
     var dragY by remember { mutableFloatStateOf(0f) }
     val threshold = with(LocalDensity.current) { 96.dp.toPx() }
     Box(
@@ -185,17 +182,13 @@ fun TerminalCard(
                         )
                     }.testTag("terminal-header"),
                 )
-                if (notice != null) {
+                (closed ?: upload)?.let { notice ->
+                    val tag = if (closed != null) "terminal" else "upload"
                     NoticeStrip(
-                        notice.text, Modifier.testTag("terminal-notice"), tone = notice.tone, busy = notice.busy,
-                        actionLabel = if (notice.closable) "Close" else null, onAction = endSession,
-                        actionModifier = Modifier.testTag("terminal-close"), textModifier = Modifier.testTag("terminal-status"),
-                    )
-                } else if (upload != null) {
-                    NoticeStrip(
-                        upload.notice.text, Modifier.testTag("upload-notice"), tone = upload.notice.tone, busy = upload.notice.busy,
-                        actionLabel = upload.action, onAction = uploadAction,
-                        actionModifier = Modifier.testTag("upload-action"), textModifier = Modifier.testTag("upload-status"),
+                        notice.text, Modifier.testTag("$tag-notice"), tone = notice.tone, busy = notice.busy,
+                        actionLabel = notice.action, onAction = if (closed != null) endSession else uploadAction,
+                        actionModifier = Modifier.testTag(if (closed != null) "terminal-close" else "upload-action"),
+                        textModifier = Modifier.testTag("$tag-status"),
                     )
                 }
             }
@@ -206,27 +199,19 @@ fun TerminalCard(
     }
 }
 
-/**
- * `SSH` in a `surfaceTrack` pill with full `text` (it sits on the terminal), `Mosh` in a saturated teal one.
- * [stale] (no word from the server for a while) greys either into the `SSH` look with muted text.
- */
+/** `SSH` in a `surfaceTrack` pill with full `text` (it sits on the terminal), `Mosh` in a saturated teal one. */
 @Composable
-fun TransportBadge(transport: Transport, modifier: Modifier = Modifier, small: Boolean = false, stale: Boolean = false) {
-    val (container, content) = transportBadgeColors(transport, stale)
-    // The grey is not the only signal: the badge says it for assistive services (and the UI tests) too.
-    val described = if (stale) modifier.semantics { stateDescription = STALE_BADGE_DESCRIPTION } else modifier
-    Badge(transport.label, described, container = container, content = content, small = small)
+fun TransportBadge(transport: Transport, modifier: Modifier = Modifier) {
+    val (container, content) = transportBadgeColors(transport)
+    Badge(transport.label, container, content, modifier)
 }
 
-/** What a greyed badge reports as its state. */
+/** What the header's pill reports as its state while the link is quiet (`Mosh · 12 s`). */
 const val STALE_BADGE_DESCRIPTION = "No word from the server"
 
-/** The badge's fill and text: teal for a healthy `Mosh`, the `SSH` look for SSH and for any stale link. */
-fun transportBadgeColors(transport: Transport, stale: Boolean): Pair<Color, Color> = when {
-    stale -> Or2Colors.SurfaceTrack to Or2Colors.TextMuted
-    transport == Transport.SSH -> Or2Colors.SurfaceTrack to Or2Colors.Text
-    else -> Or2Colors.Teal to Or2Colors.Background
-}
+/** The badge's fill and text: teal with dark text for `Mosh`, the `SSH` track look for SSH. */
+fun transportBadgeColors(transport: Transport): Pair<Color, Color> =
+    if (transport == Transport.SSH) Or2Colors.SurfaceTrack to Or2Colors.Text else Or2Colors.Teal to Or2Colors.Background
 
 /** A terminal that has not connected yet, or closed before it did: no terminal, no keys. */
 @Composable

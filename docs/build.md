@@ -472,14 +472,13 @@ spinner and progress line), `home-picker-failed` (the failure and **Retry**), `i
 connected host's screen), `picker-herdr`, `picker-many` (the host screen's picker at full height), `picker-tmux`,
 `picker-recent`, `host-form`, `host-form-new-key` (no stored key: **New key** chosen), `host-form-edit`, `keys`,
 `keys-empty`, `key-sheet` (a key's own sheet), `settings`, `about`, `licenses`, `license-text` (the GPL text page),
-`hostkey-first`, `hostkey-changed`, `hostkey-changed-many` (the tallest trust dialog), `shortcuts` (the keyboard
-shortcuts sheet), `add-host` (the add-host chooser in its sheet; `home-empty` shows it inline), `pair-scan`,
+`hostkey-first`, `hostkey-changed`, `hostkey-changed-many` (the tallest trust dialog), `shortcuts` (the gestures and
+keyboard shortcuts sheet), `add-host` (the add-host chooser in its sheet; `home-empty` shows it inline), `pair-scan`,
 `pair-scan-denied`, `pair-review`, `pair-review-new` (with a failure), `pair-progress`, `pair-install`
 (Easy pair; the camera preview itself is not in the gallery), `keepalive` (the battery step that ends adding a
 host), `keepalive-waiting` (Android's dialog up), `terminal` (a shell over SSH), `terminal-tmux` (a tmux
 target over Mosh), `terminal-long` (a title long enough to ellipsize), `terminal-stale` (Mosh, `Last heard
-12 s ago`), `terminal-connecting` and `terminal-closed` (the notice strip under the header, the latter with
-**Close**), `terminal-arrowpad`, `terminal-arrowpad-text` (the pad open over a terminal full of text, to
+12 s ago`), `terminal-closed` (the notice strip under the header, with **Close**), `terminal-arrowpad`, `terminal-arrowpad-text` (the pad open over a terminal full of text, to
 judge its blue keys against it), `terminal-herdr-wheel` (a herdr target tracking the mouse after a swipe up
 went to herdr as wheel events: the scroll-to-bottom button shows), `terminal-composer` (opens with a message typed and the keyboard up, to show
 the caret and the lit send button). Any name with the suffix `-scrolled` (`licenses-scrolled`, `about-scrolled`,

@@ -1,6 +1,6 @@
 package io.github.code_akram.or2.terminal
 
-import io.github.code_akram.or2.paste.composerWithPath
+import io.github.code_akram.or2.paste.composerWithPaths
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -13,7 +13,7 @@ class ComposerSendTest {
         val pending = chrome.composerText
         // The upload finishes behind the dialog: its path joins the composer.
         val path = "/home/u/.cache/or2/images/or2-20261002-153012-a1b2c3.png"
-        chrome.composerText = composerWithPath(chrome.composerText, path)
+        chrome.composerText = composerWithPaths(chrome.composerText, listOf(path))
         // Confirmed and sent: only the sent text goes; the path is still there to send.
         chrome.composerSent(pending)
         assertEquals(path, chrome.composerText)

@@ -199,6 +199,11 @@ class ThemeTest {
         assertEquals(36.dp, Or2Dimens.HeaderRow)
         assertEquals(30.dp, Or2Dimens.Key)
         assertEquals(40.dp, Or2Dimens.KeyTouch)
+        // A toolbar key's touch box is 34 x 40 dp around the 30 dp key drawn in it.
+        assertEquals(34.dp, Or2Dimens.KeyTouchWidth)
+        assertEquals(6.dp, Or2Dimens.KeyLabelPadding)
+        assertEquals(8.dp, Or2Dimens.ToolbarMargin)
+        assertEquals(6.dp, Or2Dimens.ToolbarPadding)
         assertEquals(40.dp, Or2Dimens.PadKey)
         assertEquals(6.dp, Or2Dimens.PadGap)
         assertEquals(36.dp, Or2Dimens.PadExtrasHeight)

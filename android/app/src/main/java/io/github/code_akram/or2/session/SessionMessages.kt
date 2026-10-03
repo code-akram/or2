@@ -2,12 +2,9 @@ package io.github.code_akram.or2.session
 
 import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.ffi.CloseReason
-import io.github.code_akram.or2.ffi.HerdrState
-import io.github.code_akram.or2.ffi.HerdrUnavailable
 import io.github.code_akram.or2.ffi.HostConnectException
 import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostState
-import io.github.code_akram.or2.ffi.SessionException
 import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.SessionState
 
@@ -88,25 +85,4 @@ fun unreachableDetail(message: String, addresses: List<HostEndpoint>): String? {
 fun hostFailureDetail(state: HostState?, addresses: List<HostEndpoint>): String? {
     val failure = ((state as? HostState.Closed)?.reason as? CloseReason.Failed)?.failure as? SessionFailure.Unreachable ?: return null
     return unreachableDetail(failure.message, addresses)
-}
-
-fun herdrStateMessage(state: HerdrState): String = when (state) {
-    HerdrState.Starting -> "Starting\u2026"
-    is HerdrState.Live -> "Live"
-    HerdrState.Closed -> "Stopped"
-    is HerdrState.Unavailable -> when (val reason = state.reason) {
-        HerdrUnavailable.NotInstalled -> "herdr is not installed on the host."
-        is HerdrUnavailable.IncompatibleProtocol -> "This herdr speaks protocol ${reason.protocol}, which or2 does not support."
-        HerdrUnavailable.NotRunning -> "herdr is not running."
-        HerdrUnavailable.Failed -> "herdr is unavailable. or2 retries while the host is connected."
-    }
-}
-
-fun sessionErrorMessage(error: SessionException): String = when (error) {
-    is SessionException.NotConnected -> "The session is not connected yet."
-    is SessionException.Closed -> "The session has closed. Reconnect to continue."
-    is SessionException.NoHostKeyPrompt -> "This host-key prompt has expired."
-    is SessionException.HostKeyMismatch -> "The presented host key no longer matches this decision. Disconnect and verify it again."
-    is SessionException.EmptyDimension -> "Terminal dimensions must be nonzero."
-    is SessionException.InvalidKey -> "The requested terminal key is invalid."
 }

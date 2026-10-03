@@ -30,22 +30,22 @@ fun noticeColor(tone: NoticeTone): Color = when (tone) {
     NoticeTone.Warning -> Or2Colors.Attention
 }
 
-/** The icon a strip shows when the caller gives none. */
+/** The strip's icon: `info` for information, `warning` for a warning. */
 fun noticeIcon(tone: NoticeTone): ImageVector = when (tone) {
     NoticeTone.Info -> Or2Icons.Info
     NoticeTone.Warning -> Or2Icons.Warning
 }
 
 /**
- * One compact status line under a header (connecting, closed, later notices): 28 dp tall, the 12 dp
- * gutter, a 14 dp icon (or, while [busy], a small accent spinner in its place), one line of mono
+ * One compact status line under a header (a closed terminal, an image upload): 28 dp tall, the 12 dp
+ * gutter, a 14 dp icon by [tone] (or, while [busy], a small accent spinner in its place), one line of mono
  * `MonoSmall` text tinted by [tone], and an optional trailing text action in `accent`. It takes layout
  * space like any row, so it never covers what is below it; it has no fill of its own and sits on its
  * container's (the terminal header's tone).
  */
 @Composable
 fun NoticeStrip(
-    text: String, modifier: Modifier = Modifier, tone: NoticeTone = NoticeTone.Info, icon: ImageVector? = null,
+    text: String, modifier: Modifier = Modifier, tone: NoticeTone = NoticeTone.Info,
     busy: Boolean = false, actionLabel: String? = null, onAction: () -> Unit = {}, actionModifier: Modifier = Modifier,
     textModifier: Modifier = Modifier,
 ) {
@@ -56,7 +56,7 @@ fun NoticeStrip(
     ) {
         Box(Modifier.size(Or2Dimens.NoticeIcon), contentAlignment = Alignment.Center) {
             if (busy) Spinner(size = Or2Dimens.NoticeIcon - 2.dp)
-            else Icon(icon ?: noticeIcon(tone), null, Modifier.size(Or2Dimens.NoticeIcon), tint = color)
+            else Icon(noticeIcon(tone), null, Modifier.size(Or2Dimens.NoticeIcon), tint = color)
         }
         Spacer(Modifier.width(8.dp))
         Text(

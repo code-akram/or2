@@ -1,9 +1,5 @@
 package io.github.code_akram.or2.pair
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,11 +39,11 @@ import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.hosts.hostFieldError
 import io.github.code_akram.or2.keys.KeyPicker
+import io.github.code_akram.or2.keys.PublicKeyActions
 import io.github.code_akram.or2.ui.BottomInsetSpacer
 import io.github.code_akram.or2.ui.GroupCard
 import io.github.code_akram.or2.ui.GroupDivider
 import io.github.code_akram.or2.ui.IconAction
-import io.github.code_akram.or2.ui.ListRow
 import io.github.code_akram.or2.ui.MonoBlock
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dimens
@@ -60,6 +56,8 @@ import io.github.code_akram.or2.ui.PrimaryButton
 import io.github.code_akram.or2.ui.SectionHeader
 import io.github.code_akram.or2.ui.Spinner
 import io.github.code_akram.or2.ui.TopBar
+import io.github.code_akram.or2.ui.clipboardText
+import io.github.code_akram.or2.ui.copyText
 import io.github.code_akram.or2.ui.scrolledUnder
 
 /** The pairing screens in turn, driven by the flow's state; [PairFlow] holds all the logic. */
@@ -201,15 +199,6 @@ fun PairScanScreen(code: String, error: String?, access: CameraAccess, onCode: (
     }
 }
 
-private fun copyText(context: Context, label: String, text: String) {
-    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText(label, text))
-}
-
-private fun clipboardText(context: Context): String {
-    val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    return manager.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
-}
-
 /**
  * What the code says, before anything is sent: the host's name and user, the addresses it will try, the host
  * key's fingerprint (trusted from the code, so there is no first-use prompt), and which phone key to authorize.
@@ -320,13 +309,13 @@ fun PairProgressScreen(name: String, cancel: () -> Unit) {
 }
 
 /**
- * The host is saved with a key that is to be installed by hand: after a code made with --manual (the host key came
- * from the code, so it is [trusted]), and after the host form saved a host with a **New key** (not trusted yet: the
- * first connection asks).
+ * "Add the key to the host": [hostLabel] is saved, and its key line ([keyLine], with its [fingerprint]) is to be added to
+ * the host's `~/.ssh/authorized_keys` by hand, with the shared Copy / Share group ([PublicKeyActions]) and **Done**. It
+ * follows Easy pair with a `--manual` code ([trusted]: the host key came with the code) and the host form saving a host
+ * with a **New key** (not [trusted]: the host-key dialog asks on the first connect).
  */
 @Composable
 fun PairInstallKeyScreen(hostLabel: String, keyLine: String, fingerprint: String, done: () -> Unit, trusted: Boolean = true) {
-    val context = LocalContext.current
     val scroll = rememberScrollState()
     Column(Modifier.fillMaxSize()) {
         TopBar(title = "Add the key to the host", scrolled = scroll.scrolledUnder())
@@ -341,19 +330,7 @@ fun PairInstallKeyScreen(hostLabel: String, keyLine: String, fingerprint: String
             )
             Text(fingerprint, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.testTag("pair-install-fingerprint"))
             SelectionContainer { MonoBlock(keyLine, Modifier.testTag("pair-install-key")) }
-            GroupCard(color = Or2Colors.SurfaceRaisedRow) {
-                ListRow("Copy public key", icon = Or2Icons.Copy, modifier = Modifier.testTag("pair-install-copy"), onClick = {
-                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                        .setPrimaryClip(ClipData.newPlainText("SSH public key", keyLine))
-                })
-                GroupDivider(inset = 44.dp)
-                ListRow("Share public key", icon = Or2Icons.Share, modifier = Modifier.testTag("pair-install-share"), onClick = {
-                    context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
-                        type = "text/plain"
-                        putExtra(Intent.EXTRA_TEXT, keyLine)
-                    }, "Share public key"))
-                })
-            }
+            PublicKeyActions(keyLine, tagPrefix = "pair-install", color = Or2Colors.SurfaceRaisedRow)
             PrimaryButton("Done", done, Modifier.testTag("pair-install-done"))
             Spacer(Modifier.height(24.dp))
             BottomInsetSpacer()

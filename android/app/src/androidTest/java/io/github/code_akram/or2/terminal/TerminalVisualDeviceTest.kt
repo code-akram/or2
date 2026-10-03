@@ -33,22 +33,20 @@ class TerminalVisualDeviceTest {
         fail("Terminal frame or Window metrics did not arrive")
     }
 
-    /** Every toolbar key is laid out inside the pill, in order and not overlapping: nothing needs a scroll. */
+    /**
+     * Every toolbar key is laid out inside the pill, in order and not overlapping: nothing needs a scroll, with or without
+     * a selection (Copy and Clear then take the typing keys' place).
+     */
     private fun assertToolbarKeysFitWithoutScrolling(view: TerminalView) {
         val toolbar = checkNotNull(view.toolbarBounds) { "Key toolbar not laid out" }
         assertTrue("Toolbar must be visible", toolbar.width() > 0 && toolbar.height() > 0)
         val density = view.resources.displayMetrics.density
-        val keys = listOf("Ctrl", "Esc", "Tab", "Arrows", "Panes", "Paste", "History", "Composer", "Keyboard")
-        val labels = if (view.selection == null) keys else listOf("Copy", "Clear") + keys
+        val labels = toolbarKeys(selecting = view.selection != null).map { it.tag } + ToolbarToggles.map { it.tag }
         assertTrue("Toolbar keys $labels must all be laid out, found ${view.toolbarKeyBounds.keys}", view.toolbarKeyBounds.keys.containsAll(labels))
         var right = toolbar.left
-        // With a selection the Copy and Clear keys join the row and it may scroll; the composer and
-        // keyboard toggles stay put either way.
-        val scrolls = view.selection != null
         labels.forEach { label ->
             val bounds = view.toolbarKeyBounds.getValue(label)
             assertTrue("$label must be visible", bounds.width() > 0 && bounds.height() > 0)
-            if (scrolls && label !in listOf("Composer", "Keyboard")) return@forEach
             assertTrue("$label ($bounds) must fit within $toolbar without scrolling", toolbar.contains(bounds))
             assertTrue("$label touch box must be at least 34 dp wide", bounds.width() >= 34 * density - 1)
             assertTrue("$label touch box must be at least 40 dp tall (the key itself is drawn 30 dp)", bounds.height() >= 40 * density - 1)

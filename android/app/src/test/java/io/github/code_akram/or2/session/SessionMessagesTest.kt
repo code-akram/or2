@@ -54,11 +54,6 @@ class SessionMessagesTest {
         assertEquals("Disconnected", hostStateMessage(HostState.Closed(CloseReason.Disconnected)))
         // A closed host explains itself exactly as a closed session does.
         assertTrue(hostStateMessage(HostState.Closed(CloseReason.Failed(SessionFailure.AuthenticationRejected))).contains("username"))
-        val herdr = listOf(HerdrState.Starting, HerdrState.Closed, HerdrState.Unavailable(HerdrUnavailable.NotInstalled, "diagnostic"),
-            HerdrState.Unavailable(HerdrUnavailable.NotRunning, "diagnostic"), HerdrState.Unavailable(HerdrUnavailable.IncompatibleProtocol(9u), "diagnostic"),
-            HerdrState.Unavailable(HerdrUnavailable.Failed, "diagnostic"))
-        assertEquals(6, herdr.map(::herdrStateMessage).toSet().size)
-        assertTrue(herdr.map(::herdrStateMessage).none { "diagnostic" in it })
     }
 
     private val addresses = listOf(io.github.code_akram.or2.data.HostEndpoint("mac.local", 22), io.github.code_akram.or2.data.HostEndpoint("10.0.0.5", 2222))
