@@ -11,7 +11,9 @@ Updated 2026-10-03.
   [v0.1.1](releases/v0.1.1.md) and [v0.1.0](releases/v0.1.0.md) (2026-10-02). The owner's QA passed in full; the
   install one-liner was checked against the release.
 - **The owner's phone runs v0.1.2**, the published APK, installed in place (hosts and keys kept).
-- `main` has nothing unreleased yet.
+- **On `main`, not released: the v0.1.3 candidate** (`7fe5266` or later; versionName still 0.1.2, FFI API 19):
+  zero-config Reply (contracts.md "# v0.1.3: zero-config Reply"), Codex-reviewed (two P3 fixed). The owner's phone
+  runs it as a signed build (2026-10-03 22:11), awaiting QA.
 
 ### In v0.1.2
 
