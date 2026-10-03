@@ -49,10 +49,10 @@ class HostConnectionsTransportTest {
      */
     private suspend fun TestScope.rig(
         pref: TransportPref = TransportPref.AUTO, moshServer: String? = "/usr/bin/mosh-server", probed: Boolean = true,
-        pending: Boolean = false, moshPending: Boolean = false, failedUntil: Long = 0, roundTripMs: Long = 0,
+        pending: Boolean = false, moshPending: Boolean = false, roundTripMs: Long = 0,
         moshServerFailures: Int = 0,
     ): Rig {
-        val host = testHost(transport = pref, moshFailedUntil = failedUntil)
+        val host = testHost(transport = pref)
         val port = FakePort()
         port.caps = port.caps.copy(moshServer = moshServer)
         port.moshServerFailuresLeft = moshServerFailures
@@ -536,15 +536,6 @@ class HostConnectionsTransportTest {
         advanceUntilIdle()
         assertNotSame(old, rig.active)
         assertEquals(UdpVerdict.UNKNOWN, rig.active.udpVerdict.value)
-    }
-
-    @Test
-    fun nothingAboutUdpIsRememberedAcrossConnections() = runTest {
-        // A host record still carrying the old 24 h memory: it is not read any more.
-        val rig = rig(failedUntil = Long.MAX_VALUE)
-        assertEquals(UdpVerdict.UNKNOWN, rig.active.udpVerdict.value)
-        rig.holder.openTerminal(rig.active, shell)
-        assertEquals(listOf(TerminalTransport.MOSH), rig.port.transports)
     }
 
     // --- the shell's fallback --------------------------------------------------------------

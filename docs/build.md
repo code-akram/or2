@@ -287,8 +287,8 @@ session already open is brought to the front, a shell always opens anew, a close
 reused) on fakes, and `TerminalActivationsProbeTest`
 the same over the real FFI against `contract_probe_host`'s deterministic answers. `UnlockPlanTest` covers biometric grouping
 (one prompt per distinct key record), `InboxModelTest` the inbox ordering and the flow that
-assembles it, `HostRecordsTest` trust clearing on any address-list change and the clearing of the mosh failure
-memory on a new transport or addresses (over a fake of the DAO's primitives), and `MigrationSqlTest`
+assembles it, `HostRecordsTest` trust clearing on any address-list change (over a fake of the DAO's
+primitives), and `MigrationSqlTest`
 runs the real v1 to v2, v2 to v3 and v3 to v4 SQL with foreign keys on and compares each result with a
 fresh database of that version. `HostConnectionsTransportTest` covers the instant opens (the AUTO choice table,
 the per-connection UDP verdict and its reset, the background mosh attempt and the swap, one attempt

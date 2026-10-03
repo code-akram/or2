@@ -47,7 +47,8 @@ val MIGRATION_2_3 = object : Migration(2, 3) {
 
 /**
  * v3 -> v4 (the M3 follow-up): each host gains `sleeps` (it goes to sleep when idle; default 0) and
- * `mosh_failed_until` (epoch milliseconds until which AUTO skips mosh for it; default 0, no memory).
+ * `mosh_failed_until` (epoch milliseconds until which AUTO skipped mosh for it; default 0, no memory; unused since
+ * v0.1.2, kept so no migration drops it).
  * Two additive `ALTER TABLE ... ADD COLUMN`s: nothing is dropped, recreated or rewritten, so keys,
  * trust and addresses are untouched.
  */
