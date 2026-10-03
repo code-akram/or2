@@ -100,7 +100,8 @@ class HomeSessionPickerDeviceTest {
         compose.waitUntil(5_000) { holder.host(7)?.state?.value is HostState.Connected }
     }
 
-    private fun waitFor(tag: String) = compose.waitUntil(5_000) { compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty() }
+    private fun waitFor(tag: String, unmerged: Boolean = false) =
+        compose.waitUntil(5_000) { compose.onAllNodesWithTag(tag, useUnmergedTree = unmerged).fetchSemanticsNodes().isNotEmpty() }
 
     /** Waits until the node tagged [tag] reads [text] (the connect runs off the test's thread). */
     private fun waitForText(tag: String, text: String) = compose.waitUntil(5_000) {
@@ -197,7 +198,8 @@ class HomeSessionPickerDeviceTest {
         compose.onNodeWithTag("host-terminals:7").assertIsDisplayed()
         compose.onNodeWithTag("host:7").performClick()
         compose.onNodeWithTag("picker-tab:1").performClick()
-        waitFor("open-mark:tmux:main")
+        // The mark sits inside its row, whose semantics merge into the row: only the unmerged tree has its tag.
+        waitFor("open-mark:tmux:main", unmerged = true)
         compose.onNodeWithTag("tmux-attach:main").performClick()
         waitFor("terminal-card")
         compose.runOnIdle {
