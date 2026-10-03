@@ -98,20 +98,20 @@ class HomeModelTest {
         HerdrView(1u, 1u, focused, emptyList(), emptyList(), panes, agents)
 
     @Test
-    fun aSessionCardShowsItsWorkingDirectoryElseWhatItsHerdrSessionShowsElseNothing() {
+    fun aHerdrTerminalsCardFollowsItsSessionsFocusedPaneElseShowsNothing() {
+        // The focused pane's agent label: herdr's focus is shared, so it is what the session's one terminal shows.
         val withAgent = view("w1:p2", listOf(pane("w1:p1", cwd = "~/one"), pane("w1:p2", "claude", "~/two")), listOf(agent("w1:p2", "Claude Code")))
-        // The pane's own working directory comes first.
-        assertEquals("~/src", sessionDetail("~/src", withAgent))
-        // Else the focused pane's agent label.
-        assertEquals("Claude Code", sessionDetail(null, withAgent))
+        assertEquals("Claude Code", sessionDetail(withAgent))
+        // The focus moves to another pane: the card follows it, whatever pane the terminal was opened on.
+        assertEquals("~/one", sessionDetail(withAgent.copy(focusedPaneId = "w1:p1")))
         // An agent with no name of its own: the pane's agent kind.
-        assertEquals("codex", sessionDetail(null, view("w1:p1", listOf(pane("w1:p1", "codex", "~/one")), listOf(agent("w1:p1", null)))))
+        assertEquals("codex", sessionDetail(view("w1:p1", listOf(pane("w1:p1", "codex", "~/one")), listOf(agent("w1:p1", null)))))
         // No agent in the focused pane: its cwd.
-        assertEquals("~/one", sessionDetail(null, view("w1:p1", listOf(pane("w1:p1", cwd = "~/one"), pane("w1:p2", "claude")))))
-        // Nothing known: empty, never user@host (the card keeps its height).
-        assertEquals("", sessionDetail(null, view("w1:p1", listOf(pane("w1:p1")))))
-        assertEquals("", sessionDetail(null, view(null, listOf(pane("w1:p1", cwd = "~/one")))))
-        assertEquals("", sessionDetail(null, null))
+        assertEquals("~/one", sessionDetail(view("w1:p1", listOf(pane("w1:p1", cwd = "~/one"), pane("w1:p2", "claude")))))
+        // Nothing known (or not a herdr terminal): empty, never user@host (the card keeps its height).
+        assertEquals("", sessionDetail(view("w1:p1", listOf(pane("w1:p1")))))
+        assertEquals("", sessionDetail(view(null, listOf(pane("w1:p1", cwd = "~/one")))))
+        assertEquals("", sessionDetail(null))
     }
 
     @Test
@@ -165,7 +165,7 @@ class HomeModelTest {
     }
 
     @Test
-    fun aTapOrTheSessionButtonConnectsOnlyAHostThatHasAKeyAndIsNotAlreadyOnItsWay() {
+    fun aTapOnTheCardHeaderConnectsOnlyAHostThatHasAKeyAndIsNotAlreadyOnItsWay() {
         val keyed = Host(HostRecord(1, "Box", "dev", "k"), listOf(HostEndpoint("box.invalid", 22)))
         val keyless = Host(HostRecord(2, "Bare", "dev", null), listOf(HostEndpoint("bare.invalid", 22)))
         assertTrue(tapConnects(keyed, LinkStatus.NOT_CONNECTED, busy = false))

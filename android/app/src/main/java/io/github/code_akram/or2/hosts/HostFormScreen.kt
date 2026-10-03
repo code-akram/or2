@@ -32,6 +32,7 @@ import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.HostRecord
 import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.data.TransportPref
+import io.github.code_akram.or2.home.DeleteHostDialog
 import io.github.code_akram.or2.keys.KeyPicker
 import io.github.code_akram.or2.keys.newKeyComment
 import io.github.code_akram.or2.keys.newKeyErrorMessage
@@ -58,9 +59,11 @@ import io.github.code_akram.or2.ui.scrolledUnder
 
 /**
  * Add or edit a host: filled fields with labels above and mono placeholders, an ordered address
- * list (each with its own port), the key choice, the inbox toggle, a full-width pill and a
- * mirrored top-bar check. Stateless storage-wise: [save] gets the finished host, then the form ends with [saved]
+ * list (each with its own port), the key choice, the inbox toggle and one Save, the full-width pill at the end.
+ * Stateless storage-wise: [save] gets the finished host, then the form ends with [saved]
  * (by default [close]; the app goes on to the battery step after a new host). [close] alone leaves without saving.
+ * Editing a host ends with a danger **Delete host** row: after the same confirmation as Home's ([DeleteHostDialog]),
+ * [delete] deletes it (the app then leaves the form).
  *
  * The key choice ends with **New key**, as on the Easy pair review (preselected when the phone has no key): Save
  * first makes and stores it with [createKey] (the biometric prompt), selects it, saves the host with it and then
@@ -71,6 +74,7 @@ fun HostFormScreen(
     previous: Host?, keys: List<KeyRecord>, busy: Boolean, save: (Host) -> Unit, close: () -> Unit,
     createKey: suspend (label: String, comment: String) -> KeyRecord, deviceLabel: String,
     saved: () -> Unit = close,
+    delete: ((Host) -> Unit)? = null,
 ) {
     // Typed input survives rotation and process death, and is re-seeded when a different host is edited.
     val identity = previous?.id ?: 0L
@@ -134,12 +138,12 @@ fun HostFormScreen(
             installKeyId = key.id
         }
     }
+    var deleting by remember { mutableStateOf(false) }
     val scroll = rememberScrollState()
     Column(Modifier.fillMaxSize()) {
         TopBar(
-            title = if (previous == null) "New connection" else "Edit connection", back = close, backIcon = Or2Icons.Close, backDescription = "Close",
+            title = if (previous == null) "New host" else "Edit host", back = close, backIcon = Or2Icons.Close, backDescription = "Close",
             scrolled = scroll.scrolledUnder(),
-            actions = { IconAction(Or2Icons.Check, "Save", ::submit, Modifier.testTag("host-form-save"), tint = Or2Colors.Accent, enabled = valid && !busy && !working) },
         )
         Column(
             Modifier.weight(1f).verticalScroll(scroll).padding(horizontal = Or2Dimens.Gutter).testTag("host-form"),
@@ -213,9 +217,18 @@ fun HostFormScreen(
                     style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp),
                 )
             }
+            if (previous != null && delete != null) {
+                GroupCard(Modifier.padding(top = 8.dp)) {
+                    ListRow("Delete host", icon = Or2Icons.Trash, titleColor = Or2Colors.Danger, enabled = !busy && !working,
+                        modifier = Modifier.testTag("host-form-delete"), onClick = { deleting = true })
+                }
+            }
             Spacer(Modifier.height(24.dp))
             BottomInsetSpacer()
         }
+    }
+    if (deleting && previous != null && delete != null) {
+        DeleteHostDialog(previous, delete = { deleting = false; delete(previous) }, dismiss = { deleting = false })
     }
 }
 

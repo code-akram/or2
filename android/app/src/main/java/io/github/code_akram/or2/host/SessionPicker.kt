@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -36,22 +35,13 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.connection.UDP_BLOCKED_LINE
-import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.ffi.HostCapabilities
-import io.github.code_akram.or2.ffi.HostState
+import io.github.code_akram.or2.ffi.HerdrSessionInfo
+import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TmuxSession
-import io.github.code_akram.or2.inbox.LinkStatus
-import io.github.code_akram.or2.inbox.linkStatus
-import io.github.code_akram.or2.session.HostTrustDialog
-import io.github.code_akram.or2.session.hostFailureDetail
-import io.github.code_akram.or2.session.hostStateMessage
-import io.github.code_akram.or2.ui.AttentionCard
-import io.github.code_akram.or2.ui.BottomInsetSpacer
 import io.github.code_akram.or2.ui.GroupCard
 import io.github.code_akram.or2.ui.GroupDivider
-import io.github.code_akram.or2.ui.IconAction
 import io.github.code_akram.or2.ui.ListRow
-import io.github.code_akram.or2.ui.Or2Card
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Field
@@ -59,15 +49,11 @@ import io.github.code_akram.or2.ui.Or2Icons
 import io.github.code_akram.or2.ui.Or2Sheet
 import io.github.code_akram.or2.ui.Or2Type
 import io.github.code_akram.or2.ui.PillButton
-import io.github.code_akram.or2.ui.PrimaryButton
-import io.github.code_akram.or2.ui.SectionHeader
 import io.github.code_akram.or2.ui.Segmented
 import io.github.code_akram.or2.ui.Spinner
 import io.github.code_akram.or2.ui.StatusDot
-import io.github.code_akram.or2.ui.TopBar
-import io.github.code_akram.or2.ui.scrolledUnder
 
-/** The tmux session list of a connected host as the screen last learned it. */
+/** The tmux session list of a connected host as the picker last learned it. */
 sealed interface TmuxList {
     data object Loading : TmuxList
     data class Loaded(val sessions: List<TmuxSession>) : TmuxList
@@ -83,173 +69,52 @@ fun tmuxNameError(name: String): String? = when {
     else -> null
 }
 
-/** An open terminal on this host, for resuming from the host screen. */
-data class HostTerminalItem(val id: Long, val title: String, val closed: Boolean)
+enum class PickerTab(val label: String) { HERDR("herdr"), TMUX("tmux") }
 
 /**
- * One host: its connection and, once connected, "Open a session", which opens the session picker sheet
- * (herdr, tmux or a recent session, or "Shell" for a plain shell). Stateless: the caller owns the connection
- * and supplies what it knows. The sheet never opens by itself: Home's card opens this screen only, and its
- * session button opens the picker over Home instead. [udpBlocked]: mosh's UDP does not reach the host on this
- * connection, so its terminals use SSH; one muted line says so and how to fix it.
+ * The herdr and tmux sessions of one host that already have an open terminal in or2: the picker marks their rows
+ * `● Open`, and choosing one switches to that terminal. [herdr] holds session names, null for herdr's default session.
  */
-@Composable
-fun HostScreen(
-    host: Host,
-    hostState: HostState?,
-    caps: HostCapabilities?,
-    capsError: String?,
-    tmux: TmuxList,
-    busy: Boolean,
-    connect: () -> Unit,
-    disconnect: () -> Unit,
-    approve: (HostState.AwaitingHostKeyDecision) -> Unit,
-    reject: () -> Unit,
-    openShell: () -> Unit,
-    openTmux: (String) -> Unit,
-    openHerdr: (session: String?) -> Unit,
-    refresh: () -> Unit,
-    modifier: Modifier = Modifier,
-    terminals: List<HostTerminalItem> = emptyList(),
-    resume: (Long) -> Unit = {},
-    back: () -> Unit = {},
-    edit: () -> Unit = {},
-    udpBlocked: Boolean = false,
-) {
-    val link = linkStatus(hostState, host.sleeps)
-    var pickerOpen by rememberSaveable { mutableStateOf(false) }
-    val scroll = rememberScrollState()
-    Column(modifier.fillMaxSize()) {
-        TopBar(title = host.label, back = back, scrolled = scroll.scrolledUnder(), actions = {
-            IconAction(Or2Icons.Pencil, "Edit host", edit, Modifier.testTag("host-edit"), enabled = !busy)
-        })
-        Column(
-            Modifier.weight(1f).verticalScroll(scroll).padding(horizontal = Or2Dimens.Gutter).testTag("host-detail"),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            StatusCard(host, hostState, link)
-            if (link == LinkStatus.CONNECTED && udpBlocked) {
-                Text(UDP_BLOCKED_LINE, style = Or2Type.Secondary, color = Or2Colors.TextMuted,
-                    modifier = Modifier.padding(horizontal = 4.dp).testTag("host-udp-blocked"))
-            }
-            if (host.keyId == null) {
-                AttentionCard("Select a key", "Edit this host and choose the SSH key it signs in with.", onClick = edit)
-            }
-            when (link) {
-                LinkStatus.NOT_CONNECTED, LinkStatus.FAILED, LinkStatus.ASLEEP ->
-                    PrimaryButton(if (host.keyId == null) "Select a key first" else "Unlock and connect", connect,
-                        Modifier.testTag("host-connect"), enabled = !busy && host.keyId != null)
-                LinkStatus.CONNECTED -> {
-                    PrimaryButton("Open a session", { pickerOpen = true }, Modifier.testTag("host-open-picker"))
-                    GroupCard {
-                        ListRow("Disconnect", icon = Or2Icons.Power, modifier = Modifier.testTag("host-disconnect"), onClick = disconnect)
-                    }
-                }
-                else -> PillButton("Cancel", disconnect, Modifier.testTag("host-disconnect"))
-            }
-            if (terminals.isNotEmpty()) {
-                Column(Modifier.testTag("open-terminals")) {
-                    SectionHeader("Open sessions", topGap = 6.dp)
-                    GroupCard {
-                        terminals.forEachIndexed { index, terminal ->
-                            if (index > 0) GroupDivider()
-                            ListRow(
-                                terminal.title + if (terminal.closed) " (closed)" else "", chevron = true,
-                                modifier = Modifier.testTag("open-terminal:${terminal.id}"), onClick = { resume(terminal.id) },
-                            )
-                        }
-                    }
-                }
-            }
-            Spacer(Modifier.height(24.dp))
-            BottomInsetSpacer()
-        }
-    }
-    if (link == LinkStatus.CONNECTED && pickerOpen) {
-        SessionPickerSheet(
-            caps, capsError, tmux, terminals, openShell = { pickerOpen = false; openShell() },
-            openTmux = { pickerOpen = false; openTmux(it) }, openHerdr = { pickerOpen = false; openHerdr(it) },
-            resume = { pickerOpen = false; resume(it) }, refresh = refresh, dismiss = { pickerOpen = false },
+data class OpenSessions(val herdr: Set<String?> = emptySet(), val tmux: Set<String> = emptySet()) {
+    /** Whether [session]'s row is marked: the default session counts by name too (an agent's terminal may name it). */
+    fun has(session: HerdrSessionInfo): Boolean = session.name in herdr || (session.isDefault && null in herdr)
+
+    fun has(session: TmuxSession): Boolean = session.name in tmux
+
+    companion object {
+        /** The marks for the [targets] of a host's open terminals (not closed, not being closed); a shell marks nothing. */
+        fun of(targets: List<TerminalTarget>) = OpenSessions(
+            herdr = targets.filterIsInstance<TerminalTarget.Herdr>().map { it.session }.toSet(),
+            tmux = targets.filterIsInstance<TerminalTarget.Tmux>().map { it.sessionName }.toSet(),
         )
     }
-    (hostState as? HostState.AwaitingHostKeyDecision)?.let { prompt ->
-        HostTrustDialog(prompt, busy, { approve(prompt) }, reject)
-    }
 }
-
-@Composable
-private fun StatusCard(host: Host, hostState: HostState?, link: LinkStatus) {
-    val message = if (link == LinkStatus.ASLEEP) LinkStatus.ASLEEP.label else hostState?.let(::hostStateMessage) ?: LinkStatus.NOT_CONNECTED.label
-    val color = when (link) {
-        LinkStatus.FAILED -> Or2Colors.Danger
-        LinkStatus.CONNECTED -> Or2Colors.Done
-        LinkStatus.NEEDS_HOST_KEY -> Or2Colors.Attention
-        LinkStatus.CONNECTING -> Or2Colors.Accent
-        LinkStatus.NOT_CONNECTED, LinkStatus.ASLEEP -> Or2Colors.TextMuted
-    }
-    Or2Card {
-        Row(Modifier.padding(Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(Or2Dimens.IconTile), contentAlignment = Alignment.Center) {
-                if (link == LinkStatus.CONNECTING) {
-                    Spinner(size = Or2Dimens.Spinner)
-                } else {
-                    Icon(Or2Icons.Server, null, Modifier.size(Or2Dimens.Spinner), tint = Or2Colors.TextMuted)
-                }
-            }
-            Spacer(Modifier.width(8.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(host.username + "@" + host.addressSummary, style = Or2Type.Mono, color = Or2Colors.TextMuted)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (link != LinkStatus.CONNECTING) {
-                        StatusDot(color, Modifier.padding(end = 6.dp))
-                    }
-                    Text(message, style = Or2Type.Body, color = if (link == LinkStatus.FAILED) Or2Colors.Danger else Or2Colors.Text,
-                        modifier = Modifier.testTag("host-state"))
-                }
-                hostFailureDetail(hostState, host.addresses)?.let { detail ->
-                    // What each address did, in muted mono: which one was refused, which never answered.
-                    Text(detail, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.testTag("host-failure-detail"))
-                }
-                (hostState as? HostState.Connected)?.let { connected ->
-                    if (host.addresses.size > 1) {
-                        Text(
-                            "Using address ${connected.addressIndex + 1u}: " +
-                                host.addresses.getOrNull(connected.addressIndex.toInt())?.let { "${it.hostname}:${it.port}" }.orEmpty(),
-                            style = Or2Type.MonoSmall, color = Or2Colors.TextMuted,
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-enum class PickerTab(val label: String) { HERDR("herdr"), TMUX("tmux"), RECENT("Open") }
 
 /**
- * The session picker: a segmented control (herdr, tmux, Open: the open terminals) with a "Shell" pill (a prompt
- * glyph) that opens a plain shell, and one grouped list below. Hosts without tmux or herdr, failed listings and
- * errors are explained in muted text, never hidden. While [gate] is set (opened from Home before the host has
- * connected) the sheet shows it instead: the host's progress, or why it is not connected with [gateAction]'s
- * pill; the lists follow in the same sheet once the gate is null.
+ * The session picker over Home (a host card's header opens it): a segmented control (herdr, tmux) with a "Shell" pill
+ * (the `>_` glyph) that opens a plain shell, and one grouped list below. A session that already has an open terminal
+ * is marked `● Open` ([open]): choosing it switches to that terminal. Hosts without tmux or herdr, failed listings and
+ * errors are explained in muted text, never hidden; so is mosh's UDP being blocked ([udpBlocked]), under the tabs.
+ * While [gate] is set (the host is not connected yet) the sheet shows it instead: the host's progress, or why it is
+ * not connected with [gateAction]'s pill; the lists follow in the same sheet once the gate is null.
  */
 @Composable
 fun SessionPickerSheet(
     caps: HostCapabilities?,
     capsError: String?,
     tmux: TmuxList,
-    recent: List<HostTerminalItem>,
+    open: OpenSessions,
     openShell: () -> Unit,
     openTmux: (String) -> Unit,
     openHerdr: (session: String?) -> Unit,
-    resume: (Long) -> Unit,
     refresh: () -> Unit,
     dismiss: () -> Unit,
     initialTab: PickerTab? = null,
     gate: PickerGate? = null,
     gateAction: (GateAction) -> Unit = {},
-    /** The host's name, over Home, where nothing else on screen says which host the sheet is for. */
+    /** The host's name: nothing else on screen says which host the sheet is for. */
     title: String? = null,
+    udpBlocked: Boolean = false,
 ) {
     var chosen by remember { mutableStateOf(initialTab) }
     val tab = chosen ?: if (caps != null && caps.herdr == null && caps.tmux != null) PickerTab.TMUX else PickerTab.HERDR
@@ -275,27 +140,31 @@ fun SessionPickerSheet(
                 Spacer(Modifier.weight(1f))
                 PillButton("Shell", openShell, Modifier.testTag("host-shell"), icon = Or2Icons.Terminal, iconFirst = true)
             }
+            if (udpBlocked) {
+                // Why this host's terminals use SSH: said once, here, and nowhere on the terminals themselves.
+                Text(
+                    UDP_BLOCKED_LINE, style = Or2Type.Secondary, color = Or2Colors.TextMuted,
+                    modifier = Modifier.padding(start = Or2Dimens.Gutter + 4.dp, end = Or2Dimens.Gutter, top = 8.dp).testTag("picker-udp-blocked"),
+                )
+            }
             Column(
                 Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(Or2Dimens.Gutter)
                     .testTag("picker-list"),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 when (tab) {
-                    PickerTab.HERDR -> HerdrList(caps, capsError, openHerdr)
-                    PickerTab.TMUX -> TmuxPane(caps, capsError, tmux, openTmux)
-                    PickerTab.RECENT -> RecentList(recent, resume)
+                    PickerTab.HERDR -> HerdrList(caps, capsError, open, openHerdr)
+                    PickerTab.TMUX -> TmuxPane(caps, capsError, tmux, open, openTmux)
                 }
-                if (tab != PickerTab.RECENT) {
-                    Row(
-                        // The icon starts at the rows' text inset (their 12 dp padding inside the card, less the glyph's own margin).
-                        Modifier.clickable(role = Role.Button, onClick = refresh)
-                            .padding(start = Or2Dimens.Gutter - 2.dp, end = Or2Dimens.Gutter, top = 8.dp, bottom = 8.dp).testTag("host-refresh"),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(Or2Icons.Refresh, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.TextMuted)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Refresh", style = Or2Type.Body, color = Or2Colors.TextMuted)
-                    }
+                Row(
+                    // The icon starts at the rows' text inset (their 12 dp padding inside the card, less the glyph's own margin).
+                    Modifier.clickable(role = Role.Button, onClick = refresh)
+                        .padding(start = Or2Dimens.Gutter - 2.dp, end = Or2Dimens.Gutter, top = 8.dp, bottom = 8.dp).testTag("host-refresh"),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Or2Icons.Refresh, null, Modifier.size(Or2Dimens.Icon), tint = Or2Colors.TextMuted)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Refresh", style = Or2Type.Body, color = Or2Colors.TextMuted)
                 }
                 Spacer(Modifier.height(12.dp))
             }
@@ -365,16 +234,20 @@ private fun SheetRow(
 }
 
 @Composable
-private fun Marker(color: Color, text: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+private fun Marker(color: Color, text: String, modifier: Modifier = Modifier) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
         StatusDot(color)
         Spacer(Modifier.width(6.dp))
         Text(text, style = Or2Type.Secondary, color = Or2Colors.TextMuted)
     }
 }
 
+/** `● Open`: this session already has a terminal in or2, and choosing it switches there. */
 @Composable
-private fun HerdrList(caps: HostCapabilities?, capsError: String?, open: (String?) -> Unit) {
+private fun OpenMarker(tag: String) = Marker(Or2Colors.Accent, "Open", Modifier.testTag(tag))
+
+@Composable
+private fun HerdrList(caps: HostCapabilities?, capsError: String?, open: OpenSessions, choose: (String?) -> Unit) {
     when {
         capsError != null -> Muted("Could not query the host. Try Refresh.")
         caps == null -> Muted("Checking the host…")
@@ -383,13 +256,21 @@ private fun HerdrList(caps: HostCapabilities?, capsError: String?, open: (String
         else -> GroupCard(color = Or2Colors.SurfaceRaisedRow) {
             caps.herdrSessions.forEachIndexed { index, session ->
                 if (index > 0) GroupDivider()
+                val isOpen = open.has(session)
                 SheetRow(
                     "herdr:${session.name}", session.name + if (session.isDefault) " (default)" else "",
                     // The state is the marker at the right, never a second caption line as well.
                     null,
                     // The default session is opened without a name, never by its listed name.
-                    { open(if (session.isDefault) null else session.name) }, "herdr-open:${session.name}", enabled = session.running,
-                    marker = { if (session.running) Marker(Or2Colors.Done, "Running") else Marker(Or2Colors.Subtle, "Not running") },
+                    { choose(if (session.isDefault) null else session.name) }, "herdr-open:${session.name}",
+                    enabled = session.running || isOpen,
+                    marker = {
+                        when {
+                            isOpen -> OpenMarker("open-mark:herdr:${session.name}")
+                            session.running -> Marker(Or2Colors.Done, "Running")
+                            else -> Marker(Or2Colors.Subtle, "Not running")
+                        }
+                    },
                 )
             }
         }
@@ -397,7 +278,7 @@ private fun HerdrList(caps: HostCapabilities?, capsError: String?, open: (String
 }
 
 @Composable
-private fun TmuxPane(caps: HostCapabilities?, capsError: String?, tmux: TmuxList, open: (String) -> Unit) {
+private fun TmuxPane(caps: HostCapabilities?, capsError: String?, tmux: TmuxList, open: OpenSessions, choose: (String) -> Unit) {
     when {
         capsError != null -> Muted("Could not query the host. Try Refresh.")
         caps == null -> Muted("Checking the host…")
@@ -415,14 +296,18 @@ private fun TmuxPane(caps: HostCapabilities?, capsError: String?, tmux: TmuxList
                                 "tmux:${session.name}", session.name,
                                 "${session.windows} window${if (session.windows == 1u) "" else "s"}" +
                                     if (session.attachedClients > 0u) " · ${session.attachedClients} attached" else "",
-                                { open(session.name) }, "tmux-attach:${session.name}",
-                                marker = if (session.attachedClients > 0u) ({ Marker(Or2Colors.Attention, "Attached") }) else null,
+                                { choose(session.name) }, "tmux-attach:${session.name}",
+                                marker = when {
+                                    open.has(session) -> ({ OpenMarker("open-mark:tmux:${session.name}") })
+                                    session.attachedClients > 0u -> ({ Marker(Or2Colors.Attention, "Attached") })
+                                    else -> null
+                                },
                             )
                         }
                     }
                 }
             }
-            NewTmuxSession(open)
+            NewTmuxSession(choose)
         }
     }
 }
@@ -436,22 +321,5 @@ private fun NewTmuxSession(open: (String) -> Unit) {
         Or2Field(name, { name = it }, label = "New session", placeholder = "session-name", errorText = error, tag = "tmux-new-name")
         PillButton("Create and attach", { open(name); name = "" }, Modifier.testTag("tmux-new"), enabled = tmuxNameError(name) == null,
             icon = Or2Icons.Plus)
-    }
-}
-
-@Composable
-private fun RecentList(recent: List<HostTerminalItem>, resume: (Long) -> Unit) {
-    if (recent.isEmpty()) {
-        Muted("No open sessions yet. Sessions you open on this host appear here until you close them.", Modifier.testTag("recent-empty"))
-        return
-    }
-    GroupCard(color = Or2Colors.SurfaceRaisedRow) {
-        recent.forEachIndexed { index, terminal ->
-            if (index > 0) GroupDivider()
-            SheetRow(
-                "recent:${terminal.id}", terminal.title, if (terminal.closed) "closed" else null, { resume(terminal.id) }, "recent-open:${terminal.id}",
-                marker = if (terminal.closed) null else ({ Marker(Or2Colors.Accent, "Open") }),
-            )
-        }
     }
 }

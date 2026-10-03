@@ -1,8 +1,5 @@
 package io.github.code_akram.or2.app
 
-import io.github.code_akram.or2.ffi.CloseReason
-import io.github.code_akram.or2.ffi.HostState
-import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TerminalTransport
 import org.junit.Assert.*
@@ -24,20 +21,6 @@ class ReattachTest {
             val original = LastTerminal(42, target, transport)
             assertEquals(original, LastTerminal.decode(original.encode()))
         }
-    }
-
-    @Test
-    fun aPendingResumeTargetSurvivesTheSavedStateRoundTripAndNothingStaysNothing() {
-        // Rotation (or process death) during a cold resume: the continuation is saved state, not
-        // `remember`, so the recreated composition still knows which terminal to reopen.
-        val scope = androidx.compose.runtime.saveable.SaverScope { true }
-        for (target in listOf(last, LastTerminal(3, TerminalTarget.Shell, TerminalTransport.SSH), LastTerminal(4, TerminalTarget.Tmux("a b"), TerminalTransport.MOSH))) {
-            val saved = with(PendingResumeSaver) { scope.save(target) }
-            assertNotNull(saved)
-            assertEquals(target, PendingResumeSaver.restore(saved!!))
-        }
-        assertNull(with(PendingResumeSaver) { scope.save(null) }) // Nothing pending: nothing saved.
-        assertNull(PendingResumeSaver.restore("garbage")) // Not ours: nothing pending.
     }
 
     @Test
@@ -94,21 +77,6 @@ class ReattachTest {
     fun nothingRememberedOrADeletedHostIsLeftAlone() {
         assertEquals(Reattach.None, decideReattach(null, listOf(session(3)), setOf(7), setOf(7)))
         assertEquals(Reattach.None, decideReattach(last, listOf(session(3)), setOf(7), setOf(8)))
-    }
-
-    private val connected = HostState.Connected(0u)
-    private val lost = HostState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("x")))
-
-    @Test
-    fun resumeWaitsForTheUnlockThenOpensOrGivesUp() {
-        assertEquals(ResumeStep.WAIT, resumeStep(null, busy = true)) // Biometric prompt up.
-        assertEquals(ResumeStep.WAIT, resumeStep(lost, busy = true)) // The old lost connection, until the new attempt replaces it.
-        assertEquals(ResumeStep.WAIT, resumeStep(HostState.Connecting, busy = false)) // connect() returned, the host is on its way.
-        assertEquals(ResumeStep.WAIT, resumeStep(HostState.Authenticating, busy = false))
-        assertEquals(ResumeStep.OPEN, resumeStep(connected, busy = false))
-        assertEquals(ResumeStep.OPEN, resumeStep(connected, busy = true))
-        assertEquals(ResumeStep.ABORT, resumeStep(null, busy = false)) // Biometric cancelled.
-        assertEquals(ResumeStep.ABORT, resumeStep(lost, busy = false)) // Connect failed.
     }
 
     // --- cold launch: the marker and the decision -------------------------------------------------

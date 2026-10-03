@@ -93,6 +93,10 @@ class TerminalChromeState(padOpen: Boolean = false, composerOpen: Boolean = fals
     /** The composer's field (a state-based text field: it takes a keyboard's images, [Composer]). */
     val composer = TextFieldState(composerText)
 
+    /** The grid the terminal view shows while it is composed, else null: the Terminals sheet's `Copy screen` reads it. */
+    var screen: TerminalGrid? = null
+        internal set
+
     /** The composer's text; setting it puts the caret at its end. */
     var composerText: String
         get() = composer.text.toString()

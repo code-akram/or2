@@ -105,7 +105,7 @@ class TopEdgeDeviceTest {
     @Test
     fun noScreenDrawsOverTheStatusBarAndEveryTopBarIsOneHeight() {
         val screens = listOf(
-            "home", "home-empty", "home-notices", "host-cards", "inbox", "inbox-empty", "host", "host-form", "host-form-edit",
+            "home", "home-empty", "home-notices", "host-cards", "inbox", "inbox-empty", "host-form", "host-form-edit",
             "keys", "keys-empty", "settings", "about", "licenses", "license-text", "pair-scan", "pair-scan-denied", "pair-review",
             "pair-progress", "pair-install", "keepalive",
         )
@@ -166,7 +166,7 @@ class TopEdgeDeviceTest {
 
     @Test
     fun noSheetOrDialogCoversTheStatusBar() {
-        listOf("home-options", "key-sheet", "shortcuts", "add-host", "picker-herdr", "home-picker").forEach { name ->
+        listOf("home-options", "key-sheet", "shortcuts", "add-host", "picker-herdr", "home-picker", "terminals").forEach { name ->
             gallery(name) { screen ->
                 val handle = awaitStill("sheet-handle")
                 assertTrue("$name: the sheet's top (${handle.top} px) is over the status bar", handle.top >= screen.statusTop)

@@ -173,7 +173,9 @@ fun TerminalScreen(
             view.onBackgroundChanged = { background(Color(it.toInt() or (0xff shl 24))) }
             view.onScrolledAwayChanged = { scrolledAway = it }
             scrolledAway = view.scrolledAway
+            chrome.screen = view.grid
             onDispose {
+                if (chrome.screen === view.grid) chrome.screen = null
                 view.onFrameDrawn = {}
                 view.onInputChanged = {}
                 view.onSelectionChanged = {}

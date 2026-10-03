@@ -26,10 +26,11 @@ class AddHostEndTest {
         return Ending(stack.afterKeepAlive(), step.hostId.takeIf { it != 0L })
     }
 
-    private val hostPage = NavStack().push(Destination.HostPage(5))
+    /** Where a paired host lands: Home, with its session picker open while it connects. */
+    private val home = NavStack()
 
     @Test
-    fun easyPairEndsOnTheStepAndOnlyThenOpensAndConnectsTheHost() {
+    fun easyPairEndsOnTheStepAndOnlyThenConnectsTheHostWithItsPickerOverHome() {
         val battery = BatteryPrompt(MemoryPrefStore()) { false }
         val ending = paired(5, battery)
         assertEquals(Destination.KeepAlive(5), ending.stack.current)
@@ -37,7 +38,7 @@ class AddHostEndTest {
         assertNull(stepDone(ending.stack, battery)) // Waiting for the answer.
         battery.answer(allow = false)
         val done = stepDone(ending.stack, battery)!!
-        assertEquals(hostPage, done.stack)
+        assertEquals(home, done.stack)
         assertEquals(5L, done.connectNow)
     }
 
@@ -51,7 +52,7 @@ class AddHostEndTest {
         exempt = true
         battery.requestClosed()
         val done = stepDone(ending.stack, battery)!!
-        assertEquals(hostPage, done.stack)
+        assertEquals(home, done.stack)
         assertEquals(5L, done.connectNow)
         assertFalse(battery.card.value)
     }
@@ -63,7 +64,7 @@ class AddHostEndTest {
             BatteryPrompt(MemoryPrefStore().apply { putBoolean("battery_asked", true) }) { false },
         )) {
             val ending = paired(5, battery)
-            assertEquals(hostPage, ending.stack)
+            assertEquals(home, ending.stack)
             assertEquals(5L, ending.connectNow)
         }
     }
@@ -75,7 +76,7 @@ class AddHostEndTest {
         BatteryPrompt(store) { false }.answer(allow = false)
         assertEquals(Destination.KeepAlive(5), first.stack.current)
         val second = paired(6, BatteryPrompt(store) { false })
-        assertEquals(NavStack().push(Destination.HostPage(6)), second.stack)
+        assertEquals(home, second.stack)
         assertEquals(6L, second.connectNow)
         // Nor after the manual form.
         assertEquals(NavStack(), NavStack().push(Destination.HostForm(0)).afterHostFormSaved(BatteryPrompt(store) { false }.shouldOffer()))
@@ -100,8 +101,8 @@ class AddHostEndTest {
     @Test
     fun editingAHostNeverEndsOnTheStep() {
         val battery = BatteryPrompt(MemoryPrefStore()) { false }
-        val form = NavStack().push(Destination.HostPage(3)).push(Destination.HostForm(3))
-        assertEquals(NavStack().push(Destination.HostPage(3)), form.afterHostFormSaved(previousIsNull(form) && battery.shouldOffer()))
+        val form = NavStack().push(Destination.HostForm(3))
+        assertEquals(NavStack(), form.afterHostFormSaved(previousIsNull(form) && battery.shouldOffer()))
         assertTrue(battery.shouldOffer()) // Still to be asked, when a host is added.
     }
 
@@ -125,7 +126,7 @@ class AddHostEndTest {
         BatteryPrompt(store) { false }.answer(allow = true)
         val restored = NavStack.decode(NavStack.afterPaired(5, keepAlive = true).encode())
         val done = stepDone(restored, BatteryPrompt(store) { false })!!
-        assertEquals(hostPage, done.stack)
+        assertEquals(home, done.stack)
         assertEquals(5L, done.connectNow)
     }
 

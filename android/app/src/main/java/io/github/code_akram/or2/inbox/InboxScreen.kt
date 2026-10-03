@@ -3,7 +3,6 @@ package io.github.code_akram.or2.inbox
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,7 +23,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.data.Host
@@ -81,7 +79,6 @@ fun InboxScreen(
     busy: Boolean,
     connectAll: () -> Unit,
     connect: (Host) -> Unit,
-    openHost: (Host) -> Unit,
     openAgent: (InboxItem) -> Unit,
     modifier: Modifier = Modifier,
     openHome: () -> Unit = {},
@@ -158,7 +155,7 @@ fun InboxScreen(
                     GroupCard {
                         state.hosts.forEachIndexed { index, row ->
                             if (index > 0) GroupDivider(inset = 32.dp)
-                            HostStatusRow(row, busy, { connect(row.host) }, { openHost(row.host) })
+                            HostStatusRow(row, busy) { connect(row.host) }
                         }
                     }
                 }
@@ -171,12 +168,12 @@ fun InboxScreen(
     }
 }
 
+/** A host's connection status; not a link anywhere (Home's card is the host's place), only its Connect or Retry pill. */
 @Composable
-private fun HostStatusRow(row: InboxHostRow, busy: Boolean, connect: () -> Unit, open: () -> Unit) {
+private fun HostStatusRow(row: InboxHostRow, busy: Boolean, connect: () -> Unit) {
     val failed = row.link == LinkStatus.FAILED
-    Box(Modifier.fillMaxWidth().testTag("inbox-host:${row.host.id}")) {
     Row(
-        Modifier.fillMaxWidth().clickable(role = Role.Button, onClick = open).testTag("inbox-open:${row.host.id}")
+        Modifier.fillMaxWidth().testTag("inbox-host:${row.host.id}")
             .padding(start = Or2Dimens.Gutter, end = 8.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -190,10 +187,9 @@ private fun HostStatusRow(row: InboxHostRow, busy: Boolean, connect: () -> Unit,
             row.herdrNote?.let { Text(it, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, modifier = Modifier.testTag("inbox-herdr-note:${row.host.id}")) }
         }
         if (row.link.canConnect) {
-            PillButton(if (failed) "Retry" else "Unlock", connect, Modifier.testTag("inbox-connect:${row.host.id}"), compact = true,
+            PillButton(if (failed) "Retry" else "Connect", connect, Modifier.testTag("inbox-connect:${row.host.id}"), compact = true,
                 enabled = !busy && row.host.keyId != null)
         }
-    }
     }
 }
 

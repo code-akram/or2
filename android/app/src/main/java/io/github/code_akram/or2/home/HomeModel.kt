@@ -24,8 +24,14 @@ data class HostCardStatus(
     val spinning get() = progress != null && dot == HostDot.CONNECTING
 }
 
-/** A host as the Home screen lists it; [address] is its address line ([hostAddressLine]). */
-data class HostCard(val host: Host, val status: HostCardStatus, val link: LinkStatus, val address: String = hostAddressLine(host))
+/**
+ * A host as the Home screen lists it; [address] is its address line ([hostAddressLine]), [terminals] its open terminals
+ * (live thumbnails in the card, creation order).
+ */
+data class HostCard(
+    val host: Host, val status: HostCardStatus, val link: LinkStatus, val address: String = hostAddressLine(host),
+    val terminals: List<HomeSession> = emptyList(),
+)
 
 /**
  * The card status for a connection [state] (null: no connection). [unlocking] is true between
@@ -64,11 +70,11 @@ fun hostAddressLine(host: Host, state: HostState? = null): String {
 }
 
 /**
- * The detail line under a Home session card's title: [cwd], the working directory of the terminal's pane when it is
- * known, else for a herdr terminal [herdrDetail] of its session's live [view], else empty (the card keeps its
- * height). Never `user@host`: the card's pill already names the host.
+ * The detail line under a terminal thumbnail's title on Home: for a herdr terminal [herdrDetail] of its session's live
+ * [view] (it follows the focused pane, whatever pane the terminal was opened on), else empty (the thumbnail keeps its
+ * height). Never `user@host`: the thumbnail sits in its host's card.
  */
-fun sessionDetail(cwd: String?, view: HerdrView?): String = cwd ?: view?.let(::herdrDetail) ?: ""
+fun sessionDetail(view: HerdrView?): String = view?.let(::herdrDetail) ?: ""
 
 /**
  * What a herdr terminal shows, in one line: the focused pane's agent label when an agent runs there, else the
@@ -83,7 +89,7 @@ fun herdrDetail(view: HerdrView): String? {
 }
 
 /**
- * Whether a tap on [host]'s card, or on its session button, starts its connection (the usual unlock): it has a
+ * Whether a tap on [host]'s card header (it opens the session picker) starts its connection (the usual unlock): it has a
  * key, nothing is connecting or connected ([link]), and no other unlock runs ([busy]).
  */
 fun tapConnects(host: Host, link: LinkStatus, busy: Boolean): Boolean = !busy && host.keyId != null && link.canConnect

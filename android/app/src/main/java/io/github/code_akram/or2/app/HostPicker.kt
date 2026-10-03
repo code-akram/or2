@@ -20,18 +20,14 @@ import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.host.GateAction
-import io.github.code_akram.or2.host.HostTerminalItem
+import io.github.code_akram.or2.host.OpenSessions
 import io.github.code_akram.or2.host.SessionPickerSheet
 import io.github.code_akram.or2.host.TmuxList
 import io.github.code_akram.or2.host.pickerGate
 import io.github.code_akram.or2.session.hostErrorMessage
 import kotlinx.coroutines.CancellationException
 
-/**
- * What a host's session picker shows, read from its live connection, and where its choices go: one source for the
- * host screen's picker and the one Home's session button opens, so both list the same things and open terminals the
- * same way.
- */
+/** What a host's session picker shows, read from its live connection, and where its choices go. */
 internal class PickerSource(
     val state: HostState?,
     val caps: HostCapabilities?,
@@ -84,31 +80,29 @@ internal fun pickerSource(
 }
 
 /**
- * The session picker over Home, from a host card's session button: the same [SessionPickerSheet] and the same
- * terminal paths as the host screen's. It shows at once: while [host] is not connected it shows the host's
- * progress ([unlocking]: waiting on the biometric unlock), or why it is not connected with Retry ([connect]) or,
- * for a host without a key, "Select a key" ([edit]); the lists follow once the host is connected. Choosing a
- * target or a recent terminal closes it ([dismiss]) and opens the terminal.
+ * The session picker over Home, from a host card's header. It shows at once: while [host] is not connected it shows
+ * the host's progress ([unlocking]: waiting on the biometric unlock), or why it is not connected with Retry or Connect
+ * ([connect]) or, for a host without a key, "Select a key" ([edit]); the lists follow once the host is connected.
+ * Choosing a target closes it ([dismiss]) and opens the terminal, or switches to the one already open on that session
+ * (its row is marked `Open`).
  */
 @Composable
 internal fun HomePickerSheet(
     host: Host, terminals: List<ActiveTerminal>, connections: HostConnections, unlocking: Boolean, busy: Boolean,
-    openTerminal: (ActiveHost, TerminalTarget) -> Unit, resume: (Long) -> Unit, connect: () -> Unit, edit: () -> Unit,
-    dismiss: () -> Unit,
+    openTerminal: (ActiveHost, TerminalTarget) -> Unit, connect: () -> Unit, edit: () -> Unit, dismiss: () -> Unit,
 ) {
     // No key(active) here: a connection that starts while the sheet is up must not close and reopen the sheet.
     val active = connections.hosts.collectAsStateWithLifecycle().value[host.id]
     val source = pickerSource(active, connections, openTerminal)
-    val recent = hostTerminalItems(terminals.filter { it.host.id == host.id })
     SessionPickerSheet(
-        source.caps, source.capsError, source.tmux, recent,
+        source.caps, source.capsError, source.tmux, openSessionsOf(terminals.filter { it.host.id == host.id }),
         openShell = { dismiss(); source.open(TerminalTarget.Shell) },
         openTmux = { name -> dismiss(); source.open(TerminalTarget.Tmux(name)) },
         openHerdr = { session -> dismiss(); source.open(TerminalTarget.Herdr(session, null)) },
-        resume = { id -> dismiss(); resume(id) },
         refresh = source.refresh, dismiss = dismiss,
         gate = pickerGate(host, source.state, unlocking, busy),
         title = host.label,
+        udpBlocked = source.udpBlocked,
         gateAction = { action ->
             when (action) {
                 GateAction.SELECT_KEY -> { dismiss(); edit() }
@@ -118,11 +112,11 @@ internal fun HomePickerSheet(
     )
 }
 
-/** The open terminals of one host, for its picker's Open tab and the host screen's list. */
+/** The sessions of one host's [terminals] that are open now (a closed terminal marks nothing): the picker's `Open` rows. */
 @Composable
-internal fun hostTerminalItems(terminals: List<ActiveTerminal>): List<HostTerminalItem> = terminals.map { terminal ->
-    key(terminal.id) {
-        val state by terminal.state.collectAsStateWithLifecycle()
-        HostTerminalItem(terminal.id, terminal.title, state is SessionState.Closed)
+private fun openSessionsOf(terminals: List<ActiveTerminal>): OpenSessions {
+    val open = terminals.filter { terminal ->
+        key(terminal.id) { terminal.state.collectAsStateWithLifecycle().value !is SessionState.Closed }
     }
+    return OpenSessions.of(open.map { it.target })
 }

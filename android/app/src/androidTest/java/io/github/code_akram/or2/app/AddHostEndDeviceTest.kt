@@ -103,7 +103,10 @@ class AddHostEndDeviceTest {
         compose.onNodeWithTag("keepalive-allow").performClick()
         compose.onNodeWithTag("keepalive").assertDoesNotExist()
         compose.runOnIdle { assertEquals(listOf(listOf(41L)), connected) }
-        compose.onNodeWithTag("host-detail").assertIsDisplayed() // The paired host's page.
+        // Home, with the paired host's picker open over its card while it connects.
+        compose.onNodeWithTag("home-list").assertExists()
+        compose.onNodeWithTag("session-picker").assertIsDisplayed()
+        compose.onNodeWithTag("picker-gate").assertIsDisplayed()
     }
 
     @Test

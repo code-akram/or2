@@ -5,8 +5,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -39,9 +39,10 @@ import org.junit.Rule
 import org.junit.Test
 
 /**
- * Home's host card, in the whole app (`Or2App`) over fakes (no network, Keystore or database): the card body opens the
- * host screen only, and its session button opens the session picker over Home, connecting the host first when it is
- * not. Choosing a target opens the terminal the way the host screen's picker does; dismissing leaves Home as it was.
+ * Home is the one place for hosts and their terminals, in the whole app (`Or2App`) over fakes (no network, Keystore or
+ * database): a host card's header opens the session picker over Home, connecting the host first when it is not;
+ * choosing a target opens the terminal, a session that is already open (`● Open`) switches to its terminal; the
+ * host's terminals sit in its card, each with its `×`; Back from a terminal goes Home.
  */
 class HomeSessionPickerDeviceTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
@@ -109,52 +110,38 @@ class HomeSessionPickerDeviceTest {
     }
 
     @Test
-    fun theCardBodyOpensTheHostScreenWithNoPicker() {
+    fun theHeaderOpensThePickerOverHomeForAConnectedHostAndAChoiceOpensTheTerminal() {
         connectFirst()
         show()
         compose.onNodeWithTag("host:7").performClick()
-        compose.onNodeWithTag("host-detail").assertIsDisplayed()
-        compose.onNodeWithTag("host-open-picker").assertIsDisplayed()
-        compose.waitForIdle()
-        compose.onNodeWithTag("session-picker").assertDoesNotExist() // Not now, and not once the screen has settled.
-        compose.runOnIdle { assertEquals(emptyList<List<Long>>(), connected) } // Connected already: nothing to unlock.
-    }
-
-    @Test
-    fun theSessionButtonOpensThePickerOverHomeForAConnectedHostAndAChoiceOpensTheTerminal() {
-        connectFirst()
-        show()
-        compose.onNodeWithContentDescription("Open a session on Alpha").performClick()
         compose.onNodeWithTag("session-picker").assertIsDisplayed()
         compose.onNodeWithTag("picker-gate").assertDoesNotExist() // Connected: the lists at once.
         compose.onNodeWithTag("picker-title").assertTextEquals("Alpha") // Over Home, the sheet names its host.
-        compose.onNodeWithTag("host-detail").assertDoesNotExist() // Over Home, not the host screen.
         compose.onNodeWithTag("home-list").assertExists()
+        compose.onNodeWithTag("picker-tab:2").assertDoesNotExist() // herdr and tmux only: no Open tab.
         waitFor("herdr-open:default")
         compose.onNodeWithTag("host-shell").performClick()
-        // The same path as the host screen's picker: the terminal opens and is shown, and the sheet is gone.
         waitFor("terminal-card")
         compose.onNodeWithTag("session-picker").assertDoesNotExist()
         compose.runOnIdle {
             assertEquals(listOf(TerminalTarget.Shell), port.sessions.map { it.first })
-            assertEquals(emptyList<List<Long>>(), connected)
+            assertEquals(emptyList<List<Long>>(), connected) // Connected already: nothing to unlock.
         }
     }
 
     @Test
-    fun forAHostThatIsNotConnectedTheButtonConnectsShowsProgressThenTheLists() {
+    fun forAHostThatIsNotConnectedTheHeaderConnectsShowsProgressThenTheLists() {
         show()
-        compose.onNodeWithTag("host-session:7").performClick()
-        compose.runOnIdle { assertEquals(listOf(listOf(7L)), connected) } // The card's usual unlock and connect.
+        compose.onNodeWithTag("host:7").performClick()
+        compose.runOnIdle { assertEquals(listOf(listOf(7L)), connected) } // The usual unlock and connect.
         compose.onNodeWithTag("session-picker").assertIsDisplayed()
-        compose.onNodeWithTag("host-detail").assertDoesNotExist()
         compose.onNodeWithTag("picker-progress").assertIsDisplayed() // At once: "Unlocking key…" while the unlock runs.
         waitForText("picker-progress", "Checking server…")
         compose.onNodeWithTag("picker-tab:0").assertDoesNotExist()
         report(HostState.Authenticating)
         compose.onNodeWithTag("picker-progress").assertTextEquals("Authenticating…")
         report(HostState.Connected(0u))
-        // The same sheet, now with herdr, tmux and Open.
+        // The same sheet, now with herdr and tmux.
         waitFor("herdr-open:default")
         compose.onNodeWithTag("picker-gate").assertDoesNotExist()
         compose.onNodeWithTag("picker-tab:1").performClick()
@@ -167,7 +154,7 @@ class HomeSessionPickerDeviceTest {
     @Test
     fun aFailedConnectSaysWhyInTheSheetAndRetryConnectsAgain() {
         show()
-        compose.onNodeWithTag("host-session:7").performClick()
+        compose.onNodeWithTag("host:7").performClick()
         waitForText("picker-progress", "Checking server…")
         report(HostState.Closed(CloseReason.Failed(SessionFailure.AuthenticationRejected)))
         waitForText("picker-reason", "Authentication rejected. Check the username and public-key authorization.")
@@ -180,7 +167,7 @@ class HomeSessionPickerDeviceTest {
     fun dismissingThePickerLeavesHomeAsItWas() {
         connectFirst()
         show()
-        compose.onNodeWithTag("host-session:7").performClick()
+        compose.onNodeWithTag("host:7").performClick()
         compose.onNodeWithTag("session-picker").assertIsDisplayed()
         // The scrim's own dismiss action (a tap outside the sheet).
         compose.onNodeWithContentDescription("Close sheet").performSemanticsAction(SemanticsActions.OnClick)
@@ -191,5 +178,50 @@ class HomeSessionPickerDeviceTest {
             assertTrue(port.sessions.isEmpty()) // Nothing was opened.
             assertTrue(holder.terminals.value.isEmpty())
         }
+    }
+
+    @Test
+    fun anOpenSessionIsMarkedOpenAndChoosingItSwitchesToItsTerminal() {
+        connectFirst()
+        show()
+        compose.onNodeWithTag("host:7").performClick()
+        compose.onNodeWithTag("picker-tab:1").performClick()
+        waitFor("tmux-attach:main")
+        compose.onNodeWithTag("open-mark:tmux:main", useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithTag("tmux-attach:main").performClick()
+        waitFor("terminal-card")
+        // Back from a terminal is Home, as its minimise disc is.
+        compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        waitFor("home-list")
+        // The terminal sits in its host's card; the picker marks its session Open, and choosing it switches back to it.
+        compose.onNodeWithTag("host-terminals:7").assertIsDisplayed()
+        compose.onNodeWithTag("host:7").performClick()
+        compose.onNodeWithTag("picker-tab:1").performClick()
+        waitFor("open-mark:tmux:main")
+        compose.onNodeWithTag("tmux-attach:main").performClick()
+        waitFor("terminal-card")
+        compose.runOnIdle {
+            assertEquals(1, port.sessions.size) // The same terminal, not a second one.
+            assertEquals(1, holder.terminals.value.size)
+        }
+    }
+
+    @Test
+    fun aHostsTerminalsSitInItsCardAndTheirCrossClosesThem() {
+        connectFirst()
+        val (tmux, shell) = compose.runOnIdle {
+            holder.openTerminal(holder.host(7)!!, TerminalTarget.Tmux("main")) to holder.openTerminal(holder.host(7)!!, TerminalTarget.Shell)
+        }
+        show()
+        compose.onNodeWithTag("session-card:${tmux.id}").assertIsDisplayed()
+        compose.onNodeWithTag("session-card:${shell.id}").assertIsDisplayed()
+        // tmux: only or2's view ends (the session runs on), in one tap.
+        compose.onNodeWithTag("session-close:${tmux.id}").performClick()
+        compose.runOnIdle { assertEquals(listOf(shell), holder.terminals.value) }
+        // A shell ends with its programs: asked first.
+        compose.onNodeWithTag("session-close:${shell.id}").performClick()
+        compose.onNodeWithTag("close-shell-confirm").assertIsDisplayed().performClick()
+        compose.runOnIdle { assertTrue(holder.terminals.value.isEmpty()) }
+        compose.onNodeWithTag("host-terminals:7").assertDoesNotExist()
     }
 }

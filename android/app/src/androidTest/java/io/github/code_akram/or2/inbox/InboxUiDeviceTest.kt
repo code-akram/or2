@@ -2,9 +2,11 @@ package io.github.code_akram.or2.inbox
 
 import androidx.activity.compose.setContent
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -48,9 +50,9 @@ class InboxUiDeviceTest {
 
     private fun show(
         state: InboxState, busy: Boolean = false, connectAll: () -> Unit = {}, connect: (Host) -> Unit = {},
-        openHost: (Host) -> Unit = {}, openAgent: (InboxItem) -> Unit = {},
+        openAgent: (InboxItem) -> Unit = {},
     ) = compose.runOnUiThread {
-        compose.activity.setContent { Or2Theme { InboxScreen(state, busy, connectAll, connect, openHost, openAgent) } }
+        compose.activity.setContent { Or2Theme { InboxScreen(state, busy, connectAll, connect, openAgent) } }
     }
 
     /** The host rows sit below the agents; scroll the list to a node that may be off screen. */
@@ -97,23 +99,24 @@ class InboxUiDeviceTest {
         val other = uiHost(2, "Other")
         val keyless = uiHost(3, "Keyless", keyId = null)
         var connected: Host? = null
-        var opened: Host? = null
         show(
             InboxState(listOf(
                 row(box, LinkStatus.NOT_CONNECTED),
                 row(other, LinkStatus.FAILED, "Authentication rejected. Check the username and public-key authorization."),
                 row(keyless, LinkStatus.NOT_CONNECTED),
             ), emptyList()),
-            connect = { connected = it }, openHost = { opened = it },
+            connect = { connected = it },
         )
         scrollTo("inbox-connect:3")
         compose.onNodeWithText("Authentication rejected. Check the username and public-key authorization.").assertIsDisplayed()
         compose.onNodeWithTag("inbox-connect:1").assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(1L, connected!!.id) }
         compose.onNodeWithText("Retry").assertIsDisplayed() // A failed host offers a retry.
+        compose.onNodeWithTag("inbox-connect:1").assertTextEquals("Connect") // The words are Connect and Retry, never Unlock.
         compose.onNodeWithTag("inbox-connect:3").assertIsNotEnabled() // No key selected: nothing to unlock.
-        compose.onNodeWithTag("inbox-open:2").performClick()
-        compose.runOnIdle { assertEquals(2L, opened!!.id) }
+        // The row is no link: a tap on it does nothing (Home's card is the host's place); only its pill acts.
+        compose.onNodeWithTag("inbox-host:2").assertHasNoClickAction()
+        compose.onNodeWithTag("inbox-open:2").assertDoesNotExist()
         // Two or more connectable hosts offer one batch action (one biometric prompt per key).
         compose.onNodeWithTag("inbox-connect-all").assertIsDisplayed()
     }

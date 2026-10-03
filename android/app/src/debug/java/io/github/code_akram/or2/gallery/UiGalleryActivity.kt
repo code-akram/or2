@@ -77,9 +77,8 @@ import io.github.code_akram.or2.home.HomeSession
 import io.github.code_akram.or2.home.HostCard
 import io.github.code_akram.or2.home.hostCardStatus
 import io.github.code_akram.or2.host.GateAction
-import io.github.code_akram.or2.host.HostScreen
+import io.github.code_akram.or2.host.OpenSessions
 import io.github.code_akram.or2.host.PickerGate
-import io.github.code_akram.or2.host.HostTerminalItem
 import io.github.code_akram.or2.host.PickerTab
 import io.github.code_akram.or2.host.SessionPickerSheet
 import io.github.code_akram.or2.host.TmuxList
@@ -92,7 +91,11 @@ import io.github.code_akram.or2.inbox.LinkStatus
 import io.github.code_akram.or2.inbox.buildInbox
 import io.github.code_akram.or2.inbox.linkStatus
 import io.github.code_akram.or2.keys.KeysScreen
+import io.github.code_akram.or2.session.CloseShellDialog
+import io.github.code_akram.or2.session.HostTrustDialog
 import io.github.code_akram.or2.session.TerminalCard
+import io.github.code_akram.or2.session.TerminalItem
+import io.github.code_akram.or2.session.TerminalsSheet
 import io.github.code_akram.or2.terminal.TargetScroller
 import io.github.code_akram.or2.terminal.TerminalChromeState
 import io.github.code_akram.or2.terminal.TerminalGrid
@@ -182,22 +185,36 @@ class UiGalleryActivity : ComponentActivity() {
                 action = GateAction.RETRY, enabled = true))
             "inbox" -> Inbox(empty = false)
             "inbox-empty" -> Inbox(empty = true)
-            "picker-herdr" -> Picker(PickerTab.HERDR)
-            "picker-tmux" -> Picker(PickerTab.TMUX)
-            "picker-recent" -> Picker(PickerTab.RECENT)
-            "picker-many" -> Picker(PickerTab.HERDR, many = true)
+            "picker-herdr" -> HomePicker(HomeVariant.Sessions, gate = null, tab = PickerTab.HERDR)
+            "picker-tmux" -> HomePicker(HomeVariant.Sessions, gate = null, tab = PickerTab.TMUX)
+            "picker-udp" -> HomePicker(HomeVariant.Sessions, gate = null, tab = PickerTab.TMUX, udpBlocked = true)
+            "picker-many" -> HomePicker(HomeVariant.Sessions, gate = null, tab = PickerTab.HERDR, many = true)
             "home-picker-many" -> HomePicker(HomeVariant.Sessions, gate = null, many = true)
             "home-options" -> Box(Modifier.fillMaxSize()) {
                 Home(HomeVariant.Sessions)
                 HostOptionsSheet(card(host(1, "workstation"), HostState.Connected(0u)), busy = false, {}, {}, {}, {}, {})
             }
-            "host" -> HostScreen(host(1, "workstation"), HostState.Connected(0u), caps, null, tmux, false, {}, {}, {}, {}, {}, {}, {}, {},
-                terminals = listOf(HostTerminalItem(1, "tmux main", false), HostTerminalItem(2, "herdr personal", false)))
+            "home-close-shell" -> Box(Modifier.fillMaxSize()) {
+                Home(HomeVariant.Sessions)
+                CloseShellDialog(close = {}, dismiss = {})
+            }
+            "terminals" -> Box(Modifier.fillMaxSize()) {
+                Terminal(target = "tmux main", transport = Transport.MOSH)
+                TerminalsSheet(
+                    listOf(
+                        TerminalItem(1, 1, "workstation", "tmux main", closed = false),
+                        TerminalItem(2, 1, "workstation", "shell", closed = true),
+                        TerminalItem(3, 2, "build-box", "herdr personal", closed = false),
+                    ),
+                    currentId = 1, select = {}, close = {}, copyScreen = {}, shortcuts = {}, dismiss = {},
+                )
+            }
             "settings" -> SettingsScreen(agentAlerts = true, setAgentAlerts = {}, copyFromHost = true, setCopyFromHost = {}, back = {})
             "shortcuts" -> ShortcutsSheet(dismiss = {})
             "host-form" -> HostFormScreen(null, listOf(key1, key2), false, {}, {}, createKey = { _, _ -> key1 }, deviceLabel = "Pixel")
             "host-form-new-key" -> HostFormScreen(null, emptyList(), false, {}, {}, createKey = { _, _ -> key1 }, deviceLabel = "Pixel")
-            "host-form-edit" -> HostFormScreen(multiHost, listOf(key1, key2), false, {}, {}, createKey = { _, _ -> key1 }, deviceLabel = "Pixel")
+            "host-form-edit" -> HostFormScreen(multiHost, listOf(key1, key2), false, {}, {}, createKey = { _, _ -> key1 }, deviceLabel = "Pixel",
+                delete = {})
             "add-host" -> AddHostSheet(easyPair = {}, manual = {}, dismiss = {})
             "pair-scan" -> PairScanScreen(GALLERY_PAIR_CODE, null, CameraAccess(granted = false, denied = false) {}, {}, back = {})
             "pair-scan-denied" -> PairScanScreen(GALLERY_PAIR_CODE, "That is not an or2 pairing code. Run or2-pair on the host and scan the code it prints.",
@@ -304,15 +321,22 @@ class UiGalleryActivity : ComponentActivity() {
     @Composable
     private fun Home(variant: HomeVariant) {
         val grid = remember { demoGrid() }
-        val sessions = if (variant != HomeVariant.Sessions) emptyList() else listOf(
-            HomeSession(1, "workstation", "tmux main", "~/code/or2", Transport.SSH) { m -> TerminalGridPreview(grid, 0, m) },
-            HomeSession(2, "build-box", "herdr personal", "~/code/herdr", Transport.MOSH) { m -> TerminalGridPreview(grid, 0, m) },
+        val live = variant == HomeVariant.Sessions
+        // Each host's open terminals sit in its card: a herdr session showing its focused agent, a tmux session, and a
+        // shell that has closed (marked, its final frame dimmed).
+        val workstation = if (!live) emptyList() else listOf(
+            HomeSession(1, "herdr", "Claude Code", Transport.MOSH) { m -> TerminalGridPreview(grid, 0, m) },
+            HomeSession(2, "tmux main", "", Transport.MOSH) { m -> TerminalGridPreview(grid, 0, m) },
+            HomeSession(3, "shell", "", Transport.SSH, closed = true) { m -> TerminalGridPreview(grid, 0, m) },
+        )
+        val buildBox = if (!live) emptyList() else listOf(
+            HomeSession(4, "shell", "", Transport.SSH, closeAsks = true) { m -> TerminalGridPreview(grid, 0, m) },
         )
         val hosts = when (variant) {
             HomeVariant.Empty -> emptyList()
             HomeVariant.Sessions, HomeVariant.Notices, HomeVariant.Connecting, HomeVariant.Failed -> listOf(
-                card(host(1, "workstation"), HostState.Connected(0u), blocked = 1),
-                card(host(2, "build-box", address = "198.51.100.7"), HostState.Connected(0u)),
+                card(host(1, "workstation", address = "workstation.local"), HostState.Connected(0u), blocked = 1, terminals = workstation),
+                card(host(2, "build-box", address = "198.51.100.7"), HostState.Connected(0u), terminals = buildBox),
                 // The host the connecting and failed pickers are for: its card says the same as the sheet.
                 card(host(3, "nas"), when (variant) {
                     HomeVariant.Connecting -> HostState.Connecting
@@ -331,18 +355,19 @@ class UiGalleryActivity : ComponentActivity() {
             )
         }
         HomeScreen(
-            sessions, hosts, keyCount = if (variant == HomeVariant.Empty) 0 else 2,
-            blocked = if (variant == HomeVariant.Empty) 0 else 1, working = if (variant == HomeVariant.Empty) 0 else 2,
-            canConnectAll = false, busy = false,
-            openSession = {}, openHost = {}, openSessions = {}, addHost = {}, easyPair = {}, manualHost = {}, editHost = {}, connectHost = {}, disconnectHost = {}, deleteHost = {},
-            openInbox = {}, openKeys = {}, connectAll = {},
+            hosts, keyCount = if (variant == HomeVariant.Empty) 0 else 2,
+            blocked = if (variant == HomeVariant.Empty) 0 else 1,
+            // Two hosts can connect on the card-states page: `Connect all` shows at the header's end there.
+            canConnectAll = variant == HomeVariant.CardStates, busy = false,
+            openPicker = {}, openSession = {}, closeSession = {}, addHost = {}, easyPair = {}, manualHost = {}, editHost = {}, connectHost = {},
+            disconnectHost = {}, deleteHost = {}, openInbox = {}, openKeys = {}, connectAll = {},
             // Both one-line offers: the battery exemption was declined, and the connection notification is not allowed.
             batteryCard = variant == HomeVariant.Notices, notificationCard = variant == HomeVariant.Notices,
         )
     }
 
-    private fun card(host: Host, state: HostState?, blocked: Int = 0, unlocking: Boolean = false) =
-        HostCard(host, hostCardStatus(state, unlocking, blocked), linkStatus(state))
+    private fun card(host: Host, state: HostState?, blocked: Int = 0, unlocking: Boolean = false, terminals: List<HomeSession> = emptyList()) =
+        HostCard(host, hostCardStatus(state, unlocking, blocked), linkStatus(state), terminals = terminals)
 
     @Composable
     private fun Inbox(empty: Boolean) {
@@ -366,33 +391,22 @@ class UiGalleryActivity : ComponentActivity() {
                 InboxHostRow(host(3, "nas"), LinkStatus.FAILED, "Authentication rejected. Check the username and public-key authorization.", null, 0),
             ), groups)
         }
-        InboxScreen(state, busy = false, connectAll = {}, connect = {}, openHost = {}, openAgent = {})
+        InboxScreen(state, busy = false, connectAll = {}, connect = {}, openAgent = {})
     }
 
     /**
-     * The session picker over Home, from a card's `>_` button: the lists for a connected host ([gate] null), or the
-     * sheet before its host has connected.
+     * The session picker over Home, from a card's header: the lists for a connected host ([gate] null; the herdr session
+     * `personal` and the tmux session `main` are open in or2, so marked `Open`), or the sheet before its host has
+     * connected. [udpBlocked] adds the muted line on mosh's UDP under the tabs.
      */
     @Composable
-    private fun HomePicker(variant: HomeVariant, gate: PickerGate?, many: Boolean = false) {
+    private fun HomePicker(variant: HomeVariant, gate: PickerGate?, many: Boolean = false, tab: PickerTab? = null, udpBlocked: Boolean = false) {
         Box(Modifier.fillMaxSize()) {
             Home(variant)
             SessionPickerSheet(
-                if (many) manyCaps else caps, null, tmux,
-                recent = listOf(HostTerminalItem(1, "tmux main", false), HostTerminalItem(3, "shell", true)),
-                openShell = {}, openTmux = {}, openHerdr = {}, resume = {}, refresh = {}, dismiss = {}, gate = gate, title = "build-box",
-            )
-        }
-    }
-
-    @Composable
-    private fun Picker(tab: PickerTab, many: Boolean = false) {
-        Box(Modifier.fillMaxSize()) {
-            HostScreen(host(1, "workstation"), HostState.Connected(0u), caps, null, tmux, false, {}, {}, {}, {}, {}, {}, {}, {})
-            SessionPickerSheet(
-                if (many) manyCaps else caps, null, tmux,
-                recent = listOf(HostTerminalItem(1, "tmux main", false), HostTerminalItem(2, "herdr personal", false), HostTerminalItem(3, "shell", true)),
-                openShell = {}, openTmux = {}, openHerdr = {}, resume = {}, refresh = {}, dismiss = {}, initialTab = tab,
+                if (many) manyCaps else caps, null, tmux, OpenSessions(herdr = setOf("personal"), tmux = setOf("main")),
+                openShell = {}, openTmux = {}, openHerdr = {}, refresh = {}, dismiss = {}, initialTab = tab, gate = gate, title = "workstation",
+                udpBlocked = udpBlocked,
             )
         }
     }
@@ -404,8 +418,11 @@ class UiGalleryActivity : ComponentActivity() {
             PublicKeyInfo("ssh-rsa", "r", "SHA256:Ab3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5bC7dE9f", ""))
         // Many previously trusted keys: the tallest dialog, which must still keep clear of the status bar.
         val old = if (many) (1..6).flatMap { two } else two
-        HostScreen(host(1, "workstation"), HostState.AwaitingHostKeyDecision(presented, if (changed) old else emptyList()), null, null,
-            TmuxList.Loading, false, {}, {}, {}, {}, {}, {}, {}, {})
+        // The dialog shows over whatever is on screen: Home here.
+        Box(Modifier.fillMaxSize()) {
+            Home(HomeVariant.Connecting)
+            HostTrustDialog(HostState.AwaitingHostKeyDecision(presented, if (changed) old else emptyList()), false, {}, {}, hostLabel = "nas")
+        }
     }
 
     /**
@@ -521,9 +538,9 @@ class UiGalleryActivity : ComponentActivity() {
         const val SCROLLED = "-scrolled"
 
         val screens = listOf(
-            "home", "home-scrolled", "home-empty", "home-notices", "host-cards", "host-cards-scrolled", "home-options",
+            "home", "home-scrolled", "home-empty", "home-notices", "host-cards", "host-cards-scrolled", "home-options", "home-close-shell",
             "home-picker", "home-picker-many", "home-picker-connecting", "home-picker-failed",
-            "inbox", "inbox-scrolled", "inbox-empty", "host", "picker-herdr", "picker-many", "picker-tmux", "picker-recent",
+            "inbox", "inbox-scrolled", "inbox-empty", "picker-herdr", "picker-many", "picker-tmux", "picker-udp",
             "host-form", "host-form-scrolled", "host-form-new-key", "host-form-edit", "keys", "keys-scrolled", "keys-empty", "key-sheet",
             "settings", "about", "about-scrolled", "licenses", "licenses-scrolled", "license-text", "license-text-scrolled",
             "hostkey-first", "hostkey-changed", "hostkey-changed-many", "shortcuts",
@@ -531,7 +548,7 @@ class UiGalleryActivity : ComponentActivity() {
             "pair-progress", "pair-install", "keepalive", "keepalive-waiting",
             "terminal", "terminal-tmux", "terminal-long", "terminal-stale", "terminal-connecting", "terminal-closed",
             "terminal-arrowpad", "terminal-arrowpad-text", "terminal-herdr-wheel", "terminal-composer",
-            "terminal-attach", "terminal-uploading", "terminal-upload-failed", "share-picker",
+            "terminal-attach", "terminal-uploading", "terminal-upload-failed", "share-picker", "terminals",
         )
     }
 }
