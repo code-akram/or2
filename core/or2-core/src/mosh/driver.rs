@@ -9,14 +9,13 @@
 //! dead network is mosh's point. It ends when the server announces the end of the session
 //! (`RemoteExited`), the user disconnects, or something internal breaks.
 //!
-//! Two entry points share one loop: [`start`] / [`start_with`] own a fresh session (a thread
-//! of their own), and [`run_session`] runs on a [`SessionDriver`] the caller already holds (the
-//! host driver, which bootstrapped the server over its SSH connection and must clean up after a
-//! session that never connected).
+//! [`run_session`] runs a session on a [`SessionDriver`] the caller already holds: the host
+//! driver, which bootstrapped the server over its SSH connection and must clean up after a
+//! session that never connected.
 
 use std::future::{Future, poll_fn};
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,12 +24,9 @@ use tokio::sync::Notify;
 use tokio::time::{Instant, sleep, sleep_until, timeout_at};
 
 use crate::input::text_bytes;
-use crate::session::{
-    CloseReason, Command, SessionDriver, SessionFailure, SessionHandle, SessionObserver,
-    SessionState, channel,
-};
+use crate::session::{CloseReason, Command, SessionDriver, SessionFailure, SessionState};
 use crate::submit::SubmitSequencer;
-use crate::transport::{DatagramTransport, DirectUdp, Endpoint, EndpointError};
+use crate::transport::DatagramTransport;
 
 use super::bootstrap::MoshParams;
 use super::ghostty::GhosttyScreen;
@@ -42,8 +38,7 @@ use super::ssp::session::{Fault, LinkHealth, Session};
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a disconnect waits for the server to acknowledge the shutdown before giving up.
 pub(crate) const GOODBYE_TIMEOUT: Duration = Duration::from_secs(1);
-/// How often [`HealthObserver::link_health`] is called, and the least time between two reports
-/// to the session's observer.
+/// The least time between two link-health reports to the session's observer.
 const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 /// Silence from the server past which the link counts as stale (the grey-out threshold the UI
 /// uses), in milliseconds.
@@ -61,123 +56,36 @@ const MAX_DATAGRAMS_PER_TURN: usize = 64;
 /// The pause after the network refused a receive (ICMP unreachable), which ends that turn.
 const REFUSED_PAUSE: Duration = Duration::from_millis(20);
 
-/// Receives the link's health about once a second, from the driver thread. This is the hook M3
-/// uses to show "no contact for N seconds"; it must return quickly.
-pub trait HealthObserver: Send + Sync {
-    fn link_health(&self, health: LinkHealth);
-}
-
-/// Controls the network side of a running session. Cheap to clone and callable from any thread.
-#[derive(Clone)]
-pub struct LinkControl {
-    roam: Arc<Notify>,
-}
-
-impl LinkControl {
-    /// The network changed: open a new socket now and send from it, instead of waiting ten
-    /// seconds without answers to notice. The server follows the first datagram that
-    /// authenticates from the new source.
-    pub fn roam(&self) {
-        self.roam.notify_one();
-    }
-}
-
-/// Starts a mosh session over OS UDP sockets. Validates the address synchronously and returns
-/// at once; everything else arrives through `observer`. `peer` is the IP address the SSH
-/// connection that ran the bootstrap actually reached (`HostHandle::peer_addr`, not a name
-/// looked up again); the server listens on it at UDP port `params.port`. Every socket of the
-/// session, roaming included, must reach exactly that address.
-pub fn start(
-    params: MoshParams,
-    peer: IpAddr,
-    observer: Arc<dyn SessionObserver>,
-) -> Result<SessionHandle, EndpointError> {
-    Ok(start_with(DirectUdp, params, peer, observer, None)?.0)
-}
-
-/// [`start`] over any [`DatagramTransport`], with a health hook, returning the network control
-/// next to the session handle.
-pub fn start_with<T: DatagramTransport>(
-    transport: T,
-    params: MoshParams,
-    peer: IpAddr,
-    observer: Arc<dyn SessionObserver>,
-    health: Option<Arc<dyn HealthObserver>>,
-) -> Result<(SessionHandle, LinkControl), EndpointError> {
-    spawn(transport, params, peer, observer, health, CONNECT_TIMEOUT)
-}
-
-fn spawn<T: DatagramTransport>(
-    transport: T,
-    params: MoshParams,
-    peer: IpAddr,
-    observer: Arc<dyn SessionObserver>,
-    health: Option<Arc<dyn HealthObserver>>,
-    connect_timeout: Duration,
-) -> Result<(SessionHandle, LinkControl), EndpointError> {
-    // Only to validate the port; the link builds its own endpoint from the pinned address.
-    Endpoint::new(&peer.to_string(), params.port)?;
-    let (handle, mut driver) = channel(observer);
-    let control = LinkControl {
-        roam: Arc::new(Notify::new()),
-    };
-    // Initialize before spawning so runtime initialization is never done in a callback.
-    let runtime = crate::ssh::runtime();
-    let plan = Plan {
-        transport: Arc::new(transport),
-        peer: SocketAddr::new(peer, params.port),
-        params,
-        health,
-        roam: control.roam.clone(),
-        shutdown: Arc::new(Notify::new()),
-        connect_timeout,
-        deadline: None,
-    };
-    std::thread::Builder::new()
-        .name("or2-mosh".into())
-        .spawn(move || {
-            runtime.block_on(async move {
-                let ended = run_session(plan, &mut driver).await;
-                driver.close(ended.reason);
-            })
-        })
-        .expect("create mosh session thread");
-    Ok((handle, control))
-}
-
 /// Everything one mosh session needs besides its [`SessionDriver`].
-pub(crate) struct Plan<T: DatagramTransport> {
-    pub(crate) transport: Arc<T>,
+pub struct Plan<T: DatagramTransport> {
+    pub transport: Arc<T>,
     /// The pinned server address: the IP the SSH connection reached and the bootstrap's port.
-    pub(crate) peer: SocketAddr,
-    pub(crate) params: MoshParams,
-    pub(crate) health: Option<Arc<dyn HealthObserver>>,
-    /// [`LinkControl::roam`]'s signal.
-    pub(crate) roam: Arc<Notify>,
+    pub peer: SocketAddr,
+    pub params: MoshParams,
     /// Ends the session like [`Command::Disconnect`] (with the shutdown handshake); a permit
     /// given before the session reads it is kept. The host driver gives it when the user
     /// disconnects the host.
-    pub(crate) shutdown: Arc<Notify>,
+    pub shutdown: Arc<Notify>,
     /// How long to wait for the server's first datagram, socket open included, counted from
     /// the start of the session. Used when `deadline` is `None`.
-    pub(crate) connect_timeout: Duration,
+    pub connect_timeout: Duration,
     /// An absolute moment by which the session must be `Connected`, set by a caller that has
     /// already spent part of its allowance (the host driver's bootstrap): it replaces
     /// `connect_timeout` for the socket open and the first datagram. A moment already past
     /// fails the session `TimedOut` at once.
-    pub(crate) deadline: Option<Instant>,
+    pub deadline: Option<Instant>,
 }
 
 /// How a session ended: the reason the user sees, and whether the server is KNOWN to have
 /// ended too.
 #[derive(Debug)]
-pub(crate) struct Ended {
-    pub(crate) reason: CloseReason,
+pub struct Ended {
+    pub reason: CloseReason,
     /// The peer itself confirmed the end (it acknowledged our goodbye, or announced its own).
     /// A goodbye that timed out or failed leaves this false although the reason is still
     /// `Disconnected`: the server may be running, and a caller that can reach it another way
     /// (the SSH connection that started it) must stop it.
-    pub(crate) server_gone: bool,
+    pub server_gone: bool,
 }
 
 impl Ended {
@@ -192,10 +100,7 @@ impl Ended {
 /// Runs the session on `driver` until it ends and says why. Does NOT close the driver: the
 /// caller does, after whatever cleanup it owes (`driver.state()` is still `Connected` if the
 /// session ever was, so a caller can tell a start that never connected).
-pub(crate) async fn run_session<T: DatagramTransport>(
-    plan: Plan<T>,
-    driver: &mut SessionDriver,
-) -> Ended {
+pub async fn run_session<T: DatagramTransport>(plan: Plan<T>, driver: &mut SessionDriver) -> Ended {
     match run(plan, driver).await {
         Ok(ended) => ended,
         Err(failure) => Ended::unconfirmed(CloseReason::Failed(failure)),
@@ -214,8 +119,6 @@ async fn run<T: DatagramTransport>(
         transport,
         peer,
         params,
-        health,
-        roam,
         shutdown,
         connect_timeout,
         deadline: absolute,
@@ -260,8 +163,6 @@ async fn run<T: DatagramTransport>(
     let mut connected = false;
     let mut published = u64::MAX;
     let mut next_rebind = Instant::now();
-    // The `HealthObserver` hook of `start_with` gets every sample, before `Connected` too.
-    let mut next_observer = Instant::now() + HEALTH_INTERVAL;
     // The session observer's reports start when the session connects (see `HealthThrottle`).
     let mut next_report: Option<Instant> = None;
     let mut throttle = HealthThrottle::default();
@@ -277,12 +178,6 @@ async fn run<T: DatagramTransport>(
             opening = Some(Box::pin(link.next_socket()));
             opening_deadline = Instant::now() + REBIND_TIMEOUT;
         }
-        if let Some(observer) = &health
-            && Instant::now() >= next_observer
-        {
-            observer.link_health(session.link_health());
-            next_observer = Instant::now() + HEALTH_INTERVAL;
-        }
         if let Some(due) = next_report
             && Instant::now() >= due
         {
@@ -297,9 +192,6 @@ async fn run<T: DatagramTransport>(
         // Wake for the next health duty only: an idle, healthy session sleeps until its own
         // protocol timers or the moment its link would turn stale.
         let mut wait = Duration::from_millis(session.wait_time_ms().max(1));
-        if health.is_some() {
-            wait = wait.min(next_observer.saturating_duration_since(Instant::now()));
-        }
         if let Some(due) = next_report {
             wait = wait.min(due.saturating_duration_since(Instant::now()));
         }
@@ -391,7 +283,6 @@ async fn run<T: DatagramTransport>(
                 opening = None;
                 next_rebind = Instant::now() + REBIND_RETRY;
             }
-            () = roam.notified() => session.request_rebind(),
             () = shutdown.notified() => {
                 let server_gone = goodbye(&mut link, &mut session, &mut buffer).await;
                 return Ok(Ended { reason: CloseReason::Disconnected, server_gone });

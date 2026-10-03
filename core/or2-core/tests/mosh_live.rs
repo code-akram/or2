@@ -1,14 +1,15 @@
 //! Live interop with a real `mosh-server` on this machine (feature `test-support`).
 //!
 //! The server is started through `mosh::bootstrap` over `LocalHost` (so the exact command line
-//! M2 uses is exercised), the client connects over 127.0.0.1 with `mosh::start_with`, and the
-//! test runs a command, resizes, roams and disconnects. The server this test started is killed
-//! by exact process id however the test ends, and nothing else is touched. Skipped, with a
-//! message, when `mosh-server` is not installed; `OR2_REQUIRE_MOSH` turns the skip into a
-//! failure so CI cannot pass vacuously.
+//! M2 uses is exercised), the client connects over 127.0.0.1 with `mosh::run_session` (the driver
+//! a host runs its mosh terminals on), and the test runs a command, resizes, roams and
+//! disconnects. The server this test started is killed by exact process id however the test ends,
+//! and nothing else is touched. Skipped, with a message, when `mosh-server` is not installed;
+//! `OR2_REQUIRE_MOSH` turns the skip into a failure so CI cannot pass vacuously.
 
 use std::fs;
 use std::io;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,10 +21,11 @@ use or2_core::frame::{CellWidth, Frame};
 use or2_core::host::HostCapabilities;
 use or2_core::mosh::{self, MoshParams};
 use or2_core::remote::{ExecOutput, LocalHost, RemoteError, RemoteHost};
-use or2_core::session::{CloseReason, SessionHandle, SessionObserver, SessionState};
+use or2_core::session::{self, CloseReason, SessionHandle, SessionObserver, SessionState};
 use or2_core::term::TerminalSize;
 use or2_core::transport::{DatagramSocket, DatagramTransport, DirectUdp, Endpoint};
 use tokio::net::UdpSocket;
+use tokio::sync::Notify;
 
 fn mosh_server() -> Option<String> {
     let path = std::env::var_os("PATH")?;
@@ -344,14 +346,26 @@ async fn a_real_mosh_server_session() {
 
     let transport = Recording::default();
     let (sender, states) = mpsc::channel();
-    let (handle, control) = mosh::start_with(
-        transport.clone(),
+    // The session driver the host runs a mosh terminal on, on a thread of its own as there.
+    let (handle, mut driver) = session::channel(Arc::new(Observer(Mutex::new(sender))));
+    let plan = mosh::Plan {
+        transport: Arc::new(transport.clone()),
+        peer: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), params.port),
         params,
-        std::net::Ipv4Addr::LOCALHOST.into(),
-        Arc::new(Observer(Mutex::new(sender))),
-        None,
-    )
-    .unwrap();
+        shutdown: Arc::new(Notify::new()),
+        connect_timeout: mosh::CONNECT_TIMEOUT,
+        deadline: None,
+    };
+    let session = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let ended = mosh::run_session(plan, &mut driver).await;
+                driver.close(ended.reason);
+            });
+    });
     let mut grid = Grid::default();
 
     // Connected once the real server authenticates; the first frame shows the shell prompt.
@@ -376,7 +390,7 @@ async fn a_real_mosh_server_session() {
     // Roaming: a new socket is opened, and the server's replies move to it.
     let sockets_before = transport.sockets.lock().unwrap().len();
     assert_eq!(sockets_before, 1);
-    control.roam();
+    handle.roam();
     let deadline = Instant::now() + Duration::from_secs(10);
     while transport.sockets.lock().unwrap().len() < 2 {
         assert!(Instant::now() < deadline, "the client never rebound");
@@ -422,6 +436,7 @@ async fn a_real_mosh_server_session() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    session.join().unwrap();
 }
 
 /// A server nobody connected to (the UDP port was firewalled, say) is stopped by

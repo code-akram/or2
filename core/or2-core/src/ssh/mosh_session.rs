@@ -227,8 +227,6 @@ pub(super) async fn drive<D: DatagramTransport>(open: Open<D>, mut driver: Sessi
             transport: datagrams,
             peer: address,
             params,
-            health: None,
-            roam: Arc::new(Notify::new()),
             shutdown,
             connect_timeout,
             deadline,
