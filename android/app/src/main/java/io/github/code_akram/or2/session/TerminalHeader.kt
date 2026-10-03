@@ -73,7 +73,8 @@ fun terminalNotice(state: SessionState): TerminalNotice? =
 
 /**
  * The terminal card's header, 36 dp, one composed piece: a thin drag handle centred at the top, the
- * two round discs as a pair at the left (minimise in `attention`, the Terminals sheet in `done`), the
+ * round discs at the left (minimise in `attention`, the Terminals sheet in `done`, and on a herdr terminal
+ * ([openSpaces]) the Spaces sheet in `accent`, the same size and spacing), the
  * title centred on the card's full width (the host in `text`, medium, then the target muted in mono),
  * and at the right the transport pill, which also says how long a quiet link has been silent ([stale]:
  * "Mosh · 12 s" in `attention`). The caller
@@ -82,7 +83,7 @@ fun terminalNotice(state: SessionState): TerminalNotice? =
 @Composable
 fun TerminalHeader(
     host: String, target: String, transport: Transport, stale: String?, minimise: () -> Unit, openSwitcher: () -> Unit,
-    modifier: Modifier = Modifier,
+    modifier: Modifier = Modifier, openSpaces: (() -> Unit)? = null,
 ) {
     Box(modifier.fillMaxWidth().height(Or2Dimens.HeaderRow)) {
         CentredRow(
@@ -92,6 +93,8 @@ fun TerminalHeader(
                 Row(Modifier.padding(start = Or2Dimens.Gutter - Or2Dimens.HeaderDiscGap / 2), verticalAlignment = Alignment.CenterVertically) {
                     HeaderDisc(Or2Icons.Minimize, "Minimise to home", Or2Colors.Attention, minimise, Modifier.testTag("terminal-back"))
                     HeaderDisc(Or2Icons.Sidebar, "Terminals", Or2Colors.Done, openSwitcher, Modifier.testTag("terminal-panes"))
+                    // herdr terminals only: shell and tmux headers keep their two discs.
+                    openSpaces?.let { HeaderDisc(Or2Icons.Spaces, "Spaces", Or2Colors.Accent, it, Modifier.testTag("terminal-spaces")) }
                 }
             },
             title = {

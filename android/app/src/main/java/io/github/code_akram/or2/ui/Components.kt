@@ -543,6 +543,7 @@ val Or2SheetContentInsets: WindowInsets
 /**
  * A modal bottom sheet in `surfaceRaised`: 24 dp top radius, drag handle, optional title on the
  * left and a "Done" action on the right. Always opens fully.
+ * A [subtitle] sits muted under the title (the Spaces sheet's herdr session).
  *
  * The sheet rule (docs/ui.md): Material's sheet window is edge to edge and lets a tall sheet's
  * surface rise to the very top of the screen, under the status bar, padding only its content. Here
@@ -557,7 +558,7 @@ val Or2SheetContentInsets: WindowInsets
 @Composable
 fun Or2Sheet(
     onDismiss: () -> Unit, modifier: Modifier = Modifier, title: String? = null, done: String? = "Done",
-    scrollable: Boolean = true, content: @Composable ColumnScope.() -> Unit,
+    scrollable: Boolean = true, subtitle: String? = null, content: @Composable ColumnScope.() -> Unit,
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -577,10 +578,18 @@ fun Or2Sheet(
                         Modifier.fillMaxWidth().padding(start = Or2Dimens.Gutter + 4.dp, end = Or2Dimens.Gutter - 4.dp, bottom = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(
-                            title.orEmpty(), style = Or2Type.ScreenTitle, color = Or2Colors.Text, maxLines = 1,
-                            overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).semantics { heading() },
-                        )
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                title.orEmpty(), style = Or2Type.ScreenTitle, color = Or2Colors.Text, maxLines = 1,
+                                overflow = TextOverflow.Ellipsis, modifier = Modifier.semantics { heading() },
+                            )
+                            subtitle?.let {
+                                Text(
+                                    it, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis, modifier = Modifier.testTag("sheet-subtitle"),
+                                )
+                            }
+                        }
                         if (done != null) TextAction(done, onDismiss, color = Or2Colors.Text, modifier = Modifier.testTag("sheet-done"))
                     }
                 }

@@ -97,6 +97,7 @@ import io.github.code_akram.or2.session.HostTrustDialog
 import io.github.code_akram.or2.session.TerminalCard
 import io.github.code_akram.or2.session.TerminalItem
 import io.github.code_akram.or2.session.TerminalsSheet
+import io.github.code_akram.or2.session.SpacesSheet
 import io.github.code_akram.or2.terminal.TargetScroller
 import io.github.code_akram.or2.terminal.TerminalChromeState
 import io.github.code_akram.or2.terminal.TerminalGrid
@@ -146,7 +147,7 @@ class UiGalleryActivity : ComponentActivity() {
             var screen by remember { mutableStateOf(initial) }
             BackHandler(enabled = screen != null && initial == null) { screen = null }
             val current = screen
-            AppScaffold(fullScreen = current != null && current.startsWith("terminal")) {
+            AppScaffold(fullScreen = current != null && (current.startsWith("terminal") || current == "spaces")) {
                 if (current == null) Menu { screen = it } else Screen(current)
             }
         }
@@ -202,6 +203,10 @@ class UiGalleryActivity : ComponentActivity() {
             "home-close-shell" -> Box(Modifier.fillMaxSize()) {
                 Home(HomeVariant.Sessions)
                 CloseShellDialog(close = {}, dismiss = {})
+            }
+            "spaces" -> Box(Modifier.fillMaxSize()) {
+                Terminal(host = "build-box", target = "herdr work", transport = Transport.MOSH)
+                SpacesSheet("work", spacesView, focus = {}, dismiss = {})
             }
             "terminals" -> Box(Modifier.fillMaxSize()) {
                 Terminal(target = "tmux main", transport = Transport.MOSH)
@@ -299,14 +304,32 @@ class UiGalleryActivity : ComponentActivity() {
         listOf(HostEndpoint("workstation.invalid", 22), HostEndpoint("198.51.100.7", 2222)),
     )
 
-    private fun agent(pane: String, status: AgentStatus, name: String, cwd: String, tab: String = "w1:t1", workspace: String = "w1") =
-        HerdrAgent(pane, tab, workspace, name, "claude", name, status, cwd, 1uL, "term_$pane")
+    private fun agent(
+        pane: String, status: AgentStatus, name: String, cwd: String, tab: String = "w1:t1", workspace: String = "w1", title: String? = null,
+    ) = HerdrAgent(pane, tab, workspace, name, "claude", name, status, cwd, 1uL, "term_$pane", null, title)
 
     private fun view(vararg agents: HerdrAgent) = HerdrView(
         1uL, null,
         listOf(HerdrWorkspace("w1", 1u, "or2"), HerdrWorkspace("w2", 2u, "docs")),
         listOf(HerdrTab("w1:t1", "w1", 1u, "ui-polish"), HerdrTab("w2:t1", "w2", 1u, "readme")),
         emptyList(), agents.toList(),
+    )
+
+    /**
+     * A herdr session as the Spaces sheet shows it: `~` with one plain tab, `or2` with two tabs (the focused `ui` holding
+     * a blocked and the focused, working agent; `2` one done agent, no title), `docs` with no tabs (left out).
+     */
+    private val spacesView = HerdrView(
+        1uL, "w2:p2",
+        listOf(HerdrWorkspace("w1", 1u, "~"), HerdrWorkspace("w2", 2u, "or2"), HerdrWorkspace("w3", 3u, "docs")),
+        listOf(HerdrTab("w1:t1", "w1", 1u, "1"), HerdrTab("w2:t1", "w2", 1u, "ui"), HerdrTab("w2:t2", "w2", 2u, "2")),
+        emptyList(),
+        listOf(
+            agent("w2:p1", AgentStatus.BLOCKED, "Claude Code", "~/code/or2", tab = "w2:t1", workspace = "w2", title = "Repository context gathering"),
+            agent("w2:p2", AgentStatus.WORKING, "reviewer", "~/code/or2", tab = "w2:t1", workspace = "w2", title = "Review v013 brief | or2"),
+            agent("w2:p3", AgentStatus.DONE, "Codex", "~/code/or2", tab = "w2:t2", workspace = "w2"),
+        ),
+        "w2:t1",
     )
 
     private val caps = HostCapabilities("/usr/bin/tmux", "/home/dev/.local/bin/herdr", null, listOf(
@@ -317,8 +340,8 @@ class UiGalleryActivity : ComponentActivity() {
      */
     private val pickerViews = mapOf<String?, HerdrView>(
         null to view(
-            agent("w1:p1", AgentStatus.BLOCKED, "Claude Code", "~/code/or2"),
-            agent("w1:p2", AgentStatus.WORKING, "Codex", "~/code/or2/android/app/src/main/java/io/github/code_akram/or2"),
+            agent("w1:p1", AgentStatus.BLOCKED, "Claude Code", "~/code/or2", title = "Repository context gathering"),
+            agent("w1:p2", AgentStatus.WORKING, "Codex", "~/code/or2/android/app/src/main/java/io/github/code_akram/or2", title = "Review v013 brief | or2"),
             agent("w2:p1", AgentStatus.DONE, "Claude Code", "~/code/docs", tab = "w2:t1", workspace = "w2"),
             agent("w2:p2", AgentStatus.IDLE, "Amp", "~/code/docs", tab = "w2:t1", workspace = "w2"),
         ),
@@ -396,8 +419,8 @@ class UiGalleryActivity : ComponentActivity() {
         } else {
             val groups = buildInbox(listOf(
                 InboxSource(1, "workstation", null, "personal", view(
-                    agent("w1:p1", AgentStatus.BLOCKED, "Claude Code", "~/code/or2"),
-                    agent("w1:p2", AgentStatus.WORKING, "Codex", "~/code/herdr"),
+                    agent("w1:p1", AgentStatus.BLOCKED, "Claude Code", "~/code/or2", title = "Repository context gathering"),
+                    agent("w1:p2", AgentStatus.WORKING, "Codex", "~/code/herdr", title = "Review v013 brief | or2"),
                     agent("w2:p1", AgentStatus.DONE, "Claude Code", "~/code/docs", tab = "w2:t1", workspace = "w2"),
                     agent("w2:p2", AgentStatus.WORKING, "Amp", "~/code/docs", tab = "w2:t1", workspace = "w2"),
                 )),
@@ -491,8 +514,9 @@ class UiGalleryActivity : ComponentActivity() {
                 }
             }
         }
+        // A herdr terminal has the third, blue disc (Spaces); shell and tmux headers keep two.
         TerminalCard(host, target, transport, cardState, minimise = {}, openSwitcher = {}, endSession = {}, linkHealth = health,
-            upload = uploadNotice(upload)) {
+            upload = uploadNotice(upload), openSpaces = if (target.startsWith("herdr")) ({}) else null) {
             TerminalScreen(session, probeState, probeFrames.receiveAsFlow(), Modifier.weight(1f),
                 composerHint = "Message $host…", chrome = chrome,
                 target = if (scroller != null) herdr else TerminalTarget.Shell, targetScroller = scroller, imagePaste = paste)
@@ -565,7 +589,7 @@ class UiGalleryActivity : ComponentActivity() {
             "pair-progress", "pair-install", "keepalive", "keepalive-waiting",
             "terminal", "terminal-tmux", "terminal-long", "terminal-stale", "terminal-closed",
             "terminal-arrowpad", "terminal-arrowpad-text", "terminal-herdr-wheel", "terminal-composer",
-            "terminal-attach", "terminal-uploading", "terminal-upload-failed", "share-picker", "terminals",
+            "terminal-attach", "terminal-uploading", "terminal-upload-failed", "share-picker", "terminals", "spaces",
         )
     }
 }
