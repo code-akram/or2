@@ -259,7 +259,7 @@ impl TerminalTarget {
 
 /// What the host offers, found by a probe per connection (`herdr_sessions` is re-read on
 /// every query). Programs are absolute paths; pass
-/// them to `herdr::run`/`watch`/`focus_pane` and the tmux and mosh commands. A missing program
+/// them to the herdr client, the tmux and the mosh commands. A missing program
 /// is `None`, and whoever would use it reports `NotInstalled`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostCapabilities {
@@ -424,7 +424,7 @@ pub enum HostCommand {
         reply: oneshot::Sender<Result<Vec<TmuxSession>, HostError>>,
     },
     /// Focus `pane_id` in herdr `session` with the herdr path from the probe
-    /// ([`herdr::focus_pane`]). Reply `NotInstalled { program: "herdr" }` with no herdr found,
+    /// ([`herdr::focus_pane_in`]). Reply `NotInstalled { program: "herdr" }` with no herdr found,
     /// `PaneNotFound` when herdr says the pane is gone, `CommandFailed` for other failures.
     FocusHerdrPane {
         session: Option<String>,
@@ -496,7 +496,7 @@ pub enum HostCommand {
         extension: String,
         reply: oneshot::Sender<Result<UploadedImage, HostError>>,
     },
-    /// Run [`herdr::run`] (or an equivalent) on `driver`, with the herdr path from the probe.
+    /// Run [`herdr::run_in`] (or an equivalent) on `driver`, with the herdr path from the probe.
     /// The session name is validated. With no herdr found, move `driver` to
     /// `Unavailable { NotInstalled }` and wait for its stop.
     WatchHerdr {

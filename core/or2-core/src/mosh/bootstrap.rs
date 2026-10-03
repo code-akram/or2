@@ -40,7 +40,7 @@ impl fmt::Debug for MoshKey {
     }
 }
 
-/// Everything [`super::start`] needs to attach to a running `mosh-server`.
+/// Everything [`super::run_session`] needs to attach to a running `mosh-server`.
 #[derive(Clone)]
 pub struct MoshParams {
     /// The UDP port the server listens on, on the host that ran the bootstrap.

@@ -231,22 +231,8 @@ impl Directory {
         socket_of(state.entries.as_deref()?, session).ok()
     }
 
-    /// The socket of `session`: from the stored list when it is trusted and calls the session
-    /// running, else from a listing read now (which is then stored).
-    pub async fn locate<H: RemoteHost>(
-        &self,
-        host: &H,
-        herdr: &str,
-        session: Option<&str>,
-    ) -> Result<String, DiscoveryError> {
-        if let Some(socket) = self.cached_socket(session) {
-            return Ok(socket);
-        }
-        self.locate_fresh(host, herdr, session).await
-    }
-
-    /// [`Directory::locate`] that always reads the listing: the caller just saw the cached
-    /// socket fail.
+    /// The socket of `session` from a listing read now (which is then stored): there is none
+    /// cached ([`Directory::cached_socket`]), or the caller just saw the cached one fail.
     pub async fn locate_fresh<H: RemoteHost>(
         &self,
         host: &H,
@@ -382,20 +368,21 @@ mod tests {
         host.set_listing(LISTING);
         let directory = Directory::new();
         // Nothing is known yet: the first lookup reads the listing, the next ones do not.
+        assert!(directory.cached_socket(None).is_none());
         assert_eq!(
-            directory.locate(&host, "h", None).await.unwrap(),
+            directory.locate_fresh(&host, "h", None).await.unwrap(),
             "/home/user/.config/herdr/herdr.sock"
         );
         assert_eq!(
-            directory.locate(&host, "h", Some("work")).await.unwrap(),
-            "/home/user/.config/herdr/sessions/work/herdr.sock"
+            directory.cached_socket(Some("work")).as_deref(),
+            Some("/home/user/.config/herdr/sessions/work/herdr.sock")
         );
         assert_eq!(host.exec_log().len(), 1);
         // A stopped or unknown session is not answered from the list: it may have started since.
         for name in ["idle", "nope"] {
             assert!(directory.cached_socket(Some(name)).is_none());
             assert!(matches!(
-                directory.locate(&host, "h", Some(name)).await,
+                directory.locate_fresh(&host, "h", Some(name)).await,
                 Err(DiscoveryError::NotRunning(_))
             ));
         }
@@ -403,7 +390,7 @@ mod tests {
         // A socket that failed makes the next lookup read the listing again.
         directory.invalidate();
         assert!(directory.cached_socket(None).is_none());
-        directory.locate(&host, "h", None).await.unwrap();
+        directory.locate_fresh(&host, "h", None).await.unwrap();
         assert_eq!(host.exec_log().len(), 4);
         assert!(directory.cached_socket(None).is_some());
     }

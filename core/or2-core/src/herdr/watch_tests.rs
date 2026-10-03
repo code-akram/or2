@@ -17,7 +17,7 @@ use super::view::AgentStatus;
 use super::watch::{self, Timing, lifecycle};
 use super::{
     HerdrError, HerdrObserver, HerdrState, HerdrUnavailable, HerdrView, HerdrWatchHandle, channel,
-    focus_pane,
+    focus_pane_in,
 };
 use crate::remote::RemoteError;
 
@@ -54,9 +54,10 @@ impl Harness {
     fn start_with(host: &FakeHost, session: Option<&str>, timing: Timing) -> Self {
         let recorder = Arc::new(Recorder::default());
         let (handle, driver) = channel(recorder.clone());
-        let task = tokio::spawn(watch::run(
+        let task = tokio::spawn(watch::run_in(
             Arc::new(host.clone()),
             HERDR.into(),
+            Arc::new(Directory::new()),
             session.map(str::to_owned),
             driver,
             timing,
@@ -700,9 +701,10 @@ async fn stop_delivers_closed_once_last_and_releases_the_observer() {
     let recorder = Arc::new(Recorder::default());
     let weak = Arc::downgrade(&recorder);
     let (handle, driver) = channel(recorder.clone());
-    let task = tokio::spawn(watch::run(
+    let task = tokio::spawn(watch::run_in(
         Arc::new(host.clone()),
         HERDR.into(),
+        Arc::new(Directory::new()),
         None,
         driver,
         Timing::default(),
@@ -965,12 +967,14 @@ async fn a_slow_server_times_out_and_is_failed() {
 #[tokio::test(start_paused = true)]
 async fn focus_sends_one_pane_focus_request_to_the_sessions_socket() {
     let host = host_with(&two_panes());
-    focus_pane(&host, HERDR, Some("work"), "w1:p2")
+    focus_pane_in(&host, HERDR, &Directory::new(), Some("work"), "w1:p2")
         .await
         .unwrap();
     assert_eq!(host.served(), [Served::Focus("w1:p2".into())]);
     assert_eq!(host.opened(), [WORK_SOCKET]);
-    focus_pane(&host, HERDR, None, "w2:p1").await.unwrap();
+    focus_pane_in(&host, HERDR, &Directory::new(), None, "w2:p1")
+        .await
+        .unwrap();
     assert_eq!(host.opened()[1], DEFAULT_SOCKET);
 }
 
@@ -978,35 +982,41 @@ async fn focus_sends_one_pane_focus_request_to_the_sessions_socket() {
 async fn focus_failures_are_reported() {
     let host = host_with(&two_panes());
     host.fail_focus("pane_not_found", "pane w9:p9 not found");
-    let error = focus_pane(&host, HERDR, None, "w9:p9").await.unwrap_err();
+    let error = focus_pane_in(&host, HERDR, &Directory::new(), None, "w9:p9")
+        .await
+        .unwrap_err();
     assert_eq!(error, HerdrError::PaneNotFound);
     // Any other herdr error stays a generic failure carrying herdr's code.
     host.fail_focus("invalid_request", "bad pane");
-    let error = focus_pane(&host, HERDR, None, "w9:p9").await.unwrap_err();
+    let error = focus_pane_in(&host, HERDR, &Directory::new(), None, "w9:p9")
+        .await
+        .unwrap_err();
     assert!(
         matches!(&error, HerdrError::Failed(m) if m.contains("invalid_request")),
         "{error:?}"
     );
 
-    let error = focus_pane(&host, HERDR, Some("idle"), "w1:p1")
+    let error = focus_pane_in(&host, HERDR, &Directory::new(), Some("idle"), "w1:p1")
         .await
         .unwrap_err();
     assert!(matches!(error, HerdrError::Failed(_)), "{error:?}");
 
     host.set_exec(127, "", "");
-    let error = focus_pane(&host, HERDR, None, "w1:p1").await.unwrap_err();
+    let error = focus_pane_in(&host, HERDR, &Directory::new(), None, "w1:p1")
+        .await
+        .unwrap_err();
     assert!(matches!(error, HerdrError::Failed(_)), "{error:?}");
 
     host.set_exec_error(RemoteError::Closed);
     assert_eq!(
-        focus_pane(&host, HERDR, None, "w1:p1").await,
+        focus_pane_in(&host, HERDR, &Directory::new(), None, "w1:p1").await,
         Err(HerdrError::Remote(RemoteError::Closed))
     );
 
     host.set_listing(&fixture("session_list.json"));
     host.set_open_error(Some(RemoteError::Closed));
     assert_eq!(
-        focus_pane(&host, HERDR, None, "w1:p1").await,
+        focus_pane_in(&host, HERDR, &Directory::new(), None, "w1:p1").await,
         Err(HerdrError::Remote(RemoteError::Closed))
     );
 }

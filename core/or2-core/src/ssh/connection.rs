@@ -1560,7 +1560,8 @@ async fn watch_herdr(host: Arc<SshHost>, session: Option<String>, mut driver: He
                     return;
                 };
                 let directory = Arc::clone(host.sessions.directory());
-                return herdr::run_in(host, herdr, directory, session, driver).await;
+                let timing = herdr::Timing::default();
+                return herdr::run_in(host, herdr, directory, session, driver, timing).await;
             }
             Err(error) => {
                 let _ = driver.transition(HerdrState::Unavailable {

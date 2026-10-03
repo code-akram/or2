@@ -626,28 +626,18 @@ impl<H: RemoteHost> Watch<H> {
     }
 }
 
-/// Runs the watch until `driver` is stopped or the host closes, then closes it. Discovers
-/// sockets with a directory of its own (the first attempt reads the listing).
-pub(super) async fn run<H: RemoteHost>(
-    host: Arc<H>,
-    herdr: String,
-    session: Option<String>,
-    driver: HerdrWatchDriver,
-    timing: Timing,
-) {
-    run_in(
-        host,
-        herdr,
-        Arc::new(Directory::new()),
-        session,
-        driver,
-        timing,
-    )
-    .await;
-}
-
-/// [`run`] with the connection's `directory`, so the first attempt costs no `session list`.
-pub(super) async fn run_in<H: RemoteHost>(
+/// Drives `driver` until it is stopped or the host closes, then closes it, with the intervals
+/// of `timing` (the contract's are [`Timing::default`]). The host driver that owns this task
+/// ends it on host close by aborting or dropping it (the driver's `Drop` delivers `Closed`): a
+/// watch learns of a lost host only from a failing call, and one parked at a final
+/// `Unavailable` makes none. `herdr` is the absolute path from the capability probe. The
+/// session's socket is not an input: the first attempt takes it from the connection's
+/// `directory` (the probe's listing, so a watch costs no `session list`), and a retry or a
+/// recovery reads `<herdr> session list --json` again (`socket_path`), so it never leaves the
+/// herdr module. See the module documentation for the protocol: subscribe, snapshot,
+/// invalidating events, `events_lost` recovery, and the retry rules for each
+/// [`HerdrUnavailable`].
+pub async fn run_in<H: RemoteHost>(
     host: Arc<H>,
     herdr: String,
     directory: Arc<Directory>,
