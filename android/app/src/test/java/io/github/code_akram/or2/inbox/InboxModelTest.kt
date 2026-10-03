@@ -287,7 +287,7 @@ class InboxModelTest {
         port.installFailure = io.github.code_akram.or2.ffi.HostException.CommandFailed("permission denied")
         val failed = runCatching { holder.installHerdrIntegration(1, "opencode") }.exceptionOrNull()
         assertTrue(failed is io.github.code_akram.or2.ffi.HostException.CommandFailed)
-        assertNull(holder.host(1)?.integrations?.value?.get("opencode"))
+        assertEquals(HerdrIntegrationState.NOT_INSTALLED, holder.host(1)?.integrations?.value?.get("opencode"))
 
         // A refresh reads them again when a view next needs them; a failed read forgets what was known (it may be stale:
         // opencode installed on the host meanwhile), so nothing is offered until a read succeeds.
