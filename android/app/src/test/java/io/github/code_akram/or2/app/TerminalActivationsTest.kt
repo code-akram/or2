@@ -31,8 +31,9 @@ import org.junit.Test
 /**
  * Every path into an agent terminal awaits `focusHerdrPane` for its pane first: tapping the inbox
  * row (new or reused terminal), the session switcher, a Home thumbnail and the host screen's
- * recent list all go through [TerminalActivations]; a gone pane or a failed focus shows a message
- * and never an activation.
+ * open list all go through [TerminalActivations]; a gone pane or a failed focus shows a message
+ * and never an activation. One herdr session has one terminal per host: every open reuses it,
+ * whatever pane it was opened on.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class TerminalActivationsTest {
@@ -84,23 +85,76 @@ class TerminalActivationsTest {
         activation(s) { done -> s.activations.launchOpenAgent(7, host.label, session, pane, done) }
 
     @Test
-    fun agentAThenBThenAReusesATerminalAndFocusesAFirst() = runTest {
+    fun anAgentTapOnPaneBReusesTheTerminalOpenedOnPaneAOfTheSameSessionAfterFocusingB() = runTest {
         val s = setup()
         val first = (openAgent(s, "w1:p1") as Activation.Ready).terminal
-        val second = (openAgent(s, "w1:p2") as Activation.Ready).terminal
         assertEquals(a, first.target)
-        assertEquals(b, second.target)
-        assertNotSame(first, second)
+        // herdr's focus is shared: a second client on the same session would only show the same pane. B focuses, then
+        // the one terminal of the session is shown.
+        val second = (openAgent(s, "w1:p2") as Activation.Ready).terminal
+        assertSame(first, second)
         assertEquals(listOf("focus:null:w1:p1", "navigate", "focus:null:w1:p2", "navigate"), s.events)
 
-        // Tapping A again: A's terminal is reused, and the focus goes back to A before navigating.
+        // Tapping A again: the same terminal, and the focus goes back to A before navigating.
         s.events.clear()
-        val again = (openAgent(s, "w1:p1") as Activation.Ready).terminal
-        assertSame(first, again)
+        assertSame(first, (openAgent(s, "w1:p1") as Activation.Ready).terminal)
         assertEquals(listOf("focus:null:w1:p1", "navigate"), s.events)
-        assertEquals(2, s.port.terminals.size) // No third terminal.
+        assertEquals(1, s.port.terminals.size) // One herdr client for the session, whatever was tapped.
         assertEquals(listOf(null to "w1:p1", null to "w1:p2", null to "w1:p1"), s.port.focused)
         assertNull(s.activations.pending.value)
+        s.holder.dismissHost(7)
+    }
+
+    @Test
+    fun anAgentTapPrefersTheSessionsTerminalOpenedWithoutAPane() = runTest {
+        val s = setup()
+        s.open(a)
+        val whole = s.open(TerminalTarget.Herdr(null, null))
+        s.events.clear()
+        assertSame(whole, (openAgent(s, "w1:p2") as Activation.Ready).terminal)
+        assertEquals(listOf("focus:null:w1:p2", "navigate"), s.events)
+        assertEquals(2, s.port.terminals.size) // Duplicates already open are left alone, never closed.
+        s.holder.dismissHost(7)
+    }
+
+    @Test
+    fun anotherSessionOrHostOpensANewTerminal() = runTest {
+        val s = setup()
+        val default = (openAgent(s, "w1:p1") as Activation.Ready).terminal
+        val work = (openAgent(s, "w1:p1", session = "work") as Activation.Ready).terminal
+        assertNotSame(default, work)
+        assertEquals(TerminalTarget.Herdr("work", "w1:p1"), work.target)
+        assertEquals(2, s.port.terminals.size)
+        // Another host has no terminal on that session: nothing there to reuse.
+        assertNull(s.activations.reusable(8, b))
+        assertNull(s.activations.reusable(8, TerminalTarget.Herdr(null, null)))
+        s.holder.dismissHost(7)
+    }
+
+    @Test
+    fun aClosedOrClosingTerminalIsNeverReusedByAnAgentTap() = runTest {
+        val s = setup()
+        val closed = (openAgent(s, "w1:p1") as Activation.Ready).terminal
+        s.port.terminals.single().second.onStateChanged(SessionState.Closed(CloseReason.Disconnected))
+        advanceUntilIdle()
+        val fresh = (openAgent(s, "w1:p2") as Activation.Ready).terminal
+        assertNotSame(closed, fresh)
+        s.holder.disconnectTerminal(fresh) // Being closed: not reused either.
+        val third = (openAgent(s, "w1:p1") as Activation.Ready).terminal
+        assertNotSame(fresh, third)
+        assertEquals(3, s.port.terminals.size)
+        s.holder.dismissHost(7)
+    }
+
+    @Test
+    fun aReattachToAnotherPaneOfTheSessionReusesItsTerminalAfterFocusingThatPane() = runTest {
+        val s = setup()
+        val open = s.open(a)
+        s.events.clear()
+        val shown = activation(s) { s.activations.launchReopen(LastTerminal(7, b, TerminalTransport.MOSH), host.label, done = it) }
+        assertSame(open, (shown as Activation.Ready).terminal)
+        assertEquals(listOf("focus:null:w1:p2", "navigate"), s.events)
+        assertEquals(1, s.port.terminals.size)
         s.holder.dismissHost(7)
     }
 
@@ -129,8 +183,8 @@ class TerminalActivationsTest {
         s.port.focusFailures["w9:p9"] = HostException.PaneNotFound()
         s.port.focusFailures["w1:p1"] = HostException.PaneNotFound() // A's pane vanishes while its terminal is open.
 
-        // A new agent whose pane is gone: no terminal is opened.
-        val failed = openAgent(s, "w9:p9") as Activation.Failed
+        // A new agent (in a session with no terminal yet) whose pane is gone: no terminal is opened.
+        val failed = openAgent(s, "w9:p9", session = "work") as Activation.Failed
         assertTrue(failed.message, failed.message.contains("pane no longer exists"))
         // The terminal that was started beside the focus is dismissed: no terminal is left for a vanished pane.
         assertEquals(2, s.port.terminals.size)
@@ -459,6 +513,10 @@ class TerminalActivationsTest {
         s.events.clear()
         assertSame(pane, pick(s, TerminalTarget.Herdr("work", "w1:p3")))
         assertEquals(listOf("focus:work:w1:p3"), s.events)
+        // Another pane of that session too: it is focused, and the session's one terminal is shown.
+        s.events.clear()
+        assertSame(pane, pick(s, TerminalTarget.Herdr("work", "w1:p4")))
+        assertEquals(listOf("focus:work:w1:p4"), s.events)
         // A shell is never reused.
         val shell = pick(s, TerminalTarget.Shell)
         assertNotSame(shell, pick(s, TerminalTarget.Shell))

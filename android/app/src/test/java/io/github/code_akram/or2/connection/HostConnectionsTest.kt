@@ -348,7 +348,9 @@ class HostConnectionsTest {
         assertEquals(listOf(1L, 2L, 3L), holder.terminals.value.map { it.id })
         assertEquals("shell", shell.title)
         assertEquals("tmux work", tmux.title)
-        assertEquals("herdr w1:p2", herdr.title)
+        assertEquals("herdr", herdr.title)
+        assertEquals("herdr work", targetTitle(TerminalTarget.Herdr("work", "w1:p2")))
+        assertEquals("herdr work", targetTitle(TerminalTarget.Herdr("work", null)))
         assertSame(port.terminals[1].third, tmux.handle.value)
 
         port.terminals[1].second.onStateChanged(SessionState.Connected)
