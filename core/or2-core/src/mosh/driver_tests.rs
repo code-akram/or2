@@ -764,6 +764,38 @@ async fn a_disconnect_does_not_wait_for_the_first_socket() {
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
+/// Without an absolute deadline the connect timeout covers the socket open and the first
+/// datagram together: one allowance, counted once (it used to start again after the open, so a
+/// slow open could double it).
+#[tokio::test]
+async fn the_connect_timeout_counts_the_socket_open_and_the_first_datagram_together() {
+    let server = FakeServer::new(KEY).await;
+    let (transport, gate, _binds) = Gated::new(0);
+    let (sender, states) = mpsc::channel();
+    let started = StdInstant::now();
+    let (_handle, _control) = spawn(
+        transport,
+        params(server.port(), KEY, 20, 5),
+        LOCALHOST,
+        Arc::new(Recorder(Mutex::new(sender))),
+        None,
+        Duration::from_millis(1000),
+    )
+    .unwrap();
+    // The resolver answers after most of the allowance; the server never does.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    gate.notify_one();
+    assert_eq!(
+        state(&states).await,
+        SessionState::Closed(CloseReason::Failed(SessionFailure::TimedOut))
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "timed out after {elapsed:?}, not once the one allowance was spent"
+    );
+}
+
 #[tokio::test]
 async fn a_resize_while_the_first_socket_opens_is_not_lost() {
     let mut server = FakeServer::new(KEY).await;

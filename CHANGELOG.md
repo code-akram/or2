@@ -56,6 +56,8 @@ Each release's notes are in [docs/releases/](docs/releases/).
   focusing the agent's pane. Duplicates already open are left alone.
 - Swiping through a tmux terminal's history after switching it to another tmux session scrolls the
   session the terminal shows, not the one it was opened on.
+- A terminal opened with an explicit Mosh choice gives up after its 15 s connect timeout when UDP is blocked; a slow
+  socket open could make it wait up to twice that.
 
 ## [0.1.1] - 2026-10-02
 

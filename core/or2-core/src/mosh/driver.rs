@@ -220,13 +220,12 @@ async fn run<T: DatagramTransport>(
     } = plan;
     let key = params.key.to_base64_key().map_err(internal)?;
     let screen = GhosttyScreen::new(params.size).map_err(internal)?;
+    // One allowance for the socket open and the first datagram together, computed once.
+    let deadline = absolute.unwrap_or_else(|| Instant::now() + connect_timeout);
     // Opening the first socket resolves the host name, which can take as long as the resolver
     // does: a disconnect (or a dropped handle) must not wait for it. A resize is remembered.
     let mut size = params.size;
-    let open = timeout_at(
-        absolute.unwrap_or_else(|| Instant::now() + connect_timeout),
-        Link::open(transport, peer),
-    );
+    let open = timeout_at(deadline, Link::open(transport, peer));
     tokio::pin!(open);
     let mut link = loop {
         tokio::select! {
@@ -256,7 +255,6 @@ async fn run<T: DatagramTransport>(
         .map_err(internal)?;
 
     let mut buffer = [0u8; RECEIVE_MTU];
-    let deadline = absolute.unwrap_or_else(|| Instant::now() + connect_timeout);
     let mut connected = false;
     let mut published = u64::MAX;
     let mut next_rebind = Instant::now();
