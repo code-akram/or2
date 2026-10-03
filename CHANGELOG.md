@@ -8,6 +8,12 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-03
+
+Reply to an agent from its notification, image paste (several at once, about a second each), and one simpler
+model for the whole app: Home holds each host's terminals, the picker lists herdr agents, one Terminals sheet,
+a toolbar that fits; notifications for every finished turn. See [the release notes](docs/releases/v0.1.2.md).
+
 ### Added
 
 - Reply from an agent notification: type a reply in the notification and it reaches the agent's pane through
@@ -186,5 +192,7 @@ The first release: the Android app (a signed APK) and the `or2-pair` host CLI fo
 - Optional local release signing for the APK (`~/.config/or2/signing.properties`); without it the release
   build stays unsigned for F-Droid.
 
-[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/code-akram/or2/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/code-akram/or2/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/code-akram/or2/releases/tag/v0.1.0

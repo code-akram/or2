@@ -1511,7 +1511,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "or2-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes 0.8.4",
  "base64",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "or2-ffi"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "or2-core",
  "thiserror",
@@ -1548,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "or2-pair"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64",
  "data-encoding",
@@ -3025,7 +3025,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "flate2",
  "libc",
