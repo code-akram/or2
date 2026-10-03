@@ -23,7 +23,6 @@ import androidx.compose.runtime.setValue
 import io.github.code_akram.or2.app.AppActions
 import io.github.code_akram.or2.app.AppViewModel
 import io.github.code_akram.or2.app.NotificationGrant
-import io.github.code_akram.or2.app.NotificationUse
 import io.github.code_akram.or2.app.Or2App
 import io.github.code_akram.or2.app.Or2Application
 import io.github.code_akram.or2.connection.KeyUnlocker
@@ -74,8 +73,8 @@ class MainActivity : FragmentActivity() {
     private val imageShares = ImageShares()
 
     /**
-     * Android's `POST_NOTIFICATIONS` dialog, opened only from an in-context offer (Home's "Show connection
-     * notification"), never on connect. Its result goes to whichever activity instance exists when it returns, and
+     * Android's `POST_NOTIFICATIONS` dialog, opened only in context (Home's "Show connection and agent notifications",
+     * the Settings switch), never on connect. Its result goes to whichever activity instance exists when it returns, and
      * every offer re-reads the permission.
      */
     private val notificationRequest = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
@@ -128,7 +127,7 @@ class MainActivity : FragmentActivity() {
             battery = app.battery,
             requestBatteryExemption = ::requestBatteryExemption,
             answerKeepAlive = ::answerKeepAlive,
-            notifications = app.notifications.offer(NotificationUse.AGENT_ALERTS),
+            notifications = app.notifications.offer,
             allowNotifications = ::allowNotifications,
             takeColdResume = app.sessionMarker::takeColdResume,
             pair = pairModel.flow,
@@ -270,18 +269,24 @@ class MainActivity : FragmentActivity() {
     }
 
     /** Opens the system's request; false when this device has no such screen. */
-    @SuppressLint("BatteryLife")
     private fun launchBatteryRequest(): Boolean = try {
-        batteryExemption.launch(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+        batteryExemption.launch(batteryRequest())
         true
     } catch (_: ActivityNotFoundException) {
         false
     }
 
     /**
+     * The system's own "let this app ignore battery optimisations?" dialog, for the battery step and Home's card. Play
+     * Store policy restricts this request; or2 ships through F-Droid.
+     */
+    @SuppressLint("BatteryLife", "UseKtx")
+    private fun batteryRequest() = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+
+    /**
      * "Allow" on a notification offer: Android's `POST_NOTIFICATIONS` dialog, or the app's notification settings once
-     * Android no longer shows it (denied for good). The one entry point for every use ([NotificationUse]): Home's card
-     * (connection status and agent alerts) and the Settings switch call it.
+     * Android no longer shows it (denied for good). The one entry point: Home's card (connection status and agent
+     * alerts) and the Settings switch call it.
      */
     private fun allowNotifications() {
         val permission = app.notifications
@@ -311,15 +316,10 @@ class MainActivity : FragmentActivity() {
         app.notifications.refresh()
     }
 
-    /**
-     * The system's own "let this app ignore battery optimisations?" dialog, from Home's card (the
-     * explanation was shown once, as the last step of adding a host). Play Store policy restricts this request;
-     * or2 ships through F-Droid.
-     */
-    @SuppressLint("BatteryLife", "UseKtx")
+    /** The system's request from Home's card (the explanation was shown once, as the last step of adding a host). */
     private fun requestBatteryExemption() {
         try {
-            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+            startActivity(batteryRequest())
         } catch (_: ActivityNotFoundException) {
             // No such screen on this device; the card stays until it is dismissed.
         }
