@@ -423,7 +423,8 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   `⇧` (the Shift arrow icon: latches Shift for the next key, as `Ctrl` latches Ctrl: Shift+Enter, Shift+arrows, a
   capital; the `⇧` character is never used, the mono face lacks it), then the arrow-pad and paste icon keys, then `/` and `@` as mono text
   (into the composer at its cursor while it is open, else typed into the terminal, taking a latched `Ctrl`), then,
-  4 dp apart, the composer and keyboard toggles without key backgrounds. A latched `Ctrl` or `⇧` draws in `accent` until
+  the composer and keyboard toggles without key backgrounds, the spare width spread evenly between all of them (no
+  gap before the toggles). A latched `Ctrl` or `⇧` draws in `accent` until
   it has been used for one key; `Alt` lives in the arrow pad's extras row. While text is selected `Copy` and
   `Clear` lead the row and the typing keys (`⇧Tab`, `⇧`, `/`, `@`, which would clear the selection anyway) give way to
   them. There is no panes key (the header's green disc opens that sheet) and no history key (a drag scrolls back,

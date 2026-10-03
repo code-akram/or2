@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -235,8 +236,8 @@ fun toolbarKeys(selecting: Boolean): List<ToolbarKey> = if (selecting) {
 val ToolbarToggles = listOf(ToolbarKey.COMPOSER, ToolbarKey.KEYBOARD)
 
 /**
- * The floating key pill: [toolbarKeys] (`Ctrl`, `Esc`, `Tab`, `⇧Tab`, `⇧`, the arrow pad, Paste, `/`, `@`), then, apart,
- * [ToolbarToggles]. It fits a 411 dp wide phone without scrolling (`KeyToolbarTest`); the scroll is only a fallback for
+ * The floating key pill: [toolbarKeys] (`Ctrl`, `Esc`, `Tab`, `⇧Tab`, `⇧`, the arrow pad, Paste, `/`, `@`), then
+ * [ToolbarToggles], the spare width spread evenly between them all. It fits a 411 dp wide phone without scrolling (`KeyToolbarTest`); the scroll is only a fallback for
  * a large system font. [press] runs a key; a latched `Ctrl` or `⇧` draws in `accent` until it has been used for one key.
  */
 @Composable
@@ -263,19 +264,18 @@ fun KeyToolbar(
             active = (key == ToolbarKey.ARROWS && state.padOpen) || (key == ToolbarKey.COMPOSER && state.composerOpen),
         )
     }
-    Row(
+    BoxWithConstraints(
         modifier.fillMaxWidth().padding(horizontal = Or2Dimens.ToolbarMargin, vertical = 6.dp).clip(Or2Shapes.Pill)
             .background(Or2Colors.ToolbarPill).padding(horizontal = Or2Dimens.ToolbarPadding),
-        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            Modifier.weight(1f).horizontalScroll(rememberScrollState()).testTag("toolbar-keys"),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            toolbarKeys(state.selecting).forEach { key(it) }
+        val width = maxWidth
+        // The spare width is spread evenly between every key and the toggles (owner, 2026-10-03: no gap before the
+        // composer toggle); the scroll is only a fallback for a large system font.
+        Row(Modifier.horizontalScroll(rememberScrollState()).testTag("toolbar-keys"), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.widthIn(min = width), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                (toolbarKeys(state.selecting) + ToolbarToggles).forEach { key(it) }
+            }
         }
-        Spacer(Modifier.width(Or2Dimens.ToolbarTogglesGap))
-        ToolbarToggles.forEach { key(it) }
     }
 }
 

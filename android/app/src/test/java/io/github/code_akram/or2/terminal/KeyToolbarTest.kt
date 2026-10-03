@@ -30,7 +30,7 @@ class KeyToolbarTest {
     private fun rowWidth(selecting: Boolean): Float =
         2 * Or2Dimens.ToolbarMargin.value + 2 * Or2Dimens.ToolbarPadding.value +
             toolbarKeys(selecting).sumOf { boxWidth(it).toDouble() }.toFloat() +
-            Or2Dimens.ToolbarTogglesGap.value + ToolbarToggles.sumOf { boxWidth(it).toDouble() }.toFloat()
+            ToolbarToggles.sumOf { boxWidth(it).toDouble() }.toFloat()
 
     @Test
     fun theRowFitsA411DpWidePhoneWithoutScrollingWithOrWithoutASelection() {

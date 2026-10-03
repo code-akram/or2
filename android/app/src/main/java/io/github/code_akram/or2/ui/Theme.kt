@@ -123,10 +123,9 @@ object Or2Dimens {
     val KeyTouchWidth = 32.dp
     val KeyLabelPadding = 5.dp
 
-    /** The toolbar pill: [ToolbarMargin] from the screen's sides, its keys [ToolbarPadding] inside it, the toggles [ToolbarTogglesGap] apart. */
+    /** The toolbar pill: [ToolbarMargin] from the screen's sides, its keys [ToolbarPadding] inside it, spread evenly. */
     val ToolbarMargin = 8.dp
     val ToolbarPadding = 6.dp
-    val ToolbarTogglesGap = 4.dp
     val PadKey = 40.dp
     val PadGap = 6.dp
     val SheetHandleWidth = 32.dp
