@@ -136,3 +136,6 @@ until the caller acknowledges, as a real host does.
 - [AGENTS.md](../AGENTS.md) has the repository rules.
 
 The in-app keyboard idea (2026-10-03) was dropped by the owner the same day.
+
+**Known flaky test:** `or2-core/tests/mosh_live.rs::terminate_stops_a_server_nobody_connected_to` can fail under full-workspace
+load (mosh-server's fork handover on loopback); it passes alone (3/3 on 2026-10-03). Harden its wait when next touched.

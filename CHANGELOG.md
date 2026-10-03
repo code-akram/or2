@@ -8,6 +8,12 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-03
+
+Zero-config Reply: `or2-pair` recommends herdr when it is missing and sets up herdr's integrations for the agents
+on the host; the app offers **Enable Reply** for an agent that has none. See
+[the release notes](docs/releases/v0.1.3.md).
+
 ### Added
 
 - `or2-pair` sets up Reply for the agents on the host: after the checks it asks herdr which of its integrations
@@ -217,7 +223,8 @@ The first release: the Android app (a signed APK) and the `or2-pair` host CLI fo
 - Optional local release signing for the APK (`~/.config/or2/signing.properties`); without it the release
   build stays unsigned for F-Droid.
 
-[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/code-akram/or2/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/code-akram/or2/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/code-akram/or2/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/code-akram/or2/releases/tag/v0.1.0
