@@ -5099,3 +5099,70 @@ stays 16).
   tests stay green, adjusted only where they asserted `AlreadyUploading`). Shares: `ACTION_SEND_MULTIPLE`
   with three `content:` images gives three, a `file:` item among them is skipped and counted, more than 10
   keeps the first 10 and says so. Device (compile): the picker contract and the intent filter.
+
+# v0.1.2: owner QA of 2026-10-03 (Home, terminals, composer, upload speed)
+
+Owner QA on the phone found these. Placeholders only: no real host details in tests or docs.
+
+## One terminal per herdr session, and what the terminals are called (lane Terminals)
+
+- **The bug.** An inbox or notification tap on an agent (`TerminalActivations.openAgent` →
+  `openOrReuse`) reused only a terminal opened for that exact pane (`findOpenTerminal(hostId,
+  Herdr(session, pane))`), so tapping a second agent opened a second full herdr client (its own mosh
+  session) on the same herdr session. herdr's focus is shared, so every such terminal shows the same
+  focused pane. The owner's host had `herdr`, `herdr w1:pT` and `herdr w12:p7` open at once.
+- **The rule.** Every herdr open (picker, inbox, notification, share, reattach) reuses the open
+  terminal for that host and herdr session whatever pane it was opened on: a pane-less one first, then
+  any (the order `reusable` already uses), never a closed, retired or closing one. A target with a pane
+  focuses that pane first, then shows the reused terminal; with none open, one is opened on
+  `Herdr(session, pane)` as today. One rule in one place (`TerminalActivations`), used by `open`,
+  `openAgent`, `reuse` and the reattach path. Duplicates already open are left alone (not auto-closed).
+- **Titles.** `targetTitle` no longer carries a pane id: `herdr` (default session) or
+  `herdr <session>`. Where a title is shown with a detail line (Home's session card), a herdr terminal's
+  detail is the focused pane's agent label from that session's live view when there is one, else the
+  focused pane's cwd, else nothing.
+- **Home session card detail.** The working directory when known (`inbox.cwdOf`), else the herdr rule
+  above, else empty (the card keeps its height). Never `user@host`: the card's pill already names the
+  host.
+- **Host card address.** A connected host shows the address in use (`HostState.Connected.addressIndex`)
+  with `+N` for the others; otherwise the first address as today.
+- **Picker tab** `Recent` is renamed `Open` (it lists the open terminals); test tags unchanged.
+- **Toolbar keys** (the row has room): after History, three mono text keys in the existing `ToolKey`
+  style: `⇧Tab` (Shift+Tab through the key encoder: Claude Code's mode cycle; Gboard cannot send it),
+  `/` and `@`. `⇧Tab` always goes to the terminal. `/` and `@` insert into the composer at its cursor
+  while the composer is open, else type into the terminal. They honour the Ctrl latch like the other
+  keys only where that makes sense (`⇧Tab` ignores it).
+- **Multi-line confirmation only where lines really run one at a time.** FFI API 17:
+  `TerminalModes.bracketed_paste` (DECSET 2004, read where `mouse_tracking` is). The composer's
+  "Send N lines?" and the toolbar's "Paste N lines?" are asked only while the program has bracketed
+  paste **off**; with it on, multi-line text goes straight out as one paste (and one Enter for a send),
+  as Rust's submit already does. `NativeContractTest` and the probe expect API 17.
+- **Tests.** JVM: `TerminalActivationsTest` (an agent tap on pane B reuses the open terminal opened on
+  pane A of the same session after focusing B; a pane-less one is preferred; another session or host
+  opens a new one; a closed one is never reused), titles, the card detail and address rules, the
+  confirmation rule both ways. Rust: the mode is reported (on and off). Device (compile): toolbar keys.
+
+## Upload speed (lane Upload)
+
+- **The problem.** An image took 4–5 s end to end on the owner's host (about 130 ms away): the upload
+  makes about 30 SFTP requests strictly one after another (channel, subsystem and init on every upload;
+  about 13 `lstat`s of the three directory parts, before the write and again before the rename; the
+  7-day sweep before the write; open, mode, write, close, rename, realpath). The bytes are one round
+  trip.
+- **The fix keeps every check** of "Image paste" and its review fixes; only waiting changes:
+  1. **Independent requests are sent together.** SFTP v3 allows many requests in flight
+     (`RawSftpSession` matches replies by id). The `lstat`s of `.cache`, `.cache/or2` and
+     `.cache/or2/images` go out at once in the common case where all exist; only a missing part falls
+     back to today's sequential create path. The re-check before the rename is one batch too. Any
+     other independent pair (e.g. the file's checks) likewise. Order is kept wherever a check depends
+     on an earlier step.
+  2. **One SFTP session per host connection**, opened on the first upload and reused by later ones
+     (uploads on a connection are serialized). A session that fails at the transport level is dropped
+     and reopened once for that upload; it ends with the connection.
+  3. **The sweep runs after the path is delivered**, in the background (best effort, bounded as
+     today, at most once per SFTP session per hour), never on the upload's critical path.
+- **Target.** An upload into an existing directory on a reused session takes at most 9 sequential
+  round trips (12 on a new session).
+- **Tests.** Rust, in-process SFTP server with a per-request delay: the round-trip bound above
+  (counted or timed), a reused session, a dropped session reopened once, the sweep after delivery and
+  rate-limited, and every existing safety test unchanged and green.
