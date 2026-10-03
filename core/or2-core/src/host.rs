@@ -564,6 +564,18 @@ pub enum HostCommand {
         extension: String,
         reply: oneshot::Sender<Result<UploadedImage, HostError>>,
     },
+    /// Install herdr's integration `id` (one of [`herdr::INTEGRATIONS`], validated) with the
+    /// probed herdr path ([`herdr::install_integration`]): one exec. Reply `NotInstalled`
+    /// without herdr, `CommandFailed` with the first line of its stderr when it fails.
+    InstallHerdrIntegration {
+        id: String,
+        reply: oneshot::Sender<Result<(), HostError>>,
+    },
+    /// Read `herdr integration status` with the probed herdr path
+    /// ([`herdr::integration_states`]). Reply `NotInstalled` without herdr.
+    HerdrIntegrations {
+        reply: oneshot::Sender<Result<Vec<herdr::Integration>, HostError>>,
+    },
     /// Run [`herdr::run_in`] (or an equivalent) on `driver`, with the herdr path from the probe.
     /// The session name is validated. With no herdr found, move `driver` to
     /// `Unavailable { NotInstalled }` and wait for its stop.
@@ -956,6 +968,34 @@ impl HostHandle {
             });
         }
         Ok(uploaded.path)
+    }
+
+    /// Installs herdr's integration `id` on the host (contracts.md, "v0.1.3: zero-config
+    /// Reply", Lane App): `<herdr> integration install <id>` as one exec, with the herdr path from
+    /// the capability probe, within the exec timeout. `id` must be one of
+    /// [`herdr::INTEGRATIONS`], else `InvalidName` with nothing sent (it is the only input, and
+    /// it goes as its own argument). `Ok` on exit 0; `NotInstalled` without herdr;
+    /// `CommandFailed` with the first line of its stderr otherwise. A running agent loads the
+    /// integration when it next starts.
+    pub async fn install_herdr_integration(&self, id: String) -> Result<(), HostError> {
+        if !herdr::is_integration(&id) {
+            return Err(HostError::InvalidName);
+        }
+        self.query(QUERY_TIMEOUT, |reply| {
+            HostCommand::InstallHerdrIntegration { id, reply }
+        })
+        .await
+    }
+
+    /// The state of herdr's integrations on the host (`<herdr> integration status`, one exec):
+    /// each of [`herdr::INTEGRATIONS`] that herdr lists, current, outdated or not installed.
+    /// `NotInstalled` without herdr; `CommandFailed` when herdr cannot say (a herdr without
+    /// integrations, a slow host).
+    pub async fn herdr_integrations(&self) -> Result<Vec<herdr::Integration>, HostError> {
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::HerdrIntegrations {
+            reply,
+        })
+        .await
     }
 
     /// Watches a herdr session (`None` is the default session). The watch ends with the
@@ -2050,6 +2090,78 @@ mod tests {
             })
         );
         drop(answers.join().unwrap());
+    }
+
+    #[tokio::test]
+    async fn an_integration_install_takes_only_an_allowlisted_id_and_is_answered_through_its_reply()
+    {
+        let (_recorder, handle, mut driver) = setup(false);
+        assert_eq!(
+            handle.install_herdr_integration("pi".into()).await,
+            Err(HostError::NotConnected)
+        );
+        connect(&mut driver);
+        // Refused before anything is sent: the driver below would see it otherwise.
+        for id in ["", "amp", "Pi", "pi ", "pi;id", "cursor-agent", "agy", "-h"] {
+            assert_eq!(
+                handle.install_herdr_integration(id.into()).await,
+                Err(HostError::InvalidName),
+                "{id:?}"
+            );
+        }
+        let answers = std::thread::spawn(move || {
+            let HostCommand::InstallHerdrIntegration { id, reply } = driver.blocking_next_command()
+            else {
+                panic!("unexpected command")
+            };
+            assert_eq!(id, "antigravity-cli");
+            reply.send(Ok(())).unwrap();
+            let HostCommand::InstallHerdrIntegration { id, reply } = driver.blocking_next_command()
+            else {
+                panic!("unexpected command")
+            };
+            assert_eq!(id, "pi");
+            reply
+                .send(Err(HostError::NotInstalled {
+                    program: "herdr".into(),
+                }))
+                .unwrap();
+            let HostCommand::HerdrIntegrations { reply } = driver.blocking_next_command() else {
+                panic!("unexpected command")
+            };
+            reply
+                .send(Ok(vec![herdr::Integration {
+                    id: "pi".into(),
+                    state: herdr::IntegrationState::Current,
+                }]))
+                .unwrap();
+            driver
+        });
+        assert_eq!(
+            handle
+                .install_herdr_integration("antigravity-cli".into())
+                .await,
+            Ok(())
+        );
+        assert_eq!(
+            handle.install_herdr_integration("pi".into()).await,
+            Err(HostError::NotInstalled {
+                program: "herdr".into()
+            })
+        );
+        assert_eq!(
+            handle.herdr_integrations().await,
+            Ok(vec![herdr::Integration {
+                id: "pi".into(),
+                state: herdr::IntegrationState::Current,
+            }])
+        );
+        let mut driver = answers.join().unwrap();
+        driver.close(CloseReason::Disconnected);
+        assert_eq!(
+            handle.install_herdr_integration("pi".into()).await,
+            Err(HostError::Closed)
+        );
     }
 
     #[tokio::test]

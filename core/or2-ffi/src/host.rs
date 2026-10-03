@@ -11,7 +11,9 @@ use or2_core::term::TerminalSize;
 use or2_core::transport::EndpointError;
 use zeroize::Zeroizing;
 
-use crate::herdr::{AgentIdentity, HerdrListener, HerdrListenerObserver, HerdrWatch};
+use crate::herdr::{
+    AgentIdentity, HerdrIntegration, HerdrListener, HerdrListenerObserver, HerdrWatch,
+};
 use crate::keys::PublicKeyInfo;
 use crate::session::{CloseReason, Session, SessionListener, TerminalTransport};
 
@@ -605,6 +607,32 @@ impl HostConnection {
             .into())
     }
 
+    /// Installs herdr's integration `id` on the host (API 19; contracts.md, "v0.1.3: zero-config
+    /// Reply", Lane App), so the agent reports its session to herdr and its notifications get
+    /// Reply once it restarts. Runs `<herdr> integration install <id>` as one exec on this
+    /// connection, with the herdr path from the capability probe, within the exec timeout (10 s).
+    /// `id` must be one of herdr 0.9.3's integrations (`pi`, `omp`, `claude`, `codex`, `copilot`,
+    /// `devin`, `droid`, `kimi`, `opencode`, `kilo`, `hermes`, `qodercli`, `qwen`, `cursor`,
+    /// `mastracode`, `antigravity-cli`, `grok`, `letta`), else `InvalidName` with nothing sent.
+    /// `Ok` on exit 0; `NotInstalled` without herdr; `CommandFailed` with the first line of its
+    /// stderr otherwise; `NotConnected` / `Closed` without a live connection.
+    pub async fn install_herdr_integration(&self, id: String) -> Result<(), HostError> {
+        Ok(self.handle.install_herdr_integration(id).await?)
+    }
+
+    /// herdr's integrations on the host (API 19): `<herdr> integration status`, one exec, read
+    /// for the ids `install_herdr_integration` takes (others, and unreadable lines, are left
+    /// out). `NotInstalled` without herdr; `CommandFailed` when herdr cannot say.
+    pub async fn herdr_integrations(&self) -> Result<Vec<HerdrIntegration>, HostError> {
+        Ok(self
+            .handle
+            .herdr_integrations()
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
     /// Uploads an image for an agent to read and returns its absolute path on the host (API 16;
     /// contracts.md, "Image paste"). The bytes go over SFTP on this host's connection (no new
     /// connection, no shell command) to `~/.cache/or2/images/or2-<UTC yyyyMMdd-HHmmss>-<6
@@ -775,6 +803,31 @@ mod tests {
             ReplyRoute::from(or2_core::herdr::ReplyRoute::Typed),
             ReplyRoute::Typed
         );
+        for (state, expected) in [
+            (
+                or2_core::herdr::IntegrationState::Current,
+                crate::herdr::HerdrIntegrationState::Current,
+            ),
+            (
+                or2_core::herdr::IntegrationState::Outdated,
+                crate::herdr::HerdrIntegrationState::Outdated,
+            ),
+            (
+                or2_core::herdr::IntegrationState::NotInstalled,
+                crate::herdr::HerdrIntegrationState::NotInstalled,
+            ),
+        ] {
+            assert_eq!(
+                HerdrIntegration::from(or2_core::herdr::Integration {
+                    id: "pi".into(),
+                    state,
+                }),
+                HerdrIntegration {
+                    id: "pi".into(),
+                    state: expected,
+                }
+            );
+        }
         assert_eq!(
             core::TerminalTarget::from(TerminalTarget::Herdr {
                 session: Some("s".into()),

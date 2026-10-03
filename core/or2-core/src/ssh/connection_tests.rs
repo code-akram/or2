@@ -291,6 +291,12 @@ enum Streamlocal {
 const HERDR_LISTING: &str = include_str!("../herdr/fixtures/session_list.json");
 const HERDR_ACK: &str = include_str!("../herdr/fixtures/ack.json");
 const HERDR_SNAPSHOT: &str = include_str!("../herdr/fixtures/snapshot_two_panes.json");
+/// The first lines of `herdr integration status` (0.9.3), the home directory replaced.
+const HERDR_INTEGRATION_STATUS: &str = "\
+pi: not installed (/home/user/.pi/agent/extensions/herdr-agent-state.ts)
+claude: current (v10) (/home/user/.claude/hooks/herdr-agent-state.sh)
+letta (experimental): not installed (/home/user/.letta/hooks/herdr-agent-session.sh)
+";
 
 struct Shared {
     streamlocal: Mutex<Streamlocal>,
@@ -304,6 +310,9 @@ struct Shared {
     /// The reply requests herdr received, in order, as `<method> <pane>`. Its `agent.prompt`
     /// refuses `w1:p1` as blocked and does not find `w9:p9`.
     replies: Mutex<Vec<String>>,
+    /// The `herdr integration ...` command lines run, in order. `install pi` succeeds, any other
+    /// install fails with two lines on stderr, and `status` prints herdr 0.9.3's answer.
+    integrations: Mutex<Vec<String>>,
     /// The capability probe starts (and is counted) but never finishes.
     probe_hangs: AtomicBool,
     /// Refuse session channels like an sshd at `MaxSessions`.
@@ -656,6 +665,28 @@ impl server::Handler for Server {
         self.shared.sessions.lock().unwrap().remove(&channel);
         self.shared.execs.fetch_add(1, Ordering::SeqCst);
         let command = String::from_utf8_lossy(command).into_owned();
+        if command.contains("'integration'") {
+            self.shared
+                .integrations
+                .lock()
+                .unwrap()
+                .push(command.clone());
+            session.channel_success(channel)?;
+            if command.ends_with("'integration' 'status'") {
+                session.data(channel, HERDR_INTEGRATION_STATUS.as_bytes().to_vec())?;
+                return finish(session, channel, 0);
+            }
+            if command.ends_with("'install' 'pi'") {
+                session.data(channel, b"installed pi integration\n".to_vec())?;
+                return finish(session, channel, 0);
+            }
+            session.extended_data(
+                channel,
+                1,
+                b"error: cannot write the hook: permission denied\nsecond line\n".to_vec(),
+            )?;
+            return finish(session, channel, 1);
+        }
         if command.contains("'session' 'list' '--json'") {
             session.channel_success(channel)?;
             let listing = *self.shared.herdr_list.lock().unwrap();
@@ -853,6 +884,7 @@ impl Fixture {
             herdr_list: Mutex::new(HerdrList::Fixture),
             focused: Mutex::new(Vec::new()),
             replies: Mutex::new(Vec::new()),
+            integrations: Mutex::new(Vec::new()),
             probe_hangs: AtomicBool::new(false),
             refuse_channels: AtomicBool::new(false),
             stall_auth: AtomicBool::new(false),
@@ -2029,6 +2061,70 @@ fn a_reply_needs_herdr() {
         })
     );
     assert!(fixture.shared.replies.lock().unwrap().is_empty());
+    fixture.handle.disconnect();
+}
+
+#[test]
+fn an_integration_is_installed_with_the_probed_herdr_as_one_exec_and_its_failure_says_why() {
+    let fixture = Fixture::connected_with(Duration::from_secs(5), PROBE_WITH_HERDR);
+    let install =
+        |id: &str| runtime().block_on(fixture.handle.install_herdr_integration(id.into()));
+    assert_eq!(install("pi"), Ok(()));
+    assert_eq!(
+        install("droid"),
+        Err(HostError::CommandFailed {
+            message: "error: cannot write the hook: permission denied".into()
+        })
+    );
+    // Off the allowlist: nothing reaches the host.
+    assert_eq!(install("pi'; reboot; '"), Err(HostError::InvalidName));
+    assert_eq!(
+        runtime().block_on(fixture.handle.herdr_integrations()),
+        Ok(vec![
+            herdr::Integration {
+                id: "pi".into(),
+                state: herdr::IntegrationState::NotInstalled
+            },
+            herdr::Integration {
+                id: "claude".into(),
+                state: herdr::IntegrationState::Current
+            },
+            herdr::Integration {
+                id: "letta".into(),
+                state: herdr::IntegrationState::NotInstalled
+            },
+        ])
+    );
+    assert_eq!(
+        *fixture.shared.integrations.lock().unwrap(),
+        [
+            "'/fake/herdr' 'integration' 'install' 'pi'",
+            "'/fake/herdr' 'integration' 'install' 'droid'",
+            "'/fake/herdr' 'integration' 'status'",
+        ]
+    );
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+    assert_eq!(install("pi"), Err(HostError::Closed));
+}
+
+#[test]
+fn an_integration_install_needs_herdr() {
+    let fixture = Fixture::connected(Duration::from_secs(5));
+    let not_installed = Err(HostError::NotInstalled {
+        program: "herdr".into(),
+    });
+    assert_eq!(
+        runtime().block_on(fixture.handle.install_herdr_integration("pi".into())),
+        not_installed
+    );
+    assert_eq!(
+        runtime()
+            .block_on(fixture.handle.herdr_integrations())
+            .map(drop),
+        not_installed
+    );
+    assert!(fixture.shared.integrations.lock().unwrap().is_empty());
     fixture.handle.disconnect();
 }
 
