@@ -17,6 +17,9 @@ Each release's notes are in [docs/releases/](docs/releases/).
   keyboard (an inserted image), or from any app's Share menu. or2 shrinks it, strips its metadata (location
   included), uploads it over SFTP on the host's connection to `~/.cache/or2/images` (swept after seven days),
   and inserts its path at the prompt without pressing Enter.
+- Several images at once: pick up to 10 in the photo picker or share several from another app. Each terminal has
+  one queue that uploads them one after another (an image added meanwhile joins it), then inserts all their paths
+  together; one that fails is skipped and reported, and Cancel stops the lot.
 
 ### Changed
 
