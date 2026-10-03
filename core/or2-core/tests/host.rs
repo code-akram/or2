@@ -30,9 +30,9 @@ use or2_core::remote::{OUTPUT_CAP, RemoteCommand, RemoteError, RemoteHost};
 use or2_core::session::{
     CloseReason, SessionFailure, SessionHandle, SessionObserver, SessionState,
 };
-use or2_core::ssh::{HostOptions, SshRemote, connect_host, connect_tapped};
+use or2_core::ssh::{HostOptions, SshRemote, connect_host, connect_host_with};
 use or2_core::term::TerminalSize;
-use or2_core::transport::DirectTcp;
+use or2_core::transport::{DirectTcp, DirectUdp};
 
 /// Skips the test without `/usr/bin/sshd`, or fails when `OR2_REQUIRE_SSHD` is set.
 macro_rules! require_sshd {
@@ -550,8 +550,9 @@ fn remote_with(sshd: &Sshd, options: HostOptions) -> (HostHandle, SshRemote) {
     let key = ClientKey::generate_ed25519("");
     sshd.authorize(&key);
     let (observer, _states, _) = host_observer();
-    let (host, tapped) = connect_tapped(
+    let (host, tapped) = connect_host_with(
         Arc::new(DirectTcp),
+        Arc::new(DirectUdp),
         request(&key, &[(lo(), sshd.port)], std::slice::from_ref(&sshd.host)),
         observer,
         options,

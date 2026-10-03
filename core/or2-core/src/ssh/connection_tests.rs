@@ -19,7 +19,7 @@ use crate::keys::ClientKey;
 use crate::session::{SessionFailure, SessionObserver, SessionState};
 use crate::ssh::connect_host;
 use crate::term::TerminalSize;
-use crate::transport::DirectTcp;
+use crate::transport::{DirectTcp, DirectUdp};
 
 struct Recorder(sync::Sender<(HostState, std::thread::ThreadId)>);
 
@@ -124,8 +124,9 @@ fn connect_over_blackhole(
     sync::Receiver<(HostState, std::thread::ThreadId)>,
 ) {
     let (observer, states) = recorder();
-    let handle = crate::ssh::connect_host_with(
+    let (handle, _) = crate::ssh::connect_host_with(
         Arc::new(Blackhole),
+        Arc::new(DirectUdp),
         request(addresses, &[]),
         observer,
         options,
@@ -233,9 +234,11 @@ fn connect_host_with_options(
 ) -> HostHandle {
     start(
         Arc::new(DirectTcp),
+        Arc::new(DirectUdp),
         request(&[("127.0.0.1", port)], &[]),
         observer,
         options,
+        None,
     )
 }
 
@@ -909,7 +912,14 @@ impl Fixture {
         )
         .unwrap();
         let (tap, tapped) = oneshot::channel();
-        let handle = start_tapped(transport, request, observer, options, Some(tap));
+        let handle = start(
+            transport,
+            Arc::new(DirectUdp),
+            request,
+            observer,
+            options,
+            Some(tap),
+        );
         Self {
             port,
             handle,
@@ -1357,9 +1367,11 @@ fn a_connection_task_that_dies_without_reporting_closes_the_host_with_internal()
     // The default 20 s connect timeout: the host must not need it to notice.
     let handle = start(
         Arc::new(Panicking),
+        Arc::new(DirectUdp),
         request(&[("127.0.0.1", 1)], &[]),
         observer,
         HostOptions::default(),
+        None,
     );
     let CloseReason::Failed(SessionFailure::Internal(_)) = closed(&states) else {
         panic!("expected Internal")

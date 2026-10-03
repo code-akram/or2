@@ -34,7 +34,7 @@ use or2_core::mosh::LinkHealth;
 use or2_core::session::{
     CloseReason, SessionFailure, SessionHandle, SessionObserver, SessionState,
 };
-use or2_core::ssh::{HostOptions, connect_host_with_datagrams};
+use or2_core::ssh::{HostOptions, connect_host_with};
 use or2_core::term::TerminalSize;
 use or2_core::transport::DirectTcp;
 
@@ -248,7 +248,7 @@ impl Live {
         let proxy = Proxy::new(sshd.port);
         let (tx, states) = mpsc::channel();
         let log = Log::default();
-        let host = connect_host_with_datagrams(
+        let (host, _) = connect_host_with(
             Arc::new(DirectTcp),
             Arc::new(udp.clone()),
             request(&key, proxy.port, &sshd.host),
@@ -282,7 +282,7 @@ impl Live {
     /// A second, direct connection to the same sshd, like the one a restarted app makes.
     fn reconnect(&self) -> (HostHandle, mpsc::Receiver<HostState>) {
         let (tx, states) = mpsc::channel();
-        let host = connect_host_with_datagrams(
+        let (host, _) = connect_host_with(
             Arc::new(DirectTcp),
             Arc::new(TestUdp::default()),
             request(&self.key, self.sshd.port, &self.sshd.host),

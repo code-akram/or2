@@ -435,7 +435,7 @@ impl ServerDebt {
 
     /// The pids of servers whose stop was given up on (the connection was lost, or no channel
     /// came free in time): they are still running on the host.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(super) fn stranded(&self) -> Vec<u32> {
         self.state().stranded.clone()
     }

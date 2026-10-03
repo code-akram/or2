@@ -752,53 +752,10 @@ impl RemoteHost for SshHost {
     }
 }
 
-pub(super) fn start<T: Transport>(
-    transport: Arc<T>,
-    request: HostConnectRequest,
-    observer: Arc<dyn HostObserver>,
-    options: HostOptions,
-) -> HostHandle {
-    start_datagrams(
-        transport,
-        Arc::new(crate::transport::DirectUdp),
-        request,
-        observer,
-        options,
-    )
-}
-
-/// [`start`] with the datagram transport that mosh terminals use.
-pub(super) fn start_datagrams<T: Transport, D: DatagramTransport>(
-    transport: Arc<T>,
-    datagrams: Arc<D>,
-    request: HostConnectRequest,
-    observer: Arc<dyn HostObserver>,
-    options: HostOptions,
-) -> HostHandle {
-    start_tapped_with(transport, datagrams, request, observer, options, None)
-}
-
-/// [`start`], also handing the established connection to `tap` (tests drive exec and
-/// streamlocal directly through it).
-#[cfg(any(test, feature = "test-support"))]
-fn start_tapped<T: Transport>(
-    transport: Arc<T>,
-    request: HostConnectRequest,
-    observer: Arc<dyn HostObserver>,
-    options: HostOptions,
-    tap: Option<oneshot::Sender<Arc<SshHost>>>,
-) -> HostHandle {
-    start_tapped_with(
-        transport,
-        Arc::new(crate::transport::DirectUdp),
-        request,
-        observer,
-        options,
-        tap,
-    )
-}
-
-fn start_tapped_with<T: Transport, D: DatagramTransport>(
+/// Starts a host connection: its driver on a thread of its own, the network on the shared
+/// runtime, mosh terminals over `datagrams`. `tap` (tests) receives the established connection
+/// once it is `Connected`.
+pub(super) fn start<T: Transport, D: DatagramTransport>(
     transport: Arc<T>,
     datagrams: Arc<D>,
     request: HostConnectRequest,
@@ -832,14 +789,6 @@ fn start_tapped_with<T: Transport, D: DatagramTransport>(
 pub struct SshRemote(Arc<SshHost>);
 
 #[cfg(any(test, feature = "test-support"))]
-impl SshRemote {
-    /// The pids of `mosh-server`s whose stop was given up on (still running on the host).
-    pub fn stranded_servers(&self) -> Vec<u32> {
-        self.0.servers.stranded()
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
 impl RemoteHost for SshRemote {
     type Stream = russh::ChannelStream<russh_client::Msg>;
 
@@ -852,18 +801,27 @@ impl RemoteHost for SshRemote {
     }
 }
 
-/// [`start`] for tests: the host handle plus a receiver that yields the connection's
-/// [`SshRemote`] once it is `Connected` (it never yields if the host fails first).
+/// `connect_host` for tests: over any transports and with explicit timings. The receiver
+/// yields the established connection as an [`SshRemote`] once it is `Connected` (it never
+/// yields if the host fails first).
 #[cfg(any(test, feature = "test-support"))]
-pub fn connect_tapped<T: Transport>(
+pub fn connect_host_with<T: Transport, D: DatagramTransport>(
     transport: Arc<T>,
+    datagrams: Arc<D>,
     request: HostConnectRequest,
     observer: Arc<dyn HostObserver>,
     options: HostOptions,
 ) -> (HostHandle, oneshot::Receiver<SshRemote>) {
     let (tap, tapped) = oneshot::channel();
     let (forward, forwarded) = oneshot::channel::<Arc<SshHost>>();
-    let handle = start_tapped(transport, request, observer, options, Some(forward));
+    let handle = start(
+        transport,
+        datagrams,
+        request,
+        observer,
+        options,
+        Some(forward),
+    );
     runtime().spawn(async move {
         if let Ok(host) = forwarded.await {
             let _ = tap.send(SshRemote(host));

@@ -32,7 +32,7 @@ use or2_core::host::{
 };
 use or2_core::keys::ClientKey;
 use or2_core::session::{CloseReason, SessionFailure, SessionObserver, SessionState};
-use or2_core::ssh::{HostOptions, connect_host_with_datagrams};
+use or2_core::ssh::{HostOptions, connect_host_with};
 use or2_core::term::TerminalSize;
 use or2_core::transport::DirectTcp;
 
@@ -209,7 +209,7 @@ impl Rig {
     fn connect(&self) -> (HostHandle, Duration, Instant) {
         let (tx, states) = mpsc::channel();
         let started = Instant::now();
-        let host = connect_host_with_datagrams(
+        let (host, _) = connect_host_with(
             Arc::new(DirectTcp),
             Arc::new(TestUdp::default()),
             HostConnectRequest::new(
@@ -425,7 +425,7 @@ fn an_unreachable_host_never_delays_another_hosts_connection_or_inbox() {
 
     let (tx, states) = mpsc::channel();
     let key = ClientKey::generate_ed25519("");
-    let stuck = connect_host_with_datagrams(
+    let (stuck, _) = connect_host_with(
         Arc::new(DirectTcp),
         Arc::new(TestUdp::default()),
         HostConnectRequest::new(
