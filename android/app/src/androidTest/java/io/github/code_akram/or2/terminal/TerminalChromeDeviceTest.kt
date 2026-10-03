@@ -579,11 +579,11 @@ class TerminalChromeDeviceTest {
     }
 
     @Test
-    fun shiftTabSlashAndAtFollowPasteAndGoWhereTheyShould() {
+    fun shiftTabSlashAndAtAreInTheOwnersOrderAndGoWhereTheyShould() {
         show()
         // ⇧Tab is Shift+Tab whatever is latched, and leaves the latch for the next key.
         compose.onNodeWithTag("key:Ctrl").performClick().assert(armed())
-        compose.onNodeWithTag("key:ShiftTab").performScrollTo().assertTextContains("⇧Tab").performClick()
+        compose.onNodeWithTag("key:ShiftTab").performScrollTo().assertTextContains("Tab").performClick()
         compose.runOnIdle { assertEquals(listOf(KeyInput(TerminalKey.Tab, KeyModifiers(true, false, false, false))), session.keys) }
         compose.onNodeWithTag("key:Ctrl").performScrollTo().assert(armed())
         // `/` with the composer closed is a key into the terminal: it takes the latch (Ctrl+/).
@@ -600,9 +600,9 @@ class TerminalChromeDeviceTest {
         compose.onNodeWithTag("key:Slash").performScrollTo().performClick()
         compose.onNodeWithTag("composer-input").assertTextContains("ask @/")
         compose.runOnIdle { assertTrue(session.keys.isEmpty() && session.texts.isEmpty()) }
-        // They follow Paste in the row, in this order.
+        // The owner's order (2026-10-03): Ctrl, Esc, Tab, ⇧Tab, ⇧, arrows, Paste, /, @.
         compose.waitForIdle()
-        val left = listOf("Paste", "ShiftTab", "Slash", "At").map { compose.onNodeWithTag("key:$it").fetchSemanticsNode().positionInRoot.x }
+        val left = listOf("Ctrl", "Esc", "Tab", "ShiftTab", "Shift", "Arrows", "Paste", "Slash", "At").map { compose.onNodeWithTag("key:$it").fetchSemanticsNode().positionInRoot.x }
         assertEquals(left.sorted(), left)
     }
 

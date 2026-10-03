@@ -171,7 +171,13 @@ fun ToolKey(
                 ),
             contentAlignment = Alignment.Center,
         ) {
-            if (label != null) {
+            if (label != null && icon != null) {
+                // An icon before the label (`⇧Tab`): the glyph small, so the key stays a text key's width.
+                Row(Modifier.padding(horizontal = Or2Dimens.KeyLabelPadding), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(icon, null, Modifier.size(KeyGlyph), tint = color)
+                    Text(label, style = Or2Type.Key, color = color, maxLines = 1, softWrap = false)
+                }
+            } else if (label != null) {
                 Text(
                     label, style = Or2Type.Key, color = color, maxLines = 1, softWrap = false,
                     modifier = Modifier.padding(horizontal = Or2Dimens.KeyLabelPadding),
@@ -182,6 +188,9 @@ fun ToolKey(
         }
     }
 }
+
+/** The icon drawn before a key's label (`⇧Tab`'s Shift arrow). */
+val KeyGlyph = 12.dp
 
 /** What the toolbar needs from the terminal; the screen owns the state, the toolbar only draws it. */
 class ToolbarState(val ctrl: Boolean, val selecting: Boolean, val padOpen: Boolean, val composerOpen: Boolean, val shift: Boolean = false)
@@ -200,8 +209,8 @@ enum class ToolbarKey(val tag: String, val description: String, val label: Strin
     TAB("Tab", "Tab", label = "Tab"),
     ARROWS("Arrows", "Arrow pad", icon = Or2Icons.Dpad),
     PASTE("Paste", "Paste", icon = Or2Icons.Paste),
-    SHIFT_TAB("ShiftTab", "Shift+Tab", label = "⇧Tab"),
-    SHIFT("Shift", "Shift", label = "⇧"),
+    SHIFT_TAB("ShiftTab", "Shift+Tab", label = "Tab", icon = Or2Icons.Shift),
+    SHIFT("Shift", "Shift", icon = Or2Icons.Shift),
     SLASH("Slash", "Slash", label = "/"),
     AT("At", "At sign", label = "@"),
     COMPOSER("Composer", "Composer", icon = Or2Icons.Chat),

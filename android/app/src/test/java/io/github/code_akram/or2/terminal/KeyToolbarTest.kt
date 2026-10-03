@@ -21,7 +21,8 @@ class KeyToolbarTest {
 
     /** A key's touch box: the drawn key (at least [Or2Dimens.KeyWidth]; a label plus its padding) and the touch inset. */
     private fun boxWidth(key: ToolbarKey): Float {
-        val drawn = maxOf(Or2Dimens.KeyWidth.value, key.label?.let { labelWidth(it) + 2 * Or2Dimens.KeyLabelPadding.value } ?: 0f)
+        val glyph = if (key.label != null && key.icon != null) KeyGlyph.value else 0f
+        val drawn = maxOf(Or2Dimens.KeyWidth.value, key.label?.let { glyph + labelWidth(it) + 2 * Or2Dimens.KeyLabelPadding.value } ?: 0f)
         return drawn + (Or2Dimens.KeyTouchWidth - Or2Dimens.KeyWidth).value
     }
 
@@ -58,7 +59,8 @@ class KeyToolbarTest {
     @Test
     fun everyKeyHasALabelOrAnIconAndADescription() {
         ToolbarKey.entries.forEach {
-            assertTrue(it.name, (it.label == null) != (it.icon == null))
+            // A label, an icon, or both (`⇧Tab`: the Shift arrow, then `Tab`); never neither.
+            assertTrue(it.name, it.label != null || it.icon != null)
             assertTrue(it.name, it.description.isNotBlank())
         }
     }

@@ -419,8 +419,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   it) of rounded keys (`surface`), 30 dp wide (text keys as wide as their label plus 5 dp each side) and 30 dp
   tall inside a 40 dp tall pill, each with a 32 x 40 dp touch box (the platform grows the hit area to 48 dp):
   in the owner's order (2026-10-03): `Ctrl`, `Esc`, `Tab`, `⇧Tab` (Shift+Tab to the terminal, whatever is latched:
-  Claude Code's mode cycle, which Gboard cannot send), `⇧` (latches Shift for the next key, as `Ctrl` latches Ctrl:
-  Shift+Enter, Shift+arrows, a capital) as mono text, then the arrow-pad and paste icon keys, then `/` and `@` as mono text
+  Claude Code's mode cycle, which Gboard cannot send; the Shift arrow drawn as a 12 dp icon before the mono `Tab`),
+  `⇧` (the Shift arrow icon: latches Shift for the next key, as `Ctrl` latches Ctrl: Shift+Enter, Shift+arrows, a
+  capital; the `⇧` character is never used, the mono face lacks it), then the arrow-pad and paste icon keys, then `/` and `@` as mono text
   (into the composer at its cursor while it is open, else typed into the terminal, taking a latched `Ctrl`), then,
   4 dp apart, the composer and keyboard toggles without key backgrounds. A latched `Ctrl` or `⇧` draws in `accent` until
   it has been used for one key; `Alt` lives in the arrow pad's extras row. While text is selected `Copy` and

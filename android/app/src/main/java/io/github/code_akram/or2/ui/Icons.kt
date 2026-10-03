@@ -30,6 +30,8 @@ object Or2Icons {
     val ChevronRight = icon("chevron-right", "M9 5l7 7-7 7")
     val ChevronDown = icon("chevron-down", "M5 9l7 7 7-7")
     val ArrowUp = icon("arrow-up", "M6 15l6-6 6 6")
+    /** A keyboard's Shift: the outlined arrow, drawn rather than the `⇧` character, which the mono face lacks. */
+    val Shift = icon("shift", "M12 4.5l-7 7.5h4v7.5h6V12h4z")
     val ArrowDown = icon("arrow-down", "M6 9l6 6 6-6")
     val ArrowLeft = icon("arrow-left", "M15 6l-6 6 6 6")
     val ArrowRight = icon("arrow-right", "M9 6l6 6-6 6")

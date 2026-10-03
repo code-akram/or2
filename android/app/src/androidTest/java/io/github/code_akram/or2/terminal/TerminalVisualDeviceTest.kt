@@ -13,6 +13,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import io.github.code_akram.or2.ffi.CursorShape
 import io.github.code_akram.or2.ffi.TerminalCursor
 import java.io.File
+import io.github.code_akram.or2.ui.Or2Dimens
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -48,7 +49,7 @@ class TerminalVisualDeviceTest {
             val bounds = view.toolbarKeyBounds.getValue(label)
             assertTrue("$label must be visible", bounds.width() > 0 && bounds.height() > 0)
             assertTrue("$label ($bounds) must fit within $toolbar without scrolling", toolbar.contains(bounds))
-            assertTrue("$label touch box must be at least 34 dp wide", bounds.width() >= 34 * density - 1)
+            assertTrue("$label touch box must be at least 32 dp wide", bounds.width() >= Or2Dimens.KeyTouchWidth.value * density - 1)
             assertTrue("$label touch box must be at least 40 dp tall (the key itself is drawn 30 dp)", bounds.height() >= 40 * density - 1)
             assertTrue("$label must follow the preceding key", bounds.left >= right - 1)
             right = bounds.right
