@@ -21,11 +21,11 @@
 
 #![forbid(unsafe_code)]
 
-pub mod bootstrap;
+pub(crate) mod bootstrap;
 mod driver;
-pub mod ghostty;
+pub(crate) mod ghostty;
 mod link;
-pub mod ssp;
+pub(crate) mod ssp;
 
 pub use bootstrap::{BootstrapError, MoshKey, MoshParams, bootstrap, terminate};
 pub use driver::CONNECT_TIMEOUT;

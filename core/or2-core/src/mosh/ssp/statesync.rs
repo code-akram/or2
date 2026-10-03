@@ -88,6 +88,7 @@ impl UserMessage {
     /// Every keystroke byte in a serialized user diff, concatenated.
     /// Resizes are skipped, so this answers "what did the user type",
     /// which is what a caller checking a diff usually means.
+    #[cfg(test)]
     pub fn keystrokes_of(diff: &[u8]) -> Result<Vec<u8>> {
         let msg = Self::decode(diff).map_err(|_| MoshError::BadInstruction)?;
         Ok(msg
@@ -149,10 +150,6 @@ impl UserStream {
         Self::default()
     }
 
-    pub fn push_byte(&mut self, byte: u8) {
-        self.events.push(UserEvent::Byte(byte));
-    }
-
     pub fn push_bytes(&mut self, bytes: &[u8]) {
         self.events
             .extend(bytes.iter().copied().map(UserEvent::Byte));
@@ -162,16 +159,9 @@ impl UserStream {
         self.events.push(UserEvent::Resize { width, height });
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.events.is_empty()
-    }
-
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.events.len()
-    }
-
-    pub fn events(&self) -> &[UserEvent] {
-        &self.events
     }
 
     /// The diff that takes `existing` to `self`: the events `existing`
@@ -225,6 +215,7 @@ impl UserStream {
     }
 
     /// The diff from nothing: what a fresh peer needs to catch up.
+    #[cfg(test)]
     pub fn init_diff(&self) -> Vec<u8> {
         self.diff_from(&UserStream::new()).unwrap_or_default()
     }
@@ -232,6 +223,7 @@ impl UserStream {
     /// Apply a diff produced by [`Self::diff_from`], appending its
     /// events. This is the server's job in a real session; the client
     /// runs it only to verify its own encoding.
+    #[cfg(test)]
     pub fn apply_string(&mut self, diff: &[u8]) -> Result<()> {
         let msg = UserMessage::decode(diff).map_err(|_| MoshError::BadInstruction)?;
         for inst in msg.instruction {

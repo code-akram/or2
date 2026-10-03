@@ -22,12 +22,6 @@ pub mod statesync;
 pub mod terminal;
 pub mod transport;
 
-pub use error::{MoshError, Result};
-pub use key::Base64Key;
-pub use screen::{Screen, ScreenError};
-pub use session::{Fault, LinkHealth, Session, Tick};
-pub use terminal::ClientTerminal;
-
 /// Stands in for bytes that may be typed secrets or screen text in `Debug` output. Anything
 /// that holds decrypted plaintext, keystrokes or host output prints through this, so a stray
 /// `{:?}` or log line of a protocol type cannot leak them.

@@ -108,6 +108,7 @@ impl<S: Screen> ClientTerminal<S> {
     }
 
     /// Whether a diff from state `num` can be applied: it is the live state or a held snapshot.
+    #[cfg(test)]
     pub fn holds(&self, num: u64) -> bool {
         num == self.live_num || self.saved.contains_key(&num)
     }
@@ -151,6 +152,7 @@ impl<S: Screen> ClientTerminal<S> {
 
     /// How many states are held, the live one included; a session that never prunes would grow
     /// this without bound.
+    #[cfg(test)]
     pub fn held_states(&self) -> usize {
         1 + self.saved.len()
     }

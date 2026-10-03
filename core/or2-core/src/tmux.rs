@@ -14,7 +14,7 @@ use crate::remote::{ExecOutput, RemoteCommand, RemoteError, RemoteHost};
 /// `_`, so a name never contains the delimiter, and the name being last means even a
 /// surprising one could not shift the numeric fields. (A control character such as U+001F
 /// cannot appear in a command line `RemoteCommand` renders.)
-pub const LIST_FORMAT: &str =
+pub(crate) const LIST_FORMAT: &str =
     "#{session_windows}:#{session_attached}:#{session_created}:#{session_activity}:#{session_name}";
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -28,7 +28,7 @@ pub enum TmuxError {
 
 /// `<tmux> -u list-sessions -F <LIST_FORMAT>`. `-u` forces UTF-8 so non-ASCII names come back
 /// as written, whatever locale the non-interactive login shell has.
-pub fn list_command(tmux: &str) -> RemoteCommand {
+pub(crate) fn list_command(tmux: &str) -> RemoteCommand {
     RemoteCommand::new(tmux).args(["-u", "list-sessions", "-F", LIST_FORMAT])
 }
 
@@ -41,7 +41,7 @@ pub fn list_command(tmux: &str) -> RemoteCommand {
 /// which is how navigation later finds exactly this terminal's client ([`navigate`]). Pass
 /// `client` only for a tmux that [`records_clients`]: an older one would reject the whole
 /// command list, attach included.
-pub fn attach_command(tmux: &str, name: &str, client: Option<&str>) -> RemoteCommand {
+pub(crate) fn attach_command(tmux: &str, name: &str, client: Option<&str>) -> RemoteCommand {
     let command = RemoteCommand::new(tmux).args(["-u", "new-session", "-A", "-s", name]);
     match client {
         Some(id) => command.args([
@@ -67,7 +67,11 @@ pub fn attach_command(tmux: &str, name: &str, client: Option<&str>) -> RemoteCom
 ///
 /// `=<name>:` is the exact session, never a prefix or pattern match. `name` must already be
 /// valid. `None` for zero lines.
-pub fn scroll_command(tmux: &str, name: &str, scroll: TargetScroll) -> Option<RemoteCommand> {
+pub(crate) fn scroll_command(
+    tmux: &str,
+    name: &str,
+    scroll: TargetScroll,
+) -> Option<RemoteCommand> {
     let target = format!("={name}:");
     let send = |args: &[&str]| -> Vec<String> {
         ["send-keys", "-t", target.as_str(), "-X"]
@@ -156,7 +160,7 @@ fn no_server(stderr: &str) -> bool {
 }
 
 /// Parses [`LIST_FORMAT`] output; lines that do not match are skipped.
-pub fn parse_list(stdout: &str) -> Vec<TmuxSession> {
+pub(crate) fn parse_list(stdout: &str) -> Vec<TmuxSession> {
     let mut sessions: Vec<TmuxSession> = stdout
         .lines()
         .filter_map(|line| {
@@ -183,20 +187,20 @@ pub fn parse_list(stdout: &str) -> Vec<TmuxSession> {
 /// A new tmux terminal's client id: 32 random lowercase hex digits. Its attach records its
 /// tmux client under it ([`attach_command`]), so it must be unique among every terminal on the
 /// tmux server: other connections, app processes and devices included.
-pub fn new_client_id() -> String {
+pub(crate) fn new_client_id() -> String {
     format!("{:032x}", rand::random::<u128>())
 }
 
 /// Whether `id` can be a client id ([`new_client_id`]): exactly 32 lowercase hex digits. It
 /// becomes part of a tmux option's name, so nothing else is accepted.
-pub fn is_valid_client_id(id: &str) -> bool {
+pub(crate) fn is_valid_client_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// The first tmux release whose `set-option` takes `-F` (formats expanded in the value: tmux
 /// CHANGES, "2.5 to 2.6"), which recording a terminal's client needs ([`attach_command`]).
 /// `#{client_name}` (2.4), user options (1.8) and server options (1.2) are older.
-pub const RECORDS_CLIENTS_SINCE: (u32, u32) = (2, 6);
+pub(crate) const RECORDS_CLIENTS_SINCE: (u32, u32) = (2, 6);
 
 /// Whether the tmux whose `tmux -V` printed `version` can record a terminal's client at its
 /// attach (`set-option -F`, [`RECORDS_CLIENTS_SINCE`]). Read strictly, since appending the
@@ -205,7 +209,7 @@ pub const RECORDS_CLIENTS_SINCE: (u32, u32) = (2, 6);
 /// `3.0-rc5`), `tmux next-X.Y` (a development build after X.Y), `tmux master`, and OpenBSD's
 /// base tmux (`tmux openbsd-X.Y`, from OpenBSD 6.3, which ships a tmux newer than 2.6).
 /// Anything else, including no answer, is `false`: the attach stays plain.
-pub fn records_clients(version: &str) -> bool {
+pub(crate) fn records_clients(version: &str) -> bool {
     fn major_minor(text: &str) -> Option<(u32, u32)> {
         let (major, rest) = text.split_once('.')?;
         let digits = rest
@@ -237,7 +241,7 @@ fn client_option(id: &str) -> String {
 /// id ([`attach_command`]), the same on every line; empty without an id, or when nothing was
 /// recorded. The client whose name it is, is that terminal's; with nothing recorded no client
 /// is.
-pub fn client_format(client: Option<&str>) -> String {
+pub(crate) fn client_format(client: Option<&str>) -> String {
     let recorded = client
         .map(|id| format!("#{{{}}}", client_option(id)))
         .unwrap_or_default();
@@ -246,7 +250,7 @@ pub fn client_format(client: Option<&str>) -> String {
 
 /// One attached tmux client, from [`client_format`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TmuxClient {
+pub(crate) struct TmuxClient {
     pub activity_unix: i64,
     /// The session it shows now.
     pub session: String,
@@ -258,12 +262,12 @@ pub struct TmuxClient {
 }
 
 /// `<tmux> -u list-clients -F <client_format(client)>`.
-pub fn list_clients_command(tmux: &str, client: Option<&str>) -> RemoteCommand {
+pub(crate) fn list_clients_command(tmux: &str, client: Option<&str>) -> RemoteCommand {
     RemoteCommand::new(tmux).args(["-u", "list-clients", "-F", &client_format(client)])
 }
 
 /// Parses [`client_format`] output; lines that do not match are skipped.
-pub fn parse_clients(stdout: &str) -> Vec<TmuxClient> {
+pub(crate) fn parse_clients(stdout: &str) -> Vec<TmuxClient> {
     stdout
         .lines()
         .filter_map(|line| {
@@ -284,7 +288,7 @@ pub fn parse_clients(stdout: &str) -> Vec<TmuxClient> {
 
 /// `<tmux> -u set-option -s -q -u @or2-client-<id>`: forgets what a terminal's attach recorded,
 /// once the terminal has closed (an option that is not set is no error).
-pub fn release_command(tmux: &str, client: &str) -> RemoteCommand {
+pub(crate) fn release_command(tmux: &str, client: &str) -> RemoteCommand {
     RemoteCommand::new(tmux).args(["-u", "set-option", "-s", "-q", "-u", &client_option(client)])
 }
 
@@ -298,7 +302,7 @@ fn exact(session: &str) -> String {
 /// `next-window -t =<session>`, `previous-window -t =<session>`, or
 /// `select-pane -L|-R|-U|-D -t =<session>:` (from the active pane of its current window).
 /// `None` for a session move, which needs a client ([`switch_command`]).
-pub fn nav_command(tmux: &str, session: &str, nav: TargetNav) -> Option<RemoteCommand> {
+pub(crate) fn nav_command(tmux: &str, session: &str, nav: TargetNav) -> Option<RemoteCommand> {
     let command = RemoteCommand::new(tmux).arg("-u");
     Some(match nav {
         TargetNav::NextWindow => command.args(["next-window", "-t", &exact(session)]),
@@ -317,7 +321,7 @@ pub fn nav_command(tmux: &str, session: &str, nav: TargetNav) -> Option<RemoteCo
 }
 
 /// `switch-client -c <client> -n` (next session) or `-p` (previous).
-pub fn switch_command(tmux: &str, client: &str, next: bool) -> RemoteCommand {
+pub(crate) fn switch_command(tmux: &str, client: &str, next: bool) -> RemoteCommand {
     RemoteCommand::new(tmux).args([
         "-u",
         "switch-client",
@@ -401,7 +405,7 @@ async fn list_clients<H: RemoteHost>(
 
 /// What a [`navigate`] call did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NavOutcome {
+pub(crate) enum NavOutcome {
     /// The move ran (or tmux said it had nowhere to go: one window, one session).
     Ran,
     /// A session move whose terminal's client cannot be identified (no client id, a tmux that
@@ -425,7 +429,7 @@ pub enum NavOutcome {
 ///   the user's fingers: a gesture is not tmux input and leaves no activity).
 ///
 /// A move with nowhere to go (one window, one session) is [`NavOutcome::Ran`].
-pub async fn navigate<H: RemoteHost>(
+pub(crate) async fn navigate<H: RemoteHost>(
     host: &H,
     tmux: &str,
     clients: &NavClients,
@@ -491,7 +495,7 @@ async fn shown_session<H: RemoteHost>(
 
 /// Forgets a closed terminal's client: its [`NavClients`] entry, and (best effort, one exec)
 /// what its attach recorded on the tmux server ([`release_command`]).
-pub async fn release_client<H: RemoteHost>(
+pub(crate) async fn release_client<H: RemoteHost>(
     host: &H,
     tmux: &str,
     clients: &NavClients,

@@ -41,9 +41,6 @@ const MAX_INSTRUCTION_BYTES: usize = 2048 * 2048;
 /// Fragment header: big-endian u64 id + big-endian u16 flags/num.
 pub const FRAGMENT_HEADER_LEN: usize = 10;
 
-/// Longest chaff mosh appends to obscure instruction length.
-pub const CHAFF_MAX: usize = 16;
-
 /// One transport instruction. Field numbers are proto2's, from
 /// `transportinstruction.proto`.
 ///
