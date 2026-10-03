@@ -2,7 +2,8 @@ package io.github.code_akram.or2.app
 
 /**
  * Where the app is. Home and the agents inbox are the two top-level screens (an icon button
- * switches between them); keys, a host, the host form and terminals are pushed on top.
+ * switches between them); keys, the host form and terminals are pushed on top. A host has no
+ * screen of its own: Home's host card is the one place for a host and its terminals.
  */
 sealed interface Destination {
     data object Home : Destination
@@ -15,7 +16,6 @@ sealed interface Destination {
 
     /** The app's settings (Agent notifications, Copy from the host), pushed from Home. */
     data object Settings : Destination
-    data class HostPage(val hostId: Long) : Destination
 
     /** The add/edit host form; [hostId] 0 adds a new host. */
     data class HostForm(val hostId: Long) : Destination
@@ -26,8 +26,8 @@ sealed interface Destination {
 
     /**
      * The last step of adding a host: "Keep sessions alive in the background?" ([BatteryPrompt]). [hostId] is the
-     * paired host to open and connect after it; 0 after the manual form (or a pairing code whose key is installed by
-     * hand), which returns to the screen the host was added from.
+     * paired host to connect (with its picker open over Home) after it; 0 after the manual form (or a pairing code
+     * whose key is installed by hand), which returns to the screen the host was added from.
      */
     data class KeepAlive(val hostId: Long) : Destination
 
@@ -38,7 +38,6 @@ sealed interface Destination {
         About -> "about"
         Licenses -> "licenses"
         Settings -> "settings"
-        is HostPage -> "host:$hostId"
         is HostForm -> "hostform:$hostId"
         is Terminal -> "terminal:$terminalId"
         EasyPair -> "pair"
@@ -55,7 +54,8 @@ sealed interface Destination {
             text == "licenses" -> Licenses
             text == "settings" -> Settings
             text.startsWith("hostform:") -> text.removePrefix("hostform:").toLongOrNull()?.let(::HostForm)
-            text.startsWith("host:") -> text.removePrefix("host:").toLongOrNull()?.let(::HostPage)
+            // The host screen (v0.1.2 and before) is gone: a saved one is Home, where its host's card is.
+            text.startsWith("host:") -> Home
             text.startsWith("terminal:") -> text.removePrefix("terminal:").toLongOrNull()?.let(::Terminal)
             text.startsWith("keepalive:") -> text.removePrefix("keepalive:").toLongOrNull()?.let(::KeepAlive)
             else -> null
@@ -87,10 +87,14 @@ data class NavStack(val entries: List<Destination> = listOf(Destination.Home)) {
     fun back(): NavStack? = if (entries.size > 1) NavStack(entries.dropLast(1)) else null
 
     /**
-     * What Back leads to: the previous screen, or Home from a top-level screen that is not Home
-     * (the Inbox), or null at Home itself, where the system leaves the app.
+     * What Back leads to: Home from a terminal (what its minimise disc does, wherever the terminal was opened from),
+     * the previous screen, or Home from a top-level screen that is not Home (the Inbox), or null at Home itself,
+     * where the system leaves the app.
      */
-    fun backOrHome(): NavStack? = back() ?: if (current != Destination.Home) NavStack() else null
+    fun backOrHome(): NavStack? = when {
+        current is Destination.Terminal -> NavStack()
+        else -> back() ?: if (current != Destination.Home) NavStack() else null
+    }
 
     /**
      * The manual form saved a host (after its key-line screen, with **New key**). A new host ends on the battery step
@@ -101,29 +105,32 @@ data class NavStack(val entries: List<Destination> = listOf(Destination.Home)) {
         if (keepAlive) replaceTop(Destination.KeepAlive(0)) else backOrHome() ?: NavStack()
 
     /**
-     * The battery step was answered (or had nothing left to ask): a paired host's page, where it connects; after the
-     * manual form, the screen the host was added from. Anything else is left alone.
+     * The battery step was answered (or had nothing left to ask): Home for a paired host (the app opens that host's
+     * picker over it and connects); after the manual form, the screen the host was added from. Anything else is left
+     * alone.
      */
     fun afterKeepAlive(): NavStack {
         val step = current as? Destination.KeepAlive ?: return this
-        return if (step.hostId != 0L) NavStack().push(Destination.HostPage(step.hostId)) else backOrHome() ?: NavStack()
+        return if (step.hostId != 0L) NavStack() else backOrHome() ?: NavStack()
     }
 
     fun encode() = entries.joinToString("|") { it.encode() }
 
     companion object {
         /**
-         * Easy pair saved [hostId]: its page from Home, where it connects at once, or first the battery step when
-         * [keepAlive] (the step then opens the page and connects).
+         * Easy pair saved [hostId]: Home, where the app opens its picker and it connects at once, or first the battery
+         * step when [keepAlive] (the step then lands on Home the same way).
          */
         fun afterPaired(hostId: Long, keepAlive: Boolean): NavStack =
-            NavStack().push(if (keepAlive) Destination.KeepAlive(hostId) else Destination.HostPage(hostId))
+            if (keepAlive) NavStack().push(Destination.KeepAlive(hostId)) else NavStack()
 
         /** A pairing code made with `--manual` ended on its key line: Home, or first the battery step when [keepAlive]. */
         fun afterKeyToInstall(keepAlive: Boolean): NavStack = if (keepAlive) NavStack().push(Destination.KeepAlive(0)) else NavStack()
 
         fun decode(text: String): NavStack {
-            val entries = text.split("|").mapNotNull(Destination::decode)
+            val decoded = text.split("|").mapNotNull(Destination::decode)
+            // Home is only ever the bottom: a saved host screen decodes to Home, and what was under it goes.
+            val entries = decoded.drop(decoded.lastIndexOf(Destination.Home).coerceAtLeast(0))
             // A stack always starts at a top-level screen; anything else saved first is dropped to Home.
             val rooted = if (entries.firstOrNull().let { it == Destination.Home || it == Destination.Inbox }) entries
             else listOf(Destination.Home) + entries

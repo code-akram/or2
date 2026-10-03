@@ -49,6 +49,27 @@ Each release's notes are in [docs/releases/](docs/releases/).
 - Image upload is much faster on a distant host: a host's uploads share one SFTP session, its independent checks
   go out together, and old images are swept after the path is in, so an upload into an existing directory waits
   for 8 round trips instead of 27 (11 for the first on a connection).
+- Home is the one place for hosts and their terminals. Each host card shows its open terminals as live thumbnails,
+  each with a small `×`; a tap on the card opens the session picker (connecting the host first when it is not), and
+  `⋯` (or a long press) opens the host's menu. `Connect all` sits at the end of the HOSTS header.
+- Closing a tmux or herdr terminal only ends or2's view of it (the session runs on) and takes one tap; closing a
+  shell asks first, since its programs end with it. A closed terminal is marked `Closed` on its thumbnail.
+- The session picker has two tabs, herdr and tmux; a session that already has a terminal in or2 is marked
+  `● Open`, and choosing it switches to that terminal. The line about mosh's UDP being blocked is in the picker.
+- The terminal's green disc opens **Terminals**: every open terminal by host, each with its `×`, then **Copy
+  screen** and **Gestures & shortcuts**. System Back from a terminal goes Home, as the orange disc does.
+- Going back to an open terminal (a thumbnail, the Terminals sheet, the picker, a reattach) shows it as it is;
+  only an agent you tap in the inbox or a notification moves herdr's focus to its pane.
+- The host form is **New host** / **Edit host** with one Save at the end, and an edited host can be deleted from
+  it (the same confirmation as Home's). The words are Host, Terminal, Connect and Retry throughout: `Unlock` and
+  `Unlock and connect` are `Connect`.
+
+### Removed
+
+- The host screen: its picker, address detail and UDP line are on Home's card and in the picker. A saved host
+  screen opens Home. The inbox's host rows are no longer links (their Connect or Retry stays).
+- Home's `SESSIONS` row, the `>_` session button and the `Working` / `Needs attention` chips (the inbox icon's badge
+  says it), the picker's `Open` tab, and the sheet's separate `Close session` row and pill.
 
 ### Fixed
 
@@ -63,6 +84,11 @@ Each release's notes are in [docs/releases/](docs/releases/).
 - Tapping a second agent of a herdr session (inbox or notification) no longer opens a second herdr client next to
   the first, both showing the same focused pane: every way into herdr reuses the session's open terminal, after
   focusing the agent's pane. Duplicates already open are left alone.
+- A Resume or a notification's tap made while another unlock was running is no longer dropped: it connects once
+  that unlock ends. The Resume card says `Mosh` / `SSH` (it said `Ssh`), and it and the `Resuming…` / `Focusing…`
+  cards name the terminal by its title.
+- A herdr terminal's thumbnail follows the pane herdr has in front, whatever pane it was opened on.
+- Ctrl+Shift+W closes a terminal the way its `×` does (an open one is disconnected, so its mosh server stops).
 - A message of several lines sent from the composer buzzes once, on the confirmation's **Send**, not twice.
 
 ## [0.1.1] - 2026-10-02

@@ -1,6 +1,7 @@
 package io.github.code_akram.or2.session
 
 import io.github.code_akram.or2.assertTouchTargetAtLeast
+import android.content.ClipboardManager
 import android.view.View
 import android.view.ViewGroup
 import androidx.activity.compose.setContent
@@ -11,6 +12,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -102,13 +104,15 @@ class EntryUiDeviceTest {
         compose.onNodeWithText("Fixture").assertIsDisplayed()
         compose.onNodeWithTag("terminal-status").assertIsDisplayed()
         compose.onNodeWithText("The server refused a terminal or shell.", substring = true).assertIsDisplayed()
-        compose.onNodeWithText("Close session").assertIsDisplayed()
+        compose.onNodeWithText("Close session").assertDoesNotExist() // The terminal's own × closes it.
         compose.onNodeWithContentDescription("Terminal").assertDoesNotExist()
         compose.onNodeWithContentDescription("Keyboard").assertDoesNotExist()
         compose.onNodeWithTag("key:Esc").assertDoesNotExist()
         compose.onNodeWithTag("terminal-card").assertDoesNotExist()
         compose.runOnIdle { assertEquals(0, session.frameTakes) }
-        compose.onNodeWithText("Close session").performClick()
+        // Closed already: nothing to ask, one tap takes it away.
+        compose.onNodeWithTag("terminal-row-close:1").performClick()
+        compose.runOnIdle { assertTrue(holder.terminals.value.isEmpty()) }
     }
 
     @Test
@@ -138,11 +142,6 @@ class EntryUiDeviceTest {
 
     @Test
     fun sessionScreenRetainsTerminalAndLastGridThroughClosedUntilClose() {
-        fun View.terminal(): TerminalView? {
-            if (this is TerminalView) return this
-            if (this is ViewGroup) for (index in 0 until childCount) getChildAt(index).terminal()?.let { return it }
-            return null
-        }
         val session = UiSession()
         val holder = terminalHolder(UiPort { session })
         var screen by mutableStateOf("terminal")
@@ -219,25 +218,64 @@ class EntryUiDeviceTest {
         assertNotNull(view)
     }
 
-    @Test
-    fun closeSessionInThePanesSheetEndsAnOpenTerminalInOneTapAndReturnsHome() {
-        val session = UiSession()
-        val holder = terminalHolder(UiPort { session })
+    /** The Terminals sheet over [targets] opened on one host, the first on screen; Home is a text fixture. */
+    private fun showTerminals(holder: HostConnections, vararg targets: TerminalTarget): MutableList<Long> {
+        val selected = mutableListOf<Long>()
         var screen by mutableStateOf("terminal")
         compose.runOnUiThread {
-            holder.openTerminal(holder.host(1)!!, TerminalTarget.Shell)
+            targets.forEach { holder.openTerminal(holder.host(1)!!, it) }
             compose.activity.setContent {
                 val terminals by holder.terminals.collectAsState()
                 AppScaffold(fullScreen = screen == "terminal") {
-                    if (screen == "terminal") SessionScreen(holder, terminals.firstOrNull(), terminals, minimise = { screen = "home" }, select = {})
-                    else Text("Home fixture")
+                    if (screen == "terminal") {
+                        SessionScreen(holder, terminals.firstOrNull(), terminals, minimise = { screen = "home" }, select = { selected += it.id })
+                    } else {
+                        Text("Home fixture")
+                    }
                 }
             }
         }
+        compose.waitUntil(5_000) { compose.onAllNodesWithTag("terminal-panes").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("terminal-panes").performClick()
-        // One action, whatever the state: no "Disconnect" step and no closed strip to dismiss afterwards.
-        compose.onNodeWithText("Disconnect session").assertDoesNotExist()
-        compose.onNodeWithTag("terminal-close-session").assertIsDisplayed().performClick()
+        compose.onNodeWithTag("terminals-sheet").assertIsDisplayed()
+        return selected
+    }
+
+    @Test
+    fun theTerminalsSheetGroupsTerminalsByHostAndItsCrossClosesOneInOneTap() {
+        val sessions = mutableListOf<UiSession>()
+        val holder = terminalHolder(UiPort { UiSession().also(sessions::add) })
+        val selected = showTerminals(holder, TerminalTarget.Shell, TerminalTarget.Tmux("work"))
+        // One header for the host; the shown terminal is marked; no separate "Close session" row.
+        compose.onNodeWithText("FIXTURE").assertIsDisplayed()
+        compose.onNodeWithText("Current").assertIsDisplayed()
+        compose.onNodeWithTag("terminal-close-session").assertDoesNotExist()
+        compose.onNodeWithTag("terminal-tab:2").performClick()
+        compose.runOnIdle { assertEquals(listOf(2L), selected) }
+        // tmux: only or2's view ends (the session runs on), in one tap, and the terminal on screen stays.
+        compose.onNodeWithTag("terminal-panes").performClick()
+        compose.onNodeWithTag("terminal-row-close:2").performClick()
+        compose.onNodeWithText("Close shell?").assertDoesNotExist()
+        compose.runOnIdle {
+            assertEquals(listOf(1L), holder.terminals.value.map { it.id })
+            assertTrue(sessions[1].destroyed)
+        }
+        compose.onNodeWithText("Home fixture").assertDoesNotExist()
+    }
+
+    @Test
+    fun closingTheShellOnScreenAsksFirstThenEndsItAndReturnsHome() {
+        val session = UiSession()
+        val holder = terminalHolder(UiPort { session })
+        showTerminals(holder, TerminalTarget.Shell)
+        compose.onNodeWithTag("terminal-row-close:1").performClick()
+        // A shell ends with its programs: asked first, and Cancel keeps it.
+        compose.onNodeWithText("Close shell?").assertIsDisplayed()
+        compose.onNodeWithText("Cancel").performClick()
+        compose.runOnIdle { assertEquals(1, holder.terminals.value.size) }
+        compose.onNodeWithTag("terminal-panes").performClick()
+        compose.onNodeWithTag("terminal-row-close:1").performClick()
+        compose.onNodeWithTag("close-shell-confirm").performClick()
         compose.onNodeWithText("Home fixture").assertIsDisplayed()
         compose.onNodeWithTag("terminal-close").assertDoesNotExist()
         compose.waitUntil(5_000) {
@@ -250,4 +288,30 @@ class EntryUiDeviceTest {
             assertEquals(1, session.closes)
         }
     }
+
+    @Test
+    fun copyScreenPutsTheVisibleTextOnTheClipboardAndTheShortcutsRowOpensTheSheet() {
+        val holder = terminalHolder(UiPort { UiSession() })
+        showTerminals(holder, TerminalTarget.Tmux("work"))
+        compose.waitUntil(5_000) {
+            var ready = false
+            compose.runOnUiThread { ready = compose.activity.window.decorView.terminal()?.grid?.hasGrid == true }
+            ready
+        }
+        compose.onNodeWithTag("terminals-copy-screen").performClick()
+        compose.onNodeWithTag("terminals-sheet").assertDoesNotExist()
+        compose.runOnIdle {
+            val clip = compose.activity.getSystemService(ClipboardManager::class.java).primaryClip
+            assertEquals("LR", clip?.getItemAt(0)?.text?.toString()) // The fixture's one row.
+        }
+        compose.onNodeWithTag("terminal-panes").performClick()
+        compose.onNodeWithTag("terminals-shortcuts").performClick()
+        compose.onNodeWithTag("shortcuts-sheet").assertIsDisplayed()
+    }
+}
+
+private fun View.terminal(): TerminalView? {
+    if (this is TerminalView) return this
+    if (this is ViewGroup) for (index in 0 until childCount) getChildAt(index).terminal()?.let { return it }
+    return null
 }

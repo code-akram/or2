@@ -97,9 +97,6 @@ data class Host(val record: HostRecord, val addresses: List<HostEndpoint>) {
     val transport get() = record.transport
     val sleeps get() = record.sleeps
 
-    /** Unused ([HostRecord.moshFailedUntil]); kept only while the host form still copies it. */
-    val moshFailedUntil get() = record.moshFailedUntil
-
     /** `host:port` summaries for lists and dialogs. */
     val addressSummary get() = addresses.joinToString(", ") { "${it.hostname}:${it.port}" }
 

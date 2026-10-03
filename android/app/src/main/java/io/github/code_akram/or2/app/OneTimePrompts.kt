@@ -149,13 +149,6 @@ class NotificationPermission(private val store: PrefStore, private val granted: 
     /** The permission may have changed (its dialog closed, or the app returned from Settings): the offer re-reads it. */
     fun refresh() = offer.refresh()
 
-    /**
-     * Kept only so `AppActions`' default in `Or2App.kt` compiles until that call reads [offer]: every use is the one
-     * offer now. Remove with that call.
-     */
-    @Deprecated("There is one offer", ReplaceWith("offer"))
-    fun offer(@Suppress("UNUSED_PARAMETER") use: NotificationUse): NotificationOffer = offer
-
     /** `notifications_asked` is the flag of the connect-time request the offers replaced: that request counts as one. */
     private fun wasRequested() = store.getBoolean(REQUESTED) || store.getBoolean(LEGACY_ASKED)
 
@@ -164,10 +157,6 @@ class NotificationPermission(private val store: PrefStore, private val granted: 
         const val LEGACY_ASKED = "notifications_asked"
     }
 }
-
-/** See [NotificationPermission.offer] (the deprecated overload). Remove with it. */
-@Deprecated("There is one offer: NotificationPermission.offer")
-enum class NotificationUse { CONNECTION, AGENT_ALERTS }
 
 /**
  * The in-context offer: [visible] while the permission is not granted and the user has not dismissed it. It stays

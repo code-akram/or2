@@ -7,9 +7,8 @@ import io.github.code_akram.or2.inbox.LinkStatus
 import io.github.code_akram.or2.inbox.linkStatus
 
 /**
- * What the session picker shows instead of its lists while its host is not connected. The picker that Home's
- * session button opens shows at once, before its host has connected: first this, then the lists. The host
- * screen's picker opens only on a connected host and never shows one.
+ * What the session picker shows instead of its lists while its host is not connected. The picker that a Home host
+ * card's header opens shows at once, before its host has connected: first this, then the lists.
  */
 sealed interface PickerGate {
     val host: String
@@ -38,7 +37,7 @@ enum class GateAction(val label: String) {
     RETRY("Retry"),
 
     /** A host that is simply not connected (a cancelled unlock, a disconnect): connect it. */
-    CONNECT("Unlock and connect"),
+    CONNECT("Connect"),
 
     /** A host without a key cannot connect: edit it to choose one. */
     SELECT_KEY("Select a key"),

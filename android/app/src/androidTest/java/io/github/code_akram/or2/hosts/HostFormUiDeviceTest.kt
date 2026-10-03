@@ -45,15 +45,34 @@ class HostFormUiDeviceTest {
     private fun show(
         previous: Host?, keys: List<KeyRecord> = listOf(key), save: (Host) -> Unit = {}, close: () -> Unit = {},
         createKey: suspend (String, String) -> KeyRecord = { _, _ -> error("no key is made in this test") },
-        saved: (() -> Unit)? = null,
+        saved: (() -> Unit)? = null, delete: (Host) -> Unit = {},
     ) = compose.runOnUiThread {
         val generation = ++generations
         // A new key per call: remember state must not leak from the previous show().
         compose.activity.setContent {
             key(generation) {
-                Or2Theme { HostFormScreen(previous, keys, false, save, close, createKey, deviceLabel = "Fixture phone", saved = saved ?: close) }
+                Or2Theme {
+                    HostFormScreen(previous, keys, false, save, close, createKey, deviceLabel = "Fixture phone", saved = saved ?: close,
+                        delete = delete)
+                }
             }
         }
+    }
+
+    @Test
+    fun anEditedHostEndsWithADangerDeleteRowThatAsksFirst() {
+        val deleted = mutableListOf<Long>()
+        val existing = uiHost(3, "Existing")
+        show(existing, delete = { deleted += it.id })
+        compose.onNodeWithTag("host-form-delete").performScrollTo().assertIsDisplayed().performClick()
+        // The same confirmation as Home's.
+        compose.onNodeWithText("Delete host?").assertIsDisplayed()
+        compose.onNodeWithText("Delete Existing and its trusted host keys? This does not delete your SSH key.").assertIsDisplayed()
+        compose.onNodeWithText("Cancel").performClick()
+        compose.runOnIdle { assertEquals(emptyList<Long>(), deleted) }
+        compose.onNodeWithTag("host-form-delete").performScrollTo().performClick()
+        compose.onNodeWithTag("delete-confirm").performClick()
+        compose.runOnIdle { assertEquals(listOf(3L), deleted) }
     }
 
     private fun keyChoice(key: KeyRecord) = compose.onNodeWithTag("host-key:${key.id}")
@@ -104,10 +123,9 @@ class HostFormUiDeviceTest {
         compose.onNodeWithTag("address-add").performScrollTo().performClick()
         fill(1, "second.invalid", "70000")
         compose.onNodeWithTag("host-form-primary").performScrollTo().assertIsNotEnabled()
-        compose.onNodeWithTag("host-form-save").assertIsNotEnabled() // The top-bar check mirrors the button.
+        compose.onNodeWithTag("host-form-save").assertDoesNotExist() // One Save: the button, no top-bar check.
         compose.onNodeWithTag("address-port:1").performScrollTo().apply { performTextClearance(); performTextInput("22") }
         compose.onNodeWithTag("host-form-primary").performScrollTo().assertIsEnabled()
-        compose.onNodeWithTag("host-form-save").assertIsEnabled()
     }
 
     @Test
@@ -115,11 +133,11 @@ class HostFormUiDeviceTest {
         var saved: Host? = null
         val existing = uiHost(3, "Existing", addresses = listOf(HostEndpoint("a.invalid", 22), HostEndpoint("b.invalid", 2222)))
         show(existing, save = { saved = it })
-        compose.onNodeWithText("Edit connection").assertIsDisplayed()
+        compose.onNodeWithText("Edit host").assertIsDisplayed()
         compose.onNodeWithText("Changing any address or port clears previous host-key trust.").performScrollTo().assertIsDisplayed()
         compose.onNodeWithTag("address-down:0").performScrollTo().performClick()
         compose.onNodeWithTag("host-inbox").performScrollTo().performClick()
-        compose.onNodeWithTag("host-form-save").performClick() // The top-bar check saves too.
+        compose.onNodeWithTag("host-form-primary").performScrollTo().performClick()
         compose.runOnIdle {
             assertEquals(listOf(HostEndpoint("b.invalid", 2222), HostEndpoint("a.invalid", 22)), saved!!.addresses)
             assertFalse(saved!!.showInInbox)
@@ -233,8 +251,8 @@ class HostFormUiDeviceTest {
         var closed = 0
         var saved = 0
         show(null, save = { saved++ }, close = { closed++ })
-        compose.onNodeWithText("New connection").assertIsDisplayed()
-        compose.onNodeWithTag("host-form-save").assertIsNotEnabled()
+        compose.onNodeWithText("New host").assertIsDisplayed()
+        compose.onNodeWithTag("host-form-delete").assertDoesNotExist() // Nothing to delete yet.
         compose.onNodeWithContentDescription("Close").performClick() // The leading icon is a close (X) here.
         compose.runOnIdle {
             assertEquals(1, closed)
@@ -289,15 +307,14 @@ class HostFormUiDeviceTest {
     }
 
     @Test
-    fun editingASleepingHostStartsFromItsFlagAndKeepsTheMoshMemory() {
+    fun editingASleepingHostStartsFromItsFlag() {
         var saved: Host? = null
-        val previous = uiHost(sleeps = true).let { it.copy(record = it.record.copy(moshFailedUntil = 1_800_000_000_000L)) }
+        val previous = uiHost(sleeps = true)
         show(previous, save = { saved = it })
         compose.onNodeWithTag("host-sleeps").performScrollTo().performClick() // Off.
         compose.onNodeWithTag("host-form-primary").performScrollTo().performClick()
         compose.runOnIdle {
             assertEquals(false, saved!!.sleeps)
-            assertEquals(1_800_000_000_000L, saved!!.moshFailedUntil)
         }
     }
 }

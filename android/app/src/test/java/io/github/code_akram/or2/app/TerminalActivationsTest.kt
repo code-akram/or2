@@ -29,11 +29,10 @@ import org.junit.Assert.*
 import org.junit.Test
 
 /**
- * Every path into an agent terminal awaits `focusHerdrPane` for its pane first: tapping the inbox
- * row (new or reused terminal), the session switcher, a Home thumbnail and the host screen's
- * open list all go through [TerminalActivations]; a gone pane or a failed focus shows a message
- * and never an activation. One herdr session has one terminal per host: every open reuses it,
- * whatever pane it was opened on.
+ * Only an explicit agent request (an inbox row, a notification) awaits `focusHerdrPane` for its pane first, new or
+ * reused terminal alike; a gone pane or a failed focus shows a message and never an activation. Everything else that
+ * brings an open terminal back (a picker row marked `Open`, a reattach) shows it as it is. One herdr session has one
+ * terminal per host: every open reuses it, whatever pane it was opened on.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class TerminalActivationsTest {
@@ -125,9 +124,6 @@ class TerminalActivationsTest {
         assertNotSame(default, work)
         assertEquals(TerminalTarget.Herdr("work", "w1:p1"), work.target)
         assertEquals(2, s.port.terminals.size)
-        // Another host has no terminal on that session: nothing there to reuse.
-        assertNull(s.activations.reusable(8, b))
-        assertNull(s.activations.reusable(8, TerminalTarget.Herdr(null, null)))
         s.holder.dismissHost(7)
     }
 
@@ -147,14 +143,30 @@ class TerminalActivationsTest {
     }
 
     @Test
-    fun aReattachToAnotherPaneOfTheSessionReusesItsTerminalAfterFocusingThatPane() = runTest {
+    fun aReattachToAnotherPaneOfTheSessionShowsItsTerminalAsItIs() = runTest {
         val s = setup()
         val open = s.open(a)
         s.events.clear()
         val shown = activation(s) { s.activations.launchReopen(LastTerminal(7, b, TerminalTransport.MOSH), host.label, done = it) }
         assertSame(open, (shown as Activation.Ready).terminal)
-        assertEquals(listOf("focus:null:w1:p2", "navigate"), s.events)
+        // Not an agent request: herdr's focus is left where the user left it.
+        assertEquals(listOf("navigate"), s.events)
         assertEquals(1, s.port.terminals.size)
+        s.holder.dismissHost(7)
+    }
+
+    @Test
+    fun theProgressTextsNameTheTargetByItsTitle() = runTest {
+        val s = setup()
+        s.port.focusGate = CompletableDeferred()
+        s.activations.launchOpenAgent(7, host.label, "work", "w1:p1") {}
+        runCurrent()
+        assertEquals("Focusing Fixture: herdr work", s.activations.pending.value)
+        s.activations.launchReopen(LastTerminal(7, TerminalTarget.Herdr(null, "w1:p2"), TerminalTransport.SSH), host.label) {}
+        runCurrent()
+        assertEquals("Resuming Fixture: herdr", s.activations.pending.value)
+        s.port.focusGate!!.complete(Unit)
+        advanceUntilIdle()
         s.holder.dismissHost(7)
     }
 
@@ -165,7 +177,7 @@ class TerminalActivationsTest {
         var result: Activation? = null
         s.activations.launchOpenAgent(7, host.label, null, "w1:p1") { result = it }
         runCurrent()
-        assertEquals("Focusing Fixture: herdr w1:p1", s.activations.pending.value)
+        assertEquals("Focusing Fixture: herdr", s.activations.pending.value)
         assertNull(result)
         // The terminal starts while the focus is in flight (they share their round trips); nothing is shown yet.
         assertEquals(1, s.port.terminals.size)
@@ -226,39 +238,6 @@ class TerminalActivationsTest {
     }
 
     @Test
-    fun aSurvivingMoshPaneTerminalIsShownAsItIsWhenItsSshConnectionIsLost() = runTest {
-        // The headline M3 case: the network drops, the SSH host closes, the mosh session keeps running.
-        val s = setup(testHost(transport = TransportPref.MOSH))
-        val terminal = s.open(a)
-        assertEquals(TerminalTransport.MOSH, terminal.transport.value)
-        s.hostListener.onHostStateChanged(HostState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("network changed"))))
-        advanceUntilIdle()
-        s.events.clear()
-
-        // Nothing can be focused, and nothing is refused: the terminal opens (Home thumbnail, switcher, reattach Show).
-        assertEquals(Activation.Ready(terminal), activation(s) { s.activations.launchReuse(terminal, it) })
-        assertEquals(Activation.Ready(terminal), s.activations.reuse(terminal))
-        assertEquals(listOf("navigate"), s.events)
-
-        // The connection forgotten altogether (dismissed) while the session lives on: still shown.
-        s.holder.dismissHost(7)
-        assertEquals(Activation.Ready(terminal), s.activations.reuse(terminal))
-        assertTrue(s.events.none { it.startsWith("focus") })
-    }
-
-    @Test
-    fun anAliveTerminalOnAHostThatIsConnectingAgainIsNotFocusedEither() = runTest {
-        val s = setup(testHost(transport = TransportPref.MOSH))
-        val terminal = s.open(a)
-        s.hostListener.onHostStateChanged(HostState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("x"))))
-        advanceUntilIdle()
-        s.events.clear()
-        assertEquals(Activation.Ready(terminal), s.activations.reuse(terminal))
-        assertTrue(s.events.isEmpty())
-        s.holder.dismissHost(7)
-    }
-
-    @Test
     fun aTerminalOpenedFromTheHostScreenOpensAtOnceWithoutWaitingForAnyProbe() = runTest {
         val s = setup(pending = true, moshPending = true, udp = null)
         var result: Activation? = null
@@ -309,66 +288,6 @@ class TerminalActivationsTest {
     }
 
     @Test
-    fun theSwitcherAndAThumbnailResumeFocusTheTerminalsPaneBeforeNavigating() = runTest {
-        val s = setup()
-        val first = s.open(a)
-        val second = s.open(b)
-        val shell = s.open(TerminalTarget.Shell)
-        s.events.clear()
-
-        // Switcher: B is on screen, A is chosen. Then the Home thumbnail of B.
-        assertEquals(Activation.Ready(first), activation(s) { s.activations.launchReuse(first, it) })
-        assertEquals(Activation.Ready(second), activation(s) { s.activations.launchReuse(second, it) })
-        assertEquals(listOf("focus:null:w1:p1", "navigate", "focus:null:w1:p2", "navigate"), s.events)
-
-        // Named sessions keep their name.
-        val named = s.open(TerminalTarget.Herdr("work", "w2:p1"))
-        s.events.clear()
-        assertEquals(Activation.Ready(named), activation(s) { s.activations.launchReuse(named, it) })
-        assertEquals(listOf("focus:work:w2:p1", "navigate"), s.events)
-
-        // Terminals that are not for one herdr pane have nothing to focus: shell, tmux, a herdr session picked as a whole.
-        val tmux = s.open(TerminalTarget.Tmux("work"))
-        val whole = s.open(TerminalTarget.Herdr("work", null))
-        s.events.clear()
-        for (terminal in listOf(shell, tmux, whole)) {
-            assertEquals(Activation.Ready(terminal), activation(s) { s.activations.launchReuse(terminal, it) })
-        }
-        assertEquals(listOf("navigate", "navigate", "navigate"), s.events)
-        s.holder.dismissHost(7)
-    }
-
-    @Test
-    fun aFailedFocusKeepsYouWhereYouAreAndAClosedTerminalNeedsNoFocus() = runTest {
-        val s = setup()
-        val terminal = s.open(a)
-        s.port.focusFailures["w1:p1"] = HostException.PaneNotFound()
-        assertTrue(activation(s) { s.activations.launchReuse(terminal, it) } is Activation.Failed)
-
-        // A closed terminal shows its final frame: nothing to focus, nothing to fail.
-        terminal.mutableState.value = SessionState.Closed(CloseReason.Disconnected)
-        s.events.clear()
-        assertEquals(Activation.Ready(terminal), activation(s) { s.activations.launchReuse(terminal, it) })
-        assertEquals(listOf("navigate"), s.events)
-        s.holder.dismissHost(7)
-    }
-
-    @Test
-    fun aTerminalDismissedWhileFocusingIsNotShown() = runTest {
-        val s = setup()
-        val terminal = s.open(a)
-        s.port.focusGate = CompletableDeferred()
-        var result: Activation? = null
-        s.activations.launchReuse(terminal) { result = it }
-        runCurrent()
-        s.holder.dismissTerminal(terminal)
-        s.port.focusGate!!.complete(Unit)
-        advanceUntilIdle()
-        assertEquals(Activation.Failed("That terminal is no longer open."), result)
-        s.holder.dismissHost(7)
-    }
-
-    @Test
     fun cancelAndANewerRequestDropTheWaitWithoutNavigating() = runTest {
         val s = setup()
         s.port.focusGate = CompletableDeferred()
@@ -387,7 +306,7 @@ class TerminalActivationsTest {
         runCurrent()
         s.activations.launchOpenAgent(7, host.label, null, "w1:p2") { done += "newer" }
         runCurrent()
-        assertEquals("Focusing Fixture: herdr w1:p2", s.activations.pending.value)
+        assertEquals("Focusing Fixture: herdr", s.activations.pending.value)
         s.port.focusGate!!.complete(Unit)
         advanceUntilIdle()
         assertEquals(listOf("newer"), done)
@@ -466,31 +385,6 @@ class TerminalActivationsTest {
         s.holder.dismissHost(7)
     }
 
-    @Test
-    fun aReuseMarksFocusAndFrameAndNeverNamesAHost() = runTest {
-        val lines = mutableListOf<String>()
-        var clock = 0L
-        val s = setup(timing = Timing(lines::add) { clock })
-        lines.clear()
-        val terminal = s.open(a)
-        s.events.clear()
-        s.port.focusGate = CompletableDeferred()
-        s.activations.launchReuse(terminal) {}
-        runCurrent()
-        clock += 250
-        s.port.focusGate!!.complete(Unit)
-        advanceUntilIdle()
-        clock += 80
-        s.holder.timing.terminalFrame(terminal.id)
-        assertEquals(
-            listOf("reuse host=7 pane=w1:p1 begin ms=0", "reuse host=7 pane=w1:p1 focused ms=250", "reuse host=7 pane=w1:p1 frame ms=330"),
-            lines,
-        )
-        // Host ids and herdr pane ids only: no label, address or user name in a marker.
-        assertTrue(lines.none { "Fixture" in it || "fixture" in it })
-        s.holder.dismissHost(7)
-    }
-
     /** What the session picker's choice of [target] activates on host 7 (the host screen's and Home's picker alike). */
     private suspend fun pick(s: Setup, target: TerminalTarget): ActiveTerminal =
         (s.activations.open(s.holder.host(7)!!, target) as Activation.Ready).terminal
@@ -504,19 +398,12 @@ class TerminalActivationsTest {
         val herdr = pick(s, TerminalTarget.Herdr("personal", null))
         assertSame(herdr, pick(s, TerminalTarget.Herdr("personal", null)))
         assertNotSame(herdr, pick(s, TerminalTarget.Herdr(null, null))) // The default session is another session.
-        // A herdr terminal opened on a pane (an inbox tap) is that session's terminal too: its pane is focused again first.
+        // A herdr terminal opened on a pane (an inbox tap) is that session's terminal too, shown as it is: the picker
+        // is no agent request, so herdr's focus stays where the user left it.
         val pane = s.open(TerminalTarget.Herdr("work", "w1:p3"))
         s.events.clear()
         assertSame(pane, pick(s, TerminalTarget.Herdr("work", null)))
-        assertEquals(listOf("focus:work:w1:p3"), s.events)
-        // A herdr pane chosen directly goes the inbox tap's way: focus, then reuse.
-        s.events.clear()
-        assertSame(pane, pick(s, TerminalTarget.Herdr("work", "w1:p3")))
-        assertEquals(listOf("focus:work:w1:p3"), s.events)
-        // Another pane of that session too: it is focused, and the session's one terminal is shown.
-        s.events.clear()
-        assertSame(pane, pick(s, TerminalTarget.Herdr("work", "w1:p4")))
-        assertEquals(listOf("focus:work:w1:p4"), s.events)
+        assertTrue(s.events.none { it.startsWith("focus") })
         // A shell is never reused.
         val shell = pick(s, TerminalTarget.Shell)
         assertNotSame(shell, pick(s, TerminalTarget.Shell))
@@ -540,11 +427,31 @@ class TerminalActivationsTest {
     }
 
     @Test
-    fun suspendingFormsMatchTheLaunchedOnes() = runTest {
+    fun closingAnOpenTerminalDisconnectsAndDismissesItAndAClosedOneIsOnlyDismissed() = runTest {
         val s = setup()
-        val first = (s.activations.openAgent(7, host.label, null, "w1:p1") as Activation.Ready).terminal
-        assertEquals(Activation.Ready(first), s.activations.reuse(first))
-        assertEquals(listOf("focus:null:w1:p1", "focus:null:w1:p1"), s.events)
+        val tmux = pick(s, TerminalTarget.Tmux("work"))
+        val tmuxSession = s.port.terminals.last().third
+        s.activations.close(tmux)
+        assertTrue("disconnect" in tmuxSession.events) // Rust stops its mosh server; the tmux session itself runs on.
+        assertFalse(tmux in s.holder.terminals.value)
+
+        // A shell that has closed by itself (its final frame still shown): the × only takes it away.
+        val shell = pick(s, TerminalTarget.Shell)
+        s.port.terminals.last().second.onStateChanged(SessionState.Closed(CloseReason.Disconnected))
+        advanceUntilIdle()
+        assertTrue(shell in s.holder.terminals.value)
+        s.activations.close(shell)
+        assertTrue(s.holder.terminals.value.isEmpty())
+        assertTrue(s.port.terminals.last().third.destroyed)
         s.holder.dismissHost(7)
+    }
+
+    @Test
+    fun onlyAnOpenShellAsksBeforeItCloses() {
+        assertTrue(closeAsks(TerminalTarget.Shell, closed = false))
+        assertFalse(closeAsks(TerminalTarget.Shell, closed = true))
+        assertFalse(closeAsks(TerminalTarget.Tmux("main"), closed = false))
+        assertFalse(closeAsks(TerminalTarget.Herdr(null, null), closed = false))
+        assertFalse(closeAsks(TerminalTarget.Herdr("work", "w1:p1"), closed = false))
     }
 }

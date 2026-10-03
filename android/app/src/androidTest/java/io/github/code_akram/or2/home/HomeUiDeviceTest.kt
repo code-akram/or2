@@ -55,20 +55,20 @@ class HomeUiDeviceTest {
 
     private val calls = mutableListOf<String>()
 
-    private fun card(host: Host, state: HostState?, blocked: Int = 0, unlocking: Boolean = false) =
-        HostCard(host, hostCardStatus(state, unlocking, blocked, host.sleeps, host.addresses), linkStatus(state, host.sleeps))
+    private fun card(host: Host, state: HostState?, blocked: Int = 0, unlocking: Boolean = false, terminals: List<HomeSession> = emptyList()) =
+        HostCard(host, hostCardStatus(state, unlocking, blocked, host.sleeps, host.addresses), linkStatus(state, host.sleeps), terminals = terminals)
 
     private fun show(
-        hosts: List<HostCard>, sessions: List<HomeSession> = emptyList(), keyCount: Int = 1, blocked: Int = 0, working: Int = 0,
+        hosts: List<HostCard>, keyCount: Int = 1, blocked: Int = 0,
         canConnectAll: Boolean = false, busy: Boolean = false, resume: HomeResume? = null, batteryCard: Boolean = false,
         notificationCard: Boolean = false,
     ) = compose.runOnUiThread {
         compose.activity.setContent {
             Or2Theme {
                 HomeScreen(
-                    sessions, hosts, keyCount, blocked, working, canConnectAll, busy,
-                    openSession = { calls += "session:${it.id}" }, openHost = { calls += "open:${it.id}" },
-                    openSessions = { calls += "sessions:${it.id}" },
+                    hosts, keyCount, blocked, canConnectAll, busy,
+                    openPicker = { calls += "picker:${it.id}" }, openSession = { calls += "session:${it.id}" },
+                    closeSession = { calls += "close:${it.id}" },
                     addHost = { calls += "add" }, easyPair = { calls += "easy" }, manualHost = { calls += "manual" }, editHost = { calls += "edit:${it.id}" }, connectHost = { calls += "connect:${it.id}" },
                     disconnectHost = { calls += "disconnect:${it.id}" }, deleteHost = { calls += "delete:${it.id}" },
                     openInbox = { calls += "inbox" }, openKeys = { calls += "keys" }, connectAll = { calls += "all" },
@@ -119,7 +119,7 @@ class HomeUiDeviceTest {
         compose.onNodeWithTag("host:1").assertIsDisplayed().performClick()
         compose.onNodeWithTag("battery-card-allow").performClick()
         compose.onNodeWithTag("battery-card-dismiss").performClick()
-        compose.runOnIdle { assertEquals(listOf("open:1", "allow-battery", "dismiss-battery"), calls) }
+        compose.runOnIdle { assertEquals(listOf("picker:1", "allow-battery", "dismiss-battery"), calls) }
     }
 
     @Test
@@ -137,7 +137,7 @@ class HomeUiDeviceTest {
         compose.onNodeWithTag("host:1").assertIsDisplayed().performClick()
         compose.onNodeWithTag("notification-card-allow").performClick()
         compose.onNodeWithTag("notification-card-dismiss").performClick()
-        compose.runOnIdle { assertEquals(listOf("open:1", "allow-notifications", "dismiss-notifications"), calls) }
+        compose.runOnIdle { assertEquals(listOf("picker:1", "allow-notifications", "dismiss-notifications"), calls) }
     }
 
     @Test
@@ -162,91 +162,112 @@ class HomeUiDeviceTest {
     }
 
     @Test
-    fun tapOpensAHostAndLongPressOffersEditConnectDisconnectAndDelete() {
+    fun theHeaderOpensThePickerAndItsMenuOrALongPressOffersConnectDisconnectEditAndDelete() {
         show(listOf(card(one, null), card(two, HostState.Connected(0u))))
+        // The header opens the session picker, connected or not.
         compose.onNodeWithTag("host:1").performClick()
-        compose.runOnIdle { assertEquals(listOf("open:1"), calls) }
+        compose.onNodeWithTag("host:2").performClick()
+        compose.runOnIdle { assertEquals(listOf("picker:1", "picker:2"), calls) }
+        // Its trailing `\u22ef` is the host menu, with a full touch target; a long press on the header is the same menu.
+        compose.onNodeWithTag("host-menu:1").assertIsDisplayed().assertTouchTargetAtLeast(48)
+        compose.onNodeWithContentDescription("Options for Alpha").assertIsDisplayed()
         // A host that is not connected can be connected or edited, not disconnected.
-        compose.onNodeWithTag("host:1").performTouchInput { longClick() }
+        compose.onNodeWithTag("host-menu:1").performClick()
         compose.onNodeWithTag("option-connect").assertIsDisplayed().performClick()
         compose.onNodeWithTag("host:1").performTouchInput { longClick() }
         compose.onNodeWithTag("option-disconnect").assertDoesNotExist()
         compose.onNodeWithTag("option-edit").performClick()
         // A connected one can be disconnected instead of connected.
-        compose.onNodeWithTag("host:2").performTouchInput { longClick() }
+        compose.onNodeWithTag("host-menu:2").performClick()
         compose.onNodeWithTag("option-connect").assertDoesNotExist()
         compose.onNodeWithTag("option-disconnect").performClick()
         // Delete asks first.
-        compose.onNodeWithTag("host:2").performTouchInput { longClick() }
+        compose.onNodeWithTag("host-menu:2").performClick()
         compose.onNodeWithTag("option-delete").performClick()
         compose.onNodeWithText("Delete host?").assertIsDisplayed()
         compose.runOnIdle { assertFalse("delete:2" in calls) }
         compose.onNodeWithTag("delete-confirm").performClick()
-        compose.runOnIdle { assertEquals(listOf("open:1", "connect:1", "edit:1", "disconnect:2", "delete:2"), calls) }
+        compose.runOnIdle { assertEquals(listOf("picker:1", "picker:2", "connect:1", "edit:1", "disconnect:2", "delete:2"), calls) }
+        // Nothing else on the card: no session button, no chips.
+        compose.onNodeWithTag("host-session:1").assertDoesNotExist()
+        compose.onNodeWithTag("chip-attention").assertDoesNotExist()
     }
 
     @Test
-    fun theCardBodyOpensTheHostAndItsSessionButtonOpensThePickerConnectedOrNot() {
-        show(listOf(card(one, HostState.Connected(0u)), card(two, null)))
-        // Every card has the button, in place of the chevron: a compact `>_` disc with a full touch target.
-        compose.onNodeWithTag("host-session:1").assertIsDisplayed().assertTouchTargetAtLeast(48)
-        compose.onNodeWithTag("host-session:2").assertIsDisplayed().assertTouchTargetAtLeast(48)
-        compose.onNodeWithContentDescription("Open a session on Alpha").assertIsDisplayed()
-        compose.onNodeWithContentDescription("Open a session on Beta").assertIsDisplayed()
-        // One thing per tap: the body opens the host screen, the button the session picker, never both.
-        compose.onNodeWithTag("host:1").performClick()
-        compose.onNodeWithTag("host-session:1").performClick()
-        compose.onNodeWithTag("host-session:2").performClick()
-        compose.runOnIdle { assertEquals(listOf("open:1", "sessions:1", "sessions:2"), calls) }
-        // Long press still opens the options, from the body.
-        compose.onNodeWithTag("host:2").performTouchInput { longClick() }
-        compose.onNodeWithTag("option-connect").assertIsDisplayed()
-    }
-
-    @Test
-    fun aHostWithoutAKeyCannotBeConnectedFromItsOptions() {
+    fun aHostWithoutAKeyCannotBeConnectedFromItsMenu() {
         show(listOf(card(uiHost(1, "Keyless", keyId = null), null)), keyCount = 0)
         compose.onNodeWithTag("home-add-key").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithTag("host:1").performTouchInput { longClick() }
+        compose.onNodeWithTag("host-menu:1").performClick()
         compose.onNodeWithTag("option-connect").assertIsNotEnabled()
     }
 
     @Test
-    fun sessionsAreThumbnailCardsWithHostAndTransportPillsAndTapResumes() {
-        val sessions = listOf(
-            HomeSession(5, "Alpha", "tmux main", "~/code/or2", Transport.SSH) { Box(it) },
-            HomeSession(6, "Beta", "herdr work", "~/src", Transport.MOSH) { Box(it) },
+    fun aHostsTerminalsAreThumbnailsInItsCardWithATransportPillAndACross() {
+        val terminals = listOf(
+            HomeSession(5, "tmux main", "", Transport.SSH) { Box(it) },
+            HomeSession(6, "herdr work", "Claude Code", Transport.MOSH) { Box(it) },
+            HomeSession(7, "shell", "", Transport.SSH, closed = true) { Box(it) },
         )
-        show(listOf(card(one, HostState.Connected(0u))), sessions)
+        show(listOf(card(one, HostState.Connected(0u), terminals = terminals), card(two, null)))
+        compose.onNodeWithTag("host-terminals:1").assertIsDisplayed()
+        compose.onNodeWithTag("host-terminals:2").assertDoesNotExist() // No terminals: no row.
         compose.onNodeWithTag("session-card:5").assertIsDisplayed()
-        compose.onNodeWithTag("session-host:5", useUnmergedTree = true).assertTextEquals("Alpha")
         compose.onNodeWithTag("session-transport:5", useUnmergedTree = true).assertTextEquals("SSH")
         compose.onNodeWithTag("session-transport:6", useUnmergedTree = true).assertTextEquals("Mosh")
         compose.onNodeWithText("tmux main").assertIsDisplayed()
-        compose.onNodeWithText("~/code/or2").assertIsDisplayed()
+        compose.onNodeWithText("Claude Code").assertIsDisplayed()
+        // A closed terminal says so on its thumbnail, in place of the transport.
+        compose.onNodeWithTag("session-card:7").performScrollTo()
+        compose.onNodeWithTag("session-closed:7", useUnmergedTree = true).assertTextEquals("Closed")
+        compose.onNodeWithTag("session-transport:7", useUnmergedTree = true).assertDoesNotExist()
+        // A tap shows the terminal; its \u00d7 (a 24 dp disc in a 40 dp box, grown to 48) closes it.
         compose.onNodeWithTag("session-card:6").performClick()
-        compose.runOnIdle { assertEquals(listOf("session:6"), calls) }
+        compose.onNodeWithTag("session-close:5").assertTouchTargetAtLeast(48)
+        compose.onNodeWithContentDescription("Close tmux main").performClick()
+        compose.runOnIdle { assertEquals(listOf("session:6", "close:5"), calls) }
     }
 
     @Test
-    fun chipsNavButtonsAndTheFabAreWired() {
-        show(listOf(card(one, HostState.Connected(0u)), card(two, null)), blocked = 2, working = 1, canConnectAll = true)
-        compose.onNodeWithTag("chip-attention").performScrollTo().assertTextEquals("Needs attention: 2").performClick()
-        compose.onNodeWithTag("chip-working").assertTextEquals("Working: 1")
-        compose.onNodeWithTag("home-connect-all").performClick()
-        compose.onNodeWithTag("inbox-badge").assertIsDisplayed()
+    fun closingAShellAsksFirstAndOtherTerminalsCloseInOneTap() {
+        val terminals = listOf(
+            HomeSession(5, "shell", "", Transport.SSH, closeAsks = true) { Box(it) },
+            HomeSession(6, "herdr", "", Transport.MOSH) { Box(it) },
+        )
+        show(listOf(card(one, HostState.Connected(0u), terminals = terminals)))
+        compose.onNodeWithTag("session-close:6").performClick()
+        compose.runOnIdle { assertEquals(listOf("close:6"), calls) }
+        compose.onNodeWithTag("session-close:5").performClick()
+        compose.onNodeWithText("Close shell?").assertIsDisplayed()
+        compose.onNodeWithText("Programs running in it end.").assertIsDisplayed()
+        compose.runOnIdle { assertEquals(listOf("close:6"), calls) } // Nothing closed yet.
+        compose.onNodeWithText("Cancel").performClick()
+        compose.onNodeWithTag("session-close:5").performClick()
+        compose.onNodeWithTag("close-shell-confirm").performClick()
+        compose.runOnIdle { assertEquals(listOf("close:6", "close:5"), calls) }
+    }
+
+    @Test
+    fun connectAllNavButtonsAndTheFabAreWired() {
+        show(listOf(card(one, HostState.Connected(0u)), card(two, null)), blocked = 2, canConnectAll = true)
+        // `Connect all` is a compact text action at the end of the HOSTS header.
+        compose.onNodeWithTag("home-connect-all").assertTextEquals("Connect all").assertTouchTargetAtLeast(48).performClick()
+        compose.onNodeWithTag("inbox-badge").assertIsDisplayed() // The inbox icon says what needs attention.
         compose.onNodeWithTag("nav-inbox").performClick()
         compose.onNodeWithTag("nav-keys").performClick()
         compose.onNodeWithTag("nav-about").assertTouchTargetAtLeast().performClick()
         compose.onNodeWithTag("home-add-host").performClick()
-        compose.runOnIdle { assertEquals(listOf("inbox", "all", "inbox", "keys", "about", "add"), calls) }
+        compose.runOnIdle { assertEquals(listOf("all", "inbox", "keys", "about", "add"), calls) }
+        // While an unlock runs there is nothing to connect yet.
+        show(listOf(card(one, HostState.Connected(0u)), card(two, null)), canConnectAll = true, busy = true)
+        compose.onNodeWithTag("home-connect-all").assertDoesNotExist()
     }
 
     @Test
     fun withoutHostsHomeOffersTheAddHostChooserAndNoSeparateKeyStep() {
         show(emptyList(), keyCount = 0)
         compose.onNodeWithTag("home-empty").assertIsDisplayed()
-        compose.onNodeWithText("No connections yet").assertIsDisplayed()
+        compose.onNodeWithText("No hosts yet").assertIsDisplayed()
+        compose.onNodeWithTag("home-connect-all").assertDoesNotExist()
         // Both paths make the key on the phone: there is no "Add an SSH key" first step.
         compose.onNodeWithTag("home-add-key").assertDoesNotExist()
         compose.onNodeWithText("Add an SSH key").assertDoesNotExist()

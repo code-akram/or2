@@ -9,19 +9,31 @@ class NavigationTest {
         val start = NavStack()
         assertEquals(Destination.Home, start.current)
         assertNull(start.back())
-        val host = start.push(Destination.HostPage(7))
-        val terminal = host.push(Destination.Terminal(3))
-        assertEquals(Destination.Terminal(3), terminal.current)
-        assertEquals(Destination.Home, terminal.tab)
-        assertEquals(host, terminal.back())
-        assertEquals(start, terminal.back()!!.back())
+        val keys = start.push(Destination.Keys)
+        val form = keys.push(Destination.HostForm(3))
+        assertEquals(Destination.HostForm(3), form.current)
+        assertEquals(Destination.Home, form.tab)
+        assertEquals(keys, form.back())
+        assertEquals(start, form.back()!!.back())
+    }
+
+    @Test
+    fun backFromATerminalGoesHomeAsItsMinimiseDiscDoes() {
+        val home = NavStack()
+        assertEquals(home, home.push(Destination.Terminal(3)).backOrHome())
+        // Wherever the terminal was opened from: the inbox (an agent's row), or a stack restored with more under it.
+        assertEquals(home, NavStack().push(Destination.Inbox).push(Destination.Terminal(3)).backOrHome())
+        assertEquals(home, NavStack(listOf(Destination.Inbox, Destination.Terminal(3))).backOrHome())
+        assertEquals(home, NavStack().push(Destination.Keys).push(Destination.Terminal(3)).backOrHome())
+        // Other pushed screens still go back one step.
+        assertEquals(NavStack().push(Destination.Keys), NavStack().push(Destination.Keys).push(Destination.HostForm(0)).backOrHome())
     }
 
     @Test
     fun switchingTerminalsReplacesAndTopLevelScreensStartAFreshStack() {
-        val stack = NavStack().push(Destination.HostPage(1)).push(Destination.Terminal(1))
+        val stack = NavStack().push(Destination.Keys).push(Destination.Terminal(1))
         val switched = stack.replaceTop(Destination.Terminal(2))
-        assertEquals(listOf(Destination.Home, Destination.HostPage(1), Destination.Terminal(2)), switched.entries)
+        assertEquals(listOf(Destination.Home, Destination.Keys, Destination.Terminal(2)), switched.entries)
         assertEquals(Destination.Home, switched.tab)
         assertEquals(NavStack(listOf(Destination.Inbox)), switched.top(Destination.Inbox))
         assertSame(stack, stack.push(Destination.Terminal(1))) // The same screen twice is one entry.
@@ -43,18 +55,30 @@ class NavigationTest {
 
     @Test
     fun theStackSurvivesSavedStateAndGarbageFallsBackToHome() {
-        val stack = NavStack().push(Destination.HostForm(42)).push(Destination.HostPage(42)).push(Destination.Terminal(9))
-        assertEquals("home|hostform:42|host:42|terminal:9", stack.encode())
+        val stack = NavStack().push(Destination.HostForm(42)).push(Destination.Terminal(9))
+        assertEquals("home|hostform:42|terminal:9", stack.encode())
         assertEquals(stack, NavStack.decode(stack.encode()))
         assertEquals(NavStack(), NavStack.decode(""))
-        assertEquals(NavStack(), NavStack.decode("nonsense|host:x"))
+        assertEquals(NavStack(), NavStack.decode("nonsense|hostform:x"))
         assertEquals(listOf(Destination.Home, Destination.Terminal(5)), NavStack.decode("terminal:5").entries)
         // Keys is pushed on a top-level screen, never the bottom of a stack.
         assertEquals(listOf(Destination.Home, Destination.Keys), NavStack.decode("keys").entries)
         assertEquals(NavStack(listOf(Destination.Inbox, Destination.Keys)), NavStack.decode("inbox|keys"))
         // The M2 "hosts" tab is Home now.
-        assertEquals(listOf(Destination.Home, Destination.HostPage(1)), NavStack.decode("hosts|host:1").entries)
+        assertEquals(NavStack(), NavStack.decode("hosts"))
         assertEquals(Destination.HostForm(0), NavStack.decode("home|hostform:0").current)
+    }
+
+    @Test
+    fun aSavedHostScreenDecodesToHome() {
+        // The host screen is gone (v0.1.2): its host's card on Home is where it was.
+        assertEquals(NavStack(), NavStack.decode("home|host:1"))
+        assertEquals(NavStack(), NavStack.decode("hosts|host:1"))
+        assertEquals(NavStack(), NavStack.decode("host:1"))
+        assertEquals(NavStack(), NavStack.decode("inbox|host:1"))
+        // What was pushed on it stays, on Home.
+        assertEquals(NavStack().push(Destination.Terminal(9)), NavStack.decode("home|hostform:42|host:42|terminal:9"))
+        assertEquals(NavStack().push(Destination.HostForm(3)), NavStack.decode("home|host:3|hostform:3"))
     }
 
     @Test
@@ -91,11 +115,13 @@ class NavigationTest {
     }
 
     @Test
-    fun easyPairEndsOnTheBatteryStepOrStraightOnTheHostPage() {
+    fun easyPairEndsOnTheBatteryStepOrStraightOnHome() {
         assertEquals(NavStack(listOf(Destination.Home, Destination.KeepAlive(5))), NavStack.afterPaired(5, keepAlive = true))
-        assertEquals(NavStack(listOf(Destination.Home, Destination.HostPage(5))), NavStack.afterPaired(5, keepAlive = false))
-        // The step leads on to the paired host's page (where it connects), wherever pairing started.
-        assertEquals(NavStack().push(Destination.HostPage(5)), NavStack.afterPaired(5, keepAlive = true).afterKeepAlive())
+        // Home, where the app opens the paired host's picker over its card while it connects.
+        assertEquals(NavStack(), NavStack.afterPaired(5, keepAlive = false))
+        // The step leads on to Home the same way, wherever pairing started.
+        assertEquals(NavStack(), NavStack.afterPaired(5, keepAlive = true).afterKeepAlive())
+        assertEquals(NavStack(), NavStack().push(Destination.Inbox).push(Destination.KeepAlive(5)).afterKeepAlive())
         // A --manual code ends on its key line, then the step, then Home.
         assertEquals(NavStack().push(Destination.KeepAlive(0)), NavStack.afterKeyToInstall(keepAlive = true))
         assertEquals(NavStack(), NavStack.afterKeyToInstall(keepAlive = false))
@@ -112,8 +138,8 @@ class NavigationTest {
         assertEquals(NavStack().push(Destination.Inbox), fromInbox.afterHostFormSaved(keepAlive = true).afterKeepAlive())
         // No step (exempt, asked, or an edit): the form just closes.
         assertEquals(NavStack(), fromHome.afterHostFormSaved(keepAlive = false))
-        val edit = NavStack().push(Destination.HostPage(3)).push(Destination.HostForm(3))
-        assertEquals(NavStack().push(Destination.HostPage(3)), edit.afterHostFormSaved(keepAlive = false))
+        val edit = NavStack().push(Destination.HostForm(3))
+        assertEquals(NavStack(), edit.afterHostFormSaved(keepAlive = false))
         // Anything that is not the step is left alone.
         assertEquals(edit, edit.afterKeepAlive())
     }

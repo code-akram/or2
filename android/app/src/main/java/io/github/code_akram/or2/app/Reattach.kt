@@ -1,14 +1,8 @@
 package io.github.code_akram.or2.app
 
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.MutableState
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.Saver
-import androidx.compose.runtime.saveable.rememberSaveable
 import io.github.code_akram.or2.connection.ActiveTerminal
 import io.github.code_akram.or2.connection.UserCloseListener
 import io.github.code_akram.or2.data.Host
-import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TerminalTransport
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -53,22 +47,6 @@ data class LastTerminal(val hostId: Long, val target: TerminalTarget, val transp
         }
     }
 }
-
-/**
- * The terminal a resume that is waiting on its host's connection will reopen, as saved state: the
- * cold-launch marker is taken once per process, so the continuation must survive the activity being
- * recreated (rotation, process restore) while the biometric or the connect is in flight. Nothing
- * pending saves nothing.
- */
-val PendingResumeSaver: Saver<LastTerminal?, String> = Saver(
-    save = { it?.encode() },
-    restore = { LastTerminal.decode(it) },
-)
-
-/** The pending resume of [Or2App], kept across recreation (see [PendingResumeSaver]). */
-@Composable
-fun rememberPendingResume(): MutableState<LastTerminal?> =
-    rememberSaveable(stateSaver = PendingResumeSaver) { mutableStateOf<LastTerminal?>(null) }
 
 /**
  * The last focused terminal, in app-private preferences (Rust has no storage). The user closing a
@@ -129,7 +107,7 @@ sealed interface Reattach {
     /** Its session is alive: show it (`request_full_frame`). */
     data class Show(val terminalId: Long) : Reattach
 
-    /** Only its host connection is up: reopen the same target there (herdr pane focused first). */
+    /** Only its host connection is up: reopen the same target there (or show the open terminal on its herdr session as it is). */
     data class Reopen(val last: LastTerminal) : Reattach
 
     /** The host is not connected: Home offers "Resume", which unlocks and then reopens. */
@@ -198,20 +176,4 @@ class SessionMarker(private val store: PrefStore) {
     private companion object {
         const val KEY = "sessions_open"
     }
-}
-
-/** The next step of a Resume once the user tapped it and the host is being unlocked and connected. */
-enum class ResumeStep { WAIT, OPEN, ABORT }
-
-/**
- * [state] is the host's connection state (null: no connection yet; a lost connection's old
- * `Closed` is still listed until the new attempt replaces it), [busy] whether an unlock or connect
- * operation is in flight. Connected opens the terminal; once the operation ended without a
- * connection (biometric cancelled, connect failed) it gives up.
- */
-fun resumeStep(state: HostState?, busy: Boolean): ResumeStep = when {
-    state is HostState.Connected -> ResumeStep.OPEN
-    busy -> ResumeStep.WAIT
-    state == null || state is HostState.Closed -> ResumeStep.ABORT
-    else -> ResumeStep.WAIT // Connecting or authenticating: the connect call returned, the host is on its way.
 }

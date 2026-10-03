@@ -75,6 +75,9 @@ object Or2Icons {
     val Trash = icon("trash", "M4.5 7h15", "M9.5 7V4.5h5V7", "M6.5 7l1 13h9l1-13", "M10 11v5", "M14 11v5")
     val Pencil = icon("pencil", "M4 20h4L19 9l-4-4L4 16z", "M13 7l4 4")
     val Power = icon("power", "M12 3.5v8", "M7 6.8a7.5 7.5 0 1 0 10 0")
+
+    /** `⋯`: a host card's menu. */
+    val More = icon("more", "M5.5 12h.01", "M12 12h.01", "M18.5 12h.01", stroke = 3f)
     val Refresh = icon("refresh", "M20 12a8 8 0 1 1-2.4-5.7", "M20 4.5V9h-4.5")
     /** A shell prompt, `>_`: the picker's "Shell" pill and the Resume card. */
     val Terminal = icon("terminal", "M5 7.5l4.5 4.5L5 16.5", "M12.5 17h6.5")

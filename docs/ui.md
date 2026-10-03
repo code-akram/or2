@@ -93,7 +93,7 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 - Top bar: one component (`TopBar`) on every screen but the terminal (whose header is its own),
   the same everywhere. No app-bar fill: exactly 48 dp tall (`Or2Dimens.TopBar`) right under the
   status bar (the root applies the top inset once; nothing else does), an optional back icon, a light
-  16 sp title (`TopBarTitle`, sentence case: "SSH keys", "New connection") and trailing actions as
+  16 sp title (`TopBarTitle`, sentence case: "SSH keys", "New host") and trailing actions as
   quiet 44 dp round icon buttons (touch target 48 dp), never pills or text buttons. Top-level screens
   (Home, Inbox) have no title, only their row of icons. The icon buttons sit on the screen edges, so
   the 20 dp glyphs (back on the left, the last action on the right) land on the 12 dp gutter like
@@ -113,8 +113,8 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 - Glow: a wide, flat ellipse behind the top bar (gone before lists start, so sticky headers on a
   plain `background` have no visible edge) and a modest radial in the bottom-right corner.
 - Primary action: full-width pill button (`accent`, 44 dp tall; the disabled label is
-  `text` at 80 % (`#AEB7D4`, 5.5:1) on `accentMuted`; `textMuted` there was 3.9:1) at the end of a form, with a one-line muted footnote below. Top-bar
-  check mark mirrors it.
+  `text` at 80 % (`#AEB7D4`, 5.5:1) on `accentMuted`; `textMuted` there was 3.9:1) at the end of a form, with a one-line muted footnote below. It is
+  the form's one Save: no top-bar check mark repeats it.
 - Scrolling content runs edge to edge and scrolls *under* the gesture bar: screens apply only the
   side and top insets at the root and end their scrolling content with `BottomInsetSpacer` (the
   navigation-bar inset, minus the keyboard when it is up), so lists are never cut flat above the
@@ -151,21 +151,31 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 
 ## Components
 
-- **Host card:** `surface` card, leading 20 dp server icon (no tile fill; Moshi draws it bare) with
-  a status dot (attention when an agent is blocked or a host-key decision waits, accent while
-  connecting, green when connected, danger on failure), name (15 sp) and mono
-  `user@host:port` subtitle, and a trailing **session button** (no chevron): the `>_` prompt glyph
-  (`Or2Icons.Terminal`, 18 dp, `accent`) on a 32 dp `accentMuted` disc, centred in a 48 dp touch box that fits
-  the card's own height (the text column carries the card's 12 dp vertical padding), described
-  "Open a session on <host>". Two actions, one per tap: the card body opens the host screen (and, for a host
-  that is not connected, starts its connection, the usual unlock), never the picker; the button opens the
-  session picker over Home (see "Session picker sheet"); a long press opens the options sheet. Connection progress replaces the subtitle in
-  place (`Checking server...`, `Unlocking key...`, `Authenticating...`) with an accent spinner in
-  the icon's own 20 dp slot (the spinner is exactly the icon's size, so the leading column lines up), on a faint `surfaceTrack` ring, so the glyph never jumps sideways; no
-  modal progress dialogs. The card's semantics carry the state ("Connected", "Needs attention", ...)
-  as well as the dot colour.
-- **Status chip:** pill in `surface` with an 8 dp coloured dot and muted label, e.g.
-  `● Needs attention: 1`; tapping opens the relevant sheet.
+- **Host card** (v0.1.2 streamline): the one place for a host and its terminals. A `surface` card of two parts:
+  - **Header row** (`host:<id>`): leading 20 dp server icon (no tile fill; Moshi draws it bare) with a status dot
+    (attention when an agent is blocked or a host-key decision waits, accent while connecting, green when
+    connected, danger on failure), name (15 sp) and the mono `user@host:port` in use (`+N` for the others), and at
+    the end a quiet **`⋯`** (`Or2Icons.More`, a 44 dp `IconAction` in `textMuted`, described "Options for <host>")
+    that opens the host menu. A tap on the header opens the session picker over Home (see "Session picker
+    sheet"), starting the connection first for a host that is not connected (the usual unlock); a long press is the
+    menu too. Connection progress replaces the address in place (`Checking server...`, `Unlocking key...`,
+    `Authenticating...`) with an accent spinner in the icon's own 20 dp slot (the spinner is exactly the icon's
+    size, so the leading column lines up), on a faint `surfaceTrack` ring, so the glyph never jumps sideways; no
+    modal progress dialogs. A failure is a `danger` line, with one muted mono line per address under it. The
+    header's semantics carry the state ("Connected", "Needs attention", ...) as well as the dot colour.
+  - **Terminals** (only when the host has open terminals): its terminals as live thumbnails in a row inside the
+    card (12 dp in from its edges and bottom, 8 dp apart, about 38 % of the card wide, scrolling sideways), in
+    the order they opened. Each thumbnail: the terminal's own background with the live preview inset (26 dp at
+    the top for the pills), the transport pill (`SSH`/`Mosh`, mono 11) at its top left, or `Closed` (a
+    `surfaceTrack` pill with muted text, the preview dimmed to 50 %) for a terminal that has closed, and at its
+    top right a small **`×`**: a 24 dp disc in the toolbar's `background` at ~85 % with a 14 dp `text` glyph,
+    centred in a 40 dp touch box (grown to 48), described "Close <title>". Under it the title (13 sp) and the mono
+    detail in `accent` (a herdr terminal's focused agent or its cwd, else empty). A tap shows the terminal as it
+    is. The `×` closes it: a tmux or herdr terminal in one tap (only or2's view ends; the session runs on), an
+    open shell after **Close shell?** "Programs running in it end." (`Close` in `danger`, `Cancel`).
+  - The host menu (`⋯`, or a long press): Connect or Disconnect, Edit, Delete (with "Delete host?").
+- **Status chip:** pill in `surface` with an 8 dp coloured dot and muted label (the reconnect chip's look). Home
+  has no status chips: the Inbox icon's badge says an agent needs attention.
 - **Agent row (inbox):** status dot (in the same 20 dp leading slot as the host rows below, so
   both start their text at one x; working dots pulse between full and 70 % alpha), agent display name, muted mono
   `host · workspace / tab`, trailing relative time; blocked rows first and tinted with
@@ -174,8 +184,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 - **Dialogs:** a `surfaceRaised` card with 12 dp screen gutters, 16 dp inside, the title, the body and the
   buttons right-aligned beneath (wrapping when they do not fit): the same gutter as the rest of the UI,
   not Material's 24 dp padding and 280 dp minimum width. The host-key dialogs use it too.
-- **Inbox host rows:** the connect action (`Retry`, `Unlock`) is a chip-scale pill (28 dp, 12 sp), so it does not
-  crowd the status text; herdr's note is mono 10.5 on the 16 sp line grid.
+- **Inbox host rows:** the connect action (`Retry`, `Connect`) is a chip-scale pill (28 dp, 12 sp), so it does not
+  crowd the status text; herdr's note is mono 10.5 on the 16 sp line grid. The row itself is no link (Home's card
+  is the host's place): only its pill acts.
 - **Add host chooser:** one chooser, like Moshi's, wherever adding a host starts: two `ActionCard`s 8 dp apart,
   `FASTEST` / **Easy pair with QR** (QR icon tile, "Recommended · ~1 min") first and `SSH-FLUENT` /
   **Set up manually** (server icon, "~3 min · needs hostname + key") second (`AddHostChooser`, its copy in
@@ -245,26 +256,28 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 - **Home:** the start destination, with trailing icon buttons only (agents inbox, keys, settings, about). The agents
   inbox is its sibling top-level screen: sticky status headers, blocked rows tinted, an empty
   state, and each host's connection status with its connect action (herdr's own explanation of
-  an unavailable session in muted mono). Sections in order: SESSIONS
-  (open sessions as live terminal thumbnail cards, ~38 % width, rounded 16 dp, the terminal inset
-  8 dp so corners never slice glyphs, with a compact host pill and a transport pill — `SSH`/`Mosh`
-  — overlaid, 13 sp title and mono path below; tap resumes), CONNECTIONS (host cards: the body opens the host
-  screen, the `>_` button the session picker over Home; "Long press for options." hint right-aligned in the
-  section header), then status chips. A FAB adds a host (the add-host sheet). Without hosts, CONNECTIONS holds the
-  empty state (**No connections yet**) with the add-host chooser under it, and nothing else: no key card (the
+  an unavailable session in muted mono). Home is the one place for hosts and their terminals (there is no host
+  screen): the notices and the Resume card, then HOSTS, the host cards (see "Host card": each with its own
+  terminals as live thumbnails), with **`Connect all`** as a compact text action at the end of the section
+  header's line (`Chip` 12 sp in `accent`, its touch target grown to 48 dp) while more than one host can connect
+  and no unlock runs. A FAB adds a host (the add-host sheet). Without hosts, HOSTS holds the
+  empty state (**No hosts yet**) with the add-host chooser under it, and nothing else: no key card (the
   keys icon still opens **SSH keys** for import and management). When the last terminal can be resumed
-  (its session is gone or its host is not connected), a **Resume card** sits above SESSIONS: an
-  `ActionCard` with the kicker `RESUME`, the title `Alpha: herdr w1:p2`, the muted line "Unlocks
+  (its session is gone or its host is not connected), a **Resume card** sits above HOSTS: an
+  `ActionCard` with the kicker `RESUME`, the title `Alpha: herdr work` (the terminal's title), the muted line "Unlocks
   if needed, then returns to this terminal." and the transport it had as the mono meta line
   (`Mosh`/`SSH`); tapping it unlocks, connects and reopens it. When the battery exemption was declined a
-  small, dismissible card above SESSIONS says "Background connections may drop" with an **Allow** text
+  small, dismissible card above HOSTS says "Background connections may drop" with an **Allow** text
   action and a close glyph (`Or2Card` on `SurfaceRaised`, `Secondary` muted text, no modal). While a host is
   connected and notifications are not allowed, a second card of the same kind says "Show connection
-  and agent notifications" (one offer for both uses, `NotificationUse.AGENT_ALERTS`; **Allow** asks for the
+  and agent notifications" (one offer for both uses, `NotificationPermission.offer`; **Allow** asks for the
   permission, or opens the app's notification settings once Android no longer asks; the glyph dismisses it
   for good). A host
   that was unreachable shows, under its failure (or under `Asleep`), one `MonoSmall` muted line per
   address: `host:port \u00b7 what happened`.
+- **Host form** (v0.1.2 streamline): titled **New host** / **Edit host**, one Save (the full-width button at the
+  end; no top-bar check). Editing a host ends with a `danger` **Delete host** row (trash icon) in its own grouped
+  card under the footnote, asking first with Home's "Delete host?" dialog; a deleted host's form returns Home.
 - **Key choice (host form):** an `SSH key` label, the muted hint `Choose a key` while nothing is chosen, and the
   same `KeyPicker` radio group as the Easy pair review: the stored keys, then **New key** ("Ed25519, generated on
   this phone. Asks for your biometric to save it."), preselected when the phone has no key, with one muted
@@ -291,11 +304,11 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   shows as asleep, and no reconnect is offered.`).
 - **Asleep:** a host flagged as sleeping whose connection went quiet is not a failure: Home's card shows
   `Asleep` in `textMuted` `Secondary` (no `danger` line, no dot; the card's state description reads
-  `Asleep`), the inbox row's message is `Asleep` in `textMuted` with the usual `Unlock` pill (tapping still
-  connects), and the host screen's status card says `Asleep` with a muted dot. A rejected key or host key
+  `Asleep`), the inbox row's message is `Asleep` in `textMuted` with the usual `Connect` pill (tapping still
+  connects), and the session picker's gate says `Asleep` in muted text with **Retry**. A rejected key or host key
   stays a `danger` failure.
-- **UDP blocked (host screen):** while a connected host's UDP verdict is `BLOCKED` (and its probe did not
-  say mosh-server is missing), one muted `Secondary` line sits under the status card: `Mosh can't reach
+- **UDP blocked (session picker):** while a connected host's UDP verdict is `BLOCKED` (and its probe did not
+  say mosh-server is missing), one muted `Secondary` line sits in the picker under its tabs: `Mosh can't reach
   this host over UDP, so terminals use SSH.` It suggests no fix: a firewall is only one cause (on the owner's
   Mac the firewall allowed mosh-server and UDP was still dropped). Nothing else explains it, and no terminal
   carries a note.
@@ -305,45 +318,46 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   the other notices (bottom of Home and the inbox, top of a full-screen terminal) and never covers or blocks a
   live pane; tapping the label runs the grouped unlock, the glyph dismisses it. It is not a dialog and holds
   nothing modal.
-- **Focus progress:** opening or returning to an agent's terminal first focuses its pane in herdr;
-  a floating `surfaceRaised` card with an accent spinner and a mono `Focusing host: herdr w1:p1…`
-  line shows in place (above the content, at the top of a full-screen terminal), never a dialog.
-  A gone pane or a failed focus replaces it with the usual dismissible message and the screen
-  stays where it was.
-- **Host screen:** the status card (address, state, the address used), then **Unlock and connect** while not
-  connected, or **Open a session** (which opens the session picker sheet) and **Disconnect** once connected, then
-  the host's open sessions. The picker never opens by itself, on arrival or when the host connects: reaching the
-  screen from Home's card shows the screen alone.
-- **Session picker sheet:** opens from a Home host card's `>_` button (over Home, without pushing the host screen)
-  and from the host screen's **Open a session**; never by itself. From Home it shows at once, whatever the host's
+- **Focus progress:** only an explicit agent request (an inbox row, a notification) focuses its pane in herdr
+  first; a floating `surfaceRaised` card with an accent spinner and a mono `Focusing host: herdr work…`
+  line (the terminal's title) shows in place (above the content, at the top of a full-screen terminal), never a
+  dialog; opening (`Opening host: tmux main…`) and a resume (`Resuming host: shell…`) use the same card. A gone pane or
+  a failed focus replaces it with the usual dismissible message and the screen stays where it was. Every other
+  way back to an open terminal (a Home thumbnail, the Terminals sheet, a picker row marked `Open`, a reattach)
+  shows it as it is: herdr's focus is left where the user left it.
+- **No host screen** (v0.1.2 streamline): Home's host card is the host's place; its header opens the picker, its
+  `⋯` the host menu, and the per-address detail and the address in use are on the card. A host-key prompt is one
+  dialog over whatever is on screen.
+- **Session picker sheet:** opens from a Home host card's header (over Home), and over Home after Easy pair (the
+  paired host's picker, while it connects); never by itself otherwise. It shows at once, whatever the host's
   state: while the host is not connected the sheet holds, instead of its lists, a compact row like the host's card
   (the name in `CardTitle`, the card's own progress line in mono `accent` with an accent spinner in the icon's
   20 dp slot: `Unlocking key…`, `Checking server…`, `Authenticating…`; `Waiting for host-key approval` in
   `attention` without a spinner while the trust dialog is up over the sheet); then the lists in the same sheet,
-  under the host's name in muted `Secondary` (over Home nothing else says which host the sheet is for; the host
-  screen's picker has no such line).
+  under the host's name in muted `Secondary` (nothing else on screen says which host the sheet is for).
   A failure shows its reason in `danger` (what each address did in muted mono under it) and a compact **Retry**
   pill; an asleep host `Asleep` in muted text with **Retry**; a host that is simply not connected (a cancelled
-  unlock) `Not connected` with **Unlock and connect**; a host without a key **Select a key**, which opens the
-  host form. Choosing a target opens the terminal exactly as from the host screen; dismissing leaves Home as it
-  was (a connect already started carries on, and the card shows it). The sheet: a
-  segmented control (`herdr` / `tmux` / `Open`) with a trailing **Shell** pill (`surfaceTrack`,
-  the `>_` prompt glyph before the label) that opens a plain shell; below, one grouped list of herdr sessions (`● Running`), tmux sessions (`●
-  Attached`, with a "new session" field) or, under Open, the open terminals of the host. A herdr
+  unlock) `Not connected` with **Connect**; a host without a key **Select a key**, which opens the
+  host form. Dismissing leaves Home as it was (a connect already started carries on, and the card shows it). The
+  sheet: a segmented control (`herdr` / `tmux`; there is no `Open` tab) with a trailing **Shell** pill
+  (`surfaceTrack`, the `>_` prompt glyph before the label, its only meaning) that opens a plain shell; the UDP line
+  under them when it applies (see "UDP blocked"); below, one grouped list of herdr sessions (`● Running`) or tmux
+  sessions (`● Attached`, with a "new session" field), then **Refresh**. A herdr
   row is title-only (44 dp) with its state at the right (`● Running`, or a dim `● Not running` and a
   muted title for a stopped one), never as a second caption line as well. The "Refresh" row's icon
-  starts at the rows' text inset. **One terminal per tmux or herdr session:** choosing a tmux session or a herdr
-  session that already has an open terminal on that host brings that terminal to the front instead of opening a
-  second one (a herdr terminal opened on one of the session's panes counts, and its pane is focused again first;
-  an agent from the inbox or a notification reuses it too, after focusing that agent's pane);
-  **Shell** always opens a new shell; a terminal that has closed is never reused (a fresh one opens). Open
-  resumes the terminal chosen.
+  starts at the rows' text inset. **One terminal per tmux or herdr session:** a tmux session or a herdr session
+  that already has an open terminal on that host shows **`● Open`** (an `accent` dot) at its row's end in place of
+  its other state, and choosing it switches to that terminal as it is instead of opening a second one (a herdr
+  terminal opened on one of the session's panes counts; an agent from the inbox or a notification reuses it too,
+  after focusing that agent's pane); **Shell** always opens a new shell; a terminal that has closed is never
+  reused (a fresh one opens).
 - **Terminal screen:** the terminal sits in a full-height card with a 24 dp top radius: the terminal
   header (below), then the terminal edge to edge with a thin `accent` scroll indicator on the right. The
   card below the header follows the terminal's own background (the remote can change it with OSC 11).
   Nothing is ever drawn over the terminal's rows, and a flapping link never resizes the grid (the stale
   label lives in the header row; any line under the header takes layout space). There is no note under
-  terminals: why AUTO uses SSH is said once, on the host screen (see "UDP blocked"). While the view is
+  terminals: why AUTO uses SSH is said once, in the session picker (see "UDP blocked"). System Back does what
+  the minimise disc does: Home, wherever the terminal was opened from. While the view is
   scrolled up (the scrollback, or a tmux/herdr target's own history) a 28 dp round scroll-to-bottom button
   (a down chevron in `accent` on the toolbar's `background` at ~85 %, in a 40 dp touch box) sits 4 dp in
   from the terminal's bottom-right corner; tapping it returns to the live screen. That includes a swipe up
@@ -357,11 +371,11 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 - **Terminal header** (`TerminalHeader`): one composed 36 dp row on the `terminalHeader` tone
   (`#222232`, one slight step above the grid), closed off from the grid by a `crust` hairline, so the
   card reads as a window with a quiet title bar. In it:
-  - **Discs, at the left, as a pair:** "minimise" (`attention` orange, a minus glyph) and the sessions
+  - **Discs, at the left, as a pair:** "minimise" (`attention` orange, a minus glyph) and the Terminals
     sheet (`done` green, a sidebar glyph), 16 dp discs with a 10 dp glyph in `background`, 10 dp apart,
     the first disc's edge on the 12 dp gutter. Each sits in a 26 x 36 dp box that meets its neighbour's at
-    the midpoint (see "Touch targets"). The minimise disc returns to Home (the session keeps running as a
-    SESSIONS thumbnail); the green one opens the sessions sheet (switch session, or **Close session**).
+    the midpoint (see "Touch targets"). The minimise disc returns to Home (the terminal keeps running as a
+    thumbnail in its host's card); the green one opens the Terminals sheet.
   - **Title, centred on the card's full width** (not on the space left between the sides): `host ·
     target`, the host in `text` sans 12 sp medium, the `·` in `subtle`, the target (`shell`, `tmux main`,
     `herdr work w1:p2`) in mono 11 `textMuted`. It lives in a slot symmetric about the centre (the width less,
@@ -380,13 +394,17 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   - **Notice strip under it:** one `NoticeStrip` (see Components) on the same `terminalHeader` tone, above the
     hairline: a closed terminal's reason in `attention` with **Close**, else an image upload's progress or failure.
     It takes layout space.
-- **Sessions sheet** (the green disc): the open sessions (the current one marked; a tap switches) and one
-  `danger` row, **Close session**, the same in every state: one tap ends this terminal (an open one is
-  disconnected, with its usual cleanup, and dismissed together; a closed one is dismissed) and returns to Home,
-  the calm place to land, rather than jumping into another terminal. There is no separate "Disconnect" step and
-  no closed strip to dismiss afterwards; that strip, with its **Close**, remains for a session that closed by
-  itself (a lost connection, a remote exit), whose final frame stays readable until then. A terminal that never
-  connected shows the same **Close session** pill.
+- **Terminals sheet** (the green disc; v0.1.2 streamline), titled **Terminals**: every open terminal grouped by
+  host (a section header with the host's name, then one `surfaceRaisedRow` grouped card of 44 dp rows: the title
+  in `RowLabel`, `Closed` muted under it for one that has closed, `● Current` (an `accent` dot) on the one on
+  screen, and a quiet 44 dp `×` at the end, described "Close <title>"). A tap switches; the `×` closes with
+  Home's rules (a tmux or herdr terminal in one tap, an open shell after **Close shell?**); closing the terminal on
+  screen returns to Home, the calm place to land, closing another leaves you where you are. Then one more card:
+  **Copy screen** (copy icon: the visible screen's text to the clipboard; Android shows its own copied
+  confirmation) and **Gestures & shortcuts** (keyboard icon: the shortcuts sheet). There is no separate
+  "Close session" row or pill: Ctrl+Shift+W closes through the same close, and the closed strip's **Close**
+  remains for a session that closed by itself (a lost connection, a remote exit), whose final frame stays
+  readable until then. A terminal that never connected shows the same grouped list, each row with its `×`.
 - **Terminal toolbar:** a floating pill (`background` at ~85 %, 8 dp from the screen's sides, keys 6 dp inside
   it) of rounded keys (`surface`), 30 dp wide (text keys as wide as their label plus 6 dp each side) and 30 dp
   tall inside a 40 dp tall pill, each with a 34 x 40 dp touch box (the platform grows the hit area to 48 dp):

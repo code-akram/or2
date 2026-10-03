@@ -61,8 +61,6 @@ class TerminalActivationsProbeTest {
                     val again = activations.openAgent(host.id, host.label, null, "w1:p1") as Activation.Ready
                     assertSame(a.terminal, again.terminal)
                     assertEquals(2, holder.terminals.value.size)
-                    assertEquals(Activation.Ready(a.terminal), activations.reuse(a.terminal))
-                    assertEquals(Activation.Ready(other.terminal), activations.reuse(other.terminal))
 
                     // Any other pane is gone: the explicit message, and no terminal is opened for it.
                     for (gone in listOf("w9:p9", "w1:p3", "w2:p2")) {
@@ -70,10 +68,6 @@ class TerminalActivationsProbeTest {
                         assertEquals("That agent's pane no longer exists in herdr. Refresh the inbox.", failed.message)
                     }
                     assertEquals(2, holder.terminals.value.size)
-
-                    // A terminal that is open for a pane that has since gone is not shown again either.
-                    val stale = holder.openTerminal(active, TerminalTarget.Herdr(null, "w9:p9"))
-                    assertTrue(activations.reuse(stale) is Activation.Failed)
 
                     // Invalid names are an error message, not an activation.
                     val invalid = activations.openAgent(host.id, host.label, "bad name", "w1:p1") as Activation.Failed

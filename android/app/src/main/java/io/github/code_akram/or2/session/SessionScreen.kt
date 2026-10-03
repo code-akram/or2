@@ -1,7 +1,22 @@
 package io.github.code_akram.or2.session
 
+import io.github.code_akram.or2.ui.copyText
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
+import io.github.code_akram.or2.app.CLOSE_SHELL_TEXT
+import io.github.code_akram.or2.app.CLOSE_SHELL_TITLE
+import io.github.code_akram.or2.app.closeAsks
+import io.github.code_akram.or2.terminal.ShortcutsSheet
+import io.github.code_akram.or2.terminal.TerminalChromeState
+import io.github.code_akram.or2.ui.IconAction
+import io.github.code_akram.or2.ui.Or2Dialog
+import io.github.code_akram.or2.ui.SectionHeader
+import io.github.code_akram.or2.ui.TextAction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -61,7 +76,6 @@ import io.github.code_akram.or2.ui.Or2Icons
 import io.github.code_akram.or2.ui.Or2Shapes
 import io.github.code_akram.or2.ui.Or2Sheet
 import io.github.code_akram.or2.ui.Or2Type
-import io.github.code_akram.or2.ui.PillButton
 import io.github.code_akram.or2.ui.StatusDot
 import io.github.code_akram.or2.ui.TopBar
 import kotlinx.coroutines.launch
@@ -105,16 +119,23 @@ fun SessionScreen(
         val linkHealth by terminal.linkHealth.collectAsStateWithLifecycle()
         val paste = terminal.imagePaste
         val upload by (paste?.state ?: NO_UPLOAD).collectAsStateWithLifecycle()
-        val closed = state is SessionState.Closed
-        // "Close session" ends the terminal in one tap: an open one is disconnected (the usual cleanup: its mosh server
-        // is told to stop, the ledger cleared on its Closed) and dismissed together, a closed one only dismissed; then
-        // Home. A terminal that closed by itself (a lost connection, a remote exit) keeps its final frame until then.
-        val endSession = {
-            if (!closed) holder.disconnectTerminal(terminal)
-            holder.dismissTerminal(terminal)
-            minimise()
+        // Closing: the × of the Terminals sheet, Ctrl+Shift+W and the closed strip's Close, all through the one close
+        // function (TerminalActivations.close: an open terminal is disconnected and dismissed together, a closed one only
+        // dismissed). An open shell asks first. Closing the terminal on screen returns Home, the calm place to land.
+        var closing by remember { mutableStateOf<ActiveTerminal?>(null) }
+        fun close(target: ActiveTerminal) {
+            holder.activations.close(target)
+            if (target === terminal) minimise()
         }
+        fun requestClose(target: ActiveTerminal) {
+            if (closeAsks(target.target, target.state.value is SessionState.Closed)) closing = target else close(target)
+        }
+        val endSession = { requestClose(terminal) }
+        // The Terminals sheet (the green disc), and the shortcuts sheet it opens.
         var switcher by remember { mutableStateOf(false) }
+        var shortcuts by remember { mutableStateOf(false) }
+        val chrome = remember { TerminalChromeState() }
+        val context = LocalContext.current
         val scope = rememberCoroutineScope()
         val haptics = LocalHapticFeedback.current
         // The card follows the terminal's own background, which the remote can change (OSC 11).
@@ -127,23 +148,47 @@ fun SessionScreen(
                 handle?.let { TerminalScreen(it, terminal.state, terminal.frameReady, Modifier.weight(1f),
                     composerHint = "Message " + terminal.host.label + "…",
                     onBackground = { background = it }, onFrameDrawn = { holder.timing.terminalFrame(terminal.id) },
-                    target = terminal.target, targetScroller = terminal.targetScroller, input = terminal.input,
+                    target = terminal.target, targetScroller = terminal.targetScroller, input = terminal.input, chrome = chrome,
                     // Swipes move tmux or herdr; a shell has nothing to move and keeps every touch.
                     onSwipe = if (terminal.target is TerminalTarget.Shell) null else { swipe ->
                         haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
                         scope.launch { holder.navigate(terminal, swipeNav(swipe)) }
                     },
                     switchTo = { index -> open.getOrNull(index)?.let { if (it !== terminal) select(it) } },
-                    closeTerminal = { holder.dismissTerminal(terminal); minimise() }, imagePaste = paste) }
+                    closeTerminal = { requestClose(terminal) }, imagePaste = paste) }
             }
         } else {
-            PendingTerminal(terminal, state, endSession, minimise, open, select)
+            PendingTerminal(terminal, state, minimise, open, select, ::requestClose)
         }
         if (switcher) {
-            SessionSwitcher(terminal, open, select = { switcher = false; select(it) }, endSession = { switcher = false; endSession() },
-                dismiss = { switcher = false })
+            TerminalsSheet(
+                terminalItems(open), terminal.id,
+                select = { id -> switcher = false; open.find { it.id == id }?.takeIf { it !== terminal }?.let(select) },
+                close = { id -> open.find { it.id == id }?.let(::requestClose) },
+                copyScreen = {
+                    switcher = false
+                    // Android shows its own "copied" confirmation (API 33 and later; or2 needs 34).
+                    chrome.screenText().takeIf { it.isNotEmpty() }?.let { text -> copyText(context, "Terminal screen", text) }
+                },
+                shortcuts = { switcher = false; shortcuts = true },
+                dismiss = { switcher = false },
+            )
+        }
+        if (shortcuts) ShortcutsSheet(dismiss = { shortcuts = false })
+        closing?.let { target ->
+            CloseShellDialog(close = { closing = null; close(target) }, dismiss = { closing = null })
         }
     }
+}
+
+/** The confirmation of closing an open shell ([closeAsks]): its programs end with it. */
+@Composable
+fun CloseShellDialog(close: () -> Unit, dismiss: () -> Unit) {
+    Or2Dialog(
+        onDismiss = dismiss, title = CLOSE_SHELL_TITLE,
+        confirm = { TextAction("Close", close, color = Or2Colors.Danger, modifier = Modifier.testTag("close-shell-confirm")) },
+        dismiss = { TextAction("Cancel", dismiss, color = Or2Colors.Text) },
+    ) { Text(CLOSE_SHELL_TEXT) }
 }
 
 /**
@@ -213,61 +258,94 @@ const val STALE_BADGE_DESCRIPTION = "No word from the server"
 fun transportBadgeColors(transport: Transport): Pair<Color, Color> =
     if (transport == Transport.SSH) Or2Colors.SurfaceTrack to Or2Colors.Text else Or2Colors.Teal to Or2Colors.Background
 
-/** A terminal that has not connected yet, or closed before it did: no terminal, no keys. */
+/** A terminal that has not connected yet, or closed before it did: no terminal, no keys; the open terminals to close or switch to. */
 @Composable
 private fun PendingTerminal(
-    terminal: ActiveTerminal, state: SessionState, endSession: () -> Unit, minimise: () -> Unit,
-    open: List<ActiveTerminal>, select: (ActiveTerminal) -> Unit,
+    terminal: ActiveTerminal, state: SessionState, minimise: () -> Unit, open: List<ActiveTerminal>,
+    select: (ActiveTerminal) -> Unit, close: (ActiveTerminal) -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
         TopBar(title = terminal.host.label, back = minimise, backIcon = Or2Icons.ChevronDown)
         Column(Modifier.padding(horizontal = Or2Dimens.Gutter), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(terminal.title + " · " + sessionMessage(state), style = Or2Type.Mono, color = Or2Colors.TextMuted,
                 modifier = Modifier.testTag("terminal-status"))
-            PillButton("Close session", endSession, Modifier.testTag("terminal-end"))
-            if (open.size > 1) SessionList(terminal, open, select)
-        }
-    }
-}
-
-/** The open sessions as a grouped list; the current one is marked. */
-@Composable
-private fun SessionList(current: ActiveTerminal, open: List<ActiveTerminal>, select: (ActiveTerminal) -> Unit) {
-    GroupCard(Modifier.testTag("terminal-switcher")) {
-        open.forEachIndexed { index, other ->
-            val state by other.state.collectAsStateWithLifecycle()
-            if (index > 0) GroupDivider()
-            ListRow(
-                other.host.label, subtitle = other.title + if (state is SessionState.Closed) " (closed)" else "", subtitleMono = true,
-                modifier = Modifier.testTag("terminal-tab:${other.id}"),
-                onClick = { if (other !== current) select(other) },
-                trailing = if (other === current) ({
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        StatusDot(Or2Colors.Accent)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Current", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
-                    }
-                }) else null,
+            TerminalGroups(
+                terminalItems(open), terminal.id,
+                select = { id -> open.find { it.id == id }?.takeIf { it !== terminal }?.let(select) },
+                close = { id -> open.find { it.id == id }?.let(close) },
             )
         }
     }
 }
 
-/** The panes/sidebar sheet: switch between open sessions, or close this one ("Close session": one tap, then Home). */
+/** One open terminal as the Terminals sheet lists it, under its host. */
+data class TerminalItem(val id: Long, val hostId: Long, val hostLabel: String, val title: String, val closed: Boolean)
+
+/** The [TerminalItem]s of [open], in order, each with its state as it is now. */
 @Composable
-private fun SessionSwitcher(
-    current: ActiveTerminal, open: List<ActiveTerminal>, select: (ActiveTerminal) -> Unit,
-    endSession: () -> Unit, dismiss: () -> Unit,
+private fun terminalItems(open: List<ActiveTerminal>): List<TerminalItem> = open.map { terminal ->
+    key(terminal.id) {
+        val state by terminal.state.collectAsStateWithLifecycle()
+        TerminalItem(terminal.id, terminal.host.id, terminal.host.label, terminal.title, state is SessionState.Closed)
+    }
+}
+
+/**
+ * The Terminals sheet (the terminal header's green disc): every open terminal grouped by host, the one on screen
+ * ([currentId]) marked `● Current`, a tap switching to another ([select]) and each row's `×` closing it ([close]: the
+ * same rules as Home's). Then **Copy screen** (the visible screen's text to the clipboard) and **Gestures &
+ * shortcuts** (the shortcuts sheet).
+ */
+@Composable
+fun TerminalsSheet(
+    items: List<TerminalItem>, currentId: Long, select: (Long) -> Unit, close: (Long) -> Unit, copyScreen: () -> Unit,
+    shortcuts: () -> Unit, dismiss: () -> Unit,
 ) {
-    Or2Sheet(dismiss, title = "Sessions") {
-        Column(Modifier.padding(horizontal = Or2Dimens.Gutter).padding(bottom = Or2Dimens.Gutter), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            SessionList(current, open, select)
+    Or2Sheet(dismiss, title = "Terminals", modifier = Modifier.testTag("terminals-sheet")) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            TerminalGroups(items, currentId, select, close)
             GroupCard {
-                ListRow(
-                    "Close session", icon = Or2Icons.Close, titleColor = Or2Colors.Danger,
-                    modifier = Modifier.testTag("terminal-close-session"), onClick = endSession,
-                )
+                ListRow("Copy screen", icon = Or2Icons.Copy, modifier = Modifier.testTag("terminals-copy-screen"), onClick = copyScreen)
+                GroupDivider(inset = 44.dp)
+                ListRow("Gestures & shortcuts", icon = Or2Icons.Keyboard, modifier = Modifier.testTag("terminals-shortcuts"), onClick = shortcuts)
             }
         }
     }
 }
+
+/** The open terminals under one header per host (in the order their first terminal opened), on cards of [color]. */
+@Composable
+private fun TerminalGroups(items: List<TerminalItem>, currentId: Long, select: (Long) -> Unit, close: (Long) -> Unit) {
+    Column(Modifier.testTag("terminal-switcher")) {
+        items.groupBy { it.hostId }.values.forEachIndexed { index, group ->
+            SectionHeader(group.first().hostLabel, topGap = if (index == 0) 0.dp else 6.dp)
+            GroupCard {
+                group.forEachIndexed { row, item ->
+                    if (row > 0) GroupDivider()
+                    TerminalRow(item, item.id == currentId, { select(item.id) }, { close(item.id) })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TerminalRow(item: TerminalItem, current: Boolean, select: () -> Unit, close: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = Or2Dimens.RowMin).clickable(role = Role.Button, onClick = select)
+            .testTag("terminal-tab:${item.id}").padding(start = Or2Dimens.Gutter),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
+            Text(item.title, style = Or2Type.RowLabel, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (item.closed) Text("Closed", style = Or2Type.Secondary, color = Or2Colors.TextMuted, maxLines = 1)
+        }
+        if (current) {
+            StatusDot(Or2Colors.Accent)
+            Spacer(Modifier.width(6.dp))
+            Text("Current", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
+        }
+        IconAction(Or2Icons.Close, "Close ${item.title}", close, Modifier.testTag("terminal-row-close:${item.id}"), tint = Or2Colors.TextMuted)
+    }
+}
+
