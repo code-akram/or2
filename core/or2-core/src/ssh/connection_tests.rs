@@ -333,6 +333,10 @@ struct Shared {
     execs: AtomicUsize,
     /// How the `sftp` subsystem misbehaves (`Quirks`).
     sftp_quirks: Mutex<sftp_server::Quirks>,
+    /// Each SFTP session served (but those with binary handles), in order: its round trips.
+    sftp_links: Mutex<Vec<Arc<sftp_server::Link>>>,
+    /// The next SFTP requests (one per session) that hang up instead of being served.
+    sftp_hang_ups: Arc<AtomicUsize>,
 }
 
 struct Server {
@@ -610,13 +614,29 @@ impl server::Handler for Server {
                     taken
                 };
                 let binary = quirks.binary_handles;
+                let latency = quirks.latency;
                 let handler = sftp_server::FsSftp::new(root, self.shared.sftp_log.clone(), quirks);
                 if binary {
                     let (near, far) = tokio::io::duplex(1 << 20);
                     russh_sftp::server::run(far, handler).await;
                     tokio::spawn(sftp_server::binary_handles(kept.into_stream(), near));
                 } else {
-                    russh_sftp::server::run(kept.into_stream(), handler).await;
+                    // Through a relay, which can delay replies, count round trips and hang up.
+                    let link = Arc::new(sftp_server::Link::default());
+                    self.shared
+                        .sftp_links
+                        .lock()
+                        .unwrap()
+                        .push(Arc::clone(&link));
+                    let (near, far) = tokio::io::duplex(1 << 20);
+                    russh_sftp::server::run(far, handler).await;
+                    tokio::spawn(sftp_server::relay(
+                        kept.into_stream(),
+                        near,
+                        link,
+                        latency,
+                        Arc::clone(&self.shared.sftp_hang_ups),
+                    ));
                 }
             }
             _ => session.channel_failure(channel)?,
@@ -848,6 +868,8 @@ impl Fixture {
             sessions: Mutex::new(std::collections::HashMap::new()),
             execs: AtomicUsize::new(0),
             sftp_quirks: Mutex::new(sftp_server::Quirks::default()),
+            sftp_links: Mutex::new(Vec::new()),
+            sftp_hang_ups: Arc::new(AtomicUsize::new(0)),
         });
         let (listener, port) = runtime().block_on(async {
             let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -3020,22 +3042,23 @@ fn an_upload_makes_a_private_directory_and_a_private_file_through_a_rename() {
         execs,
         "no shell command"
     );
-    // The SFTP channel is closed once the upload is done.
-    wait_for(|| fixture.shared.closes.load(Ordering::SeqCst) >= 1);
-
-    // A second upload reuses the directory and gets a name of its own.
+    // The SFTP session stays open for the connection's next upload (contracts.md, "Upload
+    // speed"): a second upload reuses it and the directory, and gets a name of its own.
+    let closes = fixture.shared.closes.load(Ordering::SeqCst);
     let second = runtime()
         .block_on(fixture.handle.upload_image(b"GIF89a".to_vec(), "gif"))
         .unwrap();
     assert_ne!(second, path);
     assert!(second.ends_with(".gif"));
     assert_eq!(listing(&directory).len(), 2);
+    assert_eq!(sftp_requests(&fixture, "init"), 1, "one SFTP session");
+    assert_eq!(fixture.shared.closes.load(Ordering::SeqCst), closes);
     fixture.handle.disconnect();
     assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
 }
 
 #[test]
-fn an_upload_first_sweeps_old_or2_files_and_makes_an_existing_directory_private() {
+fn an_upload_sweeps_old_or2_files_once_delivered_and_makes_an_existing_directory_private() {
     let (fixture, _home, root) = sftp_fixture();
     let directory = root.join(".cache/or2/images");
     std::fs::create_dir_all(&directory).unwrap();
@@ -3061,6 +3084,10 @@ fn an_upload_first_sweeps_old_or2_files_and_makes_an_existing_directory_private(
         .block_on(fixture.handle.upload_image(image_bytes(10), "jpg"))
         .unwrap();
     let name = path.rsplit('/').next().unwrap().to_owned();
+    // The sweep runs once the path was delivered (contracts.md, "Upload speed").
+    wait_for(|| {
+        !directory.join("or2-old.png").exists() && !directory.join("or2-old.png.part").exists()
+    });
     assert_eq!(
         listing(&directory),
         [
@@ -3571,9 +3598,9 @@ fn the_directories_are_checked_again_before_the_rename() {
     let upload = std::thread::scope(|scope| {
         let upload =
             scope.spawn(|| runtime().block_on(fixture.handle.upload_image(image_bytes(10), "png")));
-        // After the checks and the sweep, while the bytes are being written, the image
-        // directory is swapped for a link.
-        wait_for(|| sftp_requests(&fixture, "opendir") == 1);
+        // After the checks, while the bytes are being written, the image directory is swapped
+        // for a link.
+        wait_for(|| sftp_requests(&fixture, "write") == 1);
         std::fs::rename(&directory, root.join(".cache/or2/moved")).unwrap();
         std::os::unix::fs::symlink(elsewhere.path(), &directory).unwrap();
         upload.join().unwrap()
@@ -3611,6 +3638,209 @@ fn a_server_with_handles_that_are_not_utf8_fails_the_upload_cleanly() {
             .block_on(fixture.handle.list_tmux_sessions())
             .is_ok()
     );
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+}
+
+// ---------------------------------------------------------------------------------------
+// Upload speed (contracts.md, "Upload speed"): round trips, the session kept, the sweep after.
+
+/// A fixture whose image directory already exists (the common case), with every SFTP reply
+/// arriving `latency` after the server gave it.
+fn distant_sftp_fixture(latency: Duration) -> (Fixture, tempfile::TempDir, std::path::PathBuf) {
+    let (fixture, home, root) = sftp_fixture();
+    std::fs::create_dir_all(root.join(".cache/or2/images")).unwrap();
+    for part in [".cache", ".cache/or2", ".cache/or2/images"] {
+        std::fs::set_permissions(root.join(part), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fixture.shared.sftp_quirks.lock().unwrap().latency = latency;
+    (fixture, home, root)
+}
+
+fn sftp_links(fixture: &Fixture) -> Vec<Arc<sftp_server::Link>> {
+    fixture.shared.sftp_links.lock().unwrap().clone()
+}
+
+fn sftp_log(fixture: &Fixture) -> Vec<String> {
+    fixture.shared.sftp_log.lock().unwrap().clone()
+}
+
+/// Round trips an upload waits for, one after another: a new session's channel open and
+/// subsystem request (one each), then the SFTP ones its relay counted, up to the `realpath`
+/// that answers the path.
+#[test]
+fn an_upload_into_an_existing_directory_waits_for_few_round_trips() {
+    let (fixture, _home, _root) = distant_sftp_fixture(Duration::from_millis(20));
+    let path = runtime()
+        .block_on(fixture.handle.upload_image(image_bytes(100_000), "png"))
+        .unwrap();
+    assert!(path.ends_with(".png"));
+    let links = sftp_links(&fixture);
+    let new_session = 2 + links[0].depth_of_last(sftp_server::REALPATH).unwrap();
+    eprintln!("round trips on a new session: {new_session}");
+    assert!(
+        new_session <= 12,
+        "{new_session} round trips on a new session"
+    );
+    // The sweep runs after the path was delivered; it is done once its listing is closed.
+    wait_for(|| {
+        let log = sftp_log(&fixture);
+        log.contains(&"opendir".to_owned()) && log.last().map(String::as_str) == Some("close")
+    });
+
+    let before = links[0].delivered();
+    let path = runtime()
+        .block_on(fixture.handle.upload_image(image_bytes(100_000), "jpg"))
+        .unwrap();
+    assert!(path.ends_with(".jpg"));
+    assert_eq!(sftp_links(&fixture).len(), 1, "the session is reused");
+    let reused = links[0].depth_of_last(sftp_server::REALPATH).unwrap() - before;
+    eprintln!("round trips on a reused session: {reused}");
+    assert!(reused <= 9, "{reused} round trips on a reused session");
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+}
+
+#[test]
+fn a_session_that_fails_under_an_upload_is_reopened_once() {
+    let (fixture, _home, root) = sftp_fixture();
+    let directory = root.join(".cache/or2/images");
+    runtime()
+        .block_on(fixture.handle.upload_image(image_bytes(10), "png"))
+        .unwrap();
+    assert_eq!(sftp_links(&fixture).len(), 1);
+
+    // The kept session dies as the next upload sends its first request: that upload opens a
+    // new session and goes through on it.
+    fixture.shared.sftp_hang_ups.store(1, Ordering::SeqCst);
+    let path = runtime()
+        .block_on(fixture.handle.upload_image(image_bytes(20), "png"))
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), image_bytes(20));
+    assert_eq!(sftp_links(&fixture).len(), 2, "reopened");
+    assert_eq!(fixture.shared.sftp_hang_ups.load(Ordering::SeqCst), 0);
+
+    // The new one dies too, and so does the one opened for it: reopened once, then failed.
+    fixture.shared.sftp_hang_ups.store(2, Ordering::SeqCst);
+    let result = runtime().block_on(fixture.handle.upload_image(image_bytes(30), "png"));
+    assert!(
+        matches!(result, Err(HostError::CommandFailed { .. })),
+        "{result:?}"
+    );
+    assert_eq!(sftp_links(&fixture).len(), 3, "reopened once only");
+    assert_eq!(fixture.shared.sftp_hang_ups.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        listing(&directory).len(),
+        2,
+        "nothing left of the failed one"
+    );
+
+    // A failed session is not kept: the next upload opens one that works.
+    runtime()
+        .block_on(fixture.handle.upload_image(image_bytes(40), "png"))
+        .unwrap();
+    assert_eq!(sftp_links(&fixture).len(), 4);
+    assert_eq!(listing(&directory).len(), 3);
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+}
+
+/// Writes an `or2-*` file last modified eight days ago into `directory`.
+fn old_image(directory: &std::path::Path, name: &str) {
+    let file = std::fs::File::create(directory.join(name)).unwrap();
+    let day = Duration::from_secs(24 * 60 * 60);
+    file.set_modified(std::time::SystemTime::now() - 8 * day)
+        .unwrap();
+}
+
+#[test]
+fn the_sweep_runs_after_the_path_is_delivered_at_most_hourly_per_session() {
+    let (fixture, _home, root) = distant_sftp_fixture(Duration::ZERO);
+    let directory = root.join(".cache/or2/images");
+    old_image(&directory, "or2-old-1.png");
+    let path = runtime()
+        .block_on(fixture.handle.upload_image(image_bytes(10), "png"))
+        .unwrap();
+    // Swept, but only once the upload had answered its path.
+    wait_for(|| !directory.join("or2-old-1.png").exists());
+    let log = sftp_log(&fixture);
+    let resolved = log.iter().rposition(|request| request == "realpath");
+    let listed = log.iter().position(|request| request == "opendir");
+    assert!(resolved < listed, "{log:?}");
+    assert!(std::path::Path::new(&path).exists());
+
+    // Not again on the same session within the hour.
+    old_image(&directory, "or2-old-2.png");
+    runtime()
+        .block_on(fixture.handle.upload_image(image_bytes(10), "png"))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(sftp_requests(&fixture, "opendir"), 1);
+    assert!(directory.join("or2-old-2.png").exists());
+
+    // A new session sweeps again.
+    fixture.shared.sftp_hang_ups.store(1, Ordering::SeqCst);
+    runtime()
+        .block_on(fixture.handle.upload_image(image_bytes(10), "png"))
+        .unwrap();
+    assert_eq!(sftp_links(&fixture).len(), 2);
+    wait_for(|| !directory.join("or2-old-2.png").exists());
+    assert_eq!(sftp_requests(&fixture, "opendir"), 2);
+    assert_eq!(listing(&directory).len(), 3, "the three images stay");
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+}
+
+#[test]
+fn a_cancelled_upload_closes_its_file_and_leaves_the_session_to_the_next() {
+    let (fixture, _home, root) = sftp_fixture();
+    fixture.shared.sftp_quirks.lock().unwrap().first_write_delay = Some(Duration::from_millis(300));
+    let upload = runtime().block_on(async {
+        tokio::select! {
+            result = fixture.handle.upload_image(image_bytes(200_000), "png") => Some(result),
+            () = async {
+                while sftp_requests(&fixture, "write") == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            } => None,
+        }
+    });
+    assert!(upload.is_none(), "still running when cancelled: {upload:?}");
+    let directory = root.join(".cache/or2/images");
+    wait_for(|| sftp_requests(&fixture, "remove") == 1);
+    wait_for(|| listing(&directory).is_empty());
+    // The session outlives the upload, so its file handle is closed rather than left open.
+    wait_for(|| sftp_requests(&fixture, "close") == 1);
+
+    let path = runtime()
+        .block_on(fixture.handle.upload_image(image_bytes(10), "png"))
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), image_bytes(10));
+    assert_eq!(sftp_requests(&fixture, "init"), 1, "the same session");
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+}
+
+#[test]
+fn the_kept_session_closes_its_channel_when_dropped() {
+    let (mut fixture, _home, root) = sftp_fixture();
+    let host = fixture.ssh();
+    let closes = fixture.shared.closes.load(Ordering::SeqCst);
+    runtime().block_on(async {
+        let uploads = upload::Uploads::default();
+        for size in [10, 20] {
+            let uploaded = uploads
+                .upload_image(&host, image_bytes(size), "png", std::future::pending())
+                .await;
+            assert!(uploaded.is_ok());
+        }
+        assert_eq!(fixture.shared.closes.load(Ordering::SeqCst), closes);
+        drop(uploads);
+    });
+    wait_for(|| fixture.shared.closes.load(Ordering::SeqCst) == closes + 1);
+    assert_eq!(sftp_requests(&fixture, "init"), 1);
+    assert_eq!(listing(&root.join(".cache/or2/images")).len(), 2);
+    drop(host);
     fixture.handle.disconnect();
     assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
 }

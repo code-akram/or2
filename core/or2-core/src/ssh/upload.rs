@@ -1,30 +1,38 @@
-//! Image upload over SFTP on the host's own SSH connection (contracts.md, "Image paste").
+//! Image upload over SFTP on the host's own SSH connection (contracts.md, "Image paste" and
+//! "Upload speed").
 //!
-//! One session channel per upload runs the server's `sftp` subsystem. Every path is relative
-//! to where the server's SFTP starts (the login's home), so `~/.cache/or2/images` needs no
-//! knowledge of `$HOME` and no shell. The upload:
+//! A connection's uploads share one session channel running the server's `sftp` subsystem
+//! ([`Uploads`]): the first upload opens it, later ones reuse it, one upload at a time. Every
+//! path is relative to where the server's SFTP starts (the login's home), so
+//! `~/.cache/or2/images` needs no knowledge of `$HOME` and no shell. Requests that do not
+//! depend on each other go out together (SFTP matches replies by id); a request that checks
+//! an earlier step waits for it. The upload:
 //!
-//! 1. creates the missing parts of [`IMAGE_DIR`] (`0700`), makes the image directory `0700` if
-//!    something else made it, and checks each part with `lstat` before going below it
-//!    ([`directory_problem`]): a directory, not a symbolic link (except `~/.cache`, which may
-//!    link to a directory held to the same rules), not writable by group or others (`~/.cache`:
-//!    by others), and the image directory exactly `0700`;
+//! 1. checks each part of [`IMAGE_DIR`] with `lstat` ([`directory_problem`]): a directory, not
+//!    a symbolic link (except `~/.cache`, which may link to a directory held to the same
+//!    rules), not writable by group or others (`~/.cache`: by others), and the image directory
+//!    exactly `0700`. All three are read at once; only when one is missing or wrong does it go
+//!    part by part, creating the missing ones (`0700`), making the image directory `0700` if
+//!    something else made it, and checking each before going below it;
 //! 2. creates `<name>.part` (exclusive, `0600`, then `fsetstat 0600`) and checks with `fstat`
 //!    that it is a regular `0600` file. Its owner is the account the upload runs as: the
-//!    directories must belong to it (`~/.cache` may also belong to root), checked next;
-//! 3. removes the directory's `or2-*` files of that owner older than [`SWEEP_AGE`] (best effort,
-//!    bounded);
-//! 4. writes the bytes, pipelined, and closes the file;
-//! 5. checks the directories again and renames the file to
+//!    directories must belong to it (`~/.cache` may also belong to root), read with the
+//!    `fstat` and checked after it;
+//! 3. writes the bytes, pipelined, and closes the file;
+//! 4. checks the directories again (read together with the close) and renames the file to
 //!    `or2-<UTC yyyyMMdd-HHmmss>-<6 hex>.<ext>`;
-//! 6. answers the absolute path the server resolves for it when that is safe to type into a
+//! 5. answers the absolute path the server resolves for it when that is safe to type into a
 //!    terminal ([`is_safe_image_path`]), else one made of the start directory's own resolved
 //!    path and the image's relative one when that is, else fails.
 //!
+//! Once its path is delivered, the host driver removes the directory's `or2-*` files of that
+//! owner older than [`SWEEP_AGE`] ([`Sweep`]: best effort, bounded, at most once per session
+//! per [`SWEEP_INTERVAL`]), never on the upload's way.
+//!
 //! Whatever ends an upload early (a failure, a check, the caller's reply dropped) removes what
-//! it made, best effort: the temporary file before the rename, the image after it, and an
-//! image whose caller did not acknowledge its path ([`deliver`]). One left behind (the
-//! connection died) is an `or2-*` file the sweep removes later.
+//! it made, best effort: the temporary file before the rename (its handle closed), the image
+//! after it, and an image whose caller did not acknowledge its path ([`deliver`]). One left
+//! behind (the connection died) is an `or2-*` file the sweep removes later.
 //!
 //! SFTP v3 names files by path only (no `openat`, no `O_NOFOLLOW`): the checks hold against
 //! other accounts, which cannot change what was checked, but not against a process of the
@@ -32,14 +40,16 @@
 //! where bytes go), never with what reaches a terminal.
 
 use std::future::Future;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::ops::Deref;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use russh::ChannelMsg;
 use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::client::{Config, RawSftpSession};
-use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
+use russh_sftp::protocol::{Attrs, FileAttributes, OpenFlags, StatusCode};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 use tokio::time::{Instant, timeout, timeout_at};
@@ -65,10 +75,12 @@ const SHARED_WRITE: u32 = 0o022;
 /// Write permission for others: `~/.cache` may be group-writable (a umask of `002` with a
 /// group of the user's own, as Debian and Ubuntu give users, leaves it `0775`).
 const OTHER_WRITE: u32 = 0o002;
-/// `or2-*` files older than this are removed by the next upload.
+/// `or2-*` files older than this are removed by a later sweep.
 pub(crate) const SWEEP_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-/// How long the sweep may take before the upload goes on without finishing it.
+/// How long the sweep may take before it is left unfinished.
 const SWEEP_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often one SFTP session sweeps at most.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// How long removing a file after a failure or a cancel may take.
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a sent path may wait for its caller's acknowledgement ([`deliver`]). The caller
@@ -96,12 +108,100 @@ const MADE_TEMPORARY: u8 = 2;
 const RENAMING: u8 = 3;
 const RENAMED: u8 = 4;
 
+/// A host connection's image uploads: its SFTP session, opened by the first upload and kept
+/// for the next ones, which run one at a time. Owned by the host driver, so the session (and
+/// its channel) goes with the connection.
+#[derive(Default)]
+pub(super) struct Uploads {
+    session: tokio::sync::Mutex<Option<Arc<Sftp>>>,
+}
+
+/// One SFTP session, on a session channel of its own that closes when it is dropped.
+pub(super) struct Sftp {
+    raw: RawSftpSession,
+    /// When this session last started a [`Sweep`].
+    swept: Mutex<Option<Instant>>,
+}
+
+impl Sftp {
+    fn new(raw: RawSftpSession) -> Self {
+        Self {
+            raw,
+            swept: Mutex::new(None),
+        }
+    }
+
+    /// Whether a sweep may start `now`; if so, it counts as started.
+    fn claim_sweep(&self, now: Instant) -> bool {
+        let mut swept = self.swept.lock().unwrap_or_else(PoisonError::into_inner);
+        let due = sweep_due(*swept, now);
+        if due {
+            *swept = Some(now);
+        }
+        due
+    }
+}
+
+impl Deref for Sftp {
+    type Target = RawSftpSession;
+
+    fn deref(&self) -> &RawSftpSession {
+        &self.raw
+    }
+}
+
+/// Whether a session that last swept at `last` may sweep again at `now`.
+fn sweep_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= SWEEP_INTERVAL)
+}
+
 /// An uploaded image: the absolute path for its caller, and the file on the host, removed if
 /// the caller no longer takes it ([`deliver`]).
 pub(super) struct Uploaded {
     pub(super) path: String,
-    sftp: Arc<RawSftpSession>,
+    sftp: Arc<Sftp>,
     relative: String,
+    /// The account the upload ran as, whose old images the [`Sweep`] removes.
+    owner: u32,
+}
+
+impl Uploaded {
+    /// The sweep to run once this image's path was delivered.
+    pub(super) fn sweep(&self) -> Sweep {
+        Sweep {
+            sftp: Arc::clone(&self.sftp),
+            owner: self.owner,
+        }
+    }
+}
+
+/// Removes [`IMAGE_DIR`]'s old `or2-*` files of the account an upload ran as, after that
+/// upload, on its session: best effort, at most [`SWEEP_TIMEOUT`], and at most once per
+/// session per [`SWEEP_INTERVAL`].
+pub(super) struct Sweep {
+    sftp: Arc<Sftp>,
+    owner: u32,
+}
+
+impl Sweep {
+    pub(super) async fn run(self) {
+        if !self.sftp.claim_sweep(Instant::now()) {
+            return;
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let listing = Mutex::new(None);
+        let _ = timeout(SWEEP_TIMEOUT, sweep(&self.sftp, now, self.owner, &listing)).await;
+        // A listing left open by the timeout would stay open as long as the session.
+        let left_open = listing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(handle) = left_open {
+            let _ = timeout(CLEANUP_TIMEOUT, self.sftp.close(handle)).await;
+        }
+    }
 }
 
 /// Hands an upload's result to its caller, in two steps: the path is sent, then the caller
@@ -127,23 +227,88 @@ pub(super) async fn deliver(
     }
 }
 
-/// Uploads `bytes` (validated by the handle: nonempty, at most `MAX_IMAGE_BYTES`) with the
-/// lower-case `extension` (see the module comment). Stops when `cancelled` resolves: the
-/// caller's reply was dropped (a cancelled or timed-out upload). Whatever ends it early
-/// removes what it made, best effort.
+/// [`Uploads::upload_image`] on a session of its own, closed when the result is dropped.
+#[cfg(test)]
 pub(super) async fn upload_image(
     host: &Arc<SshHost>,
     bytes: Vec<u8>,
     extension: &str,
     cancelled: impl Future<Output = ()>,
 ) -> Result<Uploaded, HostError> {
-    tokio::pin!(cancelled);
-    let failure = Failure(Arc::clone(host));
-    let sftp = tokio::select! {
-        sftp = open(host, &failure) => sftp?,
-        () = &mut cancelled => return Err(cancelled_error()),
-    };
-    let sftp = Arc::new(sftp);
+    Uploads::default()
+        .upload_image(host, bytes, extension, cancelled)
+        .await
+}
+
+impl Uploads {
+    /// Uploads `bytes` (validated by the handle: nonempty, at most `MAX_IMAGE_BYTES`) with the
+    /// lower-case `extension` (see the module comment), after any upload already running on
+    /// this connection. Stops when `cancelled` resolves: the caller's reply was dropped (a
+    /// cancelled or timed-out upload). Whatever ends it early removes what it made, best effort.
+    ///
+    /// The connection's session is opened if there is none. A session that fails at the
+    /// transport level (its stream ended, or a request got no answer in time) is dropped; when
+    /// it failed before anything was made, the upload starts again on a new one, once.
+    pub(super) async fn upload_image(
+        &self,
+        host: &Arc<SshHost>,
+        bytes: Vec<u8>,
+        extension: &str,
+        cancelled: impl Future<Output = ()>,
+    ) -> Result<Uploaded, HostError> {
+        tokio::pin!(cancelled);
+        let mut session = tokio::select! {
+            session = self.session.lock() => session,
+            () = &mut cancelled => return Err(cancelled_error()),
+        };
+        let mut reopened = false;
+        loop {
+            let failure = Failure::new(host);
+            let sftp = match session.as_ref() {
+                Some(sftp) => Arc::clone(sftp),
+                None => {
+                    let sftp = tokio::select! {
+                        sftp = open(host, &failure) => Arc::new(Sftp::new(sftp?)),
+                        () = &mut cancelled => return Err(cancelled_error()),
+                    };
+                    *session = Some(Arc::clone(&sftp));
+                    sftp
+                }
+            };
+            let tried = attempt(&sftp, &bytes, extension, cancelled.as_mut(), &failure).await;
+            let error = match tried.result {
+                Ok(uploaded) => return Ok(uploaded),
+                Err(error) => error,
+            };
+            if failure.broken() {
+                *session = None;
+                if tried.again && !reopened && !failure.closed() {
+                    reopened = true;
+                    continue;
+                }
+            }
+            return Err(error);
+        }
+    }
+}
+
+/// How one try of an upload ended.
+struct Tried {
+    result: Result<Uploaded, HostError>,
+    /// It was not cancelled, and nothing was made on the host before it failed: it may start
+    /// again on a new session when its own failed.
+    again: bool,
+}
+
+/// One try of an upload on `sftp`. What it made on the host is removed again on a failure,
+/// best effort; a cleanup that gets no answer in time leaves the session broken.
+async fn attempt<F: Future<Output = ()>>(
+    sftp: &Arc<Sftp>,
+    bytes: &[u8],
+    extension: &str,
+    mut cancelled: Pin<&mut F>,
+    failure: &Failure,
+) -> Tried {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
@@ -155,29 +320,53 @@ pub(super) async fn upload_image(
         path: &path,
         temporary: &temporary,
     };
-    let made = AtomicU8::new(MADE_NOTHING);
-    let result = tokio::select! {
-        result = upload(&sftp, &target, now, bytes, &made, &failure) => result,
-        () = &mut cancelled => Err(cancelled_error()),
+    let progress = Progress::default();
+    let (result, was_cancelled) = tokio::select! {
+        result = upload(sftp, &target, bytes, &progress, failure) => (result, false),
+        () = &mut cancelled => (Err(cancelled_error()), true),
     };
+    let made = progress.made.load(Ordering::SeqCst);
     match result {
-        Ok(resolved) => Ok(Uploaded {
-            path: resolved,
-            sftp,
-            relative: path,
-        }),
+        Ok((resolved, owner)) => Tried {
+            result: Ok(Uploaded {
+                path: resolved,
+                sftp: Arc::clone(sftp),
+                relative: path,
+                owner,
+            }),
+            again: false,
+        },
         Err(error) => {
-            let made = made.load(Ordering::SeqCst);
-            let _ = timeout(CLEANUP_TIMEOUT, async {
-                if matches!(made, MAKING_TEMPORARY | MADE_TEMPORARY | RENAMING) {
-                    let _ = sftp.remove(temporary.as_str()).await;
-                }
-                if matches!(made, RENAMING | RENAMED) {
-                    let _ = sftp.remove(path.as_str()).await;
-                }
+            let open = progress
+                .handle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            let cleanup = timeout(CLEANUP_TIMEOUT, async {
+                // The session outlives the upload: a handle left open would too.
+                let closed = async {
+                    if let Some(handle) = open {
+                        let _ = sftp.close(handle).await;
+                    }
+                };
+                let removed = async {
+                    if matches!(made, MAKING_TEMPORARY | MADE_TEMPORARY | RENAMING) {
+                        let _ = sftp.remove(temporary.as_str()).await;
+                    }
+                    if matches!(made, RENAMING | RENAMED) {
+                        let _ = sftp.remove(path.as_str()).await;
+                    }
+                };
+                tokio::join!(closed, removed);
             })
             .await;
-            Err(error)
+            if cleanup.is_err() {
+                failure.stale.store(true, Ordering::SeqCst);
+            }
+            Tried {
+                result: Err(error),
+                again: !was_cancelled && made == MADE_NOTHING,
+            }
         }
     }
 }
@@ -189,15 +378,30 @@ struct Target<'a> {
     temporary: &'a str,
 }
 
-/// Steps 1 to 6 of the module comment, recording in `made` what is on the host.
+/// What an upload has on the host so far: what it made (`MADE_NOTHING` and on), and the
+/// temporary file's handle while it is open.
+#[derive(Default)]
+struct Progress {
+    made: AtomicU8,
+    handle: Mutex<Option<String>>,
+}
+
+impl Progress {
+    fn set_handle(&self, handle: Option<String>) {
+        *self.handle.lock().unwrap_or_else(PoisonError::into_inner) = handle;
+    }
+}
+
+/// Steps 1 to 5 of the module comment, recording in `progress` what is on the host. Answers
+/// the image's path and its owner.
 async fn upload(
-    sftp: &Arc<RawSftpSession>,
+    sftp: &Arc<Sftp>,
     target: &Target<'_>,
-    now: Duration,
-    bytes: Vec<u8>,
-    made: &AtomicU8,
+    bytes: &[u8],
+    progress: &Progress,
     failure: &Failure,
-) -> Result<String, HostError> {
+) -> Result<(String, u32), HostError> {
+    let made = &progress.made;
     ensure_directory(sftp, failure).await?;
     made.store(MAKING_TEMPORARY, Ordering::SeqCst);
     let handle = match sftp
@@ -216,18 +420,27 @@ async fn upload(
         }
     };
     made.store(MADE_TEMPORARY, Ordering::SeqCst);
+    progress.set_handle(Some(handle.clone()));
     let written = async {
         let owner = private_file(sftp, &handle, failure).await?;
-        check_directories(sftp, Some(owner), failure).await?;
-        let _ = timeout(SWEEP_TIMEOUT, sweep(sftp, now, owner)).await;
         write(sftp, &handle, bytes, failure).await?;
         Ok(owner)
     }
     .await;
-    let closed = sftp.close(handle).await;
-    let owner = written?;
+    // Closing needs no answer to the checks before the rename: both go out together.
+    let closing = sftp.close(handle);
+    let owner = match written {
+        Ok(owner) => owner,
+        Err(error) => {
+            let _ = closing.await;
+            progress.set_handle(None);
+            return Err(error);
+        }
+    };
+    let (closed, parts) = tokio::join!(closing, read_parts(sftp));
+    progress.set_handle(None);
     closed.map_err(|error| failure.of("writing the image", error))?;
-    check_directories(sftp, Some(owner), failure).await?;
+    check_parts(parts, Some(owner), failure)?;
     made.store(RENAMING, Ordering::SeqCst);
     if let Err(error) = sftp.rename(target.temporary, target.path).await {
         // Not renamed (a name that exists is not ours to remove).
@@ -235,7 +448,7 @@ async fn upload(
         return Err(failure.of("naming the image", error));
     }
     made.store(RENAMED, Ordering::SeqCst);
-    resolve(sftp, target, failure).await
+    Ok((resolve(sftp, target, failure).await?, owner))
 }
 
 /// The image's absolute path, for a terminal: the server's `realpath` of it when that is safe
@@ -379,11 +592,26 @@ async fn open(host: &Arc<SshHost>, failure: &Failure) -> Result<RawSftpSession, 
     }
 }
 
+/// Makes sure [`IMAGE_DIR`] is there and private. In the common case every part exists and
+/// passes its check ([`directory_problem`], its owner not yet known): one round trip reads
+/// them all, and nothing is made. Otherwise [`make_directories`] goes part by part. A part the
+/// session could not read at all (a broken session) fails here, with nothing more sent on it.
+async fn ensure_directory(sftp: &RawSftpSession, failure: &Failure) -> Result<(), HostError> {
+    let parts = read_parts(sftp).await;
+    if let Some(error) = parts.broken() {
+        return Err(failure.of("reading ~/.cache/or2", error));
+    }
+    match parts.first_problem(None) {
+        None => Ok(()),
+        Some(_) => make_directories(sftp, failure).await,
+    }
+}
+
 /// Creates the missing parts of [`IMAGE_DIR`] (`0700`) and makes the image directory `0700`
 /// when something else made it. Each part is checked ([`directory_problem`], its owner not yet
 /// known) before anything is made below it: a server that will not make the image directory
 /// private fails the upload.
-async fn ensure_directory(sftp: &RawSftpSession, failure: &Failure) -> Result<(), HostError> {
+async fn make_directories(sftp: &RawSftpSession, failure: &Failure) -> Result<(), HostError> {
     for part in IMAGE_DIR_PARTS {
         match sftp.lstat(part).await {
             Ok(_) => {}
@@ -406,18 +634,6 @@ async fn ensure_directory(sftp: &RawSftpSession, failure: &Failure) -> Result<()
             let _ = sftp.setstat(part, mode(DIRECTORY_MODE)).await;
         }
         check_part(sftp, part, None, failure).await?;
-    }
-    Ok(())
-}
-
-/// Checks every part of [`IMAGE_DIR`] again, now that the `owner` is known.
-async fn check_directories(
-    sftp: &RawSftpSession,
-    owner: Option<u32>,
-    failure: &Failure,
-) -> Result<(), HostError> {
-    for part in IMAGE_DIR_PARTS {
-        check_part(sftp, part, owner, failure).await?;
     }
     Ok(())
 }
@@ -445,6 +661,81 @@ async fn check_part(
     match directory_problem(part, &attributes, owner) {
         Some(problem) => Err(failed(&problem)),
         None => Ok(()),
+    }
+}
+
+/// The parts of [`IMAGE_DIR`] as `lstat` saw them, in [`IMAGE_DIR_PARTS`] order, and
+/// `~/.cache` as `stat` saw it (what a symbolic link there leads to), all read at once.
+struct Parts {
+    lstat: [Result<Attrs, SftpError>; 3],
+    cache: Result<Attrs, SftpError>,
+}
+
+/// One part's problem: it could not be read, or [`directory_problem`] has something to say.
+enum PartProblem {
+    Unreadable(SftpError),
+    Wrong(String),
+}
+
+/// Reads every part of [`IMAGE_DIR`] in one round trip: the requests go out together.
+async fn read_parts(sftp: &RawSftpSession) -> Parts {
+    let [cache, or2, images] = IMAGE_DIR_PARTS;
+    let (cache, or2, images, followed) = tokio::join!(
+        sftp.lstat(cache),
+        sftp.lstat(or2),
+        sftp.lstat(images),
+        sftp.stat(cache),
+    );
+    Parts {
+        lstat: [cache, or2, images],
+        cache: followed,
+    }
+}
+
+impl Parts {
+    /// The first error that is not the server's answer (the session is broken), if any.
+    fn broken(&self) -> Option<SftpError> {
+        self.lstat
+            .iter()
+            .chain([&self.cache])
+            .find_map(|read| match read {
+                Err(error) if !matches!(error, SftpError::Status(_)) => Some(error.clone()),
+                _ => None,
+            })
+    }
+
+    /// The first part's problem, in order, exactly as [`check_part`] of each part in turn
+    /// would find it.
+    fn first_problem(self, owner: Option<u32>) -> Option<PartProblem> {
+        let mut cache = Some(self.cache);
+        for (part, read) in IMAGE_DIR_PARTS.into_iter().zip(self.lstat) {
+            let mut attributes = match read {
+                Ok(found) => found.attrs,
+                Err(error) => return Some(PartProblem::Unreadable(error)),
+            };
+            if part == CACHE_DIR
+                && has_type(&attributes, MODE_SYMLINK)
+                && let Some(followed) = cache.take()
+            {
+                attributes = match followed {
+                    Ok(found) => found.attrs,
+                    Err(error) => return Some(PartProblem::Unreadable(error)),
+                };
+            }
+            if let Some(problem) = directory_problem(part, &attributes, owner) {
+                return Some(PartProblem::Wrong(problem));
+            }
+        }
+        None
+    }
+}
+
+/// Checks every part of [`IMAGE_DIR`] as read, now that the `owner` is known.
+fn check_parts(parts: Parts, owner: Option<u32>, failure: &Failure) -> Result<(), HostError> {
+    match parts.first_problem(owner) {
+        None => Ok(()),
+        Some(PartProblem::Unreadable(error)) => Err(failure.of("reading ~/.cache/or2", error)),
+        Some(PartProblem::Wrong(problem)) => Err(failed(&problem)),
     }
 }
 
@@ -486,16 +777,18 @@ pub(crate) fn directory_problem(
 }
 
 /// Makes the temporary file `0600` (a server may have ignored the mode it was created with) and
-/// checks that it is: a regular `0600` file. Answers its owner, the account the upload runs as.
+/// checks that it is: a regular `0600` file. Its owner is the account the upload runs as, and
+/// every part of [`IMAGE_DIR`] must belong to it: the parts are read with the `fstat` (they
+/// need nothing from it) and checked after the file. Answers the owner.
 async fn private_file(
     sftp: &RawSftpSession,
     handle: &str,
     failure: &Failure,
 ) -> Result<u32, HostError> {
+    // The `fstat` checks what this did: it waits for the answer.
     let _ = sftp.fsetstat(handle, mode(FILE_MODE)).await;
-    let attributes = sftp
-        .fstat(handle)
-        .await
+    let (file, parts) = tokio::join!(sftp.fstat(handle), read_parts(sftp));
+    let attributes = file
         .map_err(|error| failure.of("checking the image", error))?
         .attrs;
     if !is_regular(&attributes)
@@ -503,20 +796,24 @@ async fn private_file(
     {
         return Err(failed("the image could not be made private"));
     }
-    attributes
+    let owner = attributes
         .uid
-        .ok_or_else(|| failed("the host does not report file owners"))
+        .ok_or_else(|| failed("the host does not report file owners"))?;
+    check_parts(parts, Some(owner), failure)?;
+    Ok(owner)
 }
 
 /// Removes [`IMAGE_DIR`]'s regular `or2-*` files of `owner` last modified more than
-/// [`SWEEP_AGE`] before `now`. Best effort: whatever fails is left for the next upload.
-async fn sweep(sftp: &RawSftpSession, now: Duration, owner: u32) {
+/// [`SWEEP_AGE`] before `now`. Best effort: whatever fails is left for a later sweep. The
+/// listing's handle is in `listing` while it is open.
+async fn sweep(sftp: &RawSftpSession, now: Duration, owner: u32, listing: &Mutex<Option<String>>) {
     let Some(cutoff) = now.checked_sub(SWEEP_AGE).map(|cutoff| cutoff.as_secs()) else {
         return;
     };
     let Ok(directory) = sftp.opendir(IMAGE_DIR).await else {
         return;
     };
+    *listing.lock().unwrap_or_else(PoisonError::into_inner) = Some(directory.handle.clone());
     let mut old = Vec::new();
     // Ends with the end of the listing (an `Eof` status) or any error.
     while let Ok(listing) = sftp.readdir(directory.handle.as_str()).await {
@@ -541,6 +838,10 @@ async fn sweep(sftp: &RawSftpSession, now: Duration, owner: u32) {
         );
     }
     let _ = sftp.close(directory.handle).await;
+    listing
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
     for name in old {
         let _ = sftp.remove(format!("{IMAGE_DIR}/{name}")).await;
     }
@@ -548,9 +849,9 @@ async fn sweep(sftp: &RawSftpSession, now: Duration, owner: u32) {
 
 /// Writes `bytes` to the open file `handle` with up to [`IN_FLIGHT`] writes in flight.
 async fn write(
-    sftp: &Arc<RawSftpSession>,
+    sftp: &Arc<Sftp>,
     handle: &str,
-    bytes: Vec<u8>,
+    bytes: &[u8],
     failure: &Failure,
 ) -> Result<(), HostError> {
     let mut writes = JoinSet::new();
@@ -620,12 +921,32 @@ fn cancelled_error() -> HostError {
     }
 }
 
-/// Maps SFTP and channel failures, telling a closed connection from a failed request.
-struct Failure(Arc<SshHost>);
+/// Maps SFTP and channel failures, telling a closed connection from a failed request, and
+/// remembers whether the session itself failed (not just a request on it).
+struct Failure {
+    host: Arc<SshHost>,
+    /// A request failed with no answer from the server: the session is gone.
+    transport: AtomicBool,
+    /// A request timed out: what the server still does on the session is unknown.
+    stale: AtomicBool,
+}
 
 impl Failure {
+    fn new(host: &Arc<SshHost>) -> Self {
+        Self {
+            host: Arc::clone(host),
+            transport: AtomicBool::new(false),
+            stale: AtomicBool::new(false),
+        }
+    }
+
     fn closed(&self) -> bool {
-        self.0.is_closed()
+        self.host.is_closed()
+    }
+
+    /// Whether the session failed at the transport level, and must not be used again.
+    fn broken(&self) -> bool {
+        self.transport.load(Ordering::SeqCst) || self.stale.load(Ordering::SeqCst)
     }
 
     fn channel(&self, error: russh::Error) -> HostError {
@@ -643,6 +964,14 @@ impl Failure {
     /// `what` failed with `error`: the server's status in words (never a path with the user's
     /// name in it), a timeout, or `Closed` when the connection is gone.
     fn of(&self, what: &str, error: SftpError) -> HostError {
+        match &error {
+            SftpError::Status(_) | SftpError::Limited(_) => {}
+            SftpError::Timeout => self.stale.store(true, Ordering::SeqCst),
+            // The session's stream ended, or it was sent something that is not SFTP.
+            SftpError::IO(_) | SftpError::UnexpectedPacket | SftpError::UnexpectedBehavior(_) => {
+                self.transport.store(true, Ordering::SeqCst);
+            }
+        }
         if self.closed() {
             return HostError::Closed;
         }
@@ -686,6 +1015,19 @@ mod tests {
             image_name(1_767_225_599, [1, 2, 3], "webp"),
             "or2-20251231-235959-010203.webp"
         );
+    }
+
+    #[test]
+    fn a_session_sweeps_at_most_once_an_hour() {
+        let start = Instant::now();
+        assert!(sweep_due(None, start), "never swept");
+        assert!(!sweep_due(Some(start), start));
+        assert!(!sweep_due(
+            Some(start),
+            start + SWEEP_INTERVAL - Duration::from_secs(1)
+        ));
+        assert!(sweep_due(Some(start), start + SWEEP_INTERVAL));
+        assert_eq!(SWEEP_INTERVAL, Duration::from_secs(3600));
     }
 
     #[test]

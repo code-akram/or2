@@ -917,6 +917,9 @@ async fn drive<T: Transport, D: DatagramTransport>(
     // The same for mosh sessions, which are waited for longer (see `mosh_session::CLOSE_BUDGET`).
     let (mosh_tracker, mut mosh_drained) = mpsc::channel::<()>(1);
     let user_cancel = driver.user_cancel();
+    // The connection's SFTP session for image uploads, kept from one upload to the next and
+    // dropped with this driver (and the upload tasks, which end with the connection).
+    let uploads = Arc::new(upload::Uploads::default());
     let mut connected: Option<Arc<SshHost>> = None;
     let mut peer_addr: Option<SocketAddr> = None;
     let mut decision = None;
@@ -980,7 +983,7 @@ async fn drive<T: Transport, D: DatagramTransport>(
                                 tracker: &mosh_tracker,
                                 user_cancel: &user_cancel,
                             };
-                            dispatch(command, host, &closing, &tracker, &mosh);
+                            dispatch(command, host, &closing, &tracker, &mosh, &uploads);
                         }
                     }
                 },
@@ -1014,6 +1017,9 @@ async fn drive<T: Transport, D: DatagramTransport>(
     // Terminals and watches first: tell them why, then wait until each has said `Closed`.
     closing_sender.send_replace(Some(reason.clone()));
     drop((tracker, mosh_tracker));
+    // The upload session goes with the connection (an upload still running holds it until it
+    // has seen `closing`).
+    drop(uploads);
     let closing_since = Instant::now();
     let _ = timeout(SESSIONS_CLOSE_GRACE, drained.recv()).await;
     // Counted from the same moment: the mosh sessions have been closing meanwhile. A loss
@@ -1049,6 +1055,7 @@ fn dispatch<D: DatagramTransport>(
     closing: &Closing,
     tracker: &mpsc::Sender<()>,
     mosh: &MoshContext<'_, D>,
+    uploads: &Arc<upload::Uploads>,
 ) {
     match command {
         HostCommand::OpenTerminal {
@@ -1213,7 +1220,7 @@ fn dispatch<D: DatagramTransport>(
             extension,
             mut reply,
         } => {
-            let host = Arc::clone(host);
+            let (host, uploads) = (Arc::clone(host), Arc::clone(uploads));
             let (mut closing, tracker) = (closing.clone(), tracker.clone());
             runtime().spawn(async move {
                 let _tracker = tracker;
@@ -1222,12 +1229,20 @@ fn dispatch<D: DatagramTransport>(
                 let result = {
                     let cancelled = reply.closed();
                     tokio::select! {
-                        result = upload::upload_image(&host, bytes, &extension, cancelled) => Some(result),
+                        result = uploads.upload_image(&host, bytes, &extension, cancelled) => Some(result),
                         _ = closed_reason(&mut closing) => None,
                     }
                 };
                 if let Some(result) = result {
+                    let sweep = result.as_ref().ok().map(upload::Uploaded::sweep);
                     upload::deliver(reply, result).await;
+                    // Old images go once the path is delivered, never on the upload's way.
+                    if let Some(sweep) = sweep {
+                        tokio::select! {
+                            () = sweep.run() => {}
+                            _ = closed_reason(&mut closing) => {}
+                        }
+                    }
                 }
             });
         }

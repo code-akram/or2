@@ -3,7 +3,8 @@
 //! paths start there, like OpenSSH's `sftp-server` in the home directory). Only what an image
 //! upload uses: stat, lstat, mkdir, setstat, open/write/fstat/fsetstat/close,
 //! opendir/readdir, remove, rename and realpath. Every request is logged by name. [`Quirks`]
-//! make it a slow, careless or hostile server.
+//! make it a slow, careless or hostile server; [`relay`] a distant one, which counts the
+//! round trips a client waits for and can hang up on it.
 
 use std::collections::HashMap;
 use std::fs::{self, DirBuilder, File as FsFile, OpenOptions, Permissions};
@@ -46,6 +47,8 @@ pub(super) struct Quirks {
     pub(super) foreign: Vec<PathBuf>,
     /// Handles go out as bytes that are not UTF-8 ([`binary_handles`]).
     pub(super) binary_handles: bool,
+    /// How long every reply takes to reach the client ([`relay`]): a distant host.
+    pub(super) latency: Duration,
 }
 
 pub(super) struct FsSftp {
@@ -257,6 +260,7 @@ impl russh_sftp::server::Handler for FsSftp {
         offset: u64,
         data: Vec<u8>,
     ) -> Result<Status, Self::Error> {
+        self.record("write");
         if let Some(delay) = self.quirks.first_write_delay.take() {
             tokio::time::sleep(delay).await;
         }
@@ -439,4 +443,148 @@ fn replace_handle(packet: &mut Vec<u8>, map: impl Fn(&[u8]) -> Option<Vec<u8>>) 
     rewritten.extend_from_slice(&replaced);
     rewritten.extend_from_slice(&packet[9 + length..]);
     *packet = rewritten;
+}
+
+/// SFTP packet types the [`Link`] tells apart.
+pub(super) const INIT: u8 = 1;
+const VERSION: u8 = 2;
+pub(super) const REALPATH: u8 = 16;
+
+/// What a [`relay`] saw of one SFTP session: how many round trips each request waited for.
+///
+/// A request's depth is one more than the deepest reply the client had been given when the
+/// request reached the relay: the requests a client sends together share a depth, one it sends
+/// after an answer is one deeper. The relay holds every reply back for the latency, so a batch
+/// the client sends at once has all arrived before any of its replies goes out. The depth of
+/// the last request of an upload is the number of round trips it waited for, one after another.
+#[derive(Default)]
+pub(super) struct Link {
+    state: Mutex<LinkState>,
+}
+
+#[derive(Default)]
+struct LinkState {
+    /// The deepest reply given to the client so far.
+    delivered: usize,
+    /// The requests not answered yet, by request id (`None`: init), with their depth.
+    pending: HashMap<Option<u32>, usize>,
+    /// Every request relayed: its SFTP type and depth.
+    requests: Vec<(u8, usize)>,
+}
+
+impl Link {
+    fn sent(&self, packet: &[u8]) {
+        let Some(&kind) = packet.first() else {
+            return;
+        };
+        let mut state = self.state.lock().unwrap();
+        let depth = state.delivered + 1;
+        state.pending.insert(request_id(packet, INIT), depth);
+        state.requests.push((kind, depth));
+    }
+
+    fn answered(&self, packet: &[u8]) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(depth) = state.pending.remove(&request_id(packet, VERSION)) {
+            state.delivered = state.delivered.max(depth);
+        }
+    }
+
+    /// The deepest reply given to the client so far: the round trips this session has waited
+    /// for until now.
+    pub(super) fn delivered(&self) -> usize {
+        self.state.lock().unwrap().delivered
+    }
+
+    /// The depth of the last request of `kind`, if any was relayed.
+    pub(super) fn depth_of_last(&self, kind: u8) -> Option<usize> {
+        let state = self.state.lock().unwrap();
+        state
+            .requests
+            .iter()
+            .rev()
+            .find(|(sent, _)| *sent == kind)
+            .map(|&(_, depth)| depth)
+    }
+}
+
+/// A packet's request id; `None` for the packet type `unnumbered` (init and version carry a
+/// protocol version there instead).
+fn request_id(packet: &[u8], unnumbered: u8) -> Option<u32> {
+    if packet.first() == Some(&unnumbered) {
+        return None;
+    }
+    let id = packet.get(1..5)?;
+    Some(u32::from_be_bytes(id.try_into().expect("four bytes")))
+}
+
+/// Relays SFTP packets between the `client` and an SFTP server on `server` like a distant
+/// host: requests go through at once, every reply reaches the client `latency` after the
+/// server gave it (in order, many on the way at once), and the [`Link`] counts the round
+/// trips. While `hang_ups` is above zero, the next session request (anything but init) is
+/// not passed on: the relay takes one off and hangs up on both sides instead, like an SFTP
+/// server that died.
+pub(super) async fn relay<C, S>(
+    client: C,
+    server: S,
+    link: Arc<Link>,
+    latency: Duration,
+    hang_ups: Arc<std::sync::atomic::AtomicUsize>,
+) where
+    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use std::sync::atomic::Ordering;
+    let (mut client_read, mut client_write) = tokio::io::split(client);
+    let (mut server_read, mut server_write) = tokio::io::split(server);
+    let (queue, mut queued) = tokio::sync::mpsc::unbounded_channel();
+    let (hang_up, hung_up) = tokio::sync::oneshot::channel::<()>();
+    let requests = async {
+        while let Some(packet) = next_packet(&mut client_read).await {
+            if packet.first() != Some(&INIT)
+                && hang_ups
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                        left.checked_sub(1)
+                    })
+                    .is_ok()
+            {
+                let _ = hang_up.send(());
+                break;
+            }
+            link.sent(&packet);
+            if send_packet(&mut server_write, &packet).await.is_err() {
+                break;
+            }
+        }
+        let _ = server_write.shutdown().await;
+    };
+    let replies = async move {
+        while let Some(packet) = next_packet(&mut server_read).await {
+            if queue
+                .send((tokio::time::Instant::now() + latency, packet))
+                .is_err()
+            {
+                break;
+            }
+        }
+    };
+    let deliveries = async {
+        tokio::pin!(hung_up);
+        loop {
+            let (due, packet) = tokio::select! {
+                next = queued.recv() => match next {
+                    Some(next) => next,
+                    None => break,
+                },
+                Ok(()) = &mut hung_up => break,
+            };
+            tokio::time::sleep_until(due).await;
+            link.answered(&packet);
+            if send_packet(&mut client_write, &packet).await.is_err() {
+                break;
+            }
+        }
+        let _ = client_write.shutdown().await;
+    };
+    tokio::join!(requests, replies, deliveries);
 }

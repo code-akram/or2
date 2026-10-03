@@ -481,8 +481,9 @@ pub enum HostCommand {
     },
     /// Write `bytes` over SFTP to the host's image directory (contracts.md, "Image paste"):
     /// `~/.cache/or2/images` (created `0700`), a temporary name renamed to
-    /// `or2-<UTC yyyyMMdd-HHmmss>-<6 hex>.<extension>` (`0600`), after sweeping that
-    /// directory's `or2-*` files older than seven days. Reply the absolute path (one safe to
+    /// `or2-<UTC yyyyMMdd-HHmmss>-<6 hex>.<extension>` (`0600`), on the connection's one SFTP
+    /// session (contracts.md, "Upload speed"); once the path is delivered, that directory's
+    /// `or2-*` files older than seven days are swept. Reply the absolute path (one safe to
     /// type into a terminal), `SftpUnavailable` without an SFTP subsystem, `CommandFailed` for
     /// other failures. `bytes` and `extension` are validated (size, lower-case known
     /// extension). A dropped `reply` (the caller cancelled or timed out) stops the upload and
@@ -880,8 +881,10 @@ impl HostHandle {
     /// Uploads an image for an agent to read (contracts.md, "Image paste"): `bytes` go over
     /// SFTP, on this connection, to `~/.cache/or2/images/or2-<UTC yyyyMMdd-HHmmss>-<6 hex>.<ext>`
     /// (`~` being where the server's SFTP starts, the login's home; the directory `0700`, the
-    /// file `0600`, written to a temporary name and renamed); each upload first removes that
-    /// directory's `or2-*` files older than seven days, best effort. No shell command runs.
+    /// file `0600`, written to a temporary name and renamed); once its path is delivered, an
+    /// upload removes that directory's `or2-*` files older than seven days, best effort and at
+    /// most hourly. The connection's uploads share one SFTP session and run one at a time
+    /// (contracts.md, "Upload speed"). No shell command runs.
     /// Resolves with the file's absolute path. `extension` is one of [`IMAGE_EXTENSIONS`]
     /// (any case; `jpeg` is kept as given, lower-cased), else `InvalidName`, as is an empty
     /// image; more than [`MAX_IMAGE_BYTES`] is `TooLarge`; both are refused before anything is
