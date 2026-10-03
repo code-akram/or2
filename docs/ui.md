@@ -396,7 +396,7 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   4 dp apart, the composer and keyboard toggles without key backgrounds. A latched `Ctrl` draws in `accent` until
   it has been used for one key; `Alt` lives in the arrow pad's extras row. While text is selected `Copy` and
   `Clear` lead the row and the typing keys (`⇧Tab`, `/`, `@`, which would clear the selection anyway) give way to
-  them. There is no panes key (the header's green disc opens that sheet) and no history key (a swipe pages back,
+  them. There is no panes key (the header's green disc opens that sheet) and no history key (a drag scrolls back,
   the scroll-to-bottom button returns). The row fits a 411 dp wide phone without scrolling either way (405.6 and
   384.8 dp by the tokens, `KeyToolbarTest`); it scrolls only with a large system font.
 - **Arrow pad:** the arrow key expands a floating 3×3 cluster above the toolbar: Backspace,
