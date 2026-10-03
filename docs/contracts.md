@@ -5616,3 +5616,52 @@ and their tests/gallery).
 like to see this app."* The session's own row is now named as a tmux row is: the session's name (the default one
 `default`), then `4 agents` / `1 agent` / `no agents` in muted mono; the separate section header and the `No agents`
 line are gone. Tags (`herdr:<name>`, `herdr-open:<name>`, `open-mark:herdr:<name>`) are unchanged.
+
+# v0.1.3: zero-config Reply (owner request, 2026-10-03)
+
+Reply from a notification needs herdr's integration inside the agent (contracts.md, "Reply from an agent notification";
+status.md, "Reply needs herdr's integration"); the owner found pi without it and no hint why. And or2's agents need
+herdr itself: a host without herdr gets no inbox, no notifications, no Reply. Zero configuration: or2 sets this up,
+the user only confirms. herdr's own install is `curl -fsSL https://herdr.dev/install.sh | sh` (also Homebrew, mise,
+Nix: https://herdr.dev/docs/install/); integrations are `herdr integration install <id>` and their state
+`herdr integration status` (text only: one line per integration, `<id>[ (experimental)]: <state> (<path>)`, state
+`current (vN)`, `not installed`, or outdated). A running agent loads its integration when it next starts.
+
+The integrations herdr 0.9.3 offers, with the agent's executable where it differs from the id: `pi`, `omp`,
+`claude`, `codex`, `copilot`, `devin`, `droid`, `kimi`, `opencode`, `kilo`, `hermes`, `qodercli`, `qwen`,
+`cursor` (`cursor-agent`), `mastracode`, `antigravity-cli` (`agy`), `grok`, `letta`. herdr's agent kinds map to them
+the same way (`agy` → `antigravity-cli`); a kind without one (e.g. `amp`, `gemini`, `cline`) has no integration.
+
+## Lane Pair: `or2-pair` (Rust, `core/or2-pair`)
+
+- **herdr missing:** today an `Info` line points at herdr's docs. It becomes a `Warn` that says what is lost and the
+  fix: `herdr not found: or2's agents inbox, notifications and Reply need it` then
+  `install it: curl -fsSL https://herdr.dev/install.sh | sh` and `(or Homebrew, mise, Nix: https://herdr.dev/docs/install/)`.
+  It is a recommendation: or2-pair never runs another project's installer. Pairing goes on.
+- **herdr present: Reply for the agents on this host.** After the checks, or2-pair runs `herdr integration status`
+  (through `hints::Commands`, time-limited; a failure or an unreadable answer is an `Info` line and nothing more),
+  finds which agents are installed (their executable in the program directories the checks already search), and
+  for those whose integration is `not installed` or outdated asks once, on the rail:
+  `Set up Reply for pi, opencode? (runs herdr integration install for each) [Y/n]`. Yes runs each install
+  (time-limited) and reports each on the rail (ok, or its failure's first line); then one line: running sessions of
+  those agents load it when they next start. No, or no terminal (stdin not a TTY), prints the commands instead.
+  Agents whose integration is current are one `Ok` line (`Reply ready for claude, codex`). Agents not installed on
+  the host are not mentioned.
+- **Tests:** the status parser on real 0.9.3 output (current, not installed, experimental, an outdated line, garbage),
+  the executable mapping, the prompt (yes, no, non-TTY), an install failure, herdr missing per platform, the rail text.
+  `tests/flow.rs` covers the step with a scripted `herdr`.
+
+## Lane App: Enable Reply from the phone (FFI API 19, Kotlin)
+
+- **Rust/FFI:** `HostConnection.install_herdr_integration(id)`: the id must be one of the list above (else
+  `InvalidName`, nothing sent); runs `<herdr path from the capability probe> integration install <id>` as one exec on
+  the host connection (no shell interpolation: the id is from the allowlist), within the exec timeout; `Ok` on exit 0,
+  else `CommandFailed` with the first line of its stderr. herdr not installed → `NotInstalled`.
+- **Kotlin:** an agent herdr reports without a session (no `reply_identity`) whose kind maps to an integration gets
+  **Enable Reply** in its Inbox row (a compact text action) and in its notification (a second action instead of
+  Reply). It asks once (`Enable Reply for pi on archlinux? or2 installs herdr's pi integration there. Restart pi
+  afterwards.`), runs the install, and says the outcome (`Done. Restart pi to reply to it.` or the failure). An agent
+  whose kind has no integration shows nothing new. An agent whose integration is installed but still has no session
+  (Codex with herdr 0.9.3, whose session report herdr refuses) shows nothing new either; the release notes explain it.
+- **Tests:** Rust: the allowlist, the exec's argv, exit codes, not installed. JVM: the kind → id mapping, which rows
+  and notifications offer it, the confirm and outcome texts. Device (compile): the Inbox action.

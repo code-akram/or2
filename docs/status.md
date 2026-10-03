@@ -86,21 +86,12 @@ until the caller acknowledges, as a real host does.
 
 ## Next, in order
 
-1. **v0.1.3, "zero-config Reply"** (owner to confirm): `or2-pair` checks `herdr integration status` and installs
+1. **v0.1.3, "zero-config Reply"** (in progress, contracts.md "# v0.1.3: zero-config Reply"): `or2-pair` checks `herdr integration status` and installs
    the missing integrations for the agents on the host with one confirmation; the app says why a notification has
    no Reply. File the herdr issue: Codex's `pane.report_agent_session` is refused (see above).
-2. **Keyboard:** the owner tries CleverKeys; then the spike (item 4 below).
-3. **The deferred M3 acceptance**, when the owner approves it: mobile data, the Wi-Fi to mobile handover, and
+2. **The deferred M3 acceptance**, deferred by the owner (2026-10-03) until they clear it: mobile data, the Wi-Fi to mobile handover, and
    unplugged (Doze) background runs. This is v0 acceptance step 3, still never tested.
-4. **Keyboard (owner idea, 2026-10-03; not decided).** An in-app keyboard in or2's look, with Ctrl, Esc,
-   Tab, arrows and the pane, paste and history keys in one layout, replacing the system keyboard, the toolbar and
-   the arrow pad. No library does for a keyboard what libghostty does for the terminal, but the parts exist:
-   our own Compose layout (Unexpected Keyboard, GPL-3.0-only, as the reference), CleverKeys' on-device glide
-   typing (GPL-3.0-only, Kotlin), Android's spell-checker API or AOSP LatinIME's dictionary engine, and
-   sherpa-onnx for dictation. Moshi's Android app keeps the system keyboard and polishes a toolbar. Steps: the
-   owner tries CleverKeys as the system keyboard for a few days; then a spike under `spikes/` (Compose layout
-   and CleverKeys' decoder, in the gallery); then the decision: everywhere, terminal only, or the toolbar pass.
-5. **The rest of the roadmap.**
+3. **The rest of the roadmap.**
    - Next items: scanning for SSH servers, recent directories, app lock.
    - M4: history sheet, ntfy, dictation, Wake-on-LAN.
    - M5: Chat View, diff viewer, web preview.
@@ -141,3 +132,5 @@ until the caller acknowledges, as a real host does.
   owner's app is updated only with signed release builds (an in-place update).
 - Worker worktrees are removed once merged; the 2026-10-02 cleanup freed about 600 GB.
 - [AGENTS.md](../AGENTS.md) has the repository rules.
+
+The in-app keyboard idea (2026-10-03) was dropped by the owner the same day.
