@@ -96,20 +96,20 @@ class TerminalHeaderDeviceTest {
     }
 
     @Test
-    fun theNoticeStripTakesLayoutSpaceAndClosedCarriesClose() {
+    fun theNoticeStripIsOnlyForAClosedTerminalTakesLayoutSpaceAndCarriesClose() {
         show()
         compose.onNodeWithTag("terminal-notice").assertDoesNotExist()
         val connected = bounds("terminal-body")
+        // The card shows once the terminal has connected: a state before that has nothing to say under the header.
         compose.runOnUiThread { state = SessionState.Connecting }
-        compose.onNodeWithTag("terminal-status", useUnmergedTree = true).assertTextEquals("Connecting…")
-        compose.onNodeWithTag("terminal-close").assertDoesNotExist()
+        compose.onNodeWithTag("terminal-notice").assertDoesNotExist()
+        compose.runOnUiThread { state = SessionState.Closed(CloseReason.Disconnected) }
+        compose.onNodeWithTag("terminal-status", useUnmergedTree = true).assertTextEquals("Disconnected")
         // The strip sits between the header and the grid: it pushes the grid down, it never covers it.
         val strip = bounds("terminal-notice")
         assertTrue("strip $strip under the header", strip.top >= bounds("terminal-header").bottom - 1)
         assertTrue("strip $strip over the body", strip.bottom <= bounds("terminal-body").top + 1)
         assertTrue(bounds("terminal-body").top > connected.top)
-        compose.runOnUiThread { state = SessionState.Closed(CloseReason.Disconnected) }
-        compose.onNodeWithTag("terminal-status", useUnmergedTree = true).assertTextEquals("Disconnected")
         compose.onNodeWithTag("terminal-close").assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals(1, closed) }
     }

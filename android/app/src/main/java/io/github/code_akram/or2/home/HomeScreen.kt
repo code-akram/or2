@@ -393,7 +393,7 @@ private fun SessionCard(session: HomeSession, width: Dp, onClick: () -> Unit) {
                         .padding(horizontal = 6.dp, vertical = 2.dp).testTag("session-host:${session.id}"),
                 )
                 Spacer(Modifier.width(4.dp))
-                TransportBadge(session.transport, Modifier.testTag("session-transport:${session.id}"), small = true)
+                TransportBadge(session.transport, Modifier.testTag("session-transport:${session.id}"))
             }
         }
         Text(session.title, style = Or2Type.Body, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis,

@@ -331,16 +331,12 @@ fun StatusChip(label: String, dot: Color, modifier: Modifier = Modifier, onClick
     }
 }
 
-/** A small tag: "PRO"-style kickers, the transport badge (`SSH`, `Mosh`). */
+/** A small mono pill, [content] text on [container]: the transport badge (`SSH`, `Mosh`) and its quiet-link form. */
 @Composable
-fun Badge(
-    text: String, modifier: Modifier = Modifier, container: Color = Or2Colors.AccentMuted, content: Color = Or2Colors.Accent,
-    small: Boolean = false,
-) {
+fun Badge(text: String, container: Color, content: Color, modifier: Modifier = Modifier) {
     Text(
-        text, style = if (small) Or2Type.Pill else Or2Type.Badge, color = content, maxLines = 1,
-        modifier = modifier.clip(Or2Shapes.Pill).background(container)
-            .padding(horizontal = if (small) 6.dp else 10.dp, vertical = if (small) 2.dp else 4.dp),
+        text, style = Or2Type.Pill, color = content, maxLines = 1,
+        modifier = modifier.clip(Or2Shapes.Pill).background(container).padding(horizontal = 6.dp, vertical = 2.dp),
     )
 }
 

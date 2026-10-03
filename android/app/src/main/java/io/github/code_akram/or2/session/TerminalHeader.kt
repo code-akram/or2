@@ -43,10 +43,7 @@ import io.github.code_akram.or2.ui.Or2Type
 import kotlin.math.max
 
 /** Between the host and the target in the header's title. */
-const val TITLE_SEPARATOR = " · "
-
-/** The header's title as plain text: `workstation · tmux main`. */
-fun headerTitleText(host: String, target: String) = host + TITLE_SEPARATOR + target
+private const val TITLE_SEPARATOR = " · "
 
 /**
  * The widest the centred title may be: the row's [width] less, on *both* sides, the wider of the
@@ -59,19 +56,24 @@ fun centredSlotWidth(width: Int, leading: Int, trailing: Int, gap: Int): Int =
 /** Where an item of [item] width starts when centred on [width]. */
 fun centredX(width: Int, item: Int): Int = (width - item) / 2
 
-/** A one-line status under the terminal header, or null while the session is connected. */
-data class TerminalNotice(val text: String, val tone: NoticeTone, val busy: Boolean, val closable: Boolean)
+/**
+ * The one line of status under the terminal header ([io.github.code_akram.or2.ui.NoticeStrip]): its text, its tone,
+ * whether a spinner shows, and its one action's label.
+ */
+data class TerminalNotice(val text: String, val tone: NoticeTone, val busy: Boolean, val action: String)
 
-/** Connecting and authenticating are muted with a spinner; a closed session is a warning with its Close action. */
-fun terminalNotice(state: SessionState): TerminalNotice? = when (state) {
-    SessionState.Connected -> null
-    is SessionState.Closed -> TerminalNotice(sessionMessage(state), NoticeTone.Warning, busy = false, closable = true)
-    else -> TerminalNotice(sessionMessage(state), NoticeTone.Info, busy = true, closable = false)
-}
+/**
+ * A closed terminal's reason, a warning with **Close**; null for any other state. The card shows only once the
+ * terminal has connected (until then the screen shows its pending state instead), so a closed terminal is the only
+ * state the strip has to explain; an image upload's notice ([io.github.code_akram.or2.paste.uploadNotice]) takes the
+ * same strip otherwise.
+ */
+fun terminalNotice(state: SessionState): TerminalNotice? =
+    (state as? SessionState.Closed)?.let { TerminalNotice(sessionMessage(it), NoticeTone.Warning, busy = false, action = "Close") }
 
 /**
  * The terminal card's header, 36 dp, one composed piece: a thin drag handle centred at the top, the
- * two round discs as a pair at the left (minimise in `attention`, the sessions sheet in `done`), the
+ * two round discs as a pair at the left (minimise in `attention`, the Terminals sheet in `done`), the
  * title centred on the card's full width (the host in `text`, medium, then the target muted in mono),
  * and at the right the transport pill, which also says how long a quiet link has been silent ([stale]:
  * "Mosh · 12 s" in `attention`). The caller
@@ -89,7 +91,7 @@ fun TerminalHeader(
                 // The first disc's edge sits on the 12 dp gutter; each box reaches halfway to the next disc.
                 Row(Modifier.padding(start = Or2Dimens.Gutter - Or2Dimens.HeaderDiscGap / 2), verticalAlignment = Alignment.CenterVertically) {
                     HeaderDisc(Or2Icons.Minimize, "Minimise to home", Or2Colors.Attention, minimise, Modifier.testTag("terminal-back"))
-                    HeaderDisc(Or2Icons.Sidebar, "Panes and sessions", Or2Colors.Done, openSwitcher, Modifier.testTag("terminal-panes"))
+                    HeaderDisc(Or2Icons.Sidebar, "Terminals", Or2Colors.Done, openSwitcher, Modifier.testTag("terminal-panes"))
                 }
             },
             title = {
@@ -101,15 +103,14 @@ fun TerminalHeader(
             trailing = {
                 Row(Modifier.padding(end = Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
                     if (stale == null) {
-                        TransportBadge(transport, Modifier.testTag("terminal-transport"), small = true)
+                        TransportBadge(transport, Modifier.testTag("terminal-transport"))
                     } else {
                         // A quiet link says so inside the pill ("Mosh · 12 s" in `attention`), so the centred title
                         // keeps its room; the full sentence is the pill's description.
                         Box(Modifier.testTag("terminal-link").semantics { contentDescription = stale }) {
                             Badge(
-                                "${transport.label} · ${staleAge(stale)}",
+                                "${transport.label} · ${staleAge(stale)}", Or2Colors.SurfaceTrack, Or2Colors.Attention,
                                 Modifier.testTag("terminal-transport").semantics { stateDescription = STALE_BADGE_DESCRIPTION },
-                                container = Or2Colors.SurfaceTrack, content = Or2Colors.Attention, small = true,
                             )
                         }
                     }

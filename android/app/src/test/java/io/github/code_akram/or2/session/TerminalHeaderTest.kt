@@ -1,8 +1,10 @@
 package io.github.code_akram.or2.session
 
 import io.github.code_akram.or2.ffi.CloseReason
-import io.github.code_akram.or2.ffi.PublicKeyInfo
+import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.SessionState
+import io.github.code_akram.or2.paste.UploadState
+import io.github.code_akram.or2.paste.uploadNotice
 import io.github.code_akram.or2.ui.NoticeTone
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Icons
@@ -41,25 +43,21 @@ class TerminalHeaderTest {
     }
 
     @Test
-    fun theTitleReadsHostThenTarget() {
-        assertEquals("workstation · tmux main", headerTitleText("workstation", "tmux main"))
+    fun onlyAClosedTerminalHasANoticeAWarningWithClose() {
+        // The card shows once the terminal has connected: nothing but Closed needs explaining under its header.
+        assertNull(terminalNotice(SessionState.Connected))
+        assertNull(terminalNotice(SessionState.Connecting))
+        val closed = terminalNotice(SessionState.Closed(CloseReason.Disconnected))!!
+        assertEquals(TerminalNotice("Disconnected", NoticeTone.Warning, busy = false, action = "Close"), closed)
+        val failed = SessionState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("diagnostic")))
+        assertEquals(sessionMessage(failed), terminalNotice(failed)!!.text)
     }
 
     @Test
-    fun connectingIsAMutedBusyNoticeAndClosedAWarningWithClose() {
-        assertNull(terminalNotice(SessionState.Connected))
-        listOf(
-            SessionState.Connecting, SessionState.Authenticating,
-            SessionState.AwaitingHostKeyDecision(PublicKeyInfo("ssh-ed25519", "k", "SHA256:x", ""), emptyList()),
-        ).forEach {
-            val notice = terminalNotice(it)!!
-            assertEquals(NoticeTone.Info, notice.tone)
-            assertTrue(notice.busy)
-            assertTrue(!notice.closable)
-            assertEquals(sessionMessage(it), notice.text)
-        }
-        val closed = terminalNotice(SessionState.Closed(CloseReason.Disconnected))!!
-        assertEquals(TerminalNotice("Disconnected", NoticeTone.Warning, busy = false, closable = true), closed)
+    fun anUploadTakesTheSameStripWithItsOwnAction() {
+        assertNull(uploadNotice(UploadState.Idle))
+        assertEquals(TerminalNotice("Uploading image…", NoticeTone.Info, busy = true, action = "Cancel"), uploadNotice(UploadState.Uploading()))
+        assertEquals(TerminalNotice("No room", NoticeTone.Warning, busy = false, action = "Dismiss"), uploadNotice(UploadState.Failed("No room")))
     }
 
     @Test

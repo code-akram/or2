@@ -221,7 +221,6 @@ object Or2Type {
     val PairCode = TextStyle(
         fontFamily = mono, fontWeight = FontWeight.Normal, fontSize = 24.sp, lineHeight = 30.sp, letterSpacing = 0.04.em,
     )
-    val Badge = TextStyle(fontFamily = sans, fontWeight = FontWeight.Normal, fontSize = 11.sp, lineHeight = 14.sp)
 
     /**
      * The terminal header's centred title: the host in the sans at 12 sp, the one medium weight in the app (a short
