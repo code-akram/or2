@@ -5248,3 +5248,154 @@ its error message.
   seen; now once the first write is, which the test server logs), and the sshd suite's
   `an_image_uploads_over_internal_sftp_into_a_private_cache_directory` (a second upload on the same connection,
   then the old file swept by a new connection's upload). Every other upload and safety test is unchanged.
+
+# v0.1.2: streamline (owner-approved plan, 2026-10-03)
+
+The owner, on the phone: *"I'm totally lost with the UI. I don't know which button does what and why."* A
+read-only review of the whole app (four reviewers: the UI map, Kotlin app layer, Kotlin terminal layer, Rust
+core and FFI) found no serious bug, about a dozen small ones, and roughly 1,500 lines that can go without
+losing a feature. This section is the plan the owner approved. **No feature the owner uses is lost, and the
+polish stays** (compact UI per `docs/ui.md`; the terminal header's coloured discs, SSH/mosh pill and centred
+title; the transparent arrow pad). Four lanes own disjoint files; each fixes its bugs with a test.
+
+## Words
+
+- **Host**: a machine (never "connection"). **Terminal**: something open in or2. **Session**: only a tmux or
+  herdr session. **Agent**: a herdr agent. **Connect** (the biometric prompt is implied), **Retry** after a
+  failure. User-visible text follows this everywhere: Home's section is `Hosts` ("No hosts yet"), the form is
+  `New host` / `Edit host`, the switcher is `Terminals`, the connection notification says `N open terminals`,
+  `Unlock and connect` / `Unlock` become `Connect`.
+
+## Lane A: the UI model (Kotlin: `app/Or2App.kt`, `app/Navigation.kt`, `app/HostPicker.kt`,
+## `app/TerminalActivations.kt`, `app/Reattach.kt`, `home/*`, `host/*`, `session/SessionScreen.kt`,
+## `hosts/HostFormScreen.kt`, `inbox/InboxScreen.kt`, the gallery screens for these, `docs/ui.md`)
+
+- **Home is the one place for hosts and their terminals.** Sections: notices and the Resume card as today,
+  then `Hosts` with `Connect all` as a compact text action in the section header (when more than one host can
+  connect). Each host card:
+  - Header row: the status dot, the name, the address-in-use or progress or failure line (as today). **Tapping
+    the header opens the session picker over Home**, connecting first through the picker's gate exactly as the
+    `>_` button does today. A trailing **`⋯`** button opens the host menu (Connect or Disconnect, Edit, Delete
+    with its confirm); long press stays as an alias of `⋯`.
+  - Below the header, when the host has open terminals: its terminals as the existing thumbnails (live preview,
+    transport badge, title, detail line), in a horizontal row inside the card. Each thumbnail has a small `×`
+    (24 dp disc, 40 dp touch box) that closes that terminal. A closed terminal is marked `Closed` on its
+    thumbnail. Closing a herdr or tmux terminal only ends or2's view (it keeps running on the host): one tap.
+    Closing a shell ends the shell: a confirm (`Close shell? Programs running in it end.`).
+  - Removed: the separate `SESSIONS` row, the `>_` session button, the `Working` / `Needs attention` chips (the
+    Inbox icon's badge says it), the card body's navigation to the host screen.
+- **The host screen is removed** (`host/HostScreen.kt`'s `HostScreen`, `Destination.HostPage`). Its unique
+  bits move: the host-key dialog is the global one already; the UDP-blocked line shows in the picker under its
+  tabs (muted); the per-address detail and "address in use" are on the card. `NavStack.afterPaired` and
+  `afterKeepAlive` land on Home with that host's picker open. A saved stack naming a host page decodes to
+  Home. The Inbox host row loses its tap (its Connect / Retry pill stays). `SessionPickerSheet`, `PickerGate`
+  and their helpers stay (move them out of `HostScreen.kt` into their own file).
+- **Picker:** tabs `herdr` and `tmux`, the `Shell` pill (keeps the `>_` glyph, now its only meaning), Refresh,
+  New tmux session, the gate. **No `Open` tab.** A herdr session or tmux session that already has an open
+  terminal shows `● Open` at its row's end; choosing it switches to that terminal (the reuse rule).
+- **Terminal:** system Back from a terminal does what the orange disc does (Home). The green disc opens the
+  **`Terminals`** sheet: every open terminal grouped by host, the current one marked, each row with its `×`
+  (same close rules as Home), then two rows: **`Copy screen`** (the visible screen's text to the clipboard,
+  with the usual copied confirmation) and **`Gestures & shortcuts`** (opens the shortcuts sheet). The separate
+  `Close session` row and pill go. Ctrl+Shift+W closes through the same close function as `×`.
+- **Re-activating a terminal shows it as it is.** Switcher, Home thumbnail, `● Open` row: no herdr focus
+  change (one terminal serves a whole herdr session now). Only an explicit agent request (inbox row,
+  notification) focuses a pane. `TerminalActivations`: `openAgent` and `reopen` share one private path; drop
+  the unreachable herdr-with-pane branch of `open()`; `reusable` becomes private (tests use `open`).
+- **Host form:** a danger **Delete host** row at the bottom (same confirm as Home's), and one Save: the bottom
+  button stays, the top-bar ✓ goes.
+- **Or2App is split** (812 lines): the reattach/resume state into its own holder, the Home destination into a
+  `HomeRoute`, the share handling, one notices overlay instead of two orders. `pendingResume` and
+  `pendingAgent` become one `PendingOpen` (one saver, one effect); a resume or agent tap while another unlock
+  runs connects once it ends (today it is silently dropped).
+- **Bugs:** the Resume card says `Ssh` (use the transport's `display()`); the Resume card and `Resuming…` /
+  `Focusing…` texts use `targetTitle`; a herdr terminal's card detail follows the focused pane (drop
+  `Or2App.cwdOf`, use the herdr rule).
+- **Tests:** update every Home, host-screen, picker and switcher device test to the new model (compile in the
+  gate); JVM tests for the pending-open unification, the close rules, `● Open` marking, Back.
+
+## Lane B: terminal and UI code (Kotlin: `terminal/*`, `ui/*`, `paste/*`, `keys/*`, `pair/*`, `notify/*`,
+## `session/TerminalHeader.kt`, `session/SessionMessages.kt`, the gallery for these)
+
+- **Toolbar:** remove the `Panes` key (the green disc opens the same sheet; remove `openPanes` from
+  `TerminalScreen` and its one use in `SessionScreen.kt`) and `History` (a swipe pages, the scroll-to-bottom
+  button returns). Keep Copy/Clear while selecting, Ctrl, Esc, Tab, the arrow pad key, Paste, `⇧Tab`, `/`,
+  `@`, then apart the composer and keyboard toggles. The row must fit a 411 dp-wide phone without scrolling
+  (a JVM or device check on the computed width). Remove the second `/` from the pad's symbol row.
+- **One paste path:** `pasteText` everywhere (delete `TerminalView.paste` and `TerminalInput.paste`), so a
+  confirmed paste is bracketed when the program asks. **Clipboard:** one `ui/Clipboard.kt` (copy, read with
+  `itemCount` checked and `coerceToText`, share) used by the terminal, Keys and pairing; one public-key Copy /
+  Share group shared by Keys and pairing.
+- **Composer:** closing it (its × or the toolbar toggle) gives focus back to the terminal; a multi-line send
+  buzzes once; opening the pad closes the composer as opening the composer closes the pad.
+- **Sheets:** `Or2Sheet` owns its body padding and the in-sheet card colour (`SurfaceRaisedRow`), fixing the
+  Sessions, Shortcuts and share sheets that draw `Surface`.
+- **The shortcuts sheet** gains a touch section first (tap, long press to select then Copy, swipes, pinch),
+  then the hardware-keyboard list; lane A opens it from the switcher.
+- **Simplify:** the arrow pad from a table (`PadActions` → one `send`); one confirm dialog for "Send N lines?"
+  and "Paste N lines?"; one hardware-shortcut helper for the view and the composer; one notice strip in the
+  terminal card; `terminalNotice` only for a closed terminal (its Connecting/Authenticating branch is never
+  shown; update the gallery and `ui.md`); `TransportBadge` and `Badge` reduced to what ships; inline
+  `identity(agent)`.
+- **Dead code:** unused icons (`Minus`, `Mic`, `Grid`, `Fingerprint`), `Or2Type.MonoLarge`, `ExtraKeys`,
+  `ToolbarActions.toggleAlt` and `ToolbarState.alt`, `sessionErrorMessage`, test-only `herdrStateMessage`,
+  `headerTitleText`, `composerWithPath`, never-passed parameters (`Segmented.icons`, `Or2Card.shape`,
+  `StatusDot.size`, `MonoBlock.container`, `PillButton.container`/`content`, `AttentionCard.icon`/
+  `subtitleColor`, `NoticeStrip.icon`), `DemoFrames.SURFACE`; stale comments (`KeyToolbar` lists Alt; "greys
+  its pill"; `PairInstallKeyScreen`'s doc; `ui.md`'s 30 vs 34 dp toolbar boxes).
+
+## Lane C: Kotlin app-layer cleanup (`connection/*`, `service/*`, `data/*`, `inbox/InboxModel.kt`,
+## `MainActivity.kt`, `app/OneTimePrompts.kt`; not `Or2App.kt`, `TerminalActivations.kt` or screens)
+
+- Remove the dead per-host mosh memory (`markMoshFailed`, `MoshFailureStore`, `clearMoshFailure`, the getter;
+  keep the Room column, marked unused, so no migration), and its tests.
+- Remove test-only production API: `HostConnections.awaitCapabilities`, `hasOpenSession`,
+  `InboxModel.linkStatuses`, `MoshServerLedger.allPids`, `NavStack.tab` (if unused after lane A, else leave),
+  `Timing.mark(detail)`, `NetworkChanges(initial)`, `ServiceController.current` (move what tests need into test
+  helpers).
+- One offer instead of `NotificationUse` (keep the prefs keys and the legacy `notifications_asked` check); one
+  battery-request intent.
+- `HostConnections`: one `currentPort(hostId, requireConnected)` helper for the six lookups; `ActiveTerminal.isOpen`
+  for the repeated "not closed, not retired, not disconnecting" test; drop checks the code already implies
+  (`retired` implies `disconnectRequested`); the repeated recheck condition; misplaced KDoc.
+- One `combineEach` helper for the nine "flatMapLatest, empty, combine" flows; `serviceSnapshots()` collected
+  once and shared by the application and the service.
+- One link-status message/colour and one agent-label function next to `LinkStatus` (lane A may use them).
+- Stale comments (`hasOpenSession`, `moshFailedUntil`, `AppActions.notifications`).
+
+## Lane D: Rust core and FFI (`core/*`; Kotlin only where an FFI change forces it)
+
+- **Bugs:** tmux swipe-scroll targets the terminal's original session after a session switch (pass the
+  terminal's tmux client id and resolve the session shown, as `navigate` does); the mosh connect timeout is
+  applied twice for an explicit Mosh choice (compute the deadline once); a reply can be sent after its
+  deadline when the cached socket is dead (budget the re-locate); a rejected subscription is retried on every
+  invalidation; the receive drain can delay a disconnect by about 1.3 s.
+- **Remove what only the probe or tests use:** the session host-key path (`ConnectRequest`/`ConnectError`,
+  `approve_host_key`/`reject_host_key`, `Command::ApproveHostKey`/`RejectHostKey`, the
+  `AwaitingHostKeyDecision`/`Authenticating` session states and their FFI errors; `contract_probe_session`
+  wraps the probe host's `open_terminal`), the test-only mosh start path (`start`/`start_with`/`spawn`,
+  `LinkControl`, `HealthObserver`; `tests/mosh_live.rs` moves to `run_session`), the herdr test-only wrappers
+  (`watch`, `run`, `focus_pane`, `watch_with_timing`, `watch::run`, `Directory::locate`; `tests/herdr_live.rs`
+  re-pointed), the peer-address plumbing, `transport::race`, `stranded_servers`, `probe::herdr_sessions`/
+  `probe`/`probe_entries`, `HostHandle::open_terminal(_with)`, the ssp leftovers, `Link.peer_ipv6`.
+- **FFI surface the app never reads:** `ViewportScroll::Top`, `terminal_size`/`TerminalSize`/`TerminalError`,
+  `BuildInfo.minimum_android_sdk`/`renderer`/`Renderer`, `TmuxSession.created_unix`/`activity_unix`,
+  `LinkHealth.since_ack_ms`, `HostCapabilities.utf8_locale` (unless Rust needs it internally), and the herdr
+  view fields Kotlin never reads (workspace/tab/pane `focused`, `agent_status`, pane `tab_id`/`workspace_id`/
+  `label`/`title`, agent `title`/`focused`, view `protocol`; check each against Kotlin main before removing).
+  Fewer fields also means fewer redundant view deliveries. **FFI API 18.** `ReplyRoute`, `Session.state()` and
+  the contract probes stay.
+- **One of each:** a `spawn_query` helper and `From` impls for `dispatch`'s nine query arms and the
+  `HerdrError`/`TmuxError` → `HostError` mappings, one `program()` helper; one input-command helper shared by
+  the SSH pump and the mosh driver; one herdr cached-socket call/retry helper for focus, scroll, navigate and
+  watch; a `HostHandle` query helper; `ExecOutput::stderr_line()`; one `or2_find` script fragment; `Client`/
+  `relay` fixed to `HostEvent`; two connect entry points instead of eight.
+- `pub(crate)` for the mosh `ssp`/`ghostty`/`bootstrap` modules and the tmux helpers used only inside, so the
+  dead-code lint polices them. Stale comments (M1 driver, `start`/`HealthObserver`, `PROBE_PANES` doc on the
+  wrong const, `docs/design.md`'s "API version 5").
+- Not now: a generic lifecycle type, gating the probe behind a cargo feature.
+
+## Integration
+
+The lead merges A, B, C and D, runs the full gate (`docs/build.md`) and the device suite on the
+`.devicetest` app, then a Codex review of the whole change, then installs a signed build for the owner's QA.
