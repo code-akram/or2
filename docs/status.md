@@ -8,11 +8,11 @@ Updated 2026-10-03.
 
 - **Released: [v0.1.1](releases/v0.1.1.md)** (2026-10-02, after [v0.1.0](releases/v0.1.0.md) the same day): the
   signed APK and `or2-pair` for Linux x86_64/aarch64 (static) and macOS Intel/Apple silicon.
-- **On `main`, not released: the v0.1.2 candidate** (`1064526` or later). The app's `versionName` is still
+- **On `main`, not released: the v0.1.2 candidate** (`4c8ec1a` or later). The app's `versionName` is still
   `0.1.1` (`versionCode 2`); the bump to 0.1.2 happens at release time. The
-  [CHANGELOG](../CHANGELOG.md) "Unreleased" section lists everything, and FFI `API_VERSION` is 16.
-- **The owner's phone runs that candidate** as the signed release build: an in-place update, so the hosts and
-  keys are kept.
+  [CHANGELOG](../CHANGELOG.md) "Unreleased" section lists everything, and FFI `API_VERSION` is 18.
+- **The owner's phone runs that candidate** (installed 2026-10-03 18:06) as the signed release build: an in-place
+  update, so the hosts and keys are kept. It awaits the owner's QA of the streamlined UI (below).
 
 ### In the v0.1.2 candidate
 
@@ -36,14 +36,22 @@ Updated 2026-10-03.
   - One fixed 48 dp top bar everywhere, with a scroll-edge hairline.
   - The app shell clips every screen to the safe area: nothing draws into the status bar.
   - Sheets stop below the status bar.
-- **Reviews.** Codex reviewed three rounds, plus one time-boxed Fable 5.1 review. Every finding was fixed with
+- **Added 2026-10-03, after the owner's first QA:** the Idle-edge notification fix; several images at once (picker
+  up to 10, share several, one queue per terminal); image upload in 8 SFTP round trips instead of 27; one terminal
+  per herdr session; and **the streamline** (contracts.md, "# v0.1.2: streamline"): one UI model (Home holds each
+  host's terminals with × to close, a tap opens the picker, `⋯` for host actions; no host screen; the Terminals
+  sheet with Copy screen and Gestures & shortcuts; Back = Home), a toolbar that fits (⇧Tab, `/`, `@`; no Panes or
+  History), one paste path, the multi-line confirm only without bracketed paste, five Rust bug fixes (tmux scroll
+  after a session switch among them), and about 670 lines less across app and core (FFI API 18).
+- **Reviews.** Codex reviewed three rounds, plus one time-boxed Fable 5.1 review; a fourth Codex round on the
+  2026-10-03 work (`1064526..2743d89`) found nothing. Every finding was fixed with
   a test, apart from the accepted reply race above and the binary SFTP handles noted under Known limits.
 
 ### Checks on `main` (last run)
 
 - All pass: `cargo fmt`, `clippy -D warnings`, `cargo test` (the whole workspace, sshd required),
   `gen-herdr-types --check`, `gen-licenses --check`, and the Gradle build, unit tests and lint.
-- The device suite passes: 150 tests. The two notification-posting tests skip, because the phone refuses
+- The device suite passes: 155 tests (2026-10-03, after the streamline). The two notification-posting tests skip, because the phone refuses
   the permission to a test build.
 
 ## Fixed: finished turns that herdr reports as Idle never notified (2026-10-03)
@@ -79,16 +87,15 @@ until the caller acknowledges, as a real host does.
 
 ## Next, in order
 
-0. **Install a signed build with the Idle fix** on the owner's phone and check that a finished turn notifies
-   (open an agent from the phone, send, lock the phone).
-1. **The owner's QA of the v0.1.2 candidate** on the phone:
-   1. Reply from a notification. Include a reply to an agent waiting at an approval dialog (Claude Code's
-      "Do you want to …?"), and note exactly what a typed reply does there.
-   2. Image paste three ways: the composer's image button, the keyboard, and Share → or2. The path appears
-      with no Enter, and Claude Code reads the image.
-   3. A second image while one uploads shows "An image is already uploading".
-   4. Spot-check: Home's card versus its `>_` button, the top bars, the blue arrow pad, and tap-to-click in
-      herdr.
+1. **The owner's QA of the streamlined v0.1.2 candidate** on the phone (installed 2026-10-03):
+   1. Home: each host's terminals inside its card; × closes (herdr/tmux one tap, a shell asks); a tap on the host
+      opens the picker (connecting first); `⋯` for Connect/Disconnect, Edit, Delete; `Connect all`.
+   2. Picker: herdr and tmux tabs, Shell; `● Open` on a session already open, which switches to it.
+   3. Terminal: Back and the orange disc go Home; the green disc's Terminals sheet (× per row, Copy screen,
+      Gestures & shortcuts); toolbar fits (⇧Tab, `/`, `@`; Copy/Clear while selecting).
+   4. Images: several from the picker and from Share; the strip's `Uploading image 2 of 4…`; about 1 s per image.
+   5. Multi-line composer text to an agent goes without the "Send N lines?" dialog.
+   6. Notifications and Reply (Claude Code, pi; Codex only while herdr accepts its session report).
 2. **Fix what the QA finds**, then **release v0.1.2**:
    1. Bump `core/Cargo.toml` to 0.1.2 (then `cargo update --workspace --offline`), the app to
       `versionName 0.1.2` / `versionCode 3`, and the version `NativeContractTest` expects.
