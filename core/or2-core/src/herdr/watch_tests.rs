@@ -1349,6 +1349,74 @@ async fn a_terminals_focus_accepts_a_recent_acknowledgement_but_the_apps_never_d
     assert_eq!(focuses(&host), 3);
 }
 
+async fn focus_tab_once(
+    gate: &FocusGate,
+    host: &FakeHost,
+    directory: &Arc<Directory>,
+    tab: &str,
+) -> Result<(), HerdrError> {
+    gate.focus_tab(&Arc::new(host.clone()), HERDR, directory, None, tab)
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_tab_focus_is_one_tab_focus_and_a_vanished_tab_is_pane_not_found() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    focus_tab_once(&gate, &host, &directory, "w2:t1")
+        .await
+        .unwrap();
+    assert!(host.exec_log().is_empty(), "the cached socket");
+    assert_eq!(host.served(), [Served::TabFocus("w2:t1".into())]);
+
+    host.fail_focus("tab_not_found", "no such tab");
+    assert_eq!(
+        focus_tab_once(&gate, &host, &directory, "w9:t9").await,
+        Err(HerdrError::PaneNotFound)
+    );
+    host.fail_focus("internal", "boom");
+    assert!(matches!(
+        focus_tab_once(&gate, &host, &directory, "w2:t1").await,
+        Err(HerdrError::Failed(_))
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_tab_focus_takes_its_turn_and_makes_the_gate_forget_the_last_pane() {
+    let host = host_with(&two_panes());
+    let directory = seeded(&host).await;
+    let gate = FocusGate::new();
+    focus_once(&gate, &host, &directory, "w2:p1", false)
+        .await
+        .unwrap();
+    // The tab moves herdr's focus elsewhere: a terminal opening on the pane focused a moment
+    // ago must focus it again, not be answered from memory.
+    focus_tab_once(&gate, &host, &directory, "w1:t1")
+        .await
+        .unwrap();
+    focus_once(&gate, &host, &directory, "w2:p1", true)
+        .await
+        .unwrap();
+    // Asked together, they are sent in the order asked; a tab never joins a pane's request.
+    let (pane, tab) = tokio::join!(
+        focus_once(&gate, &host, &directory, "w2:p2", false),
+        focus_tab_once(&gate, &host, &directory, "w2:t1"),
+    );
+    pane.unwrap();
+    tab.unwrap();
+    assert_eq!(
+        host.served(),
+        [
+            Served::Focus("w2:p1".into()),
+            Served::TabFocus("w1:t1".into()),
+            Served::Focus("w2:p1".into()),
+            Served::Focus("w2:p2".into()),
+            Served::TabFocus("w2:t1".into()),
+        ]
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_failed_focus_is_shared_with_those_waiting_and_remembered_by_nobody() {
     let host = host_with(&two_panes());

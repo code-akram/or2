@@ -224,7 +224,7 @@ pub fn is_valid_herdr_session_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
 }
 
-/// `[A-Za-z0-9:_-]{1,128}`.
+/// `[A-Za-z0-9:_-]{1,128}`; herdr's tab ids (`w1:t1`) follow the same rule.
 pub fn is_valid_herdr_pane_id(id: &str) -> bool {
     (1..=128).contains(&id.len())
         && id
@@ -339,7 +339,7 @@ pub enum HostError {
     InvalidName,
     #[error("{program} is not installed on the host")]
     NotInstalled { program: String },
-    /// `focus_herdr_pane`: herdr no longer has that pane (the agent's pane was closed since
+    /// `focus_herdr_pane`, `focus_herdr_tab`: herdr no longer has that pane or tab (closed since
     /// the caller last saw it). Refresh the inbox; do not open or reuse a terminal for it.
     #[error("the herdr pane no longer exists")]
     PaneNotFound,
@@ -497,6 +497,14 @@ pub enum HostCommand {
     FocusHerdrPane {
         session: Option<String>,
         pane_id: String,
+        reply: oneshot::Sender<Result<(), HostError>>,
+    },
+    /// Focus tab `tab_id` in herdr `session` (`tab.focus`), in order with the session's pane
+    /// focuses. Replies as [`HostCommand::FocusHerdrPane`]; a tab that has gone is
+    /// `PaneNotFound`.
+    FocusHerdrTab {
+        session: Option<String>,
+        tab_id: String,
         reply: oneshot::Sender<Result<(), HostError>>,
     },
     /// Stop the `mosh-server` with process id `pid` on the host ([`crate::mosh::terminate`]):
@@ -762,6 +770,28 @@ impl HostHandle {
         self.query(QUERY_TIMEOUT, |reply| HostCommand::FocusHerdrPane {
             session,
             pane_id,
+            reply,
+        })
+        .await
+    }
+
+    /// Focuses tab `tab_id` in herdr `session` (`None` is the default session): herdr shows the
+    /// pane that tab last had focused, and a terminal running the herdr client follows. Names
+    /// are validated like [`HostHandle::focus_herdr_pane`]'s (`InvalidName`); a tab that has
+    /// gone is [`HostError::PaneNotFound`], a host without herdr `NotInstalled`.
+    pub async fn focus_herdr_tab(
+        &self,
+        session: Option<String>,
+        tab_id: String,
+    ) -> Result<(), HostError> {
+        if !session.as_deref().is_none_or(is_valid_herdr_session_name)
+            || !is_valid_herdr_pane_id(&tab_id)
+        {
+            return Err(HostError::InvalidName);
+        }
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::FocusHerdrTab {
+            session,
+            tab_id,
             reply,
         })
         .await
@@ -1540,6 +1570,13 @@ mod tests {
                 Err(HostError::InvalidName),
                 "{session:?} {pane:?}"
             );
+            assert_eq!(
+                handle
+                    .focus_herdr_tab(session.map(str::to_owned), pane.replace('p', "t"))
+                    .await,
+                Err(HostError::InvalidName),
+                "tab {session:?} {pane:?}"
+            );
         }
         assert!(driver.commands.try_recv().is_err(), "nothing was enqueued");
         driver.close(CloseReason::Disconnected);
@@ -1625,6 +1662,32 @@ mod tests {
             driver
         });
         let focus = || handle.focus_herdr_pane(Some("work".into()), "w1:p2".into());
+        assert_eq!(focus().await, Ok(()));
+        assert_eq!(focus().await, Err(HostError::PaneNotFound));
+        drop(answers.join().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_herdr_tab_focus_carries_its_names_and_is_answered_through_its_reply() {
+        let (_recorder, handle, mut driver) = setup(false);
+        connect(&mut driver);
+        let answers = std::thread::spawn(move || {
+            for answer in [Ok(()), Err(HostError::PaneNotFound)] {
+                let HostCommand::FocusHerdrTab {
+                    session,
+                    tab_id,
+                    reply,
+                } = driver.blocking_next_command()
+                else {
+                    panic!("unexpected command")
+                };
+                assert_eq!(session, None);
+                assert_eq!(tab_id, "w2:t3");
+                reply.send(answer).unwrap();
+            }
+            driver
+        });
+        let focus = || handle.focus_herdr_tab(None, "w2:t3".into());
         assert_eq!(focus().await, Ok(()));
         assert_eq!(focus().await, Err(HostError::PaneNotFound));
         drop(answers.join().unwrap());

@@ -52,10 +52,13 @@ use tokio::time::{Instant, sleep_until};
 
 use super::HerdrError;
 use super::discovery::{Directory, DiscoveryError};
-use super::generated::request::{PaneTarget, RequestBody};
+use super::generated::request::{PaneTarget, RequestBody, TabTarget};
 use super::watch::PANE_NOT_FOUND;
 use super::wire::WireError;
 use crate::remote::RemoteHost;
+
+/// herdr's code for a request that names a tab that does not exist (any more).
+const TAB_NOT_FOUND: &str = "tab_not_found";
 
 /// How long an acknowledged focus counts for a terminal that opens on the same pane.
 pub const RECENT: Duration = Duration::from_secs(2);
@@ -130,7 +133,6 @@ impl FocusGate {
         pane_id: &str,
         accept_recent: bool,
     ) -> Result<(), HerdrError> {
-        let (reply, answer) = oneshot::channel();
         let job: Job = {
             let (host, directory) = (Arc::clone(host), Arc::clone(directory));
             let (herdr, session, pane_id) = (
@@ -142,10 +144,51 @@ impl FocusGate {
                 focus_pane_in(&*host, &herdr, &directory, session.as_deref(), &pane_id).await
             })
         };
+        self.ask(session, pane_id.to_owned(), accept_recent, job)
+            .await
+    }
+
+    /// Focuses tab `tab_id` of `session` (herdr's `tab.focus`: the tab shows the pane it last
+    /// had focused), in order with the session's pane focuses: it is queued like one and moves
+    /// the focused pane, so what was acknowledged before is forgotten. It is never answered
+    /// from memory, and never answers a terminal's pane focus.
+    pub async fn focus_tab<H: RemoteHost>(
+        &self,
+        host: &Arc<H>,
+        herdr: &str,
+        directory: &Arc<Directory>,
+        session: Option<&str>,
+        tab_id: &str,
+    ) -> Result<(), HerdrError> {
+        let job: Job = {
+            let (host, directory) = (Arc::clone(host), Arc::clone(directory));
+            let (herdr, session, tab_id) = (
+                herdr.to_owned(),
+                session.map(str::to_owned),
+                tab_id.to_owned(),
+            );
+            Box::pin(async move {
+                focus_tab_in(&*host, &herdr, &directory, session.as_deref(), &tab_id).await
+            })
+        };
+        // A key no pane id can equal (a pane id has no space), so a tab's request joins only
+        // a request for the same tab.
+        self.ask(session, format!("tab {tab_id}"), false, job).await
+    }
+
+    /// Hands one request for `key` to its session's actor and waits for the answer.
+    async fn ask(
+        &self,
+        session: Option<&str>,
+        key: String,
+        accept_recent: bool,
+        job: Job,
+    ) -> Result<(), HerdrError> {
+        let (reply, answer) = oneshot::channel();
         self.submit(
             session.map(str::to_owned),
             Request {
-                pane_id: pane_id.to_owned(),
+                pane_id: key,
                 accept_recent,
                 reply,
                 job,
@@ -354,4 +397,35 @@ pub async fn focus_pane_in<H: RemoteHost>(
     super::scroll::call(host, herdr, directory, session, "or2_focus", &body)
         .await
         .map(|_| ())
+}
+
+/// One `tab.focus`, the socket from `directory`, as [`focus_pane_in`] does for a pane: the tab
+/// shows the pane it last had focused. A tab that has gone is [`HerdrError::PaneNotFound`].
+pub async fn focus_tab_in<H: RemoteHost>(
+    host: &H,
+    herdr: &str,
+    directory: &Directory,
+    session: Option<&str>,
+    tab_id: &str,
+) -> Result<(), HerdrError> {
+    let body = RequestBody::TabFocus(TabTarget {
+        tab_id: tab_id.to_owned(),
+    });
+    match super::scroll::call_raw(
+        host,
+        herdr,
+        directory,
+        session,
+        "or2_focus_tab",
+        &body,
+        None,
+    )
+    .await?
+    {
+        Ok(_) => Ok(()),
+        Err(WireError::Herdr { code, .. }) if code == TAB_NOT_FOUND => {
+            Err(HerdrError::PaneNotFound)
+        }
+        Err(error) => Err(wire_error(error)),
+    }
 }

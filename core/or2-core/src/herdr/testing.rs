@@ -31,6 +31,8 @@ pub(super) enum Served {
     },
     Snapshot,
     Focus(String),
+    /// `tab.focus` of a tab id (it shares `pane.focus`'s failure and gate).
+    TabFocus(String),
     /// `pane.scroll` of `pane_id` to `offset` rows from the bottom, as requested.
     Scroll {
         pane_id: String,
@@ -526,14 +528,25 @@ async fn serve(state: Arc<Mutex<State>>, stream: DuplexStream) {
             }
             let _ = conn.send(format!("{}\n", step.reply).as_bytes()).await;
         }
-        "pane.focus" => {
-            let pane = request["params"]["pane_id"]
-                .as_str()
-                .unwrap_or("")
-                .to_owned();
+        "pane.focus" | "tab.focus" => {
+            let served = if method == "tab.focus" {
+                Served::TabFocus(
+                    request["params"]["tab_id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_owned(),
+                )
+            } else {
+                Served::Focus(
+                    request["params"]["pane_id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_owned(),
+                )
+            };
             let (failure, gate) = {
                 let mut state = lock(&state);
-                state.served.push(Served::Focus(pane.clone()));
+                state.served.push(served);
                 let gate = match state.focus_gate.take() {
                     Some((0, entered, release)) => Some((entered, release)),
                     Some((skip, entered, release)) => {

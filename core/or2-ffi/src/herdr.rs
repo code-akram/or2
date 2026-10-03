@@ -109,6 +109,12 @@ pub struct HerdrAgent {
     /// herdr started): such an agent's notification offers no Reply.
     #[uniffi(default)]
     pub reply_identity: Option<AgentIdentity>,
+    /// The task the agent is on (API 20): herdr's `terminal_title_stripped`, trimmed, without a
+    /// leading spinner or status glyph, at most 120 characters; `None` when empty. What herdr's
+    /// sidebar shows, and the best way to tell two agents apart. A view whose only change is a
+    /// title is delivered at most once a second.
+    #[uniffi(default)]
+    pub title: Option<String>,
 }
 
 /// or2's projection of one herdr session, delivered whole.
@@ -121,6 +127,10 @@ pub struct HerdrView {
     pub tabs: Vec<HerdrTab>,
     pub panes: Vec<HerdrPane>,
     pub agents: Vec<HerdrAgent>,
+    /// herdr's focused tab (API 20): the tab a herdr client shows. Last, with a default, so
+    /// records built before it keep their shape.
+    #[uniffi(default)]
+    pub focused_tab_id: Option<String>,
 }
 
 /// `NotInstalled` and `IncompatibleProtocol` are final; `NotRunning` and `Failed` retry.
@@ -236,6 +246,7 @@ impl From<core::Agent> for HerdrAgent {
             cwd: a.cwd,
             state_change_seq: a.state_change_seq,
             terminal_id: a.terminal_id,
+            title: a.title,
         }
     }
 }
@@ -249,6 +260,7 @@ impl From<core::HerdrView> for HerdrView {
             tabs: view.tabs.into_iter().map(Into::into).collect(),
             panes: view.panes.into_iter().map(Into::into).collect(),
             agents: view.agents.into_iter().map(Into::into).collect(),
+            focused_tab_id: view.focused_tab_id,
         }
     }
 }
@@ -330,6 +342,7 @@ mod tests {
         let view = core::HerdrView {
             version: 7,
             focused_pane_id: Some("p1".into()),
+            focused_tab_id: Some("t1".into()),
             workspaces: vec![core::Workspace {
                 workspace_id: "w1".into(),
                 number: 1,
@@ -362,6 +375,7 @@ mod tests {
                     value: "s1".into(),
                 }),
                 interactive_ready: false,
+                title: Some("Fixing the build".into()),
             }],
         };
         let HerdrState::Live { view: mapped } = core::HerdrState::Live { view }.into() else {
@@ -369,6 +383,8 @@ mod tests {
         };
         assert_eq!(mapped.version, 7);
         assert_eq!(mapped.focused_pane_id.as_deref(), Some("p1"));
+        assert_eq!(mapped.focused_tab_id.as_deref(), Some("t1"));
+        assert_eq!(mapped.agents[0].title.as_deref(), Some("Fixing the build"));
         assert_eq!(mapped.workspaces[0].label, "main");
         assert_eq!(mapped.tabs[0].number, 2);
         assert_eq!(mapped.panes[0].agent.as_deref(), Some("claude"));

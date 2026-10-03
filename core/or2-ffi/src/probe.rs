@@ -225,7 +225,11 @@ fn publish(driver: &mut SessionDriver, frame: Frame) {
 /// generated once per process, then reports `Connected { 0 }`.
 /// `capabilities` (which reports a `mosh-server`), `mosh_server` (its path) and `list_tmux_sessions` return fixed data. `focus_herdr_pane` succeeds for the
 /// probe view's panes (`w1:p1`, `w1:p2`, `w2:p1`) and is `PaneNotFound` for any other id; the
-/// focused pane is then the `focused_pane_id` of the views of watches started afterwards. `open_terminal` returns a
+/// focused pane is then the `focused_pane_id` of the views of watches started afterwards.
+/// `focus_herdr_tab` (API 20) succeeds for the probe view's tabs (`w1:t1`, `w2:t1`), focusing the
+/// tab's one pane (`w1:p1`, `w2:p1`), and is `PaneNotFound` for any other id. The view's
+/// `focused_tab_id` is the focused pane's tab; its agents are titled `Fixing the build`
+/// (`w1:p1`) and `Review the upload path` (`w1:p2`), and `w2:p1` has no title. `open_terminal` returns a
 /// session served by the probe script (`Connecting` to
 /// `Connected`; row 0 names the target). With `TerminalTransport::Mosh` the terminal behaves the
 /// same, plus: after its first frame `on_link_health` receives three values in order,
@@ -409,6 +413,20 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                     Err(core_host::HostError::PaneNotFound)
                 });
             }
+            HostCommand::FocusHerdrTab { tab_id, reply, .. } => {
+                // A probe tab has one pane, its workspace's first.
+                let pane = tab_id
+                    .strip_suffix(":t1")
+                    .map(|workspace| format!("{workspace}:p1"))
+                    .filter(|pane| PROBE_PANES.contains(&pane.as_str()));
+                let _ = reply.send(match pane {
+                    Some(pane) => {
+                        *focused.lock().unwrap() = pane;
+                        Ok(())
+                    }
+                    None => Err(core_host::HostError::PaneNotFound),
+                });
+            }
             HostCommand::StopMoshServer { pid, reply } => {
                 // A stop that cannot run, for tests of the caller keeping the pid.
                 let _ = reply.send(if pid == PROBE_UNSTOPPABLE_PID {
@@ -575,6 +593,7 @@ fn probe_view(label: &str, version: u64, resolved: bool, focus: &str) -> HerdrVi
             terminal_id: format!("term_{pane}"),
             agent_session: None,
             interactive_ready: false,
+            title: None,
         }
     };
     let pane = |a: &Agent| Pane {
@@ -590,10 +609,12 @@ fn probe_view(label: &str, version: u64, resolved: bool, focus: &str) -> HerdrVi
                 kind: "id".into(),
                 value: "sess_w1:p1".into(),
             }),
+            title: Some("Fixing the build".into()),
             ..agent("w1:p1", "claude", first, if resolved { 5 } else { 4 })
         },
         Agent {
             interactive_ready: true,
+            title: Some("Review the upload path".into()),
             ..agent("w1:p2", "codex", AgentStatus::Working, 2)
         },
         agent("w2:p1", "pi", AgentStatus::Idle, 1),
@@ -601,6 +622,9 @@ fn probe_view(label: &str, version: u64, resolved: bool, focus: &str) -> HerdrVi
     HerdrView {
         version,
         focused_pane_id: Some(focus.into()),
+        focused_tab_id: focus
+            .split_once(':')
+            .map(|(workspace, _)| format!("{workspace}:t1")),
         workspaces: vec![
             Workspace {
                 workspace_id: "w1".into(),

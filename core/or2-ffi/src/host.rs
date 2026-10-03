@@ -159,7 +159,7 @@ pub enum HostError {
     InvalidName,
     #[error("{program} is not installed on the host")]
     NotInstalled { program: String },
-    /// `focus_herdr_pane`: the pane no longer exists in herdr.
+    /// `focus_herdr_pane`, `focus_herdr_tab`: the pane or tab no longer exists in herdr.
     #[error("the herdr pane no longer exists")]
     PaneNotFound,
     /// `reason` is a diagnostic without secrets; do not match on it. (Not `message`: that
@@ -504,6 +504,20 @@ impl HostConnection {
         pane_id: String,
     ) -> Result<(), HostError> {
         Ok(self.handle.focus_herdr_pane(session, pane_id).await?)
+    }
+
+    /// Focuses tab `tab_id` in herdr `session` (API 20; `None` is the default session) and
+    /// resolves once herdr has acknowledged it: herdr shows the pane that tab last had focused,
+    /// and a terminal running `herdr` on the session follows. Sent in order with the session's
+    /// pane focuses. `InvalidName` for a malformed session or tab id, `NotInstalled` without
+    /// herdr, `PaneNotFound` when the tab has gone, `CommandFailed` otherwise. Cancelling the
+    /// coroutine drops the reply only.
+    pub async fn focus_herdr_tab(
+        &self,
+        session: Option<String>,
+        tab_id: String,
+    ) -> Result<(), HostError> {
+        Ok(self.handle.focus_herdr_tab(session, tab_id).await?)
     }
 
     /// Stops the `mosh-server` with process id `pid` on the host (API 10): one an earlier

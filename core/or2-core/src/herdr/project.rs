@@ -61,6 +61,7 @@ pub fn project(snapshot: &SessionSnapshot) -> HerdrView {
     HerdrView {
         version: 0,
         focused_pane_id: snapshot.focused_pane_id.clone(),
+        focused_tab_id: snapshot.focused_tab_id.clone(),
         workspaces: snapshot
             .workspaces
             .iter()
@@ -108,9 +109,65 @@ pub fn project(snapshot: &SessionSnapshot) -> HerdrView {
                     value: session.value.clone(),
                 }),
                 interactive_ready: agent.interactive_ready == Some(true),
+                title: agent
+                    .terminal_title_stripped
+                    .as_deref()
+                    .and_then(agent_title),
             })
             .collect(),
     }
+}
+
+/// The most characters of an agent title kept; the rest is cut.
+pub const TITLE_MAX_CHARS: usize = 120;
+
+/// An agent's title from herdr's `terminal_title_stripped`: trimmed, control characters removed,
+/// a leading spinner or status glyph and the space after it removed (Claude Code animates one in
+/// its title: `⠋ Fixing the build`, `✳ Fixing the build`), capped at [`TITLE_MAX_CHARS`]
+/// characters. `None` when nothing is left.
+///
+/// A glyph is removed only when whitespace (or nothing) follows it, so a title that starts with
+/// a word (`π - service`, `*args`) is kept whole. What counts as a glyph is [`is_status_glyph`].
+pub fn agent_title(raw: &str) -> Option<String> {
+    let clean: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let mut title = clean.trim();
+    let mut chars = title.chars();
+    if let Some(first) = chars.next()
+        && is_status_glyph(first)
+    {
+        // An emoji glyph may carry a variation selector.
+        let rest = chars.as_str().trim_start_matches(['\u{FE0E}', '\u{FE0F}']);
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            title = rest.trim_start();
+        }
+    }
+    let capped: String = title.chars().take(TITLE_MAX_CHARS).collect();
+    let capped = capped.trim_end();
+    (!capped.is_empty()).then(|| capped.to_owned())
+}
+
+/// A spinner or status symbol a program puts before its title: Braille spinners (U+2800–U+28FF),
+/// `*`, `·`, `•`, `∙`, `⋅`, `⋆`, and the arrows, technical symbols (`⏺`, `⏳`), shapes (`●`,
+/// `◐`, `■`), miscellaneous symbols and dingbats (`★`, `✓`, `✳`, `✶`, `✻`, `✽`, `✢`) and emoji
+/// blocks. Letters (`π`) and ordinary punctuation are never glyphs.
+pub fn is_status_glyph(c: char) -> bool {
+    matches!(
+        c,
+        '*' | '\u{00B7}'
+            | '\u{2022}'
+            | '\u{2023}'
+            | '\u{2043}'
+            | '\u{2219}'
+            | '\u{22C5}'
+            | '\u{22C6}'
+            | '\u{2190}'..='\u{21FF}'
+            | '\u{2300}'..='\u{23FF}'
+            | '\u{25A0}'..='\u{25FF}'
+            | '\u{2600}'..='\u{27BF}'
+            | '\u{2800}'..='\u{28FF}'
+            | '\u{2B00}'..='\u{2BFF}'
+            | '\u{1F300}'..='\u{1FAFF}'
+    )
 }
 
 /// The panes that need a `pane.agent_status_changed` subscription, as `(pane_id,
@@ -141,6 +198,7 @@ mod tests {
         let view = project(&snapshot);
         assert_eq!(view.version, 0);
         assert_eq!(view.focused_pane_id.as_deref(), Some("w2:p2"));
+        assert_eq!(view.focused_tab_id.as_deref(), Some("w2:t1"));
         assert_eq!(
             view.workspaces,
             [
@@ -210,6 +268,7 @@ mod tests {
                         value: "v".into(),
                     }),
                     interactive_ready: true,
+                    title: Some("Review v013 brief | or2".into()),
                 },
                 Agent {
                     pane_id: "w1:p2".into(),
@@ -225,10 +284,59 @@ mod tests {
                     terminal_id: "term_b".into(),
                     agent_session: None,
                     interactive_ready: false,
+                    title: None,
                 }
             ]
         );
         assert_eq!(view.panes[0].agent.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn an_agent_title_loses_its_leading_spinner_or_status_glyph() {
+        let title = |raw: &str| agent_title(raw);
+        // Claude Code's spinners and status marks, each with the space after it.
+        for glyph in [
+            "⠋", "⠙", "⣾", "✳", "✶", "✻", "✽", "✢", "·", "*", "●", "•", "◐", "⏺", "★", "✓", "⚡️",
+            "🤖",
+        ] {
+            assert_eq!(
+                title(&format!("{glyph} Repository context gathering")).as_deref(),
+                Some("Repository context gathering"),
+                "{glyph:?}"
+            );
+        }
+        // Surrounding whitespace and the space after the glyph go; inner spacing stays.
+        assert_eq!(
+            title("  ✳   Review v013 brief | or2  ").as_deref(),
+            Some("Review v013 brief | or2")
+        );
+        // Only one glyph, and only a leading one.
+        assert_eq!(title("✳ ✳ twice").as_deref(), Some("✳ twice"));
+        assert_eq!(title("Done ✓").as_deref(), Some("Done ✓"));
+        // A letter or a glyph glued to a word is part of the title.
+        assert_eq!(
+            title("π - cliproxyapi.service - user").as_deref(),
+            Some("π - cliproxyapi.service - user")
+        );
+        assert_eq!(title("*args parsing").as_deref(), Some("*args parsing"));
+        assert_eq!(title("~/code").as_deref(), Some("~/code"));
+        // Control characters never reach a line of text.
+        assert_eq!(title("one\ntwo\u{7}").as_deref(), Some("onetwo"));
+    }
+
+    #[test]
+    fn an_agent_title_is_capped_and_an_empty_one_is_absent() {
+        let long = "x".repeat(TITLE_MAX_CHARS + 30);
+        assert_eq!(agent_title(&long).unwrap().chars().count(), TITLE_MAX_CHARS);
+        // Characters, not bytes: a multi-byte title is cut on a character boundary.
+        let wide = "é".repeat(TITLE_MAX_CHARS + 1);
+        assert_eq!(agent_title(&wide), Some("é".repeat(TITLE_MAX_CHARS)));
+        // A cut that ends on a space does not keep it.
+        let spaced = format!("{} tail", "y".repeat(TITLE_MAX_CHARS - 1));
+        assert_eq!(agent_title(&spaced), Some("y".repeat(TITLE_MAX_CHARS - 1)));
+        for empty in ["", "   ", "⠋", "✳  ", "\n"] {
+            assert_eq!(agent_title(empty), None, "{empty:?}");
+        }
     }
 
     #[test]

@@ -43,6 +43,9 @@ use crate::remote::{RemoteError, RemoteHost};
 pub struct Timing {
     /// At most one view delivery per interval; also the least time between snapshot reads.
     pub coalesce: Duration,
+    /// At most one delivery per interval of a view whose only change is an agent title (a
+    /// spinner in a title must not churn the UI); see [`Delivery`].
+    pub title: Duration,
     /// Pause before retrying after `NotRunning` or `Failed`.
     pub retry: Duration,
     /// Pause before resubscribing after `events_lost` or a dropped event stream.
@@ -55,6 +58,7 @@ impl Default for Timing {
     fn default() -> Self {
         Self {
             coalesce: Duration::from_millis(100),
+            title: Duration::from_secs(1),
             retry: Duration::from_secs(10),
             resubscribe: Duration::from_millis(500),
             request: Duration::from_secs(10),
@@ -185,9 +189,17 @@ struct Target {
 
 /// Coalescing of deliveries. Views are held with `version` 0; the counter is applied on
 /// delivery.
+///
+/// A pending view that differs from the delivered one only in agent titles waits until
+/// `title` has passed since the last delivery that changed a title (the newest such view
+/// wins); any other change goes out after `coalesce` as before, carrying whatever titles it
+/// has.
 struct Delivery {
     coalesce: Duration,
+    title: Duration,
     last_sent: Option<Instant>,
+    /// When the last delivery that changed an agent title went out.
+    title_sent: Option<Instant>,
     /// The last delivered view, version 0.
     sent: Option<HerdrView>,
     /// The latest view not delivered yet.
@@ -195,11 +207,22 @@ struct Delivery {
     version: u64,
 }
 
+/// `view` with every agent title removed: what is left to compare when only titles changed.
+fn untitled(view: &HerdrView) -> HerdrView {
+    let mut view = view.clone();
+    for agent in &mut view.agents {
+        agent.title = None;
+    }
+    view
+}
+
 impl Delivery {
-    fn new(coalesce: Duration) -> Self {
+    fn new(coalesce: Duration, title: Duration) -> Self {
         Self {
             coalesce,
+            title,
             last_sent: None,
+            title_sent: None,
             sent: None,
             pending: None,
             version: 0,
@@ -210,13 +233,24 @@ impl Delivery {
         self.pending = (self.sent.as_ref() != Some(&view)).then_some(view);
     }
 
+    /// Whether the pending view changes nothing but agent titles.
+    fn titles_only(&self) -> bool {
+        match (&self.sent, &self.pending) {
+            (Some(sent), Some(pending)) => untitled(sent) == untitled(pending),
+            _ => false,
+        }
+    }
+
     /// When the pending view may be delivered; `None` when there is none.
     fn due(&self) -> Option<Instant> {
         self.pending.as_ref()?;
-        Some(
-            self.last_sent
-                .map_or_else(Instant::now, |sent| sent + self.coalesce),
-        )
+        let coalesced = self
+            .last_sent
+            .map_or_else(Instant::now, |sent| sent + self.coalesce);
+        Some(match self.title_sent {
+            Some(at) if self.titles_only() => coalesced.max(at + self.title),
+            _ => coalesced,
+        })
     }
 
     fn take_due(&mut self) -> Option<HerdrView> {
@@ -225,8 +259,20 @@ impl Delivery {
             return None;
         }
         let mut view = self.pending.take()?;
+        let titles_changed = self.sent.as_ref().is_some_and(|sent| {
+            sent.agents
+                .iter()
+                .map(|agent| (&agent.pane_id, &agent.title))
+                .ne(view
+                    .agents
+                    .iter()
+                    .map(|agent| (&agent.pane_id, &agent.title)))
+        });
         self.version += 1;
         self.last_sent = Some(Instant::now());
+        if titles_changed {
+            self.title_sent = self.last_sent;
+        }
         self.sent = Some(view.clone());
         view.version = self.version;
         Some(view)
@@ -642,7 +688,7 @@ pub async fn run_in<H: RemoteHost>(
         timing,
         events: None,
         dirty: false,
-        out: Delivery::new(timing.coalesce),
+        out: Delivery::new(timing.coalesce, timing.title),
         requests: 0,
     }
     .run()
@@ -652,12 +698,13 @@ pub async fn run_in<H: RemoteHost>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::herdr::view::HerdrView;
+    use crate::herdr::view::{Agent, AgentStatus, HerdrView};
 
     fn view(label: &str) -> HerdrView {
         HerdrView {
             version: 0,
             focused_pane_id: Some(label.to_owned()),
+            focused_tab_id: None,
             workspaces: Vec::new(),
             tabs: Vec::new(),
             panes: Vec::new(),
@@ -667,7 +714,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn the_first_view_goes_out_at_once_and_a_burst_collapses_to_the_latest() {
-        let mut out = Delivery::new(Duration::from_millis(100));
+        let mut out = Delivery::new(Duration::from_millis(100), Duration::from_secs(1));
         out.offer(view("a"));
         let first = out.take_due().expect("immediate");
         assert_eq!(first.version, 1);
@@ -697,7 +744,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_unchanged_view_is_not_delivered_and_a_reset_forgets_what_was_sent() {
-        let mut out = Delivery::new(Duration::from_millis(100));
+        let mut out = Delivery::new(Duration::from_millis(100), Duration::from_secs(1));
         out.offer(view("a"));
         assert!(out.take_due().is_some());
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -713,5 +760,96 @@ mod tests {
             out.take_due().expect("a change from Unavailable").version,
             2
         );
+    }
+
+    fn agent(pane: &str, title: Option<&str>) -> Agent {
+        Agent {
+            pane_id: pane.into(),
+            tab_id: "w1:t1".into(),
+            workspace_id: "w1".into(),
+            name: None,
+            agent: Some("claude".into()),
+            display_agent: None,
+            status: AgentStatus::Working,
+            cwd: None,
+            state_change_seq: 1,
+            terminal_id: format!("term_{pane}"),
+            agent_session: None,
+            interactive_ready: false,
+            title: title.map(str::to_owned),
+        }
+    }
+
+    /// One agent on `w1:p1` titled `title`, the focus on `focus`.
+    fn titled(title: &str, focus: &str) -> HerdrView {
+        HerdrView {
+            agents: vec![agent("w1:p1", Some(title))],
+            ..view(focus)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_title_only_change_waits_a_second_and_the_newest_wins() {
+        let mut out = Delivery::new(Duration::from_millis(100), Duration::from_secs(1));
+        out.offer(titled("one", "a"));
+        assert_eq!(out.take_due().expect("the first view").version, 1);
+
+        // The first title change since: nothing held it back yet, so it goes as any change.
+        tokio::time::advance(Duration::from_millis(200)).await;
+        out.offer(titled("two", "a"));
+        assert_eq!(out.take_due().expect("not throttled yet").version, 2);
+        let changed = Instant::now();
+
+        // A spinner's frames every 100 ms: held until a second after that delivery.
+        for (frame, title) in ["⠋ x", "⠙ x", "⠹ x", "⠸ x"].into_iter().enumerate() {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            out.offer(titled(title, "a"));
+            assert!(out.take_due().is_none(), "frame {frame} is held");
+            assert_eq!(out.due(), Some(changed + Duration::from_secs(1)));
+        }
+        tokio::time::advance(Duration::from_millis(600)).await;
+        let held = out.take_due().expect("a second has passed");
+        assert_eq!(held.version, 3);
+        assert_eq!(held.agents[0].title.as_deref(), Some("⠸ x"), "the newest");
+
+        // The next title change waits its own second.
+        tokio::time::advance(Duration::from_millis(100)).await;
+        out.offer(titled("three", "a"));
+        assert!(out.take_due().is_none());
+        tokio::time::advance(Duration::from_millis(900)).await;
+        assert_eq!(out.take_due().expect("due").version, 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn any_other_change_is_not_held_by_the_title_interval() {
+        let mut out = Delivery::new(Duration::from_millis(100), Duration::from_secs(1));
+        out.offer(titled("one", "a"));
+        out.take_due().unwrap();
+        tokio::time::advance(Duration::from_millis(100)).await;
+        out.offer(titled("two", "a"));
+        out.take_due().unwrap();
+
+        // A title change held back, then the focus moves too: the view goes after the usual
+        // 100 ms, titles and all.
+        tokio::time::advance(Duration::from_millis(100)).await;
+        out.offer(titled("three", "a"));
+        assert!(out.take_due().is_none());
+        out.offer(titled("three", "b"));
+        let view = out.take_due().expect("a focus change is not held");
+        assert_eq!(view.focused_pane_id.as_deref(), Some("b"));
+        assert_eq!(view.agents[0].title.as_deref(), Some("three"));
+
+        // A status change, an agent that appears: each after the usual 100 ms.
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let mut blocked = titled("four", "b");
+        blocked.agents[0].status = AgentStatus::Blocked;
+        out.offer(blocked);
+        assert!(out.take_due().is_some(), "a status change is not held");
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let mut more = titled("four", "b");
+        more.agents[0].status = AgentStatus::Blocked;
+        more.agents.push(agent("w1:p2", Some("new")));
+        out.offer(more);
+        assert!(out.take_due().is_some(), "a new agent is not held");
     }
 }

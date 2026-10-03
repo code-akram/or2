@@ -58,6 +58,10 @@ pub struct Agent {
     /// herdr started this agent (`herdr agent start`) and found it ready for input
     /// (`interactive_ready`).
     pub interactive_ready: bool,
+    /// The task the agent is on, as its terminal title says (herdr's
+    /// `terminal_title_stripped`, cleaned by [`super::project::agent_title`]): what herdr's
+    /// sidebar shows, and the best way to tell two agents apart. Absent when empty.
+    pub title: Option<String>,
 }
 
 /// One agent instance's session, as herdr reports it (`agent_session`): its `kind` (`id` or
@@ -73,6 +77,8 @@ pub struct HerdrView {
     /// Increases with every delivered view of one watch.
     pub version: u64,
     pub focused_pane_id: Option<String>,
+    /// herdr's focused tab (`focused_tab_id`): the tab a herdr client shows.
+    pub focused_tab_id: Option<String>,
     pub workspaces: Vec<Workspace>,
     pub tabs: Vec<Tab>,
     pub panes: Vec<Pane>,
