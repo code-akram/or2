@@ -6,7 +6,8 @@
 //! - a best-effort read of `sshd_config` and the files it `Include`s,
 //! - the login shell (sshd runs the pairing command through it) and the path of this program,
 //! - leftover pairing keys of earlier runs,
-//! - are tmux, herdr and mosh-server installed (all optional),
+//! - are tmux, herdr and mosh-server installed (all optional; without herdr a warning, since
+//!   or2's agents need it),
 //! - a firewall hint for mosh's UDP ports.
 //!
 //! What is missing or failing comes with the exact fix for this host ([`crate::hints`]).
@@ -228,6 +229,9 @@ impl ShellProbe for SystemShell {
     }
 }
 
+/// What a host without herdr goes without.
+const HERDR_NEEDED: &str = "or2's agents inbox, notifications and Reply need it";
+
 pub fn run(input: &CheckInput<'_>) -> Vec<Check> {
     let mut out = Vec::new();
     let blocking = if input.pairing {
@@ -264,11 +268,7 @@ pub fn run(input: &CheckInput<'_>) -> Vec<Check> {
             Program::Tmux,
             "optional: or2 can attach to its sessions",
         ),
-        (
-            "herdr",
-            Program::Herdr,
-            "optional: the agents inbox needs it",
-        ),
+        ("herdr", Program::Herdr, HERDR_NEEDED),
         (
             "mosh-server",
             Program::MoshServer,
@@ -280,14 +280,17 @@ pub fn run(input: &CheckInput<'_>) -> Vec<Check> {
         } else {
             find_program(name, input.program_dirs)
         };
+        let fix = hints::install(program, input.platform, input.facts);
         match path {
             Some(_) => found.push(name),
+            // or2's agents need herdr: without it there is no inbox, no notification, no Reply.
+            None if program == Program::Herdr => out.push(check(
+                Level::Warn,
+                format!("herdr not found: {HERDR_NEEDED}\n{fix}"),
+            )),
             None => out.push(check(
                 Level::Info,
-                format!(
-                    "{name} not found ({note})\n{}",
-                    hints::install(program, input.platform, input.facts)
-                ),
+                format!("{name} not found ({note})\n{fix}"),
             )),
         }
     }
@@ -1010,7 +1013,7 @@ mod tests {
     fn a_healthy_host_reports_ok_and_changes_nothing() {
         use std::os::unix::fs::PermissionsExt;
         let bin = tempfile::tempdir().unwrap();
-        for name in ["tmux", "mosh-server"] {
+        for name in ["tmux", "herdr", "mosh-server"] {
             executable(bin.path(), name);
         }
         let mut setup = Setup::new(banner("SSH-2.0-OpenSSH_9.9"));
@@ -1025,13 +1028,8 @@ mod tests {
         assert!(
             checks
                 .iter()
-                .any(|c| c.text == "tmux, mosh-server found" && c.level == Level::Ok),
+                .any(|c| c.text == "tmux, herdr, mosh-server found" && c.level == Level::Ok),
             "{checks:?}"
-        );
-        assert!(
-            checks
-                .iter()
-                .any(|c| c.text.starts_with("herdr not found") && c.level == Level::Info)
         );
         assert!(checks.iter().any(|c| {
             c.text
@@ -1100,12 +1098,14 @@ mod tests {
             ),
             "{infos:?}"
         );
+        // herdr is a warning: or2's agents need it. Its own installer, recommended, never run.
         assert!(
-            infos
-                .iter()
-                .any(|t| t.starts_with("herdr not found") && t.contains("herdr's install docs")),
-            "{infos:?}"
+            texts(&checks, Level::Warn).contains(
+                &"herdr not found: or2's agents inbox, notifications and Reply need it\ninstall it: `curl -fsSL https://herdr.dev/install.sh | sh`\n(or Homebrew, mise, Nix: https://herdr.dev/docs/install/)"
+            ),
+            "{checks:?}"
         );
+        assert!(!infos.iter().any(|t| t.contains("herdr")), "{infos:?}");
         assert!(
             infos
                 .iter()
@@ -1126,6 +1126,19 @@ mod tests {
                 .any(|t| t.starts_with("tmux not found") && t.ends_with("`brew install tmux`")),
             "{checks:?}"
         );
+        assert!(
+            texts(&checks, Level::Warn).iter().any(|t| t.starts_with(
+                "herdr not found: or2's agents inbox, notifications and Reply need it\ninstall it: `curl -fsSL https://herdr.dev/install.sh | sh`"
+            )),
+            "{checks:?}"
+        );
+        // Windows: herdr's docs, no installer to pipe into a shell.
+        setup.platform = Platform::Windows;
+        assert!(
+            texts(&setup.run(), Level::Warn).contains(
+                &"herdr not found: or2's agents inbox, notifications and Reply need it\nsee herdr's install docs: https://herdr.dev/docs/install/"
+            ),
+        );
     }
 
     #[cfg(unix)]
@@ -1133,7 +1146,10 @@ mod tests {
     fn a_mac_firewall_that_blocks_mosh_warns_with_the_fix_and_pairing_goes_on() {
         use std::os::unix::fs::PermissionsExt;
         let bin = tempfile::tempdir().unwrap();
-        executable(bin.path(), "mosh-server");
+        // herdr here: its absence would be a warning of its own.
+        for name in ["mosh-server", "herdr"] {
+            executable(bin.path(), name);
+        }
         let mut setup = Setup::new(banner("SSH-2.0-OpenSSH_9.9"));
         std::fs::set_permissions(setup.home.path(), std::fs::Permissions::from_mode(0o755))
             .unwrap();

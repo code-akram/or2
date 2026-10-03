@@ -274,6 +274,8 @@ mod live {
                 .env("OR2_PAIR_TEST_HOME", self.home.path())
                 .env("OR2_PAIR_TEST_USER", "tester")
                 .env("OR2_PAIR_TEST_ETC_SSH", self.etc.path())
+                // No herdr or agent of this machine is run (the Reply step would).
+                .env("OR2_PAIR_TEST_PROGRAM_DIRS", "")
                 .env("NO_COLOR", "1")
                 .env("LC_ALL", "C.UTF-8")
                 .stdout(Stdio::piped())

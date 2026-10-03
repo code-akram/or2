@@ -97,7 +97,10 @@ inputs, the contract's vectors and their bootstrap keys included. `tests/fifo.rs
 FIFO where `authorized_keys` should be (reports and exits, nothing changed). `tests/flow.rs`: the whole CLI flow in
 a thread, in a temporary home and a temporary `/etc/ssh` with made-up interfaces, a scripted terminal and a
 pretend sshd banner (nothing of the user's `~/.ssh`, sshd, tmux or herdr is read), the phone played by a
-direct call of the forced command's code. `tests/cli.rs`: the built binary (usage, the removed `--bind` and
+direct call of the forced command's code; the Reply step runs a scripted `herdr` (a shell script in a temporary
+directory, with made-up agent executables beside it) that answers `integration status` with herdr 0.9.3's output
+and logs every install. The tests of the built binary set `OR2_PAIR_TEST_PROGRAM_DIRS` (read only by a
+`test-support` build) so that no herdr or agent of the machine running them is found. `tests/cli.rs`: the built binary (usage, the removed `--bind` and
 `--pair-port`, `enroll`, the cleanup on SIGINT, SIGTERM, SIGHUP and the timeout, and the output rail: the error that
 ends it on standard error, the ASCII rail outside a UTF-8 locale and with `--ascii`, and, on a pseudo-terminal,
 colour (none with `NO_COLOR`, `--no-color` or `TERM=dumb`) and the answered code question redrawn with the code
@@ -132,7 +135,9 @@ that target, so the tests are not cross-checked).
 The checks' fixes for a host (`hints.rs`: the package manager, the sshd unit, the service manager and the
 firewall, read from files under a root directory) are unit-tested on fake trees in a temporary directory and on
 fabricated facts, never on the machine running the tests. The macOS firewall's `socketfilterfw` answers are fed
-from captured outputs through the `Commands` seam; no test runs the real command.
+from captured outputs through the `Commands` seam; no test runs the real command. The Reply step (`reply.rs`:
+herdr's status parser on real 0.9.3 output and garbage, the agents' executables, the question, the installs and
+their failures, the Codex note) is unit-tested through the same seam with a fake herdr.
 
 **or2-pair release binaries.** From the repository root:
 

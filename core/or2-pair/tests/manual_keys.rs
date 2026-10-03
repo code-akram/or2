@@ -38,6 +38,8 @@ fn manual(
         exe: Ok(EXE.into()),
         prompt: &script,
         can_ask: true,
+        interactive: false,
+        commands: &or2_pair::hints::SystemCommands::default(),
         style: or2_pair::rail::Style::plain(),
         random: &random,
         now: &|| or2_pair::date::DateTime::from_unix(1_782_867_661),

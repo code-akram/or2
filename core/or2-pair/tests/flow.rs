@@ -954,3 +954,252 @@ fn an_unwritable_key_file_is_refused_and_leaves_no_state_behind() {
     );
     assert!(world.state_files().is_empty());
 }
+
+/// A host with a scripted `herdr` (a shell script that answers `integration status` with what
+/// herdr 0.9.3 printed, logs every call, and fails the install of `omp`) and these agents'
+/// executables, all in a temporary directory. Nothing of this machine's herdr is run.
+struct Agents {
+    bin: tempfile::TempDir,
+}
+
+/// What herdr 0.9.3 printed on the owner's host.
+const HERDR_STATUS: &str = "\
+pi: current (v9) (/home/u/.pi/agent/extensions/herdr-agent-state.ts)
+omp: not installed (/home/u/.omp/agent/extensions/herdr-omp-agent-state.ts)
+claude: current (v10) (/home/u/.claude/hooks/herdr-agent-state.sh)
+codex: current (v8) (/home/u/.codex/herdr-agent-state.sh)
+copilot: not installed (/home/u/.copilot/hooks/herdr-agent-state.sh)
+opencode: not installed (/home/u/.config/opencode/plugins/herdr-agent-state.js)
+letta (experimental): not installed (/home/u/.letta/hooks/herdr-agent-session.sh)
+";
+
+impl Agents {
+    fn new(agents: &[&str]) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        let status = bin.path().join("status.txt");
+        std::fs::write(&status, HERDR_STATUS).unwrap();
+        let log = bin.path().join("herdr.log");
+        let script = format!(
+            "#!/bin/sh\n\
+             echo \"$*\" >> '{log}'\n\
+             case \"$1 $2 $3\" in\n\
+             'integration status ') cat '{status}' ;;\n\
+             'integration install omp') echo 'error: cannot write /home/u/.omp/agent/extensions: Permission denied' >&2; exit 1 ;;\n\
+             'integration install '*) echo \"installed $3\" ;;\n\
+             *) exit 2 ;;\n\
+             esac\n",
+            log = log.display(),
+            status = status.display(),
+        );
+        let mut programs = vec![("herdr", script)];
+        programs.extend(
+            agents
+                .iter()
+                .map(|agent| (*agent, "#!/bin/sh\n".to_owned())),
+        );
+        for (name, text) in programs {
+            let path = bin.path().join(name);
+            std::fs::write(&path, text).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        Self { bin }
+    }
+
+    fn setup(&self, interactive: bool) -> Setup {
+        Setup {
+            program_dirs: vec![self.bin.path().to_path_buf()],
+            interactive,
+            ..Setup::default()
+        }
+    }
+
+    /// What herdr was asked, one call a line.
+    fn calls(&self) -> String {
+        std::fs::read_to_string(self.bin.path().join("herdr.log")).unwrap_or_default()
+    }
+}
+
+/// A pairing on this host, the phone pairing as soon as it can; `script` types the answers.
+fn pair_on(world: &World, setup: &Setup, script: &Script) -> Pairing<()> {
+    pair(
+        world,
+        &options(),
+        setup,
+        script,
+        &FakeSignals::default(),
+        |ready| {
+            let code = parse_code(&ready.payload);
+            enroll(world, code.id.as_ref().unwrap().as_str(), PHONE_KEY, "p");
+        },
+    )
+}
+
+fn in_order(out: &str, needles: &[&str]) {
+    let mut at = 0;
+    for needle in needles {
+        let found = out[at..]
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} missing or out of order in:\n{out}"));
+        at += found + needle.len();
+    }
+}
+
+#[test]
+fn reply_is_set_up_on_yes_before_the_code_is_asked() {
+    let world = World::new();
+    let agents = Agents::new(&["pi", "claude", "opencode"]);
+    let script = Script::new(&["", &new_code().display()]);
+    let result = pair_on(&world, &agents.setup(true), &script);
+    assert_eq!(result.exit.unwrap(), Exit::Paired, "{}", result.output);
+    assert_eq!(script.asked.load(Ordering::SeqCst), 2);
+    in_order(
+        &result.output,
+        &[
+            "\n✔  herdr found\n",
+            "\n│\n✔  Reply ready for pi, claude\n\
+             ◆  Set up Reply for opencode? (runs herdr integration install for each) [Y/n]\n\
+             │  Yes\n\
+             │\n\
+             ✔  Reply set up for opencode\n\
+             ●  Running sessions of opencode load it when they next start\n\
+             │\n\
+             ●  Open or2 on your phone: Add host > Easy pair\n",
+            "\n◆  Code shown on your phone\n",
+            "\n└  Paired\n",
+        ],
+    );
+    assert_eq!(
+        agents.calls(),
+        "integration status\nintegration install opencode\n"
+    );
+}
+
+#[test]
+fn reply_answered_no_prints_the_commands_and_pairing_goes_on() {
+    let world = World::new();
+    let agents = Agents::new(&["opencode", "omp"]);
+    let script = Script::new(&["n", &new_code().display()]);
+    let result = pair_on(&world, &agents.setup(true), &script);
+    assert_eq!(result.exit.unwrap(), Exit::Paired, "{}", result.output);
+    in_order(
+        &result.output,
+        &[
+            "\n◆  Set up Reply for omp, opencode? (runs herdr integration install for each) [Y/n]\n\
+             │  No\n\
+             │\n\
+             ●  Reply was not set up. To set it up later:\n\
+             │  `herdr integration install omp`\n\
+             │  `herdr integration install opencode`\n\
+             │\n\
+             ●  Open or2 on your phone",
+            "\n└  Paired\n",
+        ],
+    );
+    assert_eq!(agents.calls(), "integration status\n");
+}
+
+#[test]
+fn a_failed_reply_install_is_reported_and_pairing_goes_on() {
+    let world = World::new();
+    let agents = Agents::new(&["omp", "opencode"]);
+    let script = Script::new(&["y", &new_code().display()]);
+    let result = pair_on(&world, &agents.setup(true), &script);
+    assert_eq!(result.exit.unwrap(), Exit::Paired, "{}", result.output);
+    in_order(
+        &result.output,
+        &[
+            "\n▲  Reply not set up for omp: error: cannot write /home/u/.omp/agent/extensions: Permission denied\n\
+             │  run it yourself: `herdr integration install omp`\n\
+             ✔  Reply set up for opencode\n\
+             ●  Running sessions of opencode load it when they next start\n",
+            "\n└  Paired\n",
+        ],
+    );
+    assert_eq!(
+        agents.calls(),
+        "integration status\nintegration install omp\nintegration install opencode\n"
+    );
+}
+
+#[test]
+fn without_a_terminal_reply_prints_the_commands_and_asks_nothing() {
+    let world = World::new();
+    let agents = Agents::new(&["opencode", "codex"]);
+    let script = Script::new(&[&new_code().display()]);
+    let result = pair_on(&world, &agents.setup(false), &script);
+    assert_eq!(result.exit.unwrap(), Exit::Paired, "{}", result.output);
+    assert_eq!(script.asked.load(Ordering::SeqCst), 1, "only the code");
+    in_order(
+        &result.output,
+        &["\n│\n✔  Reply ready for codex\n\
+             ●  Reply is not set up for opencode\n\
+             │  set it up with:\n\
+             │  `herdr integration install opencode`\n\
+             │  running sessions load it when they next start\n\
+             ●  codex: Reply may not work while Codex runs its shared daemon (herdr#4649)\n\
+             │  turn it off: add `daemon_auto_start = false` under `[features]` in ~/.codex/config.toml\n\
+             │  then stop the running daemon once no Codex session uses it, and start Codex with `codex --no-daemon`\n\
+             │\n\
+             ●  Open or2 on your phone"],
+    );
+    assert_eq!(agents.calls(), "integration status\n");
+}
+
+#[test]
+fn check_and_manual_show_reply_but_change_nothing() {
+    for check in [true, false] {
+        let world = World::new();
+        // Codex with its daemon turned off: no note.
+        let codex = world.home.path().join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(
+            codex.join("config.toml"),
+            "[features]\ndaemon_auto_start = false\n",
+        )
+        .unwrap();
+        let agents = Agents::new(&["opencode", "codex"]);
+        let mut options = options();
+        options.check_only = check;
+        options.manual = !check;
+        let script = Script::new(&["y"]);
+        let result = pair(
+            &world,
+            &options,
+            &agents.setup(true),
+            &script,
+            &FakeSignals::default(),
+            |_| (),
+        );
+        assert!(result.exit.is_ok(), "{check}: {:?}", result.exit);
+        assert_eq!(script.asked.load(Ordering::SeqCst), 0, "{check}");
+        let out = &result.output;
+        assert!(
+            out.contains(
+                "\n✔  Reply ready for codex\n●  Reply is not set up for opencode\n│  set it up with:\n│  `herdr integration install opencode`\n"
+            ) && !out.contains("herdr#4649")
+                && out.ends_with("\n└  Done\n"),
+            "{check}: {out}"
+        );
+        assert_eq!(agents.calls(), "integration status\n", "{check}");
+    }
+}
+
+#[test]
+fn without_herdr_a_warning_says_what_is_lost_and_pairing_goes_on() {
+    let world = World::new();
+    let script = Script::new(&[&new_code().display()]);
+    let result = pair_on(&world, &Setup::default(), &script);
+    assert_eq!(result.exit.unwrap(), Exit::Paired, "{}", result.output);
+    in_order(
+        &result.output,
+        &[
+            "\n▲  herdr not found: or2's agents inbox, notifications and Reply need it\n\
+             │  install it: `curl -fsSL https://herdr.dev/install.sh | sh`\n\
+             │  (or Homebrew, mise, Nix: https://herdr.dev/docs/install/)\n",
+            "\n●  Open or2 on your phone",
+            "\n└  Paired\n",
+        ],
+    );
+    assert!(!result.output.contains("Reply ready") && !result.output.contains("Set up Reply"));
+}

@@ -161,11 +161,35 @@ pub enum AppRule {
 /// The macOS firewall's command-line tool. Only its read-only queries are run.
 pub const SOCKETFILTERFW: &str = "/usr/libexec/ApplicationFirewall/socketfilterfw";
 
-/// Runs a read-only command and returns what it printed (standard output, then standard error),
-/// whatever its exit status, or `None` when it could not be run or did not finish in time. The
-/// seam that lets tests feed captured outputs instead of running anything.
+/// What a command did that ran to its end: its exit status and both outputs (each at most
+/// [`COMMAND_OUTPUT_LIMIT`] bytes).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ran {
+    /// It exited with status 0.
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl Ran {
+    /// Standard output, then standard error.
+    pub fn text(&self) -> String {
+        format!("{}{}", self.stdout, self.stderr)
+    }
+}
+
+/// Runs a command and returns what it did, or `None` when it could not be run or did not finish
+/// in time. The seam that lets tests feed captured outputs instead of running anything. The
+/// checks run only read-only queries through it; the one command that changes something is
+/// `herdr integration install`, which the Reply step ([`crate::reply`]) runs once the person
+/// said yes.
 pub trait Commands {
-    fn run(&self, program: &Path, args: &[&OsStr]) -> Option<String>;
+    fn exec(&self, program: &Path, args: &[&OsStr]) -> Option<Ran>;
+
+    /// What it printed (standard output, then standard error), whatever its exit status.
+    fn run(&self, program: &Path, args: &[&OsStr]) -> Option<String> {
+        self.exec(program, args).map(|ran| ran.text())
+    }
 }
 
 /// The real [`Commands`]: the program is run directly (no shell), with no input, for at most
@@ -187,7 +211,7 @@ impl Default for SystemCommands {
 pub const COMMAND_OUTPUT_LIMIT: u64 = 64 * 1024;
 
 impl Commands for SystemCommands {
-    fn run(&self, program: &Path, args: &[&OsStr]) -> Option<String> {
+    fn exec(&self, program: &Path, args: &[&OsStr]) -> Option<Ran> {
         use std::io::Read;
         use std::process::{Command, Stdio};
         use std::sync::mpsc::{self, Receiver};
@@ -214,28 +238,40 @@ impl Commands for SystemCommands {
             child.stdout.take().map(reader),
             child.stderr.take().map(reader),
         ];
-        let finished = loop {
+        let status = loop {
             match child.try_wait() {
-                Ok(Some(_)) => break true,
+                Ok(Some(status)) => break Some(status),
                 Ok(None) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                _ => break false,
+                _ => break None,
             }
         };
-        if !finished {
+        let Some(status) = status else {
             let _ = child.kill();
             let _ = child.wait();
             return None;
-        }
+        };
         // Something it left running could still hold a pipe: the reading is inside the same
         // time limit.
-        let mut text = Vec::new();
-        for output in outputs.into_iter().flatten() {
-            let left = deadline.saturating_duration_since(Instant::now());
-            text.extend(output.recv_timeout(left).ok()?);
+        let mut texts = Vec::new();
+        for output in outputs {
+            let text = match output {
+                Some(output) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    output.recv_timeout(left).ok()?
+                }
+                None => Vec::new(),
+            };
+            texts.push(String::from_utf8_lossy(&text).into_owned());
         }
-        Some(String::from_utf8_lossy(&text).into_owned())
+        let stderr = texts.pop().unwrap_or_default();
+        let stdout = texts.pop().unwrap_or_default();
+        Some(Ran {
+            success: status.success(),
+            stdout,
+            stderr,
+        })
     }
 }
 
@@ -597,12 +633,25 @@ pub enum Program {
     MoshServer,
 }
 
+/// herdr's own install command.
+pub const HERDR_INSTALL: &str = "curl -fsSL https://herdr.dev/install.sh | sh";
+
+/// herdr's install page: its installer, Homebrew, mise and Nix.
+pub const HERDR_INSTALL_DOCS: &str = "https://herdr.dev/docs/install/";
+
 /// How to install a program that was not found: the line under "<program> not found".
 pub fn install(program: Program, platform: Platform, facts: &HostFacts) -> String {
     let package = match program {
-        // herdr's own instructions say how to install it; no package name is guessed.
+        // herdr's own installer (a recommendation: or2-pair never runs another project's
+        // installer); no package name is guessed. It has none for Windows: only its docs.
         Program::Herdr => {
-            return "see herdr's install docs (https://github.com/herdrdev/herdr)".to_owned();
+            return if platform == Platform::Windows {
+                format!("see herdr's install docs: {HERDR_INSTALL_DOCS}")
+            } else {
+                format!(
+                    "install it: `{HERDR_INSTALL}`\n(or Homebrew, mise, Nix: {HERDR_INSTALL_DOCS})"
+                )
+            };
         }
         Program::Tmux => "tmux",
         // `mosh-server` comes with the `mosh` package everywhere.
@@ -832,7 +881,7 @@ mod tests {
     }
 
     impl Commands for Captured {
-        fn run(&self, program: &Path, args: &[&OsStr]) -> Option<String> {
+        fn exec(&self, program: &Path, args: &[&OsStr]) -> Option<Ran> {
             let args: Vec<String> = args
                 .iter()
                 .map(|arg| arg.to_string_lossy().into_owned())
@@ -840,12 +889,17 @@ mod tests {
             self.asked
                 .borrow_mut()
                 .push((program.to_path_buf(), args.clone()));
-            match args.first().map(String::as_str) {
+            let stdout = match args.first().map(String::as_str) {
                 Some("--getglobalstate") => self.global.map(str::to_owned),
                 Some("--getblockall") => self.block_all.map(str::to_owned),
                 Some("--getappblocked") => self.app.map(|text| text.replace("{}", &args[1])),
                 _ => None,
-            }
+            }?;
+            Some(Ran {
+                success: true,
+                stdout,
+                stderr: String::new(),
+            })
         }
     }
 
@@ -1240,6 +1294,20 @@ mod tests {
         assert_eq!(
             commands.run(sh, &[arg("-c"), arg("echo out; echo err >&2; exit 3")]),
             Some("out\nerr\n".to_owned())
+        );
+        // The exit status and the two outputs apart, for herdr's installs.
+        assert_eq!(
+            commands.exec(sh, &[arg("-c"), arg("echo out; echo err >&2; exit 3")]),
+            Some(Ran {
+                success: false,
+                stdout: "out\n".into(),
+                stderr: "err\n".into(),
+            })
+        );
+        assert!(
+            commands
+                .exec(sh, &[arg("-c"), arg("echo fine")])
+                .is_some_and(|ran| ran.success)
         );
         assert_eq!(
             commands.run(Path::new("/nonexistent/socketfilterfw"), &[]),
@@ -1732,12 +1800,29 @@ mod tests {
             install(Program::MoshServer, Platform::Linux, &HostFacts::default())
                 .contains("mosh package with your package manager")
         );
-        // herdr: its own instructions, whatever the package manager.
-        for facts in [linux(Some(PackageManager::Apt)), HostFacts::default()] {
-            let hint = install(Program::Herdr, Platform::Linux, &facts);
-            assert!(hint.contains("herdr's install docs"), "{hint}");
-            assert!(!hint.contains("apt"), "{hint}");
+        // herdr: its own installer, whatever the package manager; on Windows only its docs.
+        for (platform, facts) in [
+            (Platform::Linux, linux(Some(PackageManager::Apt))),
+            (Platform::Linux, HostFacts::default()),
+            (
+                Platform::MacOs,
+                HostFacts {
+                    package_manager: Some(PackageManager::Brew),
+                    ..HostFacts::default()
+                },
+            ),
+            (Platform::Other, HostFacts::default()),
+        ] {
+            assert_eq!(
+                install(Program::Herdr, platform, &facts),
+                "install it: `curl -fsSL https://herdr.dev/install.sh | sh`\n(or Homebrew, mise, Nix: https://herdr.dev/docs/install/)",
+                "{platform:?}"
+            );
         }
+        assert_eq!(
+            install(Program::Herdr, Platform::Windows, &HostFacts::default()),
+            "see herdr's install docs: https://herdr.dev/docs/install/"
+        );
     }
 
     #[test]

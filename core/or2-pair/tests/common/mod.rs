@@ -228,6 +228,10 @@ pub struct Setup {
     pub install_keys: bool,
     pub platform: Platform,
     pub shell: Option<String>,
+    /// Where programs (herdr, the agents) are looked for: none by default.
+    pub program_dirs: Vec<PathBuf>,
+    /// Standard input is a terminal (the Reply step asks).
+    pub interactive: bool,
 }
 
 impl Default for Setup {
@@ -241,6 +245,8 @@ impl Default for Setup {
             install_keys: true,
             platform: Platform::Linux,
             shell: Some("/bin/bash".into()),
+            program_dirs: Vec::new(),
+            interactive: true,
         }
     }
 }
@@ -280,7 +286,7 @@ pub fn pair<R>(
                 account,
                 hostname: Some("testhost.example.net".into()),
                 etc_ssh: world.etc.path().to_path_buf(),
-                program_dirs: Vec::<PathBuf>::new(),
+                program_dirs: setup.program_dirs.clone(),
                 interfaces: interfaces(),
                 platform: setup.platform,
                 facts: or2_pair::hints::HostFacts::default(),
@@ -290,6 +296,11 @@ pub fn pair<R>(
                 exe: setup.exe.clone(),
                 prompt: script,
                 can_ask: setup.can_ask,
+                interactive: setup.interactive,
+                // A scripted herdr (a shell script in a temporary directory) runs for real.
+                commands: &or2_pair::hints::SystemCommands {
+                    timeout: Duration::from_secs(10),
+                },
                 style: or2_pair::rail::Style::plain(),
                 random: &random,
                 now: &DateTime::now,

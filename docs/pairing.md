@@ -87,7 +87,8 @@ On the host, in a terminal:
 or2-pair
 ```
 
-It runs its checks (sshd and its version, `authorized_keys`, your `sshd_config`, your login shell), then asks
+It runs its checks (sshd and its version, `authorized_keys`, your `sshd_config`, your login shell), sets up
+[Reply](#reply-for-the-agents-on-this-host) for your agents when herdr is installed, then asks
 **Code shown on your phone**. Type the code (capitals or not, with or without the hyphens; codes never contain
 `Z`, `U`, `I`, `L` or `O`, and an `I` or `L` is read as `1`, an `O` as `0`); the terminal does not show it as
 you type, like a password (once you press Enter it shows the code masked, `••••-••••-••••`). A typo is caught
@@ -104,6 +105,34 @@ trusted and or2 connects: there is no first-use host-key prompt. `or2-pair` prin
 ends with `Paired`. In the
 rare case that the host took the key but the phone could not save the host, the review says so and keeps that key
 (the key choice is locked): **Pair** then only saves the host, without pairing again.
+
+### Reply for the agents on this host
+
+Replying to an agent from its notification on the phone needs herdr's integration inside that agent. When herdr
+is installed, `or2-pair` asks it after the checks (`herdr integration status`, at most 15 s) and looks for the
+agents it has integrations for on this host (their programs in the same directories the checks search: `pi`,
+`claude`, `codex`, `opencode`, `cursor-agent`, `agy` and so on). Agents that are not installed are not mentioned.
+
+```text
+✔  Reply ready for pi, claude
+◆  Set up Reply for opencode? (runs herdr integration install for each) [Y/n]
+│  Yes
+│
+✔  Reply set up for opencode
+●  Running sessions of opencode load it when they next start
+```
+
+Enter (or `y`) runs `herdr integration install <id>` for each agent whose integration is missing or outdated and
+reports each; one that fails says why and the command to run yourself. Anything else (`n`) installs nothing and
+prints the commands. Without a terminal, and with `--check` or `--manual` (which change nothing), there is no
+question: it prints the commands. If herdr cannot answer, one line says so. None of it stops the pairing.
+
+When Codex is installed and `~/.codex/config.toml` does not set `daemon_auto_start = false` under `[features]`,
+a note says that Reply may not work while Codex runs its shared daemon (Codex runs its hooks in one long-lived
+daemon that remembers the pane it was first started from:
+[herdr#4649](https://github.com/herdrdev/herdr/issues/4649)) and how to turn the daemon off: that setting, then
+stop the running daemon once no Codex session uses it and start Codex with `codex --no-daemon`. `or2-pair` does not
+change Codex's config.
 
 ### What happens, and what it writes
 
@@ -254,11 +283,13 @@ does not need any of this: without mosh, terminals use SSH.
 
 ### Missing tmux, herdr or mosh-server
 
-They are optional, and each one that is missing comes with its install command for your package manager
-(Homebrew, apt, dnf or yum, pacman, zypper or apk; `sudo` left out when you run as root): for example
-``tmux: not found (optional: or2 can attach to its sessions); install it: `sudo apt install tmux` ``. For herdr it
-points to [herdr's own install instructions](https://github.com/herdrdev/herdr) rather than guess a package.
-`or2-pair` only prints these commands; it never runs them, or `sudo`.
+tmux and mosh-server are optional, and each one that is missing comes with its install command for your package
+manager (Homebrew, apt, dnf or yum, pacman, zypper or apk; `sudo` left out when you run as root): for example
+``tmux: not found (optional: or2 can attach to its sessions); install it: `sudo apt install tmux` ``. A missing herdr
+is a warning, because or2's agents inbox, notifications and Reply need it; it gives herdr's own installer,
+`curl -fsSL https://herdr.dev/install.sh | sh`, and [its other ways](https://herdr.dev/docs/install/) (Homebrew,
+mise, Nix) rather than guess a package. `or2-pair` only prints these commands; it never runs them, or `sudo`. The
+pairing goes on without them.
 
 ## How it stays safe
 

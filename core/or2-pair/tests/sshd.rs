@@ -282,6 +282,8 @@ impl Sshd {
             .env("OR2_PAIR_TEST_HOME", self.home())
             .env("OR2_PAIR_TEST_USER", current_user())
             .env("OR2_PAIR_TEST_ETC_SSH", self.etc())
+            // No herdr or agent of this machine is run (the Reply step would).
+            .env("OR2_PAIR_TEST_PROGRAM_DIRS", "")
             .env("NO_COLOR", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
