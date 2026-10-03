@@ -23,7 +23,6 @@ private object Mocha {
     const val MAGENTA = 0xf5c2e7u
     const val TEAL = 0x94e2d5u
     const val PEACH = 0xfab387u
-    const val SURFACE = 0x313244u
 }
 
 private data class Span(val text: String, val fg: UInt = Mocha.FG, val bg: UInt = Mocha.BG, val bold: Boolean = false, val underline: Boolean = false)

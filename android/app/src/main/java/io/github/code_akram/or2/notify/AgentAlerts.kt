@@ -250,7 +250,7 @@ class AgentAlerts(
             val text = alertText(agent.status, before.worked) ?: continue
             when {
                 isOnScreen(key) -> cancel(key)
-                enabled() -> post(AgentAlert(key, agentName(agent), text, hostLabel, agent = identity(agent)))
+                enabled() -> post(AgentAlert(key, agentName(agent), text, hostLabel, agent = agent.replyIdentity))
             }
         }
         // Gone from the session: nothing left to open.
@@ -345,9 +345,6 @@ class AgentAlerts(
         nonces.revoke(key)
     }
 }
-
-/** The agent instance a view reports in a pane, as a reply names it; null when herdr reports none (no Reply). */
-fun identity(agent: HerdrAgent): AgentIdentity? = agent.replyIdentity
 
 /**
  * Whether [now] is still the agent instance [was] names, as Rust decides for a reply: the same terminal and kind, and
