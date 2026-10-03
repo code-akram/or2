@@ -17,9 +17,12 @@ class TerminalInput(
         private set
     var alt = false
         private set
+    var shift = false
+        private set
 
     fun toggleCtrl() { ctrl = !ctrl; changed() }
     fun toggleAlt() { alt = !alt; changed() }
+    fun toggleShift() { shift = !shift; changed() }
     fun compose(text: String) { composing = text; changed() }
     fun discardComposition() { composing = ""; changed() }
     fun finishComposition() { commit(composing) }
@@ -27,7 +30,7 @@ class TerminalInput(
     fun commit(text: String) {
         discardComposition()
         if (text.isEmpty()) return
-        if (!ctrl && !alt) {
+        if (!ctrl && !alt && !shift) {
             sendText(text)
         } else {
             // Sticky modifiers affect exactly the next character, not an entire pasted string.
@@ -36,7 +39,8 @@ class TerminalInput(
             key(when (first) {
                 "\n", "\r" -> TerminalKey.Enter
                 "\t" -> TerminalKey.Tab
-                else -> TerminalKey.Character(first)
+                // Shift on a letter is its capital, as a keyboard's Shift is.
+                else -> TerminalKey.Character(if (shift) first.uppercase() else first)
             })
             if (end < text.length) sendText(text.substring(end))
         }
@@ -49,9 +53,10 @@ class TerminalInput(
     fun exactKey(key: TerminalKey, modifiers: KeyModifiers) = sendKey(KeyInput(key, modifiers))
 
     fun key(key: TerminalKey, modifiers: KeyModifiers = KeyModifiers(false, false, false, false)) {
-        val input = KeyInput(key, modifiers.copy(ctrl = modifiers.ctrl || ctrl, alt = modifiers.alt || alt))
+        val input = KeyInput(key, modifiers.copy(shift = modifiers.shift || shift, ctrl = modifiers.ctrl || ctrl, alt = modifiers.alt || alt))
         ctrl = false
         alt = false
+        shift = false
         changed()
         sendKey(input)
     }

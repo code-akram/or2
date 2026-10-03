@@ -109,6 +109,26 @@ class TerminalInputTest {
         assertFalse(input.ctrl || input.alt)
     }
 
+    @Test fun theShiftLatchShiftsExactlyTheNextKeyOrCharacter() {
+        input.toggleShift()
+        assertTrue(input.shift)
+        input.key(TerminalKey.Enter)
+        assertEquals(KeyInput(TerminalKey.Enter, KeyModifiers(true, false, false, false)), keys.last())
+        assertFalse(input.shift)
+        // A letter is its capital, with Shift; the rest of the text is typed as it is.
+        input.toggleShift()
+        input.commit("abc")
+        assertEquals(KeyInput(TerminalKey.Character("A"), KeyModifiers(true, false, false, false)), keys.last())
+        assertEquals(listOf("bc"), texts)
+        assertFalse(input.shift)
+        // With Ctrl too, both apply to the one key.
+        input.toggleShift()
+        input.toggleCtrl()
+        input.key(TerminalKey.ArrowLeft)
+        assertEquals(KeyModifiers(true, true, false, false), keys.last().modifiers)
+        assertFalse(input.shift || input.ctrl)
+    }
+
     @Test fun hardwareNavigationFunctionAndUnicodeMappingsAreDistinct() {
         assertEquals(TerminalKey.Delete, terminalKey(KeyEvent.KEYCODE_FORWARD_DEL, 0))
         assertEquals(TerminalKey.Backspace, terminalKey(KeyEvent.KEYCODE_DEL, 0))

@@ -184,12 +184,13 @@ fun ToolKey(
 }
 
 /** What the toolbar needs from the terminal; the screen owns the state, the toolbar only draws it. */
-class ToolbarState(val ctrl: Boolean, val selecting: Boolean, val padOpen: Boolean, val composerOpen: Boolean)
+class ToolbarState(val ctrl: Boolean, val selecting: Boolean, val padOpen: Boolean, val composerOpen: Boolean, val shift: Boolean = false)
 
 /**
  * The toolbar's keys: the test tag (`key:<tag>`), what an assistive service reads, and the mono label or the icon.
- * `⇧Tab` is Shift+Tab whatever is latched (Claude Code's mode cycle, which Gboard cannot send); `/` and `@` type into
- * the composer at its cursor while it is open, else into the terminal.
+ * `⇧Tab` is Shift+Tab whatever is latched (Claude Code's mode cycle, which Gboard cannot send); `⇧` latches Shift for the
+ * next key, as `Ctrl` latches Ctrl (Shift+Enter, Shift+arrows, a capital); `/` and `@` type into the composer at its
+ * cursor while it is open, else into the terminal.
  */
 enum class ToolbarKey(val tag: String, val description: String, val label: String? = null, val icon: ImageVector? = null) {
     COPY("Copy", "Copy selection", label = "Copy"),
@@ -200,6 +201,7 @@ enum class ToolbarKey(val tag: String, val description: String, val label: Strin
     ARROWS("Arrows", "Arrow pad", icon = Or2Icons.Dpad),
     PASTE("Paste", "Paste", icon = Or2Icons.Paste),
     SHIFT_TAB("ShiftTab", "Shift+Tab", label = "⇧Tab"),
+    SHIFT("Shift", "Shift", label = "⇧"),
     SLASH("Slash", "Slash", label = "/"),
     AT("At", "At sign", label = "@"),
     COMPOSER("Composer", "Composer", icon = Or2Icons.Chat),
@@ -207,15 +209,16 @@ enum class ToolbarKey(val tag: String, val description: String, val label: Strin
 }
 
 /**
- * The keys before the toggles, in order. While text is selected Copy and Clear lead the row and the typing keys
+ * The keys before the toggles, in the owner's order (2026-10-03): `Ctrl`, `Esc`, `Tab`, `⇧Tab`, `⇧`, the arrow pad, Paste,
+ * `/`, `@`. While text is selected Copy and Clear lead the row and the typing keys
  * (`⇧Tab`, `/`, `@`, which would clear the selection anyway) give way to them, so the row fits a phone either way.
  */
 fun toolbarKeys(selecting: Boolean): List<ToolbarKey> = if (selecting) {
     listOf(ToolbarKey.COPY, ToolbarKey.CLEAR, ToolbarKey.CTRL, ToolbarKey.ESC, ToolbarKey.TAB, ToolbarKey.ARROWS, ToolbarKey.PASTE)
 } else {
     listOf(
-        ToolbarKey.CTRL, ToolbarKey.ESC, ToolbarKey.TAB, ToolbarKey.ARROWS, ToolbarKey.PASTE,
-        ToolbarKey.SHIFT_TAB, ToolbarKey.SLASH, ToolbarKey.AT,
+        ToolbarKey.CTRL, ToolbarKey.ESC, ToolbarKey.TAB, ToolbarKey.SHIFT_TAB, ToolbarKey.SHIFT, ToolbarKey.ARROWS,
+        ToolbarKey.PASTE, ToolbarKey.SLASH, ToolbarKey.AT,
     )
 }
 
@@ -223,9 +226,9 @@ fun toolbarKeys(selecting: Boolean): List<ToolbarKey> = if (selecting) {
 val ToolbarToggles = listOf(ToolbarKey.COMPOSER, ToolbarKey.KEYBOARD)
 
 /**
- * The floating key pill: [toolbarKeys] (`Ctrl`, `Esc`, `Tab`, the arrow pad, Paste, `⇧Tab`, `/`, `@`), then, apart,
+ * The floating key pill: [toolbarKeys] (`Ctrl`, `Esc`, `Tab`, `⇧Tab`, `⇧`, the arrow pad, Paste, `/`, `@`), then, apart,
  * [ToolbarToggles]. It fits a 411 dp wide phone without scrolling (`KeyToolbarTest`); the scroll is only a fallback for
- * a large system font. [press] runs a key; a latched `Ctrl` draws in `accent` until it has been used for one key.
+ * a large system font. [press] runs a key; a latched `Ctrl` or `⇧` draws in `accent` until it has been used for one key.
  */
 @Composable
 fun KeyToolbar(
@@ -238,11 +241,16 @@ fun KeyToolbar(
             key.description,
             {
                 if (key == ToolbarKey.CTRL) haptics.tick(!state.ctrl)
+                if (key == ToolbarKey.SHIFT) haptics.tick(!state.shift)
                 press(key)
             },
             Modifier.testTag("key:${key.tag}").onGloballyPositioned { onKeyPositioned(key.tag, it) },
             label = key.label, icon = key.icon, framed = key !in ToolbarToggles,
-            latched = if (key == ToolbarKey.CTRL) state.ctrl else null,
+            latched = when (key) {
+                ToolbarKey.CTRL -> state.ctrl
+                ToolbarKey.SHIFT -> state.shift
+                else -> null
+            },
             active = (key == ToolbarKey.ARROWS && state.padOpen) || (key == ToolbarKey.COMPOSER && state.composerOpen),
         )
     }

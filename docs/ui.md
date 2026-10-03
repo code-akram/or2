@@ -124,8 +124,8 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   centred in a 26 x 36 dp box that reaches halfway to the other disc (the boxes meet at the midpoint, so where
   the grown targets would overlap the box a tap lands in wins and a tap between the discs goes to the nearer one),
   status chips that are buttons are 28 dp, the composer's bare icon actions are 40 dp boxes (the
-  send button is a 36 dp disc in a 40 dp box). The toolbar keys are 34 x 40 dp touch boxes around the
-  30 dp key drawn (a text key is as wide as its label plus 6 dp each side, at least 30 dp), and the
+  send button is a 36 dp disc in a 40 dp box). The toolbar keys are 32 x 40 dp touch boxes around the
+  30 dp key drawn (a text key is as wide as its label plus 5 dp each side, at least 30 dp), and the
   arrow-pad extras 28-38 x 36 dp, shoulder to shoulder, so a tap lands on the nearest key; the
   segmented control's segments span the whole 32 dp track.
 - Fingerprints in list rows are ellipsized in the middle on one line (`SHA256:7vK2mQ9x…tB1MkA`); the
@@ -416,14 +416,15 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   remains for a session that closed by itself (a lost connection, a remote exit), whose final frame stays
   readable until then. A terminal that never connected shows the same grouped list, each row with its `×`.
 - **Terminal toolbar:** a floating pill (`background` at ~85 %, 8 dp from the screen's sides, keys 6 dp inside
-  it) of rounded keys (`surface`), 30 dp wide (text keys as wide as their label plus 6 dp each side) and 30 dp
-  tall inside a 40 dp tall pill, each with a 34 x 40 dp touch box (the platform grows the hit area to 48 dp):
-  `Ctrl`, `Esc`, `Tab` as mono text, then the arrow-pad and paste icon keys, then `⇧Tab` (Shift+Tab to the
-  terminal, whatever is latched: Claude Code's mode cycle, which Gboard cannot send), `/` and `@` as mono text
+  it) of rounded keys (`surface`), 30 dp wide (text keys as wide as their label plus 5 dp each side) and 30 dp
+  tall inside a 40 dp tall pill, each with a 32 x 40 dp touch box (the platform grows the hit area to 48 dp):
+  in the owner's order (2026-10-03): `Ctrl`, `Esc`, `Tab`, `⇧Tab` (Shift+Tab to the terminal, whatever is latched:
+  Claude Code's mode cycle, which Gboard cannot send), `⇧` (latches Shift for the next key, as `Ctrl` latches Ctrl:
+  Shift+Enter, Shift+arrows, a capital) as mono text, then the arrow-pad and paste icon keys, then `/` and `@` as mono text
   (into the composer at its cursor while it is open, else typed into the terminal, taking a latched `Ctrl`), then,
-  4 dp apart, the composer and keyboard toggles without key backgrounds. A latched `Ctrl` draws in `accent` until
+  4 dp apart, the composer and keyboard toggles without key backgrounds. A latched `Ctrl` or `⇧` draws in `accent` until
   it has been used for one key; `Alt` lives in the arrow pad's extras row. While text is selected `Copy` and
-  `Clear` lead the row and the typing keys (`⇧Tab`, `/`, `@`, which would clear the selection anyway) give way to
+  `Clear` lead the row and the typing keys (`⇧Tab`, `⇧`, `/`, `@`, which would clear the selection anyway) give way to
   them. There is no panes key (the header's green disc opens that sheet) and no history key (a drag scrolls back,
   the scroll-to-bottom button returns). The row fits a 411 dp wide phone without scrolling either way (405.6 and
   384.8 dp by the tokens, `KeyToolbarTest`); it scrolls only with a large system font.

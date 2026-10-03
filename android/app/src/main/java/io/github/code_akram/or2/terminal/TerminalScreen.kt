@@ -143,6 +143,7 @@ fun TerminalScreen(
         var scrolledAway by remember { mutableStateOf(view.scrolledAway) }
         var ctrl by remember { mutableStateOf(false) }
         var alt by remember { mutableStateOf(false) }
+        var shift by remember { mutableStateOf(false) }
         var selecting by remember { mutableStateOf(false) }
         var pending by remember { mutableStateOf<PendingLines?>(null) }
         var shortcutsOpen by remember { mutableStateOf(false) }
@@ -175,7 +176,7 @@ fun TerminalScreen(
         val frameDrawn by rememberUpdatedState(onFrameDrawn)
         DisposableEffect(view, chrome) {
             view.onFrameDrawn = { frameDrawn() }
-            view.onInputChanged = { ctrl = view.input.ctrl; alt = view.input.alt }
+            view.onInputChanged = { ctrl = view.input.ctrl; alt = view.input.alt; shift = view.input.shift }
             view.onSelectionChanged = { selecting = view.selection != null }
             view.onBackgroundChanged = { background(Color(it.toInt() or (0xff shl 24))) }
             view.onScrolledAwayChanged = { scrolledAway = it }
@@ -212,6 +213,7 @@ fun TerminalScreen(
                 ToolbarKey.COPY -> view.copySelection()
                 ToolbarKey.CLEAR -> view.clearSelection()
                 ToolbarKey.CTRL -> view.input.toggleCtrl()
+                ToolbarKey.SHIFT -> view.input.toggleShift()
                 ToolbarKey.ESC -> view.input.key(TerminalKey.Escape)
                 ToolbarKey.TAB -> view.input.key(TerminalKey.Tab)
                 ToolbarKey.ARROWS -> {
@@ -296,7 +298,7 @@ fun TerminalScreen(
                 )
             }
             KeyToolbar(
-                ToolbarState(ctrl, selecting, chrome.padOpen, chrome.composerOpen), ::press,
+                ToolbarState(ctrl, selecting, chrome.padOpen, chrome.composerOpen, shift), ::press,
                 Modifier.onGloballyPositioned { view.toolbarBounds = it.unclippedBoundsInRoot() },
                 onKeyPositioned = { label, coordinates -> view.toolbarKeyBounds[label] = coordinates.unclippedBoundsInRoot() },
             )

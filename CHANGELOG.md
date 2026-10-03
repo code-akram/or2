@@ -33,6 +33,8 @@ Each release's notes are in [docs/releases/](docs/releases/).
 - A herdr terminal is called `herdr` (or `herdr <session>`), not after the pane it was opened on. Home's session
   card shows the working directory, else the agent (or the directory) herdr has in front, never `user@host`; a
   connected host's card shows the address in use. The picker's `Recent` tab is now `Open`.
+- The toolbar keys run `Ctrl`, `Esc`, `Tab`, `⇧Tab`, `⇧`, arrows, Paste, `/`, `@`; `⇧` latches Shift for the next
+  key as `Ctrl` latches Ctrl (Shift+Enter, Shift+arrows, a capital).
 - The toolbar has `⇧Tab` (Claude Code's mode cycle, which Gboard cannot send), `/` and `@` after Paste; `/` and
   `@` go into the composer at its cursor while it is open.
 - The terminal toolbar fits a phone without scrolling: the Panes key is gone (the header's green disc opens the same

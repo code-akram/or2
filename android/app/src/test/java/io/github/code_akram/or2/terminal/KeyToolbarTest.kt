@@ -40,9 +40,9 @@ class KeyToolbarTest {
     }
 
     @Test
-    fun theKeysAreCtrlEscTabArrowsPasteThenTheTypingKeys() {
+    fun theKeysAreInTheOwnersOrder() {
         assertEquals(
-            listOf("Ctrl", "Esc", "Tab", "Arrows", "Paste", "ShiftTab", "Slash", "At"),
+            listOf("Ctrl", "Esc", "Tab", "ShiftTab", "Shift", "Arrows", "Paste", "Slash", "At"),
             toolbarKeys(selecting = false).map { it.tag },
         )
         assertEquals(listOf("Composer", "Keyboard"), ToolbarToggles.map { it.tag })
