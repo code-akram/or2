@@ -92,7 +92,7 @@ const SHELLS: &[&str] = &[
 /// Why a reply stopped because its caller gave up (never shown: nobody waits for it).
 const CANCELLED: &str = "the reply was cancelled";
 /// Why a reply stopped because a request that sends could no longer end before the deadline.
-const NO_TIME: &str = "no time was left to send the reply";
+pub(super) const NO_TIME: &str = "no time was left to send the reply";
 /// Why a reply to an agent herdr reports no instance of ([`AgentIdentity::is_instance`]) is
 /// refused: only the pane itself can be answered.
 pub const OPEN_THE_PANE: &str = "open the pane to reply";
@@ -199,6 +199,7 @@ pub async fn reply_in<H: RemoteHost>(
                 reply.session,
                 "or2_reply_agent",
                 &get,
+                None,
             )
             .await?
             .map_err(gone)
@@ -212,7 +213,20 @@ pub async fn reply_in<H: RemoteHost>(
         text: reply.text.to_owned(),
         wait: None,
     });
-    match call_raw(host, herdr, directory, reply.session, "or2_prompt", &prompt).await? {
+    // A dead cached socket is located again before the prompt goes: that may only spend the
+    // time the prompt's own bound leaves before the deadline.
+    let start_by = window.start_by();
+    match call_raw(
+        host,
+        herdr,
+        directory,
+        reply.session,
+        "or2_prompt",
+        &prompt,
+        Some(start_by),
+    )
+    .await?
+    {
         Ok(_) => return Ok(ReplyRoute::Prompted),
         Err(WireError::Herdr { code, .. }) if code == AGENT_BLOCKED || code == AGENT_NOT_READY => {}
         Err(error) => return Err(gone(error)),
@@ -367,10 +381,17 @@ impl<C: Future<Output = ()>> Window<C> {
             () = self.cancelled.as_mut() => return Err(HerdrError::Failed(CANCELLED.into())),
             () = std::future::ready(()) => {}
         }
-        if Instant::now() + send_bound() > self.deadline {
+        if Instant::now() > self.start_by() {
             return Err(HerdrError::Failed(NO_TIME.into()));
         }
         Ok(())
+    }
+
+    /// The latest moment a request that sends may start: its own bound before the deadline.
+    fn start_by(&self) -> Instant {
+        self.deadline
+            .checked_sub(send_bound())
+            .unwrap_or_else(Instant::now)
     }
 }
 
@@ -1011,5 +1032,52 @@ mod tests {
         assert!(Instant::now() < deadline);
         tokio::time::sleep(Duration::from_secs(60)).await;
         assert!(typed(&host).is_empty(), "{:?}", host.served());
+    }
+
+    /// The cached socket dies between the identity check and the prompt (herdr restarted on
+    /// another socket) and the host is slow to list the sessions again: the re-locate spends
+    /// the prompt's time, so the prompt is not sent once it could land after the deadline (it
+    /// used to be sent whenever the listing came back).
+    #[tokio::test(start_paused = true)]
+    async fn a_dead_cached_socket_is_located_again_only_within_the_replys_time() {
+        const WORK: &str = "/home/user/.config/herdr/sessions/work/herdr.sock";
+        let host = self::host();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        host.hold_next("agent.get", Arc::clone(&entered), Arc::clone(&release));
+        let directory = Directory::new();
+        let agent = claude(PANE);
+        let reply = Reply {
+            session: Some("work"),
+            pane_id: PANE,
+            agent: &agent,
+            text: "yes",
+        };
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let restart = async {
+            entered.notified().await;
+            host.kill_socket(WORK);
+            host.set_listing(
+                &fixture("session_list.json")
+                    .replace("sessions/work/herdr.sock", "sessions/work/herdr-2.sock"),
+            );
+            host.set_exec_delay(Duration::from_secs(20));
+            release.notify_one();
+        };
+        let (result, ()) = tokio::join!(
+            reply_in(
+                &host,
+                "/h",
+                &directory,
+                reply,
+                deadline,
+                std::future::pending()
+            ),
+            restart
+        );
+        assert_eq!(result, Err(HerdrError::Failed(NO_TIME.into())));
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(!sent(&host), "{:?}", host.served());
     }
 }

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
 use serde_json::Value;
+use tokio::time::{Instant, timeout_at};
 
 use super::HerdrError;
 use super::discovery::Directory;
@@ -151,13 +152,17 @@ pub(super) async fn call<H: RemoteHost>(
     id: &str,
     body: &RequestBody,
 ) -> Result<Value, HerdrError> {
-    call_raw(host, herdr, directory, session, id, body)
+    call_raw(host, herdr, directory, session, id, body, None)
         .await?
         .map_err(wire_error)
 }
 
 /// [`call`] with herdr's answer unmapped, for a caller that acts on a particular error code:
 /// the outer error is the socket's discovery failing, the inner one the request's.
+///
+/// `start_by` is the latest moment the request may be sent (a reply that must not land after
+/// its caller's deadline): a re-locate after a dead cached socket is bounded by it, and the
+/// request is never sent past it ([`super::reply::NO_TIME`]).
 pub(super) async fn call_raw<H: RemoteHost>(
     host: &H,
     herdr: &str,
@@ -165,7 +170,9 @@ pub(super) async fn call_raw<H: RemoteHost>(
     session: Option<&str>,
     id: &str,
     body: &RequestBody,
+    start_by: Option<Instant>,
 ) -> Result<Result<Value, WireError>, HerdrError> {
+    let no_time = || HerdrError::Failed(super::reply::NO_TIME.into());
     let mut fresh = false;
     loop {
         let cached = if fresh {
@@ -176,11 +183,18 @@ pub(super) async fn call_raw<H: RemoteHost>(
         let from_cache = cached.is_some();
         let socket = match cached {
             Some(socket) => socket,
-            None => directory
-                .locate_fresh(host, herdr, session)
-                .await
-                .map_err(discovery_error)?,
+            None => {
+                let locate = directory.locate_fresh(host, herdr, session);
+                match start_by {
+                    Some(by) => timeout_at(by, locate).await.map_err(|_| no_time())?,
+                    None => locate.await,
+                }
+                .map_err(discovery_error)?
+            }
         };
+        if start_by.is_some_and(|by| Instant::now() > by) {
+            return Err(no_time());
+        }
         match wire::call(host, &socket, id, body, Timing::default().request).await {
             Ok(answer) => return Ok(Ok(answer)),
             Err(WireError::Unreachable(_)) if from_cache => {
