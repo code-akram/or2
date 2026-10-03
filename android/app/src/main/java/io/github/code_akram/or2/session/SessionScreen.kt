@@ -70,6 +70,8 @@ import io.github.code_akram.or2.ui.GroupCard
 import io.github.code_akram.or2.ui.GroupDivider
 import io.github.code_akram.or2.ui.ListRow
 import io.github.code_akram.or2.ui.NoticeStrip
+import io.github.code_akram.or2.ui.NoticeTone
+import io.github.code_akram.or2.inbox.herdrViews
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Icons
@@ -140,10 +142,24 @@ fun SessionScreen(
         val haptics = LocalHapticFeedback.current
         // The card follows the terminal's own background, which the remote can change (OSC 11).
         var background by remember { mutableStateOf(Or2Colors.TerminalBackground) }
+        // The Spaces sheet (the blue disc, herdr terminals only), and why its last tap could not focus, if it could not.
+        val herdr = terminal.target as? TerminalTarget.Herdr
+        var spaces by remember { mutableStateOf(false) }
+        var focusFailure by remember { mutableStateOf<String?>(null) }
+        val uploadShown = uploadNotice(upload)
         if (hasConnected) {
             TerminalCard(terminal.host.label, terminal.title, transport.display(), state, minimise, openSwitcher = { switcher = true }, endSession,
-                background = background, linkHealth = linkHealth, upload = uploadNotice(upload),
-                uploadAction = { if (upload.uploading) paste?.cancel() else paste?.dismiss() }) {
+                background = background, linkHealth = linkHealth,
+                // An upload's notice first; a failed Spaces tap takes the same strip, with Dismiss.
+                upload = uploadShown ?: focusFailure?.let { TerminalNotice(it, NoticeTone.Warning, busy = false, action = "Dismiss") },
+                uploadAction = {
+                    when {
+                        uploadShown == null -> focusFailure = null
+                        upload.uploading -> paste?.cancel()
+                        else -> paste?.dismiss()
+                    }
+                },
+                openSpaces = herdr?.let { { spaces = true } }) {
                 // Keep the borrowed handle composed through Closed so its final frame stays visible.
                 handle?.let { TerminalScreen(it, terminal.state, terminal.frameReady, Modifier.weight(1f),
                     composerHint = "Message " + terminal.host.label + "…",
@@ -174,6 +190,20 @@ fun SessionScreen(
                 dismiss = { switcher = false },
             )
         }
+        if (spaces && herdr != null) {
+            // The session's live view only while the sheet is up: nothing recomposes the terminal for it otherwise.
+            val views = remember(holder) { holder.herdrViews() }
+            val all by views.collectAsStateWithLifecycle(emptyMap())
+            SpacesSheet(
+                herdr.session, all[terminal.host.id to herdr.session],
+                focus = { target ->
+                    spaces = false
+                    focusFailure = null
+                    scope.launch { focusFailure = holder.activations.focusInTerminal(terminal, target) }
+                },
+                dismiss = { spaces = false },
+            )
+        }
         if (shortcuts) ShortcutsSheet(dismiss = { shortcuts = false })
         closing?.let { target ->
             CloseShellDialog(close = { closing = null; close(target) }, dismiss = { closing = null })
@@ -192,7 +222,7 @@ fun CloseShellDialog(close: () -> Unit, dismiss: () -> Unit) {
 }
 
 /**
- * The full-height card: the [TerminalHeader] (drag handle, the two discs, the centred `host · target`
+ * The full-height card: the [TerminalHeader] (drag handle, the discs (a third, Spaces, with [openSpaces]), the centred `host · target`
  * title, the [transport] pill) on the header's tonal step, one [NoticeStrip] under it (a closed
  * terminal's reason with **Close**, else an image upload's [upload] with its action [uploadAction],
  * Cancel or Dismiss), a `crust` hairline, and the terminal below. A drag down anywhere on the header
@@ -204,7 +234,7 @@ fun CloseShellDialog(close: () -> Unit, dismiss: () -> Unit) {
 fun TerminalCard(
     host: String, target: String, transport: Transport, state: SessionState, minimise: () -> Unit, openSwitcher: () -> Unit,
     endSession: () -> Unit, modifier: Modifier = Modifier, background: Color = Or2Colors.TerminalBackground, linkHealth: LinkHealth? = null,
-    upload: TerminalNotice? = null, uploadAction: () -> Unit = {},
+    upload: TerminalNotice? = null, uploadAction: () -> Unit = {}, openSpaces: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val stale = linkStaleLabel(linkHealth)
@@ -226,6 +256,7 @@ fun TerminalCard(
                             onVerticalDrag = { change, amount -> change.consume(); dragY = (dragY + amount).coerceAtLeast(0f) },
                         )
                     }.testTag("terminal-header"),
+                    openSpaces = openSpaces,
                 )
                 (closed ?: upload)?.let { notice ->
                     val tag = if (closed != null) "terminal" else "upload"

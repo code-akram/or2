@@ -92,6 +92,10 @@ class UiPort(
     val focused = mutableListOf<Pair<String?, String>>()
 
     override suspend fun focusHerdrPane(session: String?, paneId: String) { focused += session to paneId }
+
+    /** The tabs `focusHerdrTab` was asked for, in order. */
+    val focusedTabs = mutableListOf<Pair<String?, String>>()
+    override suspend fun focusHerdrTab(session: String?, tabId: String) { focusedTabs += session to tabId }
     override suspend fun stopMoshServer(pid: UInt) = Unit
     override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll, clientId: String?) = Unit
     override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) = Unit

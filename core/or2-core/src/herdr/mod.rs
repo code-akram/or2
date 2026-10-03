@@ -248,6 +248,7 @@ mod tests {
         HerdrView {
             version,
             focused_pane_id: None,
+            focused_tab_id: None,
             workspaces: Vec::new(),
             tabs: Vec::new(),
             panes: Vec::new(),

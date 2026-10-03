@@ -177,8 +177,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 - **Status chip:** pill in `surface` with an 8 dp coloured dot and muted label (the reconnect chip's look). Home
   has no status chips: the Inbox icon's badge says an agent needs attention.
 - **Agent row (inbox):** status dot (in the same 20 dp leading slot as the host rows below, so
-  both start their text at one x; working dots pulse between full and 70 % alpha), agent display name, muted mono
-  `host · workspace / tab`, trailing relative time; blocked rows first and tinted with
+  both start their text at one x; working dots pulse between full and 70 % alpha), the agent named as herdr names
+  it (its name, else display name, else kind), the task it is on (its terminal title, API 20) on its own muted
+  `Secondary` line when it says more than the name, muted mono `host · workspace / tab`, trailing relative time; blocked rows first and tinted with
   `attentionSurface`. Sticky muted section headers per status. An agent with no Reply because herdr's integration
   for it is missing has **Enable Reply** under its status word: a compact `accent` text action (12 sp, 4 x 2 dp
   padding, the platform's 48 dp target), never a pill. It asks first with the "Enable Reply?" dialog (`Or2Dialog`,
@@ -351,7 +352,8 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   then `4 agents` / `1 agent` / `no agents` in muted mono; `● Open` at its end when the session has a terminal; a tap
   opens the session as it is), then its agents under small muted mono workspace headers (herdr's workspace order; in
   one, by tab then pane). Never app words such as "Whole session" (owner, 2026-10-03). An agent row (56 dp) is its
-  label (the inbox's) over its directory in muted mono small (the path's end kept), with its status dot and word at
+  label (the inbox's), the task it is on (muted `Secondary`, when it says more than the label; v0.1.4) and its
+  directory in muted mono small (the path's end kept), with its status dot and word at
   the right in the inbox's colours (`Working` pulses, `Blocked` is in `attention`); a tap opens it exactly as
   an inbox row does. Sessions without a live view (not running, or a host whose agents are not watched) follow in
   one card, one title-only row each with its state at the right (`● Running`, or a dim `● Not running` and a muted
@@ -389,7 +391,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
     sheet (`done` green, a sidebar glyph), 16 dp discs with a 10 dp glyph in `background`, 10 dp apart,
     the first disc's edge on the 12 dp gutter. Each sits in a 26 x 36 dp box that meets its neighbour's at
     the midpoint (see "Touch targets"). The minimise disc returns to Home (the terminal keeps running as a
-    thumbnail in its host's card); the green one opens the Terminals sheet.
+    thumbnail in its host's card); the green one opens the Terminals sheet. A **herdr terminal** has a third
+    disc right after them (v0.1.4), identical in size, glyph size and step: `accent` blue with a 2 x 2 grid
+    glyph, described `Spaces`, opening the Spaces sheet. Shell and tmux headers keep the pair, unchanged.
   - **Title, centred on the card's full width** (not on the space left between the sides): `host ·
     target`, the host in `text` sans 12 sp medium, the `·` in `subtle`, the target (`shell`, `tmux main`,
     `herdr work w1:p2`) in mono 11 `textMuted`. It lives in a slot symmetric about the centre (the width less,
@@ -408,6 +412,17 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   - **Notice strip under it:** one `NoticeStrip` (see Components) on the same `terminalHeader` tone, above the
     hairline: a closed terminal's reason in `attention` with **Close**, else an image upload's progress or failure.
     It takes layout space.
+- **Spaces sheet** (the blue disc, herdr terminals only; v0.1.4), titled **Spaces**, the herdr session's name in
+  muted mono under the title when it is not the default one. From the terminal's live herdr view: each space in
+  herdr's order as a small muted mono header with its label in herdr's own case (`~`, `or2`), then one
+  `surfaceRaisedRow` card of its tabs in herdr's order, each a 44 dp row `tab <label>` (`tab 1`, `tab ui`), and
+  under each tab its panes that hold an agent, indented: the status dot (Inbox colours, working pulses), the
+  agent's name and its task on a muted line, the status word at the right (`Blocked` in `attention`). The focused
+  tab and pane carry `● Current` (an `accent` dot), as the Terminals sheet marks its current terminal. A tap on a
+  tab is herdr's tab focus, on an agent its pane focus; the sheet closes and the terminal shows it as herdr draws
+  it. A focus that fails says why in the terminal's notice strip (`Dismiss`). Spaces without tabs are left out;
+  nothing else is in the sheet (herdr creates, renames and closes spaces and tabs). Before the session's first
+  view it says `Waiting for herdr…`.
 - **Terminals sheet** (the green disc; v0.1.2 streamline), titled **Terminals**: every open terminal grouped by
   host (a section header with the host's name, then one `surfaceRaisedRow` grouped card of 44 dp rows: the title
   in `RowLabel`, `Closed` muted under it for one that has closed, `● Current` (an `accent` dot) on the one on

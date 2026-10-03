@@ -870,6 +870,7 @@ mod tests {
                 value: "sess_w1:p1".into(),
             }),
             interactive_ready: false,
+            title: Some("Fixing the build".into()),
         };
         assert_eq!(AgentIdentity::of(&agent), Some(claude(PANE)));
         let started = Agent {

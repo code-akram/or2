@@ -97,6 +97,15 @@ class PickerHerdrSessionsTest {
     }
 
     @Test
+    fun anAgentRowCarriesTheTaskItIsOnUnderItsLabel() {
+        val titled = agent("w1:p1").copy(name = "reviewer", title = "Review v013 brief | or2")
+        val repeat = agent("w1:p2").copy(title = "Claude Code")
+        val rows = pickerWorkspaces(view(titled, repeat))[0].agents
+        assertEquals(PickerAgent("w1:p1", "reviewer", AgentStatus.IDLE, "~/code/or2", "Review v013 brief | or2"), rows[0])
+        assertNull("a title that repeats the label is left out", rows[1].title)
+    }
+
+    @Test
     fun agentsInNoListedWorkspaceComeLastWithoutAHeader() {
         val groups = pickerWorkspaces(view(agent("w9:p1", workspace = "w9"), agent("w1:p1")))
         assertEquals(listOf("or2", null), groups.map { it.label })

@@ -156,6 +156,32 @@ class TerminalActivations(private val connections: HostConnections, private val 
         }
     }
 
+    /**
+     * A tap in the Spaces sheet of [terminal], a herdr terminal on screen: [focus] is focused in the terminal's session
+     * (a tab through herdr's tab focus, an agent's pane through the pane focus an agent tap uses) and the terminal
+     * shows it as herdr draws it, since a herdr client follows the session's focus. Nothing opens, nothing is navigated
+     * to: the terminal is already the one shown. Returns null once herdr acknowledged, else what the user reads (the tab
+     * or pane has gone, the host is no longer connected). Any other terminal does nothing (null).
+     */
+    suspend fun focusInTerminal(terminal: ActiveTerminal, focus: HerdrFocus): String? {
+        val herdr = terminal.target as? TerminalTarget.Herdr ?: return null
+        val active = connections.host(terminal.host.id) ?: return "${terminal.host.label} is no longer connected."
+        return try {
+            when (focus) {
+                is HerdrFocus.Tab -> connections.focusHerdrTab(active, herdr.session, focus.tabId)
+                is HerdrFocus.Pane -> connections.focusHerdrPane(active, herdr.session, focus.paneId)
+            }
+            null
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            when (focus) {
+                is HerdrFocus.Pane -> focusMessage(error)
+                is HerdrFocus.Tab -> tabFocusMessage(error)
+            }
+        }
+    }
+
     fun launchReopen(last: LastTerminal, hostLabel: String, span: String? = null, connectedInThisTap: Boolean = false, done: (Activation) -> Unit) =
         launch("Resuming $hostLabel: ${targetTitle(last.target)}", done) { reopen(last, hostLabel, span, connectedInThisTap) }
 
@@ -215,6 +241,23 @@ fun closeAsks(target: TerminalTarget, closed: Boolean): Boolean = target == Term
 /** The confirmation of closing an open shell ([closeAsks]). */
 const val CLOSE_SHELL_TITLE = "Close shell?"
 const val CLOSE_SHELL_TEXT = "Programs running in it end."
+
+/** What a Spaces sheet tap focuses in a herdr terminal's session ([TerminalActivations.focusInTerminal]). */
+sealed interface HerdrFocus {
+    /** A tab: herdr shows the pane it last had focused. */
+    data class Tab(val tabId: String) : HerdrFocus
+
+    /** An agent's pane. */
+    data class Pane(val paneId: String) : HerdrFocus
+}
+
+/** What the user reads when a tab could not be focused: it has gone, or the error. */
+fun tabFocusMessage(error: Exception): String = when (error) {
+    is HostException.PaneNotFound -> "That tab is no longer open in herdr."
+    is HostException.CommandFailed -> "Could not focus the tab: ${error.reason}"
+    is HostException -> hostErrorMessage(error)
+    else -> "Could not focus the tab: ${error.message ?: error::class.simpleName}"
+}
 
 /** What the user reads when a pane could not be focused: the agent is gone, or the error. */
 fun focusMessage(error: Exception): String = when (error) {

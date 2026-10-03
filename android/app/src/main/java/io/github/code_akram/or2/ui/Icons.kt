@@ -85,6 +85,14 @@ object Or2Icons {
     val Terminal = icon("terminal", "M5 7.5l4.5 4.5L5 16.5", "M12.5 17h6.5")
     val Layers = icon("layers", "M12 3.5l9 5-9 5-9-5z", "M3 12.5l9 5 9-5", "M3 16.5l9 5 9-5")
     val Minimize = icon("minimize", "M5 12h14")
+    /** herdr's spaces: a 2 × 2 grid (the terminal header's blue disc). */
+    val Spaces = icon(
+        "spaces",
+        "M5 4h4.5a1 1 0 0 1 1 1v4.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z",
+        "M14.5 4H19a1 1 0 0 1 1 1v4.5a1 1 0 0 1-1 1h-4.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z",
+        "M5 13.5h4.5a1 1 0 0 1 1 1V19a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-4.5a1 1 0 0 1 1-1z",
+        "M14.5 13.5H19a1 1 0 0 1 1 1V19a1 1 0 0 1-1 1h-4.5a1 1 0 0 1-1-1v-4.5a1 1 0 0 1 1-1z",
+    )
     val Share = icon("share", "M12 15V4", "M7.5 8.5L12 4l4.5 4.5", "M5 13v6a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-6")
     val Upload = icon("upload", "M12 16V5", "M7.5 9.5L12 5l4.5 4.5", "M5 15v4a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-4")
     val Image = icon("image", "M5 4.5h14a1.5 1.5 0 0 1 1.5 1.5v12a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18V6A1.5 1.5 0 0 1 5 4.5z", "M3.5 16l4.5-4.5 4 4 2.5-2.5 6 6", "M15.5 9h.01")

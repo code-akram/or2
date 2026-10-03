@@ -78,14 +78,21 @@ fun linkStatusColor(link: LinkStatus): Color? = when (link) {
 }
 
 /**
- * An agent's label: herdr's display name, else its name, else its agent id, else [paneAgent] (the agent herdr names
- * on the pane itself); null when none is set.
+ * An agent's label as herdr names it: its name (an agent started by name), else herdr's display name, else its agent
+ * id, else [paneAgent] (the agent herdr names on the pane itself); null when none is set.
  */
 fun agentLabel(agent: HerdrAgent?, paneAgent: String? = null): String? =
-    listOfNotNull(agent?.displayAgent, agent?.name, agent?.agent, paneAgent).firstOrNull { it.isNotBlank() }
+    listOfNotNull(agent?.name, agent?.displayAgent, agent?.agent, paneAgent).firstOrNull { it.isNotBlank() }
 
 /** "Claude Code" style name for an inbox row or an alert: [agentLabel], else a placeholder. */
 fun agentName(agent: HerdrAgent): String = agentLabel(agent) ?: "agent"
+
+/**
+ * The task [agent] is on (API 20, `HerdrAgent.title`: its terminal title as herdr's sidebar shows it), for the line
+ * under its [label]; null when it has none or it only repeats the label.
+ */
+fun agentTitle(agent: HerdrAgent?, label: String?): String? =
+    agent?.title?.trim()?.takeIf { it.isNotEmpty() && !it.equals(label?.trim(), ignoreCase = true) }
 
 /** One agent row of the inbox. */
 data class InboxItem(
@@ -105,6 +112,8 @@ data class InboxItem(
      * kind's integration is not installed or outdated on the host. Null: nothing new.
      */
     val enableReply: String? = null,
+    /** The task the agent is on ([agentTitle]): a muted line under [agentName]; null when there is none. */
+    val title: String? = null,
 ) {
     /** What the row's **Enable Reply** asks to confirm, or null when it has none. */
     val enableReplyRequest: EnableReplyRequest? get() = enableReply?.let { EnableReplyRequest(hostId, hostLabel, agentName, it) }
@@ -150,7 +159,7 @@ fun buildInbox(sources: List<InboxSource>): List<InboxGroup> {
                 InboxItem(
                     source.hostId, source.hostLabel, source.session, source.sessionName, agent.paneId, agentName(agent),
                     agent.status, workspaces[agent.workspaceId]?.label, tabs[agent.tabId]?.label, agent.cwd,
-                    enableReplyFor(agent, source.integrations),
+                    enableReplyFor(agent, source.integrations), agentTitle(agent, agentName(agent)),
                 ),
                 workspaces[agent.workspaceId]?.number ?: UInt.MAX_VALUE, tabs[agent.tabId]?.number ?: UInt.MAX_VALUE,
             )

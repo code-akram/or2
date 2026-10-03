@@ -96,6 +96,12 @@ interface HostPort : AutoCloseable {
     suspend fun focusHerdrPane(session: String?, paneId: String)
 
     /**
+     * API 20: focuses herdr tab [tabId] of [session] (herdr shows the pane that tab last had focused) and resolves once
+     * herdr acknowledged; `PaneNotFound` when the tab is gone.
+     */
+    suspend fun focusHerdrTab(session: String?, tabId: String)
+
+    /**
      * API 10: stops the `mosh-server` [pid] an earlier process left on the host. Returns when no such
      * server runs any more (stopped, or not there, or the id names another program, which is left
      * alone); throws when the stop could not run, and the caller keeps the pid.
@@ -158,6 +164,7 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
     override fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface =
         connection.watchHerdr(session, listener)
     override suspend fun focusHerdrPane(session: String?, paneId: String) = connection.focusHerdrPane(session, paneId)
+    override suspend fun focusHerdrTab(session: String?, tabId: String) = connection.focusHerdrTab(session, tabId)
     override suspend fun stopMoshServer(pid: UInt) = connection.stopMoshServer(pid)
     override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll, clientId: String?) =
         connection.scrollTarget(target, paneId, scroll, clientId)
@@ -918,6 +925,16 @@ class HostConnections(
     suspend fun focusHerdrPane(current: ActiveHost, session: String?, paneId: String) {
         if (!owns(current)) throw HostException.Closed()
         currentPort(current.host.id, requireConnected = false).focusHerdrPane(session, paneId)
+    }
+
+    /**
+     * Focuses herdr tab [tabId] in [session] (null: the default session) and returns once herdr acknowledged: a
+     * terminal running herdr on the session then shows that tab (the Spaces sheet). Throws [HostException]
+     * (`PaneNotFound` when the tab has gone).
+     */
+    suspend fun focusHerdrTab(current: ActiveHost, session: String?, tabId: String) {
+        if (!owns(current)) throw HostException.Closed()
+        currentPort(current.host.id, requireConnected = false).focusHerdrTab(session, tabId)
     }
 
     /**

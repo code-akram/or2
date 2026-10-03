@@ -100,10 +100,13 @@ class InboxModelTest {
     }
 
     @Test
-    fun agentNamePrefersTheDisplayNameThenNameThenAgentThenAPlaceholder() {
+    fun agentNamePrefersTheNameThenDisplayNameThenAgentThenAPlaceholder() {
         fun named(display: String?, name: String?, kind: String?) =
             HerdrAgent("p", "t", "w", name, kind, display, AgentStatus.IDLE, null, 0uL, "term_p")
-        assertEquals("Display", agentName(named("Display", "name", "kind")))
+        // herdr's way: an agent started by name is that name.
+        assertEquals("name", agentName(named("Display", "name", "kind")))
+        assertEquals("Display", agentName(named("Display", null, "kind")))
+        assertEquals("Display", agentName(named("Display", " ", "kind")))
         assertEquals("name", agentName(named(null, "name", "kind")))
         assertEquals("kind", agentName(named(null, null, "kind")))
         assertEquals("agent", agentName(named("", null, null)))
@@ -116,6 +119,22 @@ class InboxModelTest {
         val orphan = buildInbox(listOf(source("Box", 1, HerdrView(1uL, null, emptyList(), emptyList(), emptyList(), listOf(agent("x:p", AgentStatus.IDLE)))))).single().items.single()
         assertNull(orphan.workspaceLabel)
         assertNull(orphan.tabLabel)
+    }
+
+    @Test
+    fun anAgentsTitleIsItsOwnLineUnlessItIsMissingOrRepeatsTheLabel() {
+        fun titled(title: String?, name: String? = "Claude Code") =
+            HerdrAgent("w1:p1", "w1:t1", "w1", name, "claude", name, AgentStatus.WORKING, null, 1uL, "term_1", null, title)
+        assertEquals("Fixing the build", agentTitle(titled(" Fixing the build "), "Claude Code"))
+        assertNull(agentTitle(titled(null), "Claude Code"))
+        assertNull(agentTitle(titled("   "), "Claude Code"))
+        assertNull("the label again says nothing", agentTitle(titled("claude code"), "Claude Code"))
+        assertNull(agentTitle(null, "Claude Code"))
+        // The Inbox row carries it, under the label.
+        val item = buildInbox(listOf(source("Box", 1, view(titled("Review v013 brief | or2"), titled("Claude Code").copy(paneId = "w1:p2")))))
+            .single().items
+        assertEquals(listOf("Review v013 brief | or2", null), item.map { it.title })
+        assertEquals(listOf("Claude Code", "Claude Code"), item.map { it.agentName })
     }
 
     @Test

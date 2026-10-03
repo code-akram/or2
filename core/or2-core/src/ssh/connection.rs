@@ -1044,6 +1044,25 @@ fn dispatch<D: DatagramTransport>(
                 .focus_pane(path, session.as_deref(), &pane_id, false)
                 .await?)
         }),
+        HostCommand::FocusHerdrTab {
+            session,
+            tab_id,
+            reply,
+        } => spawn_query(closing, tracker, reply, async move {
+            // One `tab.focus`, through the focus gate so it keeps its place among the pane
+            // focuses of the session.
+            let path = host.programs().await?.program(Program::Herdr)?;
+            Ok(host
+                .focus
+                .focus_tab(
+                    &host,
+                    path,
+                    host.sessions.directory(),
+                    session.as_deref(),
+                    &tab_id,
+                )
+                .await?)
+        }),
         HostCommand::StopMoshServer { pid, reply } => {
             spawn_query(closing, tracker, reply, async move {
                 Ok(mosh::terminate(&*host, pid).await?)

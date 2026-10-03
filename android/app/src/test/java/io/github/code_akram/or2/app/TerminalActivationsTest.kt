@@ -229,6 +229,44 @@ class TerminalActivationsTest {
     }
 
     @Test
+    fun aSpacesTapFocusesTheTabOrThePaneInTheTerminalsSessionAndOpensNothing() = runTest {
+        val s = setup()
+        val terminal = s.open(TerminalTarget.Herdr("work", null))
+        advanceUntilIdle()
+        s.events.clear()
+        // A tab through herdr's tab focus, an agent through the pane focus, both in the terminal's own session.
+        assertNull(s.activations.focusInTerminal(terminal, HerdrFocus.Tab("w2:t1")))
+        assertNull(s.activations.focusInTerminal(terminal, HerdrFocus.Pane("w2:p3")))
+        assertEquals(listOf("focus-tab:work:w2:t1", "focus:work:w2:p3"), s.events)
+        assertEquals(listOf("work" to "w2:t1"), s.port.focusedTabs)
+        assertEquals(listOf<Pair<String?, String>>("work" to "w2:p3"), s.port.focused.takeLast(1))
+        // Nothing opened, nothing waited for: the terminal is the one on screen.
+        assertEquals(listOf(terminal), s.holder.terminals.value)
+        assertNull(s.activations.pending.value)
+
+        // What failed is what the user reads.
+        s.port.focusFailures["w2:t9"] = HostException.PaneNotFound()
+        assertEquals("That tab is no longer open in herdr.", s.activations.focusInTerminal(terminal, HerdrFocus.Tab("w2:t9")))
+        s.port.focusFailures["w2:t1"] = HostException.CommandFailed("herdr session is not running")
+        assertEquals("Could not focus the tab: herdr session is not running", s.activations.focusInTerminal(terminal, HerdrFocus.Tab("w2:t1")))
+        s.port.focusFailures["w2:p9"] = HostException.PaneNotFound()
+        assertTrue(s.activations.focusInTerminal(terminal, HerdrFocus.Pane("w2:p9"))!!.contains("pane no longer exists"))
+
+        // A shell terminal has no Spaces: nothing is sent.
+        val shell = s.open(TerminalTarget.Shell)
+        advanceUntilIdle()
+        s.events.clear()
+        assertNull(s.activations.focusInTerminal(shell, HerdrFocus.Tab("w2:t1")))
+        assertTrue(s.events.none { it.startsWith("focus") })
+
+        // A host that went away is said so, before anything is sent.
+        s.holder.dismissHost(7)
+        s.events.clear()
+        assertEquals("Fixture is no longer connected.", s.activations.focusInTerminal(terminal, HerdrFocus.Tab("w2:t1")))
+        assertTrue(s.events.none { it.startsWith("focus") })
+    }
+
+    @Test
     fun aHostThatIsNoLongerConnectedIsReportedBeforeAnyFocus() = runTest {
         val s = setup()
         s.holder.dismissHost(7)

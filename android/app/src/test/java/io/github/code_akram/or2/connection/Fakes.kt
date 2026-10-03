@@ -293,6 +293,14 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         focusFailures[paneId]?.let { throw it }
         focused += session to paneId
     }
+
+    /** The tabs `focusHerdrTab` was asked for, in order; a [focusFailures] entry for the tab id is thrown. */
+    val focusedTabs = mutableListOf<Pair<String?, String>>()
+    override suspend fun focusHerdrTab(session: String?, tabId: String) {
+        events += "focus-tab:$session:$tabId"
+        focusFailures[tabId]?.let { throw it }
+        focusedTabs += session to tabId
+    }
 }
 
 /** An in-memory [AppDao]: the same transactional `saveHost`/`replaceTrust` logic over fake rows. */
