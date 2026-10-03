@@ -236,11 +236,3 @@ fun HostConnections.pendingHostKeys(): Flow<List<PendingHostKey>> =
     hosts.map { it.values.sortedBy { a -> a.host.id } }
         .combineEach { a -> a.state.map { s -> (s as? HostState.AwaitingHostKeyDecision)?.let { PendingHostKey(a, it) } } }
         .map { it.filterNotNull() }
-
-/**
- * The one prompt to show as a dialog over the current screen: that of the first host other than
- * [shownHost], and only when [shownHost] has no prompt of its own (its host screen shows that
- * one), so two dialogs never stack.
- */
-fun List<PendingHostKey>.dialogForOtherHost(shownHost: Long?): PendingHostKey? =
-    if (any { it.active.host.id == shownHost }) null else firstOrNull()

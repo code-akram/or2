@@ -315,22 +315,6 @@ fun Spinner(modifier: Modifier = Modifier, size: Dp = 16.dp) {
     )
 }
 
-/** A 28 dp pill in `surface` with an 8 dp coloured dot and a muted label, e.g. `● Needs attention: 1`. */
-@Composable
-fun StatusChip(label: String, dot: Color, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
-    Row(
-        modifier.then(if (onClick != null) Modifier.minimumInteractiveComponentSize() else Modifier)
-            .clip(Or2Shapes.Pill).background(Or2Colors.Surface)
-            .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier)
-            .heightIn(min = Or2Dimens.Chip).padding(horizontal = 12.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        StatusDot(dot)
-        Spacer(Modifier.width(8.dp))
-        Text(label, style = Or2Type.Chip, color = Or2Colors.TextMuted, maxLines = 1)
-    }
-}
-
 /** A small mono pill, [content] text on [container]: the transport badge (`SSH`, `Mosh`) and its quiet-link form. */
 @Composable
 fun Badge(text: String, container: Color, content: Color, modifier: Modifier = Modifier) {
