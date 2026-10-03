@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
 use serde_json::Value;
-use tokio::time::{Instant, timeout_at};
+use tokio::time::Instant;
 
 use super::HerdrError;
 use super::discovery::Directory;
@@ -172,38 +172,14 @@ pub(super) async fn call_raw<H: RemoteHost>(
     body: &RequestBody,
     start_by: Option<Instant>,
 ) -> Result<Result<Value, WireError>, HerdrError> {
-    let no_time = || HerdrError::Failed(super::reply::NO_TIME.into());
-    let mut fresh = false;
-    loop {
-        let cached = if fresh {
-            None
-        } else {
-            directory.cached_socket(session)
-        };
-        let from_cache = cached.is_some();
-        let socket = match cached {
-            Some(socket) => socket,
-            None => {
-                let locate = directory.locate_fresh(host, herdr, session);
-                match start_by {
-                    Some(by) => timeout_at(by, locate).await.map_err(|_| no_time())?,
-                    None => locate.await,
-                }
-                .map_err(discovery_error)?
-            }
-        };
-        if start_by.is_some_and(|by| Instant::now() > by) {
-            return Err(no_time());
-        }
-        match wire::call(host, &socket, id, body, Timing::default().request).await {
-            Ok(answer) => return Ok(Ok(answer)),
-            Err(WireError::Unreachable(_)) if from_cache => {
-                directory.invalidate();
-                fresh = true;
-            }
-            Err(error) => return Ok(Err(error)),
-        }
-    }
+    let timeout = Timing::default().request;
+    directory
+        .with_socket(host, herdr, session, start_by, |socket| async move {
+            wire::call(host, &socket, id, body, timeout).await
+        })
+        .await
+        .map(|(_, answer)| answer)
+        .map_err(discovery_error)
 }
 
 #[cfg(test)]

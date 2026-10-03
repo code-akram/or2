@@ -24,7 +24,7 @@ use super::generated::request::{
 };
 use super::generated::success_response::{ResponseResult, TabInfo, WorkspaceInfo};
 use super::watch::Timing;
-use super::wire::{self, WireError};
+use super::wire;
 use crate::host::{NavDirection, TargetNav};
 use crate::remote::RemoteHost;
 
@@ -165,21 +165,14 @@ impl<H: RemoteHost> Socket<'_, H> {
                 .await
                 .map_err(wire_error);
         }
-        if let Some(socket) = self.directory.cached_socket(self.session) {
-            match wire::call(self.host, &socket, REQUEST_ID, body, timeout).await {
-                Err(WireError::Unreachable(_)) => self.directory.invalidate(),
-                result => {
-                    self.known = Some(socket);
-                    return result.map_err(wire_error);
-                }
-            }
-        }
-        let socket = self
+        let host = self.host;
+        let (socket, result) = self
             .directory
-            .locate_fresh(self.host, self.herdr, self.session)
+            .with_socket(host, self.herdr, self.session, None, |socket| async move {
+                wire::call(host, &socket, REQUEST_ID, body, timeout).await
+            })
             .await
             .map_err(discovery_error)?;
-        let result = wire::call(self.host, &socket, REQUEST_ID, body, timeout).await;
         self.known = Some(socket);
         result.map_err(wire_error)
     }

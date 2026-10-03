@@ -469,49 +469,37 @@ impl<H: RemoteHost> Watch<H> {
 
         // The first attempt of a watch takes its socket from the connection's listing; every
         // later one (a retry after a failure, a recovery) reads the listing again.
-        let mut fresh = self.attempts > 0;
+        if self.attempts > 0 {
+            self.directory.invalidate();
+        }
         self.attempts += 1;
         // Two streams open together, one for the subscription and one for the first snapshot
         // (which must follow the subscription's acknowledgement, not its open): a socket that
         // the cached listing named but that does not open sends the attempt back to the
         // listing once, instead of failing the watch for a retry interval.
-        let (socket, events, requests) = loop {
-            let directory = Arc::clone(&self.directory);
-            let cached = if fresh {
-                None
-            } else {
-                directory.cached_socket(target.session.as_deref())
-            };
-            let from_cache = cached.is_some();
-            let socket = match cached {
-                Some(socket) => socket,
-                None => self
-                    .pump(directory.locate_fresh(&*host, &target.herdr, target.session.as_deref()))
-                    .await?
-                    .map_err(exit_for_discovery)?,
-            };
-            let opened = self
-                .pump(tokio::time::timeout(timeout, async {
-                    tokio::join!(wire::open(&*host, &socket), wire::open(&*host, &socket))
-                }))
-                .await?
-                .map_err(|_| exit_for_wire(WireError::TimedOut))?;
-            match opened {
-                (Ok(events), Ok(requests)) => break (socket, events, requests),
-                (events, requests) => {
-                    let error = events
-                        .err()
-                        .or(requests.err())
-                        .expect("one of the two opens failed");
-                    if from_cache && matches!(error, WireError::Unreachable(_)) {
-                        self.directory.invalidate();
-                        fresh = true;
-                        continue;
-                    }
-                    return Err(exit_for_wire(error));
+        let directory = Arc::clone(&self.directory);
+        let opens = directory.with_socket(
+            &*host,
+            &target.herdr,
+            target.session.as_deref(),
+            None,
+            |socket| {
+                let host = &host;
+                async move {
+                    tokio::time::timeout(timeout, async {
+                        let (events, requests) = tokio::join!(
+                            wire::open(&**host, &socket),
+                            wire::open(&**host, &socket)
+                        );
+                        Ok((events?, requests?))
+                    })
+                    .await
+                    .unwrap_or(Err(WireError::TimedOut))
                 }
-            }
-        };
+            },
+        );
+        let (socket, opened) = self.pump(opens).await?.map_err(exit_for_discovery)?;
+        let (events, requests) = opened.map_err(exit_for_wire)?;
 
         // Subscribe first, then read: nothing that happens from here on can be missed.
         let id = self.request_id();
