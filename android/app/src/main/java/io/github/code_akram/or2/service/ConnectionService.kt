@@ -53,7 +53,7 @@ class ConnectionService : Service() {
         super.onCreate()
         val app = application as Or2Application
         createChannel()
-        controller = ServiceController(scope, app.connections.serviceSnapshots(), host)
+        controller = ServiceController(scope, app.serviceSnapshots, host)
         network = NetworkWatch(this, app.networkChanges).also { it.start() }
     }
 

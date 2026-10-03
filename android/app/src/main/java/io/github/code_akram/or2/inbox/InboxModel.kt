@@ -3,6 +3,7 @@ package io.github.code_akram.or2.inbox
 import io.github.code_akram.or2.connection.ActiveHost
 import io.github.code_akram.or2.connection.HerdrSessionWatch
 import io.github.code_akram.or2.connection.HostConnections
+import io.github.code_akram.or2.connection.combineEach
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.CloseReason
@@ -14,10 +15,8 @@ import io.github.code_akram.or2.ffi.HostCapabilities
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.session.hostStateMessage
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 
@@ -164,17 +163,10 @@ fun herdrNote(caps: HostCapabilities?, capsError: String?, watches: List<Pair<St
 }
 
 /** Live views of one connection's watches. */
-@OptIn(ExperimentalCoroutinesApi::class)
 private fun ActiveHost.liveViews(host: Host): Flow<List<Triple<HerdrSessionWatch, HerdrState, InboxSource?>>> =
-    watches.flatMapLatest { list ->
-        if (list.isEmpty()) flowOf(emptyList())
-        else combine(list.map { it.state }) { states ->
-            list.mapIndexed { index, watch ->
-                val state = states[index]
-                Triple(watch, state, (state as? HerdrState.Live)?.let {
-                    InboxSource(host.id, host.label, watch.session, watch.name, it.view)
-                })
-            }
+    watches.combineEach { watch ->
+        watch.state.map { state ->
+            Triple(watch, state, (state as? HerdrState.Live)?.let { InboxSource(host.id, host.label, watch.session, watch.name, it.view) })
         }
     }
 
@@ -182,17 +174,11 @@ private fun ActiveHost.liveViews(host: Host): Flow<List<Triple<HerdrSessionWatch
  * The inbox for the hosts flagged `showInInbox`, following their connections, capability probes
  * and herdr watches. A host's label comes from [hosts] (current), not from the connection.
  */
-@OptIn(ExperimentalCoroutinesApi::class)
 fun HostConnections.inbox(hosts: Flow<List<Host>>): Flow<InboxState> =
     combine(hosts, this.hosts) { list, active -> list.filter { it.showInInbox }.map { it to active[it.id] } }
-        .flatMapLatest { pairs ->
-            if (pairs.isEmpty()) flowOf(InboxState(emptyList(), emptyList()))
-            else combine(pairs.map { (host, active) -> hostFlow(host, active) }) { parts ->
-                InboxState(parts.map { it.first }, buildInbox(parts.flatMap { it.second }))
-            }
-        }
+        .combineEach { (host, active) -> hostFlow(host, active) }
+        .map { parts -> InboxState(parts.map { it.first }, buildInbox(parts.flatMap { it.second })) }
 
-@OptIn(ExperimentalCoroutinesApi::class)
 private fun hostFlow(host: Host, active: ActiveHost?): Flow<Pair<InboxHostRow, List<InboxSource>>> {
     if (active == null) {
         return flowOf(InboxHostRow(host, LinkStatus.NOT_CONNECTED, LinkStatus.NOT_CONNECTED.label, null, 0) to emptyList())
@@ -207,35 +193,26 @@ private fun hostFlow(host: Host, active: ActiveHost?): Flow<Pair<InboxHostRow, L
 }
 
 /** The state of every connection, keyed by host id; hosts without a connection are absent. */
-@OptIn(ExperimentalCoroutinesApi::class)
-fun HostConnections.hostStates(): Flow<Map<Long, HostState>> = hosts.flatMapLatest { active ->
-    if (active.isEmpty()) flowOf(emptyMap())
-    else combine(active.values.map { a -> a.state.map { a.host.id to it } }) { it.toMap() }
-}
+fun HostConnections.hostStates(): Flow<Map<Long, HostState>> =
+    hosts.map { it.values }.combineEach { a -> a.state.map { a.host.id to it } }.map { it.toMap() }
 
 /**
  * The live view of every herdr watch of every connection, keyed by host id and session (null: the default session),
  * whatever the host's inbox flag; a watch that is not live is absent.
  */
-@OptIn(ExperimentalCoroutinesApi::class)
-fun HostConnections.herdrViews(): Flow<Map<Pair<Long, String?>, HerdrView>> = hosts.flatMapLatest { active ->
-    if (active.isEmpty()) return@flatMapLatest flowOf(emptyMap())
-    combine(active.values.map { a -> a.liveViews(a.host) }) { parts ->
+fun HostConnections.herdrViews(): Flow<Map<Pair<Long, String?>, HerdrView>> =
+    hosts.map { it.values }.combineEach { a -> a.liveViews(a.host) }.map { parts ->
         parts.flatMap { views -> views.mapNotNull { it.third } }.associate { (it.hostId to it.session) to it.view }
     }
-}
 
 /** A host-key decision the user has not made yet. */
 data class PendingHostKey(val active: ActiveHost, val prompt: HostState.AwaitingHostKeyDecision)
 
 /** Connections waiting for a host-key decision, in host-id order. */
-@OptIn(ExperimentalCoroutinesApi::class)
-fun HostConnections.pendingHostKeys(): Flow<List<PendingHostKey>> = hosts.flatMapLatest { active ->
-    if (active.isEmpty()) flowOf(emptyList())
-    else combine(active.values.sortedBy { it.host.id }.map { a -> a.state.map { s -> (s as? HostState.AwaitingHostKeyDecision)?.let { PendingHostKey(a, it) } } }) {
-        it.filterNotNull()
-    }
-}
+fun HostConnections.pendingHostKeys(): Flow<List<PendingHostKey>> =
+    hosts.map { it.values.sortedBy { a -> a.host.id } }
+        .combineEach { a -> a.state.map { s -> (s as? HostState.AwaitingHostKeyDecision)?.let { PendingHostKey(a, it) } } }
+        .map { it.filterNotNull() }
 
 /**
  * The one prompt to show as a dialog over the current screen: that of the first host other than
