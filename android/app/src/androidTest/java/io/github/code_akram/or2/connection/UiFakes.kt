@@ -88,7 +88,10 @@ class UiPort(
         watchListeners += listener
         return UiWatch()
     }
-    override suspend fun focusHerdrPane(session: String?, paneId: String) = Unit
+    /** The panes `focusHerdrPane` was asked for, in order. */
+    val focused = mutableListOf<Pair<String?, String>>()
+
+    override suspend fun focusHerdrPane(session: String?, paneId: String) { focused += session to paneId }
     override suspend fun stopMoshServer(pid: UInt) = Unit
     override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll, clientId: String?) = Unit
     override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) = Unit

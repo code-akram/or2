@@ -21,10 +21,17 @@ import io.github.code_akram.or2.connection.UiPort
 import io.github.code_akram.or2.connection.UiTrust
 import io.github.code_akram.or2.connection.uiHost
 import io.github.code_akram.or2.data.KeyRecord
+import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.CloseReason
+import io.github.code_akram.or2.ffi.HerdrAgent
+import io.github.code_akram.or2.ffi.HerdrState
+import io.github.code_akram.or2.ffi.HerdrTab
+import io.github.code_akram.or2.ffi.HerdrView
+import io.github.code_akram.or2.ffi.HerdrWorkspace
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.TerminalTarget
+import io.github.code_akram.or2.ffi.TmuxSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -206,6 +213,60 @@ class HomeSessionPickerDeviceTest {
             assertEquals(1, port.sessions.size) // The same terminal, not a second one.
             assertEquals(1, holder.terminals.value.size)
         }
+    }
+
+    @Test
+    fun theHerdrTabListsTheHostsLiveAgentsAndTappingOneOpensItsTerminalFocusedOnIt() {
+        connectFirst()
+        // The default session's watch (the host shows in the inbox) reports two agents, as Rust would.
+        compose.waitUntil(5_000) { port.watchListeners.isNotEmpty() }
+        val view = HerdrView(
+            1uL, null, listOf(HerdrWorkspace("w1", 1u, "or2")), listOf(HerdrTab("w1:t1", "w1", 1u, "ui")), emptyList(),
+            listOf(
+                HerdrAgent("w1:p1", "w1:t1", "w1", null, null, "Claude Code", AgentStatus.WORKING, "~/code/or2", 1uL, "term_1"),
+                HerdrAgent("w1:p2", "w1:t1", "w1", null, null, "Codex", AgentStatus.BLOCKED, "~/code/or2", 1uL, "term_2"),
+            ),
+        )
+        compose.runOnUiThread { port.watchListeners.first().onHerdrStateChanged(HerdrState.Live(view)) }
+        show()
+        compose.onNodeWithTag("host:7").performClick()
+        waitFor("herdr-agent:default:w1:p2")
+        compose.onNodeWithTag("herdr-workspace:default:or2", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag("herdr-agent:default:w1:p2").performClick()
+        waitFor("terminal-card")
+        compose.onNodeWithTag("session-picker").assertDoesNotExist()
+        compose.runOnIdle {
+            // The Inbox tap's path: the pane is focused and the session's terminal opened on it.
+            assertEquals(listOf<Pair<String?, String>>(null to "w1:p2"), port.focused)
+            assertEquals(listOf<TerminalTarget>(TerminalTarget.Herdr(null, "w1:p2")), port.sessions.map { it.first })
+        }
+        // Back Home, Whole session shows that terminal as it is: no second client, no focus.
+        compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        waitFor("home-list")
+        compose.onNodeWithTag("host:7").performClick()
+        waitFor("open-mark:herdr:default", unmerged = true)
+        compose.onNodeWithTag("herdr-open:default").performClick()
+        waitFor("terminal-card")
+        compose.runOnIdle {
+            assertEquals(1, port.sessions.size)
+            assertEquals(1, port.focused.size)
+        }
+    }
+
+    @Test
+    fun theTmuxListIsReadAgainEachTimeThePickerOpens() {
+        connectFirst()
+        show()
+        compose.onNodeWithTag("host:7").performClick()
+        compose.onNodeWithTag("picker-tab:1").performClick()
+        waitFor("tmux-attach:main")
+        compose.onNodeWithTag("tmux-attach:fresh").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Close sheet").performSemanticsAction(SemanticsActions.OnClick)
+        // A session made on the host meanwhile shows the next time the picker opens, without Refresh.
+        compose.runOnUiThread { port.tmux = port.tmux + TmuxSession("fresh", 1u, 0u) }
+        compose.onNodeWithTag("host:7").performClick()
+        compose.onNodeWithTag("picker-tab:1").performClick()
+        waitFor("tmux-attach:fresh")
     }
 
     @Test

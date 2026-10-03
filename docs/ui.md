@@ -341,16 +341,25 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   host form. Dismissing leaves Home as it was (a connect already started carries on, and the card shows it). The
   sheet: a segmented control (`herdr` / `tmux`; there is no `Open` tab) with a trailing **Shell** pill
   (`surfaceTrack`, the `>_` prompt glyph before the label, its only meaning) that opens a plain shell; the UDP line
-  under them when it applies (see "UDP blocked"); below, one grouped list of herdr sessions (`● Running`) or tmux
-  sessions (`● Attached`, with a "new session" field), then **Refresh**. A herdr
-  row is title-only (44 dp) with its state at the right (`● Running`, or a dim `● Not running` and a
-  muted title for a stopped one), never as a second caption line as well. The "Refresh" row's icon
-  starts at the rows' text inset. **One terminal per tmux or herdr session:** a tmux session or a herdr session
-  that already has an open terminal on that host shows **`● Open`** (an `accent` dot) at its row's end in place of
-  its other state, and choosing it switches to that terminal as it is instead of opening a second one (a herdr
-  terminal opened on one of the session's panes counts; an agent from the inbox or a notification reuses it too,
-  after focusing that agent's pane); **Shell** always opens a new shell; a terminal that has closed is never
-  reused (a fresh one opens).
+  under them when it applies (see "UDP blocked"); below, the herdr tab's sessions or the tmux tab's list. **herdr:**
+  each running session the app watches (its live view, the inbox's source) is a section header with its name (the
+  default session by its name alone, never `(default)`), then one `surfaceRaisedRow` card: a 44 dp `Whole session`
+  row (`● Open` at its end when the session has a terminal), then its agents under small muted mono workspace
+  headers (herdr's workspace order; in one, by tab then pane), or a muted `No agents`. An agent row (56 dp) is its
+  label (the inbox's) over its directory in muted mono small (the path's end kept), with its status dot and word at
+  the right in the inbox's colours (`Working` pulses, `Blocked` is in `attention`); a tap opens it exactly as
+  an inbox row does. Sessions without a live view (not running, or a host whose agents are not watched) follow in
+  one card, one title-only row each with its state at the right (`● Running`, or a dim `● Not running` and a muted
+  title for a stopped one), never as a second caption line as well. The herdr tab has no Refresh (it is live).
+  **tmux:** sessions (`● Attached`, with a "new session" field), then **Refresh**, whose icon starts at the rows'
+  text inset. The list is read again each time the picker opens and the tab is shown: until the first answer a
+  16 dp spinner stands where the list will be; a later read (or Refresh, which also re-probes the host for new
+  herdr sessions) keeps the list and shows a 14 dp spinner beside `Refresh`. **One terminal per tmux or herdr
+  session:** a tmux session or a herdr session that already has an open terminal on that host shows **`● Open`**
+  (an `accent` dot) at its row's end in place of its other state, and choosing it switches to that terminal as it
+  is instead of opening a second one (a herdr terminal opened on one of the session's panes counts; an agent from
+  the inbox, the picker or a notification reuses it too, after focusing that agent's pane); **Shell** always opens
+  a new shell; a terminal that has closed is never reused (a fresh one opens).
 - **Terminal screen:** the terminal sits in a full-height card with a 24 dp top radius: the terminal
   header (below), then the terminal edge to edge with a thin `accent` scroll indicator on the right. The
   card below the header follows the terminal's own background (the remote can change it with OSC 11).

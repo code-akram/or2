@@ -37,7 +37,7 @@ internal fun HomeRoute(
     hosts: List<Host>, keyCount: Int, terminals: List<ActiveTerminal>, states: Map<Long, HostState>, inbox: InboxState,
     connections: HostConnections, busy: Boolean, unlocking: Set<Long>, actions: AppActions, resume: ResumeUi,
     picker: Long?, setPicker: (Long?) -> Unit,
-    connect: (List<Host>) -> Unit, openTerminal: (ActiveHost, TerminalTarget) -> Unit, show: (Long) -> Unit,
+    connect: (List<Host>) -> Unit, openTerminal: (ActiveHost, TerminalTarget) -> Unit, openAgent: OpenAgent, show: (Long) -> Unit,
     push: (Destination) -> Unit, addHost: () -> Unit, easyPair: () -> Unit, manualHost: () -> Unit,
 ) {
     val transports by remember(connections) { connections.transports() }.collectAsStateWithLifecycle(emptyMap())
@@ -101,7 +101,7 @@ internal fun HomeRoute(
     if (pickerHost != null) {
         HomePickerSheet(
             pickerHost, terminals, connections, unlocking = pickerHost.id in unlocking, busy = busy,
-            openTerminal = openTerminal,
+            openTerminal = openTerminal, openAgent = openAgent,
             connect = { connect(listOf(pickerHost)) },
             edit = { push(Destination.HostForm(pickerHost.id)) },
             dismiss = { setPicker(null) },

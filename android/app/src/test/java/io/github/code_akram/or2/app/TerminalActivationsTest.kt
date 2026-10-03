@@ -412,6 +412,46 @@ class TerminalActivationsTest {
     }
 
     @Test
+    fun thePickersAgentTakesTheInboxPathAndItsWholeSessionRowShowsThatTerminalAsItIs() = runTest {
+        val s = setup()
+        val calls = mutableListOf<String>()
+        val shown = mutableListOf<Activation>()
+        val choices = PickerChoices(
+            host,
+            open = { target -> calls += "open:$target"; s.activations.launchOpen(s.holder.host(7)!!, target) { shown += it } },
+            // Or2App's openAgent: the Inbox row's path.
+            openAgent = { hostId, label, session, pane ->
+                calls += "agent:$hostId:$label:$session:$pane"
+                s.activations.launchOpenAgent(hostId, label, session, pane) { shown += it }
+            },
+            dismiss = { calls += "dismiss" },
+        )
+        choices.agent("work", "w1:p2")
+        advanceUntilIdle()
+        // The sheet closes, then the agent's pane is focused and its session's terminal opens.
+        assertEquals(listOf("dismiss", "agent:7:${host.label}:work:w1:p2"), calls)
+        val agent = (shown.single() as Activation.Ready).terminal
+        assertEquals(TerminalTarget.Herdr("work", "w1:p2"), agent.target)
+        assertEquals(listOf("work" to "w1:p2"), s.port.focused)
+
+        // Whole session: the same terminal, shown as it is (no focus, no second client).
+        calls.clear()
+        choices.herdr("work")
+        advanceUntilIdle()
+        assertEquals(listOf("dismiss", "open:${TerminalTarget.Herdr("work", null)}"), calls)
+        assertSame(agent, (shown.last() as Activation.Ready).terminal)
+        assertEquals(listOf("work" to "w1:p2"), s.port.focused)
+
+        // Another agent of the session: focused, and the same terminal again.
+        choices.agent("work", "w2:p1")
+        advanceUntilIdle()
+        assertSame(agent, (shown.last() as Activation.Ready).terminal)
+        assertEquals(listOf("work" to "w1:p2", "work" to "w2:p1"), s.port.focused)
+        assertEquals(1, s.port.terminals.size)
+        s.holder.dismissHost(7)
+    }
+
+    @Test
     fun aClosedOrClosingTerminalIsNotReusedByThePicker() = runTest {
         val s = setup()
         val first = pick(s, TerminalTarget.Tmux("work"))
