@@ -213,6 +213,18 @@ fun HostConnections.hostStates(): Flow<Map<Long, HostState>> = hosts.flatMapLate
     else combine(active.values.map { a -> a.state.map { a.host.id to it } }) { it.toMap() }
 }
 
+/**
+ * The live view of every herdr watch of every connection, keyed by host id and session (null: the default session),
+ * whatever the host's inbox flag; a watch that is not live is absent.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+fun HostConnections.herdrViews(): Flow<Map<Pair<Long, String?>, HerdrView>> = hosts.flatMapLatest { active ->
+    if (active.isEmpty()) return@flatMapLatest flowOf(emptyMap())
+    combine(active.values.map { a -> a.liveViews(a.host) }) { parts ->
+        parts.flatMap { views -> views.mapNotNull { it.third } }.associate { (it.hostId to it.session) to it.view }
+    }
+}
+
 /** Link status of every connection, keyed by host id; hosts without a connection are absent. */
 @OptIn(ExperimentalCoroutinesApi::class)
 fun HostConnections.linkStatuses(): Flow<Map<Long, LinkStatus>> = hosts.flatMapLatest { active ->

@@ -2,6 +2,7 @@ package io.github.code_akram.or2.home
 
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
+import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.inbox.LinkStatus
 import io.github.code_akram.or2.inbox.linkStatus
@@ -23,8 +24,8 @@ data class HostCardStatus(
     val spinning get() = progress != null && dot == HostDot.CONNECTING
 }
 
-/** A host as the Home screen lists it. */
-data class HostCard(val host: Host, val status: HostCardStatus, val link: LinkStatus)
+/** A host as the Home screen lists it; [address] is its address line ([hostAddressLine]). */
+data class HostCard(val host: Host, val status: HostCardStatus, val link: LinkStatus, val address: String = hostAddressLine(host))
 
 /**
  * The card status for a connection [state] (null: no connection). [unlocking] is true between
@@ -51,11 +52,34 @@ fun hostCardStatus(
     }
 }
 
-/** `user@host:port` of the first (preferred) address, with `+N` for the others. */
-fun hostAddressLine(host: Host): String {
-    val first = host.addresses.first()
+/**
+ * `user@host:port` of the address in use while [state] is connected (`HostState.Connected.addressIndex`), else of
+ * the first (preferred) one, with `+N` for the others.
+ */
+fun hostAddressLine(host: Host, state: HostState? = null): String {
+    val index = (state as? HostState.Connected)?.addressIndex?.toInt() ?: 0
+    val shown = host.addresses.getOrNull(index) ?: host.addresses.first()
     val more = host.addresses.size - 1
-    return "${host.username}@${first.hostname}:${first.port}" + if (more > 0) " +$more" else ""
+    return "${host.username}@${shown.hostname}:${shown.port}" + if (more > 0) " +$more" else ""
+}
+
+/**
+ * The detail line under a Home session card's title: [cwd], the working directory of the terminal's pane when it is
+ * known, else for a herdr terminal [herdrDetail] of its session's live [view], else empty (the card keeps its
+ * height). Never `user@host`: the card's pill already names the host.
+ */
+fun sessionDetail(cwd: String?, view: HerdrView?): String = cwd ?: view?.let(::herdrDetail) ?: ""
+
+/**
+ * What a herdr terminal shows, in one line: the focused pane's agent label when an agent runs there, else the
+ * focused pane's cwd, else null. herdr's focus is shared, so the focused pane is what the session's terminal shows.
+ */
+fun herdrDetail(view: HerdrView): String? {
+    val focused = view.focusedPaneId ?: return null
+    val agent = view.agents.firstOrNull { it.paneId == focused }
+    val pane = view.panes.firstOrNull { it.paneId == focused }
+    val labels = listOfNotNull(agent?.displayAgent, agent?.name, agent?.agent, pane?.agent)
+    return labels.firstOrNull { it.isNotBlank() } ?: listOfNotNull(pane?.cwd, agent?.cwd).firstOrNull { it.isNotBlank() }
 }
 
 /**

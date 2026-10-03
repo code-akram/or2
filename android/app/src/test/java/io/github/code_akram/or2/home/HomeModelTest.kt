@@ -3,7 +3,11 @@ package io.github.code_akram.or2.home
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.HostRecord
+import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.CloseReason
+import io.github.code_akram.or2.ffi.HerdrAgent
+import io.github.code_akram.or2.ffi.HerdrPane
+import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.PublicKeyInfo
 import io.github.code_akram.or2.ffi.SessionFailure
@@ -67,6 +71,47 @@ class HomeModelTest {
         fun host(vararg endpoints: HostEndpoint) = Host(HostRecord(1, "Box", "dev", null), endpoints.toList())
         assertEquals("dev@workstation.invalid:22", hostAddressLine(host(HostEndpoint("workstation.invalid", 22))))
         assertEquals("dev@a.invalid:2222 +2", hostAddressLine(host(HostEndpoint("a.invalid", 2222), HostEndpoint("b.invalid", 22), HostEndpoint("c.invalid", 22))))
+    }
+
+    @Test
+    fun aConnectedHostShowsTheAddressInUseWithTheCountOfOthers() {
+        val host = Host(HostRecord(1, "Box", "dev", null), listOf(HostEndpoint("workstation.local", 22), HostEndpoint("198.51.100.7", 2222)))
+        assertEquals("dev@198.51.100.7:2222 +1", hostAddressLine(host, HostState.Connected(1u)))
+        assertEquals("dev@workstation.local:22 +1", hostAddressLine(host, HostState.Connected(0u)))
+        // Not connected (or connecting, or closed): the first address, as before.
+        assertEquals("dev@workstation.local:22 +1", hostAddressLine(host, null))
+        assertEquals("dev@workstation.local:22 +1", hostAddressLine(host, HostState.Connecting))
+        assertEquals("dev@workstation.local:22 +1", hostAddressLine(host, HostState.Closed(CloseReason.Disconnected)))
+        // An index the host no longer has (its addresses were edited) falls back to the first.
+        assertEquals("dev@workstation.local:22 +1", hostAddressLine(host, HostState.Connected(5u)))
+        assertEquals("dev@198.51.100.7:2222 +1", HostCard(host, hostCardStatus(null, false, 0), LinkStatus.CONNECTED, hostAddressLine(host, HostState.Connected(1u))).address)
+        assertEquals("dev@workstation.local:22 +1", HostCard(host, hostCardStatus(null, false, 0), LinkStatus.NOT_CONNECTED).address)
+    }
+
+    private fun pane(id: String, agent: String? = null, cwd: String? = null) =
+        HerdrPane(id, "w1:t1", "w1", null, agent, AgentStatus.IDLE, cwd, null, false)
+
+    private fun agent(pane: String, name: String?, display: String? = name, cwd: String? = null) =
+        HerdrAgent(pane, "w1:t1", "w1", name, name?.lowercase(), display, AgentStatus.WORKING, cwd, null, false, 1u, "term_$pane", null)
+
+    private fun view(focused: String?, panes: List<HerdrPane>, agents: List<HerdrAgent> = emptyList()) =
+        HerdrView(1u, 1u, focused, emptyList(), emptyList(), panes, agents)
+
+    @Test
+    fun aSessionCardShowsItsWorkingDirectoryElseWhatItsHerdrSessionShowsElseNothing() {
+        val withAgent = view("w1:p2", listOf(pane("w1:p1", cwd = "~/one"), pane("w1:p2", "claude", "~/two")), listOf(agent("w1:p2", "Claude Code")))
+        // The pane's own working directory comes first.
+        assertEquals("~/src", sessionDetail("~/src", withAgent))
+        // Else the focused pane's agent label.
+        assertEquals("Claude Code", sessionDetail(null, withAgent))
+        // An agent with no name of its own: the pane's agent kind.
+        assertEquals("codex", sessionDetail(null, view("w1:p1", listOf(pane("w1:p1", "codex", "~/one")), listOf(agent("w1:p1", null)))))
+        // No agent in the focused pane: its cwd.
+        assertEquals("~/one", sessionDetail(null, view("w1:p1", listOf(pane("w1:p1", cwd = "~/one"), pane("w1:p2", "claude")))))
+        // Nothing known: empty, never user@host (the card keeps its height).
+        assertEquals("", sessionDetail(null, view("w1:p1", listOf(pane("w1:p1")))))
+        assertEquals("", sessionDetail(null, view(null, listOf(pane("w1:p1", cwd = "~/one")))))
+        assertEquals("", sessionDetail(null, null))
     }
 
     @Test
