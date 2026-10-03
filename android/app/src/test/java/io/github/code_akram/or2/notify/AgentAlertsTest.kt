@@ -178,6 +178,24 @@ class AgentAlertsTest {
     }
 
     @Test
+    fun theTextNamesTheTaskTheAgentIsOnWhenItHasOne() {
+        fun titled(status: AgentStatus, seq: ULong, title: String?) = agent("w1:p1", status, seq).copy(title = title)
+        deliver(view(titled(AgentStatus.WORKING, 1u, "Fixing the build")))
+        deliver(view(titled(AgentStatus.BLOCKED, 2u, "Fixing the build")))
+        assertEquals("Needs input · Fixing the build", sink.posted.last().text)
+        assertEquals("Claude Code", sink.posted.last().title)
+        deliver(view(titled(AgentStatus.WORKING, 3u, "Review v013 brief | or2")))
+        deliver(view(titled(AgentStatus.DONE, 4u, "Review v013 brief | or2")))
+        assertEquals("Done · Review v013 brief | or2", sink.posted.last().text)
+        // No title: the edge alone.
+        deliver(view(titled(AgentStatus.WORKING, 5u, null)))
+        deliver(view(titled(AgentStatus.DONE, 6u, null)))
+        assertEquals("Done", sink.posted.last().text)
+        assertEquals("Needs input", alertLine("Needs input", "  "))
+        assertEquals("Done · x", alertLine("Done", " x "))
+    }
+
+    @Test
     fun backToWorkingOrGoneCancelsThePanesNotification() {
         deliver(view(agent("w1:p1", AgentStatus.WORKING, 1u), agent("w1:p2", AgentStatus.WORKING, 1u)))
         deliver(view(agent("w1:p1", AgentStatus.BLOCKED, 2u), agent("w1:p2", AgentStatus.DONE, 2u)))

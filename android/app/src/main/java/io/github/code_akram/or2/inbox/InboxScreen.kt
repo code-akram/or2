@@ -207,6 +207,15 @@ fun EnableReplyDialog(request: EnableReplyRequest, enable: () -> Unit, dismiss: 
     ) { Text(request.question) }
 }
 
+/**
+ * The task an agent is on ([agentTitle]), on its own line under the agent's label, muted, one line: how herdr's
+ * sidebar tells two agents apart. The Inbox, the picker and the Spaces sheet show it alike.
+ */
+@Composable
+fun AgentTitle(title: String, modifier: Modifier = Modifier) {
+    Text(title, style = Or2Type.Secondary, color = Or2Colors.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = modifier)
+}
+
 /** Test tag of an agent row's **Enable Reply** action. */
 fun enableReplyTag(item: InboxItem) = "inbox-enable-reply:${item.hostId}:${item.session ?: "-"}:${item.paneId}"
 
@@ -224,6 +233,7 @@ private fun AgentRow(item: InboxItem, open: (InboxItem) -> Unit, enableReply: (I
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
                 Text(item.agentName, style = Or2Type.RowLabel, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                item.title?.let { AgentTitle(it, Modifier.testTag("inbox-item-title:${inboxItemTag(item).removePrefix("inbox-item:")}")) }
                 val place = listOfNotNull(item.workspaceLabel, item.tabLabel).joinToString(" / ")
                 Text(
                     listOf(item.hostLabel + (if (item.session != null) " · ${item.sessionName}" else ""), place).filter { it.isNotEmpty() }.joinToString(" · "),

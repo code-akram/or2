@@ -44,7 +44,9 @@ import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HostCapabilities
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TmuxSession
+import io.github.code_akram.or2.inbox.AgentTitle
 import io.github.code_akram.or2.inbox.agentLabel
+import io.github.code_akram.or2.inbox.agentTitle
 import io.github.code_akram.or2.inbox.statusColor
 import io.github.code_akram.or2.inbox.statusLabel
 import io.github.code_akram.or2.ui.GroupCard
@@ -98,8 +100,11 @@ data class OpenSessions(val herdr: Set<String?> = emptySet(), val tmux: Set<Stri
     }
 }
 
-/** One agent under its herdr session in the picker: [label] ([agentLabel]), its status and its pane's cwd. */
-data class PickerAgent(val paneId: String, val label: String, val status: AgentStatus, val cwd: String?)
+/**
+ * One agent under its herdr session in the picker: [label] ([agentLabel]), its status, its pane's cwd and the task it is
+ * on ([title], [agentTitle]).
+ */
+data class PickerAgent(val paneId: String, val label: String, val status: AgentStatus, val cwd: String?, val title: String? = null)
 
 /** The agents of one herdr workspace, under its [label] (null: herdr names no workspace for them). */
 data class PickerWorkspace(val label: String?, val agents: List<PickerAgent>)
@@ -145,7 +150,8 @@ fun pickerWorkspaces(view: HerdrView): List<PickerWorkspace> {
         .sortedWith(compareBy<HerdrAgent>({ tabs[it.tabId]?.number ?: UInt.MAX_VALUE }, { it.paneId }))
         .map { agent ->
             val pane = panes[agent.paneId]
-            PickerAgent(agent.paneId, agentLabel(agent, pane?.agent) ?: "agent", agent.status, agent.cwd ?: pane?.cwd)
+            val label = agentLabel(agent, pane?.agent) ?: "agent"
+            PickerAgent(agent.paneId, label, agent.status, agent.cwd ?: pane?.cwd, agentTitle(agent, label))
         }
     val workspaces = view.workspaces.sortedBy { it.number }
     val grouped = workspaces.mapNotNull { workspace ->
@@ -406,7 +412,7 @@ private fun LiveSession(session: PickerHerdrSession, isOpen: Boolean, first: Boo
     }
 }
 
-/** An agent: its label and its pane's cwd (muted, the path's end kept), its status dot and word at the right. */
+/** An agent: its label, the task it is on and its pane's cwd (muted, the path's end kept), its status dot and word at the right. */
 @Composable
 private fun AgentRow(session: String, agent: PickerAgent, open: () -> Unit) {
     val blocked = agent.status == AgentStatus.BLOCKED
@@ -418,6 +424,7 @@ private fun AgentRow(session: String, agent: PickerAgent, open: () -> Unit) {
     ) {
         Column(Modifier.weight(1f)) {
             Text(agent.label, style = Or2Type.RowLabel, color = Or2Colors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            agent.title?.let { AgentTitle(it, Modifier.testTag("herdr-agent-title:$session:${agent.paneId}")) }
             agent.cwd?.let {
                 Text(it, style = Or2Type.MonoSmall, color = Or2Colors.TextMuted, maxLines = 1, overflow = TextOverflow.StartEllipsis)
             }

@@ -80,7 +80,7 @@ data class AgentPaneKey(val hostId: Long, val session: String?, val paneId: Stri
 data class AgentAlert(
     val key: AgentPaneKey,
     val title: String,
-    /** `Needs input` or `Done`: the edge that posted it. */
+    /** `Needs input` or `Done`: the edge that posted it, then ` · ` and the agent's title when it has one ([alertLine]). */
     val text: String,
     /** The host's label. */
     val subText: String,
@@ -178,6 +178,12 @@ fun alertText(status: AgentStatus, worked: Boolean = false): String? = when (sta
 }
 
 /**
+ * A notification's text: the edge ([alertText], `Needs input` or `Done`), then ` · ` and the task the agent is on
+ * (`HerdrAgent.title`, API 20) when there is one: `Needs input · Fixing the build`.
+ */
+fun alertLine(edge: String, title: String?): String = title?.trim()?.takeIf { it.isNotEmpty() }?.let { "$edge · $it" } ?: edge
+
+/**
  * The edge rule, fed every state of every live herdr watch ([HerdrObserver], on the holder's main dispatcher) and
  * the terminal on screen ([screenChanged]):
  *
@@ -263,7 +269,7 @@ class AgentAlerts(
                 continue
             }
             if (before == null || agent.stateChangeSeq <= before.seq) continue
-            val text = alertText(agent.status, before.worked) ?: continue
+            val text = alertLine(alertText(agent.status, before.worked) ?: continue, agent.title)
             when {
                 isOnScreen(key) -> cancel(key)
                 enabled() -> post(
