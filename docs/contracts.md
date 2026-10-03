@@ -5779,3 +5779,42 @@ because no screen read it then. One lane (Rust and Kotlin).
 - **Tests.** Rust: the title projection (glyph stripping, cap, empty), the title-only throttle, other changes
   undelayed. JVM: label/title lines, the notification text, the sheet's grouping and current marks, a tap's focus
   call. Device (compile + run): the disc only on herdr terminals, the sheet, a tap. Gallery: `spaces`.
+
+**Implemented (branch `v014/spaces`).** One lane, Rust and Kotlin. Where the spec was silent:
+
+- **The glyph rule** (`herdr::project::agent_title`). Control characters are dropped and the title trimmed; then
+  the first character is removed, with the whitespace after it, only when it is a status glyph **and** whitespace
+  (or nothing) follows it, so `π - service` and `*args` stay whole. A glyph is `*`, `·`, `•`, `‣`, `⁃`, `∙`, `⋅`,
+  `⋆` or any character of the arrows (U+2190–21FF), technical symbols (U+2300–23FF: `⏺ ⏳`), box drawing, blocks
+  and geometric shapes (U+2500–25FF: `● ◐ ■`), miscellaneous symbols and dingbats (U+2600–27BF: `★ ✓ ✳ ✶ ✻ ✽ ✢`),
+  Braille (U+2800–28FF), U+2B00–2BFF, and emoji (U+1F300–1FAFF); a variation selector after it goes too. One glyph
+  at most. The cap is 120 characters (not bytes), trailing whitespace of the cut removed.
+- **The throttle** (`watch::Delivery`, `Timing::title` = 1 s). A pending view equal to the delivered one except
+  for agent titles waits until a second after the last delivery that changed a title (the first such change since
+  the watch went live goes out with the usual 100 ms coalescing); a newer offer replaces it. Anything else in the
+  view (status, focus, a new agent, ...) goes out after the usual 100 ms and carries the newest titles with it.
+- **Tab focus.** herdr has `tab.focus`, so a tab tap uses it (the tab shows the pane it last had focused) rather
+  than a pane: `HostConnection.focus_herdr_tab(session, tab_id)` (API 20), sent through the connection's focus gate
+  under a key no pane id can equal, so it keeps its order among the session's pane focuses, clears the gate's
+  remembered pane, and is never answered from memory; herdr's `tab_not_found` is `PaneNotFound`. Tab ids are
+  validated as pane ids are. The probe host focuses `w1:t1` / `w2:t1` (their first pane). The view also carries
+  herdr's `focused_tab_id` (`HerdrView.focused_tab_id`, last with a default, so positional Kotlin records keep
+  their shape); without it the current tab is the focused pane's.
+- **The label order.** The spec's "name, else display name, else kind" is now `agentLabel` everywhere (Inbox,
+  picker, Spaces, notifications, Home's herdr detail); before it, the display name came first. The title line is
+  left out when it equals the label (ignoring case), in every list; a notification adds ` · <title>` whenever there
+  is one.
+- **The sheet.** `session/SpacesSheet.kt`: `spacesOf(view)` orders spaces and tabs by herdr's numbers and a tab's
+  agents by herdr's pane order. A space header is the label in muted mono small, in herdr's own case (not the
+  uppercase `SectionHeader`). Agent rows are indented under their tab: status dot, label, title, the status word at
+  the right and `● Current` under it for the focused pane. No live view yet: `Waiting for herdr…`. Tags:
+  `spaces-sheet`, `space:<workspace>`, `space-label:<workspace>`, `space-tab:<tab>`, `space-tab-current:<tab>`,
+  `space-agent:<pane>`, `space-agent-title:<pane>`, `space-agent-status:<pane>`, `space-agent-current:<pane>`; the
+  disc is `terminal-spaces`. `Or2Sheet` gained a muted `subtitle` (`sheet-subtitle`).
+- **A tap** is `TerminalActivations.focusInTerminal(terminal, HerdrFocus.Tab | HerdrFocus.Pane)`: the pane or tab
+  focus through `HostConnections.focusHerdrPane` / `focusHerdrTab` in the terminal's own session, nothing opened or
+  navigated (the terminal is already the one shown). The sheet closes first; a focus that fails puts its reason in
+  the terminal's notice strip with **Dismiss** (`That tab is no longer open in herdr.`, or the pane's message).
+  The sheet collects `herdrViews()` only while it is open.
+- **Gallery:** `spaces` (a herdr terminal with the sheet over it, session `work`), and the blue disc on the herdr
+  terminal screens (`terminal-long`, `terminal-herdr-wheel`); agents in `inbox` and `picker-herdr` have titles.

@@ -8,6 +8,23 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+### Added
+
+- Spaces: a third, blue disc in a herdr terminal's header (after the orange and green ones, the same size) opens
+  the session's spaces as herdr has them: each space's tabs (`tab ui`) and, under each tab, its agents with their
+  status, name and task; the focused tab and pane are marked `● Current`. Tapping a tab or an agent focuses it in
+  herdr and the terminal shows it. Shell and tmux headers are unchanged.
+- FFI API 20: `HerdrAgent.title` (herdr's terminal title of the agent, trimmed, without a leading spinner or status
+  glyph, at most 120 characters; a view whose only change is a title is delivered at most once a second),
+  `HerdrView.focused_tab_id`, and `HostConnection.focus_herdr_tab(session, tab_id)` (herdr's tab focus, in order
+  with the session's pane focuses).
+
+### Changed
+
+- Agents are named as herdr names them, everywhere they appear (Inbox, the picker, Spaces, notifications): the
+  agent's name when it was started by one, else herdr's display name, else its kind; then the task it is on, from
+  its terminal title, on its own muted line. A notification reads `Needs input · <task>` or `Done · <task>`.
+
 ## [0.1.3] - 2026-10-03
 
 Zero-config Reply: `or2-pair` recommends herdr when it is missing and sets up herdr's integrations for the agents
