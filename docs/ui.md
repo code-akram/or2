@@ -179,7 +179,11 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 - **Agent row (inbox):** status dot (in the same 20 dp leading slot as the host rows below, so
   both start their text at one x; working dots pulse between full and 70 % alpha), agent display name, muted mono
   `host · workspace / tab`, trailing relative time; blocked rows first and tinted with
-  `attentionSurface`. Sticky muted section headers per status.
+  `attentionSurface`. Sticky muted section headers per status. An agent with no Reply because herdr's integration
+  for it is missing has **Enable Reply** under its status word: a compact `accent` text action (12 sp, 4 x 2 dp
+  padding, the platform's 48 dp target), never a pill. It asks first with the "Enable Reply?" dialog (`Or2Dialog`,
+  **Cancel** and **Enable**), which a notification's **Enable Reply** action opens over whatever is on screen; the
+  outcome is the usual message card.
 - **Grouped settings list:** rows inside one `surface` card separated by inset hairlines.
 - **Dialogs:** a `surfaceRaised` card with 12 dp screen gutters, 16 dp inside, the title, the body and the
   buttons right-aligned beneath (wrapping when they do not fit): the same gutter as the rest of the UI,
