@@ -633,12 +633,25 @@ pub enum Program {
     MoshServer,
 }
 
+/// herdr's own install command.
+pub const HERDR_INSTALL: &str = "curl -fsSL https://herdr.dev/install.sh | sh";
+
+/// herdr's install page: its installer, Homebrew, mise and Nix.
+pub const HERDR_INSTALL_DOCS: &str = "https://herdr.dev/docs/install/";
+
 /// How to install a program that was not found: the line under "<program> not found".
 pub fn install(program: Program, platform: Platform, facts: &HostFacts) -> String {
     let package = match program {
-        // herdr's own instructions say how to install it; no package name is guessed.
+        // herdr's own installer (a recommendation: or2-pair never runs another project's
+        // installer); no package name is guessed. It has none for Windows: only its docs.
         Program::Herdr => {
-            return "see herdr's install docs (https://github.com/herdrdev/herdr)".to_owned();
+            return if platform == Platform::Windows {
+                format!("see herdr's install docs: {HERDR_INSTALL_DOCS}")
+            } else {
+                format!(
+                    "install it: `{HERDR_INSTALL}`\n(or Homebrew, mise, Nix: {HERDR_INSTALL_DOCS})"
+                )
+            };
         }
         Program::Tmux => "tmux",
         // `mosh-server` comes with the `mosh` package everywhere.
@@ -1787,12 +1800,29 @@ mod tests {
             install(Program::MoshServer, Platform::Linux, &HostFacts::default())
                 .contains("mosh package with your package manager")
         );
-        // herdr: its own instructions, whatever the package manager.
-        for facts in [linux(Some(PackageManager::Apt)), HostFacts::default()] {
-            let hint = install(Program::Herdr, Platform::Linux, &facts);
-            assert!(hint.contains("herdr's install docs"), "{hint}");
-            assert!(!hint.contains("apt"), "{hint}");
+        // herdr: its own installer, whatever the package manager; on Windows only its docs.
+        for (platform, facts) in [
+            (Platform::Linux, linux(Some(PackageManager::Apt))),
+            (Platform::Linux, HostFacts::default()),
+            (
+                Platform::MacOs,
+                HostFacts {
+                    package_manager: Some(PackageManager::Brew),
+                    ..HostFacts::default()
+                },
+            ),
+            (Platform::Other, HostFacts::default()),
+        ] {
+            assert_eq!(
+                install(Program::Herdr, platform, &facts),
+                "install it: `curl -fsSL https://herdr.dev/install.sh | sh`\n(or Homebrew, mise, Nix: https://herdr.dev/docs/install/)",
+                "{platform:?}"
+            );
         }
+        assert_eq!(
+            install(Program::Herdr, Platform::Windows, &HostFacts::default()),
+            "see herdr's install docs: https://herdr.dev/docs/install/"
+        );
     }
 
     #[test]
