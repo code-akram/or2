@@ -224,11 +224,11 @@ private fun StatusCard(host: Host, hostState: HostState?, link: LinkStatus) {
     }
 }
 
-enum class PickerTab(val label: String) { HERDR("herdr"), TMUX("tmux"), RECENT("Recent") }
+enum class PickerTab(val label: String) { HERDR("herdr"), TMUX("tmux"), RECENT("Open") }
 
 /**
- * The session picker: a segmented control (herdr, tmux, Recent) with a "Shell" pill (a prompt glyph) that opens a
- * plain shell, and one grouped list below. Hosts without tmux or herdr, failed listings and
+ * The session picker: a segmented control (herdr, tmux, Open: the open terminals) with a "Shell" pill (a prompt
+ * glyph) that opens a plain shell, and one grouped list below. Hosts without tmux or herdr, failed listings and
  * errors are explained in muted text, never hidden. While [gate] is set (opened from Home before the host has
  * connected) the sheet shows it instead: the host's progress, or why it is not connected with [gateAction]'s
  * pill; the lists follow in the same sheet once the gate is null.
@@ -442,7 +442,7 @@ private fun NewTmuxSession(open: (String) -> Unit) {
 @Composable
 private fun RecentList(recent: List<HostTerminalItem>, resume: (Long) -> Unit) {
     if (recent.isEmpty()) {
-        Muted("No recent sessions yet. Sessions you open on this host appear here until you close them.", Modifier.testTag("recent-empty"))
+        Muted("No open sessions yet. Sessions you open on this host appear here until you close them.", Modifier.testTag("recent-empty"))
         return
     }
     GroupCard(color = Or2Colors.SurfaceRaisedRow) {
