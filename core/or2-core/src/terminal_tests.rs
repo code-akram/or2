@@ -225,7 +225,8 @@ fn frames_report_mouse_tracking_and_the_alternate_screen() {
         frame.modes(),
         TerminalModes {
             mouse_tracking: true,
-            alternate_screen: false
+            alternate_screen: false,
+            bracketed_paste: false,
         }
     );
     terminal.write(b"\x1b[?1049h");
@@ -233,7 +234,8 @@ fn frames_report_mouse_tracking_and_the_alternate_screen() {
         terminal.frame().unwrap().modes(),
         TerminalModes {
             mouse_tracking: true,
-            alternate_screen: true
+            alternate_screen: true,
+            bracketed_paste: false,
         }
     );
     terminal.write(b"\x1b[?1000l");
@@ -241,7 +243,8 @@ fn frames_report_mouse_tracking_and_the_alternate_screen() {
         terminal.frame().unwrap().modes(),
         TerminalModes {
             mouse_tracking: false,
-            alternate_screen: true
+            alternate_screen: true,
+            bracketed_paste: false,
         }
     );
     terminal.write(b"\x1b[?1002h\x1b[?1049l");
@@ -249,6 +252,29 @@ fn frames_report_mouse_tracking_and_the_alternate_screen() {
     terminal.write(b"\x1b[?1002l\x1b[?1003h");
     assert!(terminal.frame().unwrap().modes().mouse_tracking);
     terminal.write(b"\x1b[?1003l");
+    assert_eq!(terminal.frame().unwrap().modes(), TerminalModes::default());
+}
+
+/// Kotlin asks before a multi-line send only while the program has bracketed paste off (contracts.md,
+/// "One terminal per herdr session"): frames report the mode both ways, a change alone included.
+#[test]
+fn frames_report_bracketed_paste_on_and_off() {
+    let mut terminal = engine(8, 3);
+    assert!(!terminal.frame().unwrap().modes().bracketed_paste);
+    terminal.write(b"\x1b[?2004h");
+    let frame = terminal.frame().unwrap();
+    assert!(frame.rows().is_empty());
+    assert_eq!(
+        frame.modes(),
+        TerminalModes {
+            mouse_tracking: false,
+            alternate_screen: false,
+            bracketed_paste: true,
+        }
+    );
+    terminal.write(b"\x1b[?1049hvim");
+    assert!(terminal.frame().unwrap().modes().bracketed_paste);
+    terminal.write(b"\x1b[?2004l\x1b[?1049l");
     assert_eq!(terminal.frame().unwrap().modes(), TerminalModes::default());
 }
 

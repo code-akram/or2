@@ -24,7 +24,8 @@ Each release's notes are in [docs/releases/](docs/releases/).
   stand apart from the terminal behind them; the extras row has accent labels.
 - A tap on a program that tracks the mouse (herdr, tmux with mouse on) is a click at that cell, so the program's own
   buttons work; a link still opens, and the keyboard key still opens the keyboard.
-- FFI API 16 (`Session.mouse_click`, `Session.paste_text`, `HostConnection.reply_to_pane`, `upload_image`).
+- FFI API 17 (`Session.mouse_click`, `Session.paste_text`, `HostConnection.reply_to_pane`, `upload_image`,
+  `TerminalModes.bracketed_paste`).
 
 ### Fixed
 

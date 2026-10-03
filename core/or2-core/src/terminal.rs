@@ -395,12 +395,13 @@ impl TerminalEngine {
         Ok(build(self.size, rows, cursor, rgb(colors.background), scrollback)?.with_modes(modes))
     }
 
-    /// The modes a swipe is routed by: whether the program tracks the mouse and which screen
-    /// is active.
+    /// The modes a swipe is routed by (whether the program tracks the mouse and which screen
+    /// is active) and whether a multi-line send needs confirming (bracketed paste).
     pub fn modes(&self) -> Result<TerminalModes, TerminalError> {
         Ok(TerminalModes {
             mouse_tracking: self.terminal.is_mouse_tracking()?,
             alternate_screen: self.terminal.active_screen()? == Screen::Alternate,
+            bracketed_paste: self.bracketed_paste()?,
         })
     }
 

@@ -29,6 +29,11 @@ pub struct TerminalModes {
     pub mouse_tracking: bool,
     /// The alternate screen is active.
     pub alternate_screen: bool,
+    /// The program has bracketed paste (DECSET 2004) on (API 17): a multi-line send or paste
+    /// arrives as one paste, so Kotlin does not ask first (contracts.md, "One terminal per herdr
+    /// session, and what the terminals are called").
+    #[uniffi(default = false)]
+    pub bracketed_paste: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -166,6 +171,7 @@ impl From<core::TakenFrame> for TerminalFrame {
             modes: TerminalModes {
                 mouse_tracking: modes.mouse_tracking,
                 alternate_screen: modes.alternate_screen,
+                bracketed_paste: modes.bracketed_paste,
             },
         }
     }
@@ -270,13 +276,15 @@ mod tests {
         .with_modes(core::TerminalModes {
             mouse_tracking: true,
             alternate_screen: false,
+            bracketed_paste: true,
         });
         let ffi = TerminalFrame::from(core::TakenFrame { sequence: 7, frame });
         assert_eq!(
             ffi.modes,
             TerminalModes {
                 mouse_tracking: true,
-                alternate_screen: false
+                alternate_screen: false,
+                bracketed_paste: true,
             }
         );
         assert_eq!(
