@@ -8,8 +8,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -17,35 +19,41 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 
-/** One terminal's image upload, as its notice strip shows it. */
+/** One terminal's image uploads, as its notice strip shows them. */
 sealed interface UploadState {
     data object Idle : UploadState
-    data object Uploading : UploadState
 
-    /** Uploading, and another image just came and was not taken: the strip says so for [ALREADY_SHOWN]. */
-    data object AlreadyUploading : UploadState
+    /**
+     * Uploading the [image]th of the [images] the queue has taken in this run ([images] grows while more join).
+     * [full]: an image beyond [MAX_IMAGES] just came and was not taken; the strip says so for [ALREADY_SHOWN].
+     */
+    data class Uploading(val image: Int = 1, val images: Int = 1, val full: Boolean = false) : UploadState
     data class Failed(val reason: String) : UploadState
 }
 
 /** Whether an upload runs (Cancel stops it). */
-val UploadState.uploading: Boolean get() = this == UploadState.Uploading || this == UploadState.AlreadyUploading
+val UploadState.uploading: Boolean get() = this is UploadState.Uploading
 
-/** How long the strip says a second image was not taken. */
+/** How many images a terminal's queue holds at once, pending or uploading. */
+const val MAX_IMAGES = 10
+
+/** How long the strip says an image beyond [MAX_IMAGES] was not taken. */
 const val ALREADY_SHOWN = 3_000L
 
-const val ALREADY_UPLOADING = "An image is already uploading"
+const val TOO_MANY_IMAGES = "At most $MAX_IMAGES images at a time"
 
 /** What a host's answer that is no path to type into a terminal fails with ([insertablePath]). */
 const val UNUSABLE_PATH = "Upload failed: the host answered an unusable path"
 
 /**
- * A terminal's image paste (contracts.md, "Image paste"): one upload at a time, from any source (the
- * composer's attach button, a keyboard's image, a share), each ending the same way. [start] prepares the
- * image ([prepareImage], off the main thread) and uploads it over the host's connection ([upload]:
- * `upload_image`); the path it returns arrives on [paths] for the terminal screen to insert
- * ([insertTarget], [pathInsertion]), once, even when the screen was not showing at that moment. [cancel]
- * stops it (the upload's coroutine is cancelled, and Rust removes the temporary file). It lives with
- * the terminal in the holder's [scope], not with a view.
+ * A terminal's image paste (contracts.md, "Image paste", "Several images at once"): one queue, fed by every
+ * source (the composer's attach button, a keyboard's image, a share) in arrival order, that uploads one image
+ * at a time. [start] adds an image; the queue prepares it ([prepareImage], off the main thread) and uploads it
+ * over the host's connection ([upload]: `upload_image`). A failed image is skipped and the rest still upload.
+ * When the queue is empty, the paths that uploaded arrive together on [paths] for the terminal screen to
+ * insert as one ([insertTarget], [pathsInsertion]), once, even when the screen was not showing at that moment.
+ * [cancel] stops the running upload (its coroutine is cancelled, and Rust removes the temporary file), drops
+ * what is still queued and inserts nothing. It lives with the terminal in the holder's [scope], not with a view.
  */
 class ImagePaste(
     private val scope: CoroutineScope,
@@ -53,74 +61,140 @@ class ImagePaste(
 ) {
     private val mutableState = MutableStateFlow<UploadState>(UploadState.Idle)
     val state: StateFlow<UploadState> = mutableState.asStateFlow()
-    private val inserts = Channel<String>(Channel.UNLIMITED)
+    private val inserts = Channel<List<String>>(Channel.UNLIMITED)
 
-    /** The uploaded images' paths, each delivered once. */
-    val paths: Flow<String> = inserts.receiveAsFlow()
+    /** Each finished queue run's uploaded paths, in arrival order, delivered once (a cancelled run delivers none). */
+    val paths: Flow<List<String>> = inserts.receiveAsFlow()
+
+    /** One run of the queue: from its first image until it is empty again (or cancelled). */
+    private class Run(val generation: Int) {
+        /** The images taken and not yet started, each its preparation. */
+        val waiting = ArrayDeque<suspend () -> PreparedImage>()
+
+        /** The images taken in this run. */
+        var images = 0
+
+        /** The images that ended, uploaded or failed. */
+        var done = 0
+        val paths = mutableListOf<String>()
+        val failures = mutableListOf<String>()
+    }
+
+    private var run: Run? = null
     private var job: Job? = null
 
-    /** Which upload speaks for the state: a cancelled one's late end must not overwrite a newer one's. */
+    /** Which run speaks for the state: a cancelled one's late end must not overwrite a newer one's. */
     private var generation = 0
 
-    /** Puts the strip back from [UploadState.AlreadyUploading]. */
-    private var already: Job? = null
+    /** Whether the strip says [TOO_MANY_IMAGES], and what puts it back. */
+    private var full = false
+    private var fullShown: Job? = null
 
     /**
-     * Starts an upload of what [prepare] makes. While one is running, nothing starts: the strip says
-     * [ALREADY_UPLOADING] for a moment (no image is dropped without a word, whichever source it came
-     * from), and the result is false, so the caller gives back what it holds for it (a keyboard's grant).
-     * Once taken, [prepare] always runs, even when the upload is cancelled before it began, so it can give
-     * back its own. Call on the main thread, like [cancel] and [dismiss].
+     * Adds an image, made by [prepare], to the queue, starting it when it is not running. With [MAX_IMAGES]
+     * pending or uploading, nothing is taken: the strip says [TOO_MANY_IMAGES] for a moment (no image is
+     * dropped without a word, whichever source it came from), and the result is false, so the caller gives back
+     * what it holds for it (a keyboard's grant). Once taken, [prepare] always runs, even when the queue is
+     * cancelled before it reached the image, so it can give back its own. Call on the main thread, like
+     * [cancel] and [dismiss].
      */
     @OptIn(DelicateCoroutinesApi::class)
     fun start(prepare: suspend () -> PreparedImage): Boolean {
-        if (job?.isActive == true) {
-            val run = generation
-            mutableState.value = UploadState.AlreadyUploading
-            already?.cancel()
-            already = scope.launch {
+        val running = run
+        if (running != null && running.images - running.done >= MAX_IMAGES) {
+            full = true
+            show(running)
+            fullShown?.cancel()
+            fullShown = scope.launch {
                 delay(ALREADY_SHOWN)
-                if (run == generation && mutableState.value == UploadState.AlreadyUploading) mutableState.value = UploadState.Uploading
+                full = false
+                if (run === running) show(running)
             }
             return false
         }
-        val run = ++generation
-        mutableState.value = UploadState.Uploading
-        // Atomic: a cancel before it is dispatched still runs `prepare` (which then stops at once).
-        job = scope.launch(start = CoroutineStart.ATOMIC) {
-            val outcome: UploadState = try {
-                val image = prepare()
-                val path = upload(image.bytes, image.format.extension)
-                if (insertablePath(path)) {
-                    if (run == generation) inserts.trySend(path)
-                    UploadState.Idle
-                } else {
-                    UploadState.Failed(UNUSABLE_PATH)
-                }
-            } catch (error: CancellationException) {
-                if (run == generation) mutableState.value = UploadState.Idle
-                throw error
-            } catch (error: Exception) {
-                UploadState.Failed(uploadErrorMessage(error))
-            }
-            if (run == generation) mutableState.value = outcome
+        val queue = running ?: Run(++generation)
+        queue.waiting.addLast(prepare)
+        queue.images++
+        if (running == null) {
+            run = queue
+            // Atomic: a cancel before it is dispatched still runs every `prepare` (each then stops at once).
+            job = scope.launch(start = CoroutineStart.ATOMIC) { work(queue) }
         }
+        show(queue)
         return true
     }
 
-    /** Stops the running upload; nothing is inserted. */
+    /** Uploads [queue]'s images one at a time until none is waiting, then delivers its paths and its outcome. */
+    private suspend fun work(queue: Run) {
+        try {
+            while (true) {
+                val prepare = queue.waiting.removeFirstOrNull() ?: break
+                try {
+                    val image = prepare()
+                    // A run cancelled while the image was prepared uploads nothing of it.
+                    currentCoroutineContext().ensureActive()
+                    val path = upload(image.bytes, image.format.extension)
+                    if (insertablePath(path)) queue.paths += path else queue.failures += UNUSABLE_PATH
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    queue.failures += uploadErrorMessage(error)
+                }
+                queue.done++
+                if (queue.waiting.isNotEmpty()) show(queue)
+            }
+        } catch (error: CancellationException) {
+            // Every taken image is prepared, so each gives back what it holds; cancelled, each stops at once.
+            while (true) {
+                val prepare = queue.waiting.removeFirstOrNull() ?: break
+                try {
+                    prepare()
+                } catch (_: Exception) {
+                    // Cancelled, so it stopped; what it would have made is not wanted.
+                }
+            }
+            if (queue.generation == generation) end(UploadState.Idle)
+            throw error
+        }
+        if (queue.generation != generation) return
+        if (queue.paths.isNotEmpty()) inserts.trySend(queue.paths.toList())
+        end(queueFailure(queue.failures, queue.images)?.let { UploadState.Failed(it) } ?: UploadState.Idle)
+    }
+
+    private fun show(queue: Run) {
+        if (queue.generation == generation) mutableState.value = UploadState.Uploading(queue.done + 1, queue.images, full)
+    }
+
+    private fun end(outcome: UploadState) {
+        run = null
+        job = null
+        full = false
+        fullShown?.cancel()
+        mutableState.value = outcome
+    }
+
+    /** Stops the running upload and drops the queued images; nothing of this run is inserted. */
     fun cancel() {
         generation++
-        already?.cancel()
-        job?.cancel()
-        job = null
-        mutableState.value = UploadState.Idle
+        val running = job
+        end(UploadState.Idle)
+        running?.cancel()
     }
 
     /** Clears a failure from the strip. */
     fun dismiss() {
         if (mutableState.value is UploadState.Failed) mutableState.value = UploadState.Idle
     }
+}
+
+/**
+ * What the strip says when a queue run of [images] ended with [failures] (their reasons, in order), or null
+ * when none failed: one image, its reason; several, how many failed and the first reason.
+ */
+fun queueFailure(failures: List<String>, images: Int): String? = when {
+    failures.isEmpty() -> null
+    images == 1 -> failures.first()
+    else -> "${failures.size} of $images images failed: ${failures.first()}"
 }
 
 /** The state of a terminal without an image paste: nothing ever uploads. */
@@ -142,7 +216,13 @@ data class UploadNotice(val notice: TerminalNotice, val action: String)
 
 fun uploadNotice(state: UploadState): UploadNotice? = when (state) {
     UploadState.Idle -> null
-    UploadState.Uploading -> UploadNotice(TerminalNotice("Uploading image…", NoticeTone.Info, busy = true, closable = false), "Cancel")
-    UploadState.AlreadyUploading -> UploadNotice(TerminalNotice(ALREADY_UPLOADING, NoticeTone.Info, busy = true, closable = false), "Cancel")
+    is UploadState.Uploading -> UploadNotice(TerminalNotice(uploadingText(state), NoticeTone.Info, busy = true, closable = false), "Cancel")
     is UploadState.Failed -> UploadNotice(TerminalNotice(state.reason, NoticeTone.Warning, busy = false, closable = false), "Dismiss")
+}
+
+/** `Uploading image…` for one image, `Uploading image <i> of <n>…` for several, or the moment's [TOO_MANY_IMAGES]. */
+private fun uploadingText(state: UploadState.Uploading): String = when {
+    state.full -> TOO_MANY_IMAGES
+    state.images == 1 -> "Uploading image…"
+    else -> "Uploading image ${state.image} of ${state.images}…"
 }

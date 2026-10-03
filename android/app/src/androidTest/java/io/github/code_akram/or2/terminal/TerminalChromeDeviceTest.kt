@@ -410,7 +410,7 @@ class TerminalChromeDeviceTest {
             compose.activity.setContent {
                 Or2Theme {
                     io.github.code_akram.or2.session.TerminalCard("workstation", "shell", Transport.SSH, SessionState.Connected,
-                        minimise = {}, openSwitcher = {}, endSession = {}, upload = uploadNotice(UploadState.Uploading),
+                        minimise = {}, openSwitcher = {}, endSession = {}, upload = uploadNotice(UploadState.Uploading()),
                         uploadAction = { cancelled = true }) {}
                 }
             }

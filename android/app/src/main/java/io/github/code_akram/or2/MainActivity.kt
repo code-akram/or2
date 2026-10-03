@@ -39,7 +39,7 @@ import io.github.code_akram.or2.ffi.generateEd25519Key
 import io.github.code_akram.or2.keys.VaultException
 import io.github.code_akram.or2.pair.PairViewModel
 import io.github.code_akram.or2.paste.ImageShares
-import io.github.code_akram.or2.paste.sharedImage
+import io.github.code_akram.or2.paste.sharedImages
 import io.github.code_akram.or2.keys.authenticateCipher
 import io.github.code_akram.or2.keys.encryptKey
 import io.github.code_akram.or2.keys.importAndWipe
@@ -161,10 +161,13 @@ class MainActivity : FragmentActivity() {
         shareFrom(intent)
     }
 
-    /** An image shared from another app (`ACTION_SEND`, any image type): the UI asks which open terminal it goes to. */
+    /**
+     * Images shared from another app (`ACTION_SEND` or `ACTION_SEND_MULTIPLE`, any image type): the UI asks once
+     * which open terminal they go to.
+     */
     private fun shareFrom(intent: Intent?) {
         if (intent == null || intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
-        sharedImage(intent)?.let(imageShares::offer)
+        sharedImages(intent)?.let(imageShares::offer)
     }
 
     /**

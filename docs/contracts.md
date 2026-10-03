@@ -5100,6 +5100,37 @@ stays 16).
   with three `content:` images gives three, a `file:` item among them is skipped and counted, more than 10
   keeps the first 10 and says so. Device (compile): the picker contract and the intent filter.
 
+**Implemented (branch `v012/multi-image`).** Kotlin only; API stays 16.
+
+- **Queue (`ImagePaste`).** A run lasts from its first image until the queue is empty. `UploadState.Uploading`
+  carries `image` (the one being worked on, `done + 1`), `images` (taken in this run) and `full` (the
+  `At most 10 images at a time` moment, `TOO_MANY_IMAGES`); `AlreadyUploading` and `ALREADY_UPLOADING` are gone.
+  `paths` is a `Flow<List<String>>`: one list per finished run, in arrival order, none for a run that uploaded
+  nothing or was cancelled. The terminal screen inserts a list as one (`pathsInsertion`, `composerWithPaths`). The
+  run's end reason is `queueFailure` (one image: its reason; several: `<n> of <total> images failed: <first>`,
+  also when all failed). `generation` still keeps a cancelled run's late end from speaking for the next run.
+- **Cancel.** The run's coroutine is cancelled; it then runs each image still queued, in that cancelled
+  coroutine, so each gives back its grant. `imagePreparation` now checks for a cancel before it opens anything,
+  so a dropped image opens no provider and takes no `ImageReaders` place; the queue also checks after a
+  preparation, so an image prepared as the cancel came is not uploaded. Reads stay one at a time per terminal,
+  well inside `MAX_LIVE_READS`.
+- **Picker.** `IMAGE_PICKER` (`PickMultipleVisualMedia(MAX_IMAGES)`, images only); without the system picker,
+  Android's fallback allows several with no limit of its own, and the queue refuses past 10 in words.
+- **Shares.** `sharedImages(intent)` reads `ACTION_SEND` (one stream) and `ACTION_SEND_MULTIPLE` (a list) into a
+  `Share`: the `content:` streams in order, the first 10 kept (`over` counts the rest), every other item (another
+  scheme, none, a missing stream) counted in `refused`. A share is taken once; what it does not send is said in
+  the app's message (`shareNote`: `At most 10 images at a time: sending the first 10`, `<n> shared items are not
+  images or2 can read`) as the terminal picker opens, or alone when nothing is readable. So a single `file:`
+  share, silently ignored before, is now said too. The pending share's saved state holds all its URIs
+  (`savedShare(vararg)`, `restoredShare` a list). The picker sheet's title stays `Send image to`.
+- **Tests.** JVM `ImagePasteTest` (three in order inserted once, one joining a running queue, the 11th refused and
+  room again once one is done, a failure in the middle, refused and unusable images counted, cancel prepares
+  every queued image in a cancelled run and uploads none, a cancelled run's late end, the strip's `i of n`,
+  `pathsInsertion`), `ImageSharesTest` (three images, `file:`/no scheme/missing skipped and counted, 12 keeps 10
+  and says so, several URIs in saved state), `ImageSourceTest`
+  (`aPreparationRunAfterItsQueueWasCancelledOpensNothingAndGivesTheGrantBack`). Device (compile):
+  `IMAGE_PICKER`'s intent (`EXTRA_PICK_IMAGES_MAX` 10), the `SEND_MULTIPLE` filter, `sharedImages` of both actions.
+
 # v0.1.2: owner QA of 2026-10-03 (Home, terminals, composer, upload speed)
 
 Owner QA on the phone found these. Placeholders only: no real host details in tests or docs.

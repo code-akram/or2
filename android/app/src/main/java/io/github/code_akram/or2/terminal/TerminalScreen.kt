@@ -58,11 +58,12 @@ import io.github.code_akram.or2.ffi.TerminalKey
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.paste.ImagePaste
 import io.github.code_akram.or2.paste.InsertTarget
-import io.github.code_akram.or2.paste.composerWithPath
+import io.github.code_akram.or2.paste.MAX_IMAGES
+import io.github.code_akram.or2.paste.composerWithPaths
 import io.github.code_akram.or2.paste.imageFromUri
 import io.github.code_akram.or2.paste.insertablePath
 import io.github.code_akram.or2.paste.insertTarget
-import io.github.code_akram.or2.paste.pathInsertion
+import io.github.code_akram.or2.paste.pathsInsertion
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dialog
 import io.github.code_akram.or2.ui.Or2Dimens
@@ -72,6 +73,12 @@ import io.github.code_akram.or2.ui.TextAction
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+
+/** The composer's attach button's Photo Picker: several images at once, at most [MAX_IMAGES], no permission. */
+val IMAGE_PICKER = ActivityResultContracts.PickMultipleVisualMedia(MAX_IMAGES)
+
+/** What [IMAGE_PICKER] asks for: images only. */
+fun imagePickRequest(): PickVisualMediaRequest = PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
 
 /**
  * The terminal and its input chrome: the Canvas terminal edge to edge, the arrow pad floating
@@ -110,8 +117,8 @@ fun TerminalScreen(
     closeTerminal: () -> Unit = {},
     /**
      * The terminal's image paste: the composer's attach button (the Photo Picker) and a keyboard's
-     * images upload through it, and each uploaded path is inserted here (contracts.md, "Image paste").
-     * Null takes no images.
+     * images upload through its queue, and each run's uploaded paths are inserted here together
+     * (contracts.md, "Image paste"). Null takes no images.
      */
     imagePaste: ImagePaste? = null,
 ) {
@@ -133,25 +140,27 @@ fun TerminalScreen(
         var pendingSend by remember { mutableStateOf<String?>(null) }
         var shortcutsOpen by remember { mutableStateOf(false) }
         val sessionState by state.collectAsState()
-        // Images: from the Photo Picker (images only, no storage permission) or a keyboard, uploaded by the terminal's paste.
-        val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-            if (uri != null) imagePaste?.start(imageFromUri(context.applicationContext, uri))
+        // Images: from the Photo Picker (images only, at most MAX_IMAGES, no storage permission) or a keyboard, each
+        // joining the terminal's upload queue, in the order picked.
+        val picker = rememberLauncherForActivityResult(IMAGE_PICKER) { uris ->
+            for (uri in uris) imagePaste?.start(imageFromUri(context.applicationContext, uri))
         }
-        val attach = imagePaste?.let { { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) } }
+        val attach = imagePaste?.let { { picker.launch(imagePickRequest()) } }
         val receiveImage = imagePaste?.let { paste -> { uri: Uri -> paste.start(imageFromUri(context.applicationContext, uri)) } }
         DisposableEffect(view, imagePaste) {
             view.onImage = imagePaste?.let { paste -> { uri, release -> paste.start(imageFromUri(context.applicationContext, uri, release)) } }
             onDispose { view.onImage = null }
         }
-        // An uploaded image's path: a space, the quoted path, no Enter; into the message being written when the
-        // composer is open, else pasted into the terminal (bracketed when the program asked for that).
+        // A queue run's uploaded paths, together: each a space and the quoted path, no Enter; into the message being
+        // written when the composer is open, else one paste into the terminal (bracketed when the program asked for that).
         LaunchedEffect(view, imagePaste) {
-            imagePaste?.paths?.collect { path ->
+            imagePaste?.paths?.collect { paths ->
                 // ImagePaste delivers only insertable paths; never type anything else.
-                if (!insertablePath(path)) return@collect
+                val usable = paths.filter(::insertablePath)
+                if (usable.isEmpty()) return@collect
                 when (insertTarget(chrome.composerOpen)) {
-                    InsertTarget.COMPOSER -> chrome.composerText = composerWithPath(chrome.composerText, path)
-                    InsertTarget.TERMINAL -> view.pasteText(pathInsertion(path))
+                    InsertTarget.COMPOSER -> chrome.composerText = composerWithPaths(chrome.composerText, usable)
+                    InsertTarget.TERMINAL -> view.pasteText(pathsInsertion(usable))
                 }
             }
         }

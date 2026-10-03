@@ -1,9 +1,11 @@
 package io.github.code_akram.or2.paste
 
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertArrayEquals
@@ -113,6 +115,25 @@ class ImageSourceTest {
             assertEquals("inOpen=$inOpen", 1, source.aborts.get())
             assertEquals("inOpen=$inOpen", 1, released.get())
         }
+    }
+
+    @OptIn(DelicateCoroutinesApi::class)
+    @Test
+    fun aPreparationRunAfterItsQueueWasCancelledOpensNothingAndGivesTheGrantBack() = runBlocking {
+        var created = false
+        val released = AtomicInteger()
+        val readers = ImageReaders(cap = 1)
+        val prepare = imagePreparation(
+            "content", { created = true; Bytes(byteArrayOf(1)) }, { released.incrementAndGet() }, Passthrough, readers = readers,
+        )
+        // As a cancelled queue runs the images it dropped: in a coroutine already cancelled.
+        val job = launch(start = CoroutineStart.ATOMIC) { prepare() }
+        job.cancel()
+        job.join()
+        assertTrue(job.isCancelled)
+        assertFalse("never opened", created)
+        assertEquals(0, readers.live)
+        assertEquals(1, released.get())
     }
 
     @Test
