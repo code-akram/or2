@@ -152,6 +152,13 @@ pub fn try_lock(fd: RawFd, exclusive: bool) -> io::Result<bool> {
     }
 }
 
+/// Releases an open file description's `flock`, including any descriptors inherited by a
+/// child between fork and exec. Closing just one descriptor does not release such a lock.
+pub fn unlock(fd: RawFd) -> io::Result<()> {
+    // SAFETY: `fd` is open; the call uses no pointers.
+    retry(-1, || unsafe { libc::flock(fd, libc::LOCK_UN) }).map(|_| ())
+}
+
 /// `fsync` of a directory: makes a rename or a new name in it durable.
 pub fn fsync_dir(dir: RawFd) -> io::Result<()> {
     // SAFETY: `dir` is open.

@@ -102,10 +102,16 @@ pub fn record_warning(text: &str) -> String {
 }
 
 /// The `or2-pair/lock` held exclusively: `authorized_keys` and the state may be changed. Dropping
-/// it releases the lock.
+/// it explicitly releases the lock, even if a child inherited the descriptor before exec.
 #[derive(Debug)]
 pub struct Held {
     _fd: OwnedFd,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let _ = unlock(self._fd.as_raw_fd());
+    }
 }
 
 /// A run's own state file, kept open with an exclusive `flock` for as long as the run lives.
@@ -113,6 +119,13 @@ pub struct Held {
 #[derive(Debug)]
 pub struct Liveness {
     _fd: OwnedFd,
+}
+
+impl Drop for Liveness {
+    fn drop(&mut self) {
+        // `close` alone leaves the lock alive if a concurrent spawn inherited a descriptor.
+        let _ = unlock(self._fd.as_raw_fd());
+    }
 }
 
 #[derive(Debug)]
@@ -533,6 +546,44 @@ mod tests {
         dir.remove(&live).unwrap();
         assert!(dir.read_state(&live).unwrap().is_none() && !dir.has_done(&live));
         dir.remove(&live).unwrap();
+    }
+
+    #[test]
+    fn dropping_liveness_unlocks_even_with_a_duplicate_descriptor() {
+        let (_home, account) = ssh_home();
+        let dir = StateDir::open(&account, true).unwrap().unwrap();
+        let live = id("aaaaaaaaaaaaa");
+        let liveness = dir.publish_state(&state("aaaaaaaaaaaaa", 123)).unwrap();
+        // `dup` and a child between fork and exec share the same open file description.
+        // Closing only the guard's descriptor would leave the child's lock alive.
+        let inherited = liveness._fd.try_clone().unwrap();
+        assert!(dir.held_by_its_run(&live).unwrap());
+        drop(liveness);
+        assert!(!dir.held_by_its_run(&live).unwrap());
+        assert!(dir.read_state(&live).unwrap().is_some());
+        drop(inherited);
+    }
+
+    #[test]
+    fn dropping_the_change_lock_unlocks_even_with_a_duplicate_descriptor() {
+        let (_home, account) = ssh_home();
+        let dir = StateDir::open(&account, true).unwrap().unwrap();
+        let held = dir.lock(Duration::ZERO, &|| false).unwrap();
+        let inherited = held._fd.try_clone().unwrap();
+        assert_eq!(
+            dir.lock(Duration::ZERO, &|| false).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(held);
+        let next = dir.lock(Duration::ZERO, &|| false).unwrap();
+        drop(inherited);
+        // Closing the old duplicate must not release the next owner's independent lock.
+        assert_eq!(
+            dir.lock(Duration::ZERO, &|| false).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(next);
+        dir.lock(Duration::ZERO, &|| false).unwrap();
     }
 
     #[test]

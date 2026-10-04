@@ -155,8 +155,18 @@ corrected through the app, using the existing key without re-pairing. This is no
 (a real server on another interface can use the same port), with a regression test. The fork-handover wait now
 requires exactly the reported pid, not just at most one owner; three standalone runs and the full gate pass.
 
-**Intermittent tests to investigate:** during release preparation,
-`ssh::connection::tests::the_kept_session_closes_its_channel_when_dropped` timed out once, and
-`or2-pair::exchange::tests::a_state_file_no_run_holds_is_expired` reported Installed instead of Expired once.
-Both passed alone and in the final full workspace run (also at eight threads per suite). No production change
-was made for either, and their causes are not established. The isolated CLI SIGKILL/expired-pairing test passes.
+**Intermittent tests investigated and fixed (2026-10-04, unreleased):**
+- **Pairing locks:** the original `a_state_file_no_run_holds_is_expired` failure reproduced on baseline full-suite
+  run 8. Closing a guard's descriptor alone leaves its `flock` alive if a parallel spawn inherited the same
+  open file description before exec. `Held` and `Liveness` now explicitly unlock on drop (retrying EINTR).
+  Two deterministic duplicate-descriptor regressions failed before the fix and pass after it; they model the
+  same sharing as fork without introducing another fork race. The old 30 s test workaround is removed.
+- **SFTP close observation:** the original `the_kept_session_closes_its_channel_when_dropped` timeout did not
+  recur in 12 SSH-suite and 8 full-core baseline runs. A deterministic EOF-before-Close regression reproduced
+  the missing callback: the fixture's `into_stream` drop sent a server-initiated Close first, so russh removed
+  the channel and ignored the client's later Close instead of invoking `channel_close`. The fixture now uses
+  passive reader/writer adapters; the regression and the original test pass. No app-side SFTP change.
+- **Verification:** 20 consecutive full pairing-unit suites (200 tests each), 12 full-core unit suites (589
+  each), plus the full all-features workspace gate (1,044 tests; sshd/tmux/mosh/herdr required), formatting and
+  Clippy with warnings denied pass. The CLI SIGKILL/expired-pairing regression passes too. Only isolated Rust
+  fixtures were used; the owner's app, authorization and deferred connectivity acceptance were untouched.

@@ -8,6 +8,13 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Pairing lock guards explicitly unlock on drop, so a child inheriting a descriptor between fork and exec
+  cannot keep an ended run looking live or delay the next authorization change.
+- The SFTP test fixture no longer races the client's channel Close with its own close-on-drop, avoiding a
+  missed callback and a false cleanup failure. Deterministic regressions cover both lock and close races.
+
 ## [0.1.4] - 2026-10-04
 
 Spaces and herdr-style agent names. See [the release notes](docs/releases/v0.1.4.md).

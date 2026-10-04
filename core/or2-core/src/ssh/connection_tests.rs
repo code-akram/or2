@@ -617,7 +617,7 @@ impl server::Handler for Server {
         let root = self.shared.sftp.lock().unwrap().clone();
         let kept = self.shared.sessions.lock().unwrap().remove(&channel);
         match (name, root, kept) {
-            ("sftp", Some(root), Some(kept)) => {
+            ("sftp", Some(root), Some(mut kept)) => {
                 session.channel_success(channel)?;
                 let quirks = {
                     let mut quirks = self.shared.sftp_quirks.lock().unwrap();
@@ -631,7 +631,11 @@ impl server::Handler for Server {
                 if binary {
                     let (near, far) = tokio::io::duplex(1 << 20);
                     russh_sftp::server::run(far, handler).await;
-                    tokio::spawn(sftp_server::binary_handles(kept.into_stream(), near));
+                    tokio::spawn(async move {
+                        let writer = kept.make_writer();
+                        let stream = tokio::io::join(kept.make_reader(), writer);
+                        sftp_server::binary_handles(stream, near).await;
+                    });
                 } else {
                     // Through a relay, which can delay replies, count round trips and hang up.
                     let link = Arc::new(sftp_server::Link::default());
@@ -642,13 +646,20 @@ impl server::Handler for Server {
                         .push(Arc::clone(&link));
                     let (near, far) = tokio::io::duplex(1 << 20);
                     russh_sftp::server::run(far, handler).await;
-                    tokio::spawn(sftp_server::relay(
-                        kept.into_stream(),
-                        near,
-                        link,
-                        latency,
-                        Arc::clone(&self.shared.sftp_hang_ups),
-                    ));
+                    let hang_ups = Arc::clone(&self.shared.sftp_hang_ups);
+                    let events = self.shared.channel_events.lock().unwrap().clone();
+                    tokio::spawn(async move {
+                        // Do not use `into_stream`: its drop sends a server-initiated Close
+                        // after EOF, which can win the race with the client's Close. russh
+                        // then removes the channel and never calls our `channel_close`.
+                        // Keep the peer passive so the counter observes the client's Close.
+                        let writer = kept.make_writer();
+                        let stream = tokio::io::join(kept.make_reader(), writer);
+                        sftp_server::relay(stream, near, link, latency, hang_ups).await;
+                        if let Some(events) = events {
+                            let _ = events.send(("sftp_end", channel));
+                        }
+                    });
                 }
             }
             _ => session.channel_failure(channel)?,
@@ -3903,6 +3914,45 @@ fn a_cancelled_upload_closes_its_file_and_leaves_the_session_to_the_next() {
         .unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), image_bytes(10));
     assert_eq!(sftp_requests(&fixture, "init"), 1, "the same session");
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+}
+
+#[test]
+fn sftp_eof_does_not_hide_the_clients_channel_close() {
+    let (mut fixture, _home, _root) = sftp_fixture();
+    let host = fixture.ssh();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    let channel = runtime().block_on(async {
+        let mut channel = host.start_open().wait().await.unwrap();
+        channel.request_subsystem(true, "sftp").await.unwrap();
+        assert!(matches!(
+            channel.wait().await,
+            Some(russh::ChannelMsg::Success)
+        ));
+        channel.eof().await.unwrap();
+        channel
+    });
+    let (event, id) = events.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(event, "session");
+    assert_eq!(
+        events.recv_timeout(Duration::from_secs(5)).unwrap(),
+        ("subsystem", id)
+    );
+    // Wait until the peer saw EOF and finished serving SFTP before closing locally.
+    // With `into_stream` on the fixture side, this already sends a server-initiated
+    // Close; russh removes that channel and never calls `channel_close` for our reply.
+    assert_eq!(
+        events.recv_timeout(Duration::from_secs(5)).unwrap(),
+        ("sftp_end", id)
+    );
+    runtime().block_on(channel.close()).unwrap();
+    assert_eq!(
+        events.recv_timeout(Duration::from_secs(5)).unwrap(),
+        ("close", id),
+        "the fixture must observe the client's Close even when EOF arrived first"
+    );
     fixture.handle.disconnect();
     assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
 }

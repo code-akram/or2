@@ -721,12 +721,10 @@ mod tests {
         let f = fixture();
         let backup = Backup::new(DateTime::now());
         let mut live = start(&f, &backup, Duration::from_secs(300));
-        // Another program holds the lock. Taken with patience: a child process that another test
-        // of this binary is starting can still hold the lock `start` just let go of, through a
-        // descriptor it inherited between its fork and its exec (Fable's review saw this test
-        // fail 1 run in 4 under the whole suite).
+        // Another program holds the lock. `start` explicitly unlocked its guard, so even
+        // a child forked by a parallel test cannot keep that old lock alive until exec.
         let dir = StateDir::open(&f.account, false).unwrap().unwrap();
-        let holder = dir.lock(Duration::from_secs(30), &|| false).unwrap();
+        let holder = dir.lock(Duration::ZERO, &|| false).unwrap();
         // The run looks once in its wait, once as the cleanup starts and once after its first
         // failed try of the lock: the second signal is there from that third look on, decided by
         // the looks themselves rather than by a thread racing them.

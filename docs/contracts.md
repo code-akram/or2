@@ -2534,7 +2534,9 @@ restrict,command="<exe> enroll <id>",expiry-time="<YYYYMMDDHHMM>Z"
   them interleave. A lock that is taken is tried again every 50 ms: `or2-pair` waits up to 3 s (a second
   signal during a cleanup ends the waiting after one more try), `enroll` up to 2 s. (Version 2 as first
   integrated locked `authorized_keys` itself; that lock could not cover `enroll`'s commit and the
-  cleanup together, and a file that is replaced has no stable inode to lock.)
+  cleanup together, and a file that is replaced has no stable inode to lock.) The lock guard explicitly
+  unlocks on drop, retrying EINTR: closing its descriptor alone would leave the lock held by a child that
+  inherited the same open file description between fork and exec.
 - **Writing.** Through the checked handles (below), under the lock: the state file first (a state file
   without a key is harmless), then one backup per run before the first change of `authorized_keys`, then
   the append. If the append fails the state file is removed again.
@@ -2610,8 +2612,9 @@ restrict,command="<exe> enroll <id>",expiry-time="<YYYYMMDDHHMM>Z"
   integration: the name existed, empty, while it was written, and another run's sweep took it for dead
   and removed it).
 - **Held for the run's life.** The foreground takes an exclusive `flock` on its state file before it
-  gets its name and keeps that descriptor open until the run ends. A state file whose lock can be taken
-  (a shared non-blocking `flock` succeeds) belongs to a run that is gone, however it ended, SIGKILL
+  gets its name and keeps that descriptor open until the run ends. Its guard explicitly unlocks on drop,
+  just like the change lock, so an inherited duplicate cannot extend the guard's lifetime. A state file whose
+  lock can be taken (a shared non-blocking `flock` succeeds) belongs to a run that is gone, however it ended, SIGKILL
   included: `enroll` refuses it (`expired`) and the sweep removes it with its bootstrap entry.
 - `or2-pair enroll <id>` is an internal subcommand (listed in `--help` under "Internal"; exactly that
   argument, the id validated before use). It runs under sshd with the phone's exec channel as stdin and

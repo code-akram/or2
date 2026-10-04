@@ -374,7 +374,7 @@ const BINARY_PREFIX: [u8; 2] = [0xff, 0xfe];
 /// so a client that does not send the handle's exact bytes back gets the server's failure.
 pub(super) async fn binary_handles<C, S>(client: C, server: S)
 where
-    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    C: AsyncRead + AsyncWrite + Unpin + Send,
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut client_read, mut client_write) = tokio::io::split(client);
@@ -531,7 +531,7 @@ pub(super) async fn relay<C, S>(
     latency: Duration,
     hang_ups: Arc<std::sync::atomic::AtomicUsize>,
 ) where
-    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    C: AsyncRead + AsyncWrite + Unpin + Send,
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     use std::sync::atomic::Ordering;
