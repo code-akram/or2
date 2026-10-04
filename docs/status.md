@@ -104,7 +104,8 @@ until the caller acknowledges, as a real host does.
 1. **The deferred M3 acceptance**, deferred by the owner (2026-10-03) until they clear it: mobile data, the Wi-Fi to mobile handover, and
    unplugged (Doze) background runs. This is v0 acceptance step 3, still never tested.
 2. **The rest of the roadmap.**
-   - Next items: scanning for SSH servers, recent directories, app lock.
+   - Next items: scanning for SSH servers, app lock. Recent directories is implemented below, unreleased;
+     external review and device/owner QA remain before shipping.
    - M4: history sheet, ntfy, dictation, Wake-on-LAN.
    - M5: Chat View, diff viewer, web preview.
 
@@ -170,3 +171,21 @@ requires exactly the reported pid, not just at most one owner; three standalone 
   each), plus the full all-features workspace gate (1,044 tests; sshd/tmux/mosh/herdr required), formatting and
   Clippy with warnings denied pass. The CLI SIGKILL/expired-pairing regression passes too. Only isolated Rust
   fixtures were used; the owner's app, authorization and deferred connectivity acceptance were untouched.
+
+**Recent directories implemented (2026-10-04, unreleased):**
+- The owner's go-ahead followed committing the pairing/SFTP fixes (`a83f3b0`). The host picker's **Dirs** tab
+  reads bounded Claude Code/Codex histories over the existing SSH connection and opens a new shell in a selected
+  project with the host's transport preference. Read-only, no daemon or Room migration; FFI API 21. Details and v1
+  format/size limits are in contracts, "Recent directories / one-tap shells". A tmux-in-directory option is not v1.
+- Deterministic regressions cover metadata parsing, limits and malformed inputs, unsafe/injected-looking paths,
+  newline file names, stale directories, timeout/cancellation, retired connections, shell transport/close/reuse
+  rules, restoration and the real FFI. Disposable SSH and mosh hosts verify the actual working directory.
+- Pass: all-features Rust workspace **1,060 tests** with sshd/tmux/mosh/herdr required, formatting, Clippy with
+  warnings denied, both generated-file checks; Android debug/device-test/unsigned-release builds, **650 JVM tests**,
+  and debug/device-test lint. Device UI tests compile, but have **not** run on the phone. Gallery:
+  `picker-directories` (synthetic paths only). External review and owner/device QA are still pending.
+- One initial workspace invocation was backgrounded, so its children inherited ignored SIGINT and the existing
+  pairing CLI Ctrl-C test waited indefinitely. Only that disposable fixture child was killed; the foreground
+  workspace rerun passed. This was a test-launch issue, not a new pairing change.
+- No release, signing-key use, phone install/test run, real-host history read or authorization change. The owner's
+  phone remains on published v0.1.4; connectivity and mobile-data/Doze acceptance remain owner-deferred.

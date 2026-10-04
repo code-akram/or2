@@ -8,6 +8,12 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+### Added
+
+- Recent directories: the host picker's **Dirs** tab lists recent Claude Code and Codex projects. Tap a path
+  to open a new shell there, over the existing host connection, with the host's transport preference.
+  History reads are bounded and read-only; no host daemon or storage migration (FFI API 21).
+
 ### Fixed
 
 - Pairing lock guards explicitly unlock on drop, so a child inheriting a descriptor between fork and exec

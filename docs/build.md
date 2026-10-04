@@ -199,6 +199,12 @@ is. The in-process russh server tests in `ssh/connection_tests.rs` (no sshd need
 refused channels, terminal setup timeout, cancelled execs, the connect timer around the
 host-key prompt and a dying connection task.
 
+`core/or2-core/tests/directories.rs` reads only temporary Claude Code/Codex histories over `LocalHost` with
+explicit config roots, exercising the bounded read script, malformed/partial records, newline filenames,
+literal shell paths and stale directories. `host.rs` and `host_mosh.rs` repeat a directory-shell open over the
+real disposable SSH/mosh fixture. That fixture also pins `CLAUDE_CONFIG_DIR` and `CODEX_HOME` inside its
+private home, so inherited agent settings cannot cause tests to read the runner's real histories.
+
 `core/or2-core/tests/host_nav.rs` runs `HostHandle::navigate` (the swipe gestures' moves) for a
 tmux target end to end: the disposable sshd, tmux on its private `TMUX_TMPDIR`, a real tmux client
 attached by an SSH terminal, and window, pane and session moves checked with `tmux display` and

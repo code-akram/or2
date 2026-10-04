@@ -15,7 +15,7 @@ class ReattachTest {
         val targets = listOf(
             TerminalTarget.Shell, TerminalTarget.Tmux("work-1"), TerminalTarget.Herdr(null, null),
             TerminalTarget.Herdr("work", "w1:p2"), TerminalTarget.Herdr(null, "w1:p2"), TerminalTarget.Herdr("a|b", "p:1=2"),
-            TerminalTarget.Tmux("é ü"),
+            TerminalTarget.Tmux("é ü"), TerminalTarget.ShellIn("/work/it's | a + project/é"),
         )
         for (target in targets) for (transport in TerminalTransport.entries) {
             val original = LastTerminal(42, target, transport)

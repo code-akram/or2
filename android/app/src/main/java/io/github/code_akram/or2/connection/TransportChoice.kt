@@ -44,6 +44,9 @@ data class OpenPlan(
     val background: Boolean = false,
 )
 
+/** Independent shells cannot use the multiplexer-only background transport swap. */
+fun TerminalTarget.isShell(): Boolean = this is TerminalTarget.Shell || this is TerminalTarget.ShellIn
+
 /**
  * The choice table (contracts.md, "Instant opens"). Explicit `SSH` and `MOSH` are never
  * second-guessed (a mosh failure is shown as it is). Under `AUTO` nothing waits for UDP:
@@ -63,7 +66,7 @@ fun planOpen(pref: TransportPref, target: TerminalTarget, verdict: UdpVerdict, m
         verdict == UdpVerdict.BLOCKED -> OpenPlan(TerminalTransport.SSH)
         moshServer != null && moshServer.path == null -> OpenPlan(TerminalTransport.SSH)
         verdict == UdpVerdict.OK -> OpenPlan(TerminalTransport.MOSH, AUTO_MOSH_BUDGET_MS, fallbackEligible = true)
-        target != TerminalTarget.Shell -> OpenPlan(TerminalTransport.SSH, background = true)
+        !target.isShell() -> OpenPlan(TerminalTransport.SSH, background = true)
         moshServer != null -> OpenPlan(TerminalTransport.MOSH, shellMoshBudgetMs(moshServer.roundTripMs), fallbackEligible = true)
         else -> OpenPlan(TerminalTransport.SSH)
     }

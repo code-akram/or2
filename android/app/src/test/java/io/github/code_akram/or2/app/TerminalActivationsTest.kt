@@ -445,7 +445,9 @@ class TerminalActivationsTest {
         // A shell is never reused.
         val shell = pick(s, TerminalTarget.Shell)
         assertNotSame(shell, pick(s, TerminalTarget.Shell))
-        assertEquals(7, s.holder.terminals.value.size) // tmux x2, herdr x2, the pane, shell x2.
+        val directoryShell = pick(s, TerminalTarget.ShellIn("/work/project"))
+        assertNotSame(directoryShell, pick(s, TerminalTarget.ShellIn("/work/project")))
+        assertEquals(9, s.holder.terminals.value.size) // tmux x2, herdr x2, the pane, shell x2, directory shell x2.
         s.holder.dismissHost(7)
     }
 
@@ -526,6 +528,8 @@ class TerminalActivationsTest {
 
     @Test
     fun onlyAnOpenShellAsksBeforeItCloses() {
+        assertTrue(closeAsks(TerminalTarget.ShellIn("/work/project"), closed = false))
+        assertFalse(closeAsks(TerminalTarget.ShellIn("/work/project"), closed = true))
         assertTrue(closeAsks(TerminalTarget.Shell, closed = false))
         assertFalse(closeAsks(TerminalTarget.Shell, closed = true))
         assertFalse(closeAsks(TerminalTarget.Tmux("main"), closed = false))

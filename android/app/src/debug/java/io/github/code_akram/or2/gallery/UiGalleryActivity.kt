@@ -78,6 +78,7 @@ import io.github.code_akram.or2.home.hostCardStatus
 import io.github.code_akram.or2.host.GateAction
 import io.github.code_akram.or2.host.OpenSessions
 import io.github.code_akram.or2.host.PickerGate
+import io.github.code_akram.or2.host.DirectoryList
 import io.github.code_akram.or2.host.PickerTab
 import io.github.code_akram.or2.host.SessionPickerSheet
 import io.github.code_akram.or2.host.TmuxList
@@ -193,6 +194,7 @@ class UiGalleryActivity : ComponentActivity() {
             }
             "picker-herdr" -> HomePicker(HomeVariant.Sessions, gate = null, tab = PickerTab.HERDR)
             "picker-tmux" -> HomePicker(HomeVariant.Sessions, gate = null, tab = PickerTab.TMUX)
+            "picker-directories" -> HomePicker(HomeVariant.Sessions, gate = null, tab = PickerTab.DIRS)
             "picker-udp" -> HomePicker(HomeVariant.Sessions, gate = null, tab = PickerTab.TMUX, udpBlocked = true)
             "picker-many" -> HomePicker(HomeVariant.Sessions, gate = null, tab = PickerTab.HERDR, many = true)
             "home-picker-many" -> HomePicker(HomeVariant.Sessions, gate = null, many = true)
@@ -453,6 +455,7 @@ class UiGalleryActivity : ComponentActivity() {
                 if (many) manyCaps else caps, null, tmux, OpenSessions(herdr = setOf("personal"), tmux = setOf("main")),
                 openShell = {}, openTmux = {}, openHerdr = {}, refresh = {}, dismiss = {}, initialTab = tab, gate = gate, title = "workstation",
                 udpBlocked = udpBlocked, herdrViews = if (many) emptyMap() else pickerViews,
+                directories = DirectoryList.Loaded(listOf("/home/dev/code/or2", "/home/dev/code/docs", "/home/dev/work/it's a project")),
             )
         }
     }
@@ -581,7 +584,7 @@ class UiGalleryActivity : ComponentActivity() {
         val screens = listOf(
             "home", "home-scrolled", "home-empty", "home-notices", "host-cards", "host-cards-scrolled", "home-options", "home-close-shell",
             "home-picker", "home-picker-many", "home-picker-connecting", "home-picker-failed",
-            "inbox", "inbox-scrolled", "inbox-empty", "inbox-enable-reply", "picker-herdr", "picker-many", "picker-tmux", "picker-udp",
+            "inbox", "inbox-scrolled", "inbox-empty", "inbox-enable-reply", "picker-herdr", "picker-many", "picker-tmux", "picker-directories", "picker-udp",
             "host-form", "host-form-scrolled", "host-form-new-key", "host-form-edit", "keys", "keys-scrolled", "keys-empty", "key-sheet",
             "settings", "about", "about-scrolled", "licenses", "licenses-scrolled", "license-text", "license-text-scrolled",
             "hostkey-first", "hostkey-changed", "hostkey-changed-many", "shortcuts",

@@ -170,7 +170,7 @@ impl Sshd {
         // Configured RSA first, as stock; listed ECDSA first (the field's documented order).
         other_host_keys.reverse();
         let mut config = format!(
-            "ListenAddress {}\n{host_key_lines}HostKey {}\nAuthorizedKeysFile {}\nPidFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPrintMotd no\nPrintLastLog no\nSetEnv HOME={} HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR={} TMUX_TMPDIR={} {environment}\nLogLevel VERBOSE\n",
+            "ListenAddress {}\n{host_key_lines}HostKey {}\nAuthorizedKeysFile {}\nPidFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPrintMotd no\nPrintLastLog no\nSetEnv HOME={} HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR={} TMUX_TMPDIR={} CLAUDE_CONFIG_DIR={} CODEX_HOME={} {environment}\nLogLevel VERBOSE\n",
             Ipv4Addr::LOCALHOST,
             path.join("host").display(),
             path.join("authorized").display(),
@@ -178,6 +178,8 @@ impl Sshd {
             path.display(),
             path.display(),
             tmux_dir.display(),
+            path.join(".claude").display(),
+            path.join(".codex").display(),
         );
         if certificate_only {
             let ca = ClientKey::generate_ed25519("");

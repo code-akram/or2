@@ -46,6 +46,7 @@ pub use integration::{
     is_integration,
 };
 pub use navigate::navigate_in;
+pub(crate) use project::display_text;
 pub use reply::{AgentIdentity, MAX_REPLY_BYTES, OPEN_THE_PANE, Reply, ReplyRoute, reply_in};
 pub use scroll::{ScrollOffsets, next_offset, scroll_pane_in};
 pub use view::{Agent, AgentSession, AgentStatus, HerdrView, Pane, Tab, Workspace};

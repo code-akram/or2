@@ -166,7 +166,7 @@ fun SessionScreen(
                     onBackground = { background = it }, onFrameDrawn = { holder.timing.terminalFrame(terminal.id) },
                     target = terminal.target, targetScroller = terminal.targetScroller, input = terminal.input, chrome = chrome,
                     // Swipes move tmux or herdr; a shell has nothing to move and keeps every touch.
-                    onSwipe = if (terminal.target is TerminalTarget.Shell) null else { swipe ->
+                    onSwipe = if (terminal.target is TerminalTarget.Shell || terminal.target is TerminalTarget.ShellIn) null else { swipe ->
                         haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
                         scope.launch { holder.navigate(terminal, swipeNav(swipe)) }
                     },

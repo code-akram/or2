@@ -185,6 +185,8 @@ pub enum TerminalTransport {
 pub enum TerminalTarget {
     /// The login shell.
     Shell,
+    /// A login shell in a literal absolute working directory.
+    ShellIn { path: String },
     /// Attach to, or create, a tmux session.
     Tmux { session_name: String },
     /// herdr in `session` (`None` is the default session), after focusing `pane_id` if given.
@@ -248,6 +250,7 @@ impl TerminalTarget {
     pub fn validate(&self) -> Result<(), HostError> {
         let valid = match self {
             Self::Shell => true,
+            Self::ShellIn { path } => crate::directories::valid_path(path),
             Self::Tmux { session_name } => is_valid_tmux_session_name(session_name),
             Self::Herdr { session, pane_id } => {
                 session.as_deref().is_none_or(is_valid_herdr_session_name)
@@ -487,6 +490,9 @@ pub enum HostCommand {
     /// reply never waits for herdr's session listing.
     MoshServer {
         reply: oneshot::Sender<Result<Option<String>, HostError>>,
+    },
+    RecentDirectories {
+        reply: oneshot::Sender<Result<Vec<String>, HostError>>,
     },
     ListTmux {
         reply: oneshot::Sender<Result<Vec<TmuxSession>, HostError>>,
@@ -745,6 +751,14 @@ impl HostHandle {
             .await
     }
 
+    /// Bounded Claude Code/Codex history read, newest first; missing histories are empty.
+    pub async fn recent_directories(&self) -> Result<Vec<String>, HostError> {
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::RecentDirectories {
+            reply,
+        })
+        .await
+    }
+
     /// tmux sessions, most recently active first; empty when no tmux server runs.
     pub async fn list_tmux_sessions(&self) -> Result<Vec<TmuxSession>, HostError> {
         self.query(QUERY_TIMEOUT, |reply| HostCommand::ListTmux { reply })
@@ -841,12 +855,13 @@ impl HostHandle {
         {
             return Err(HostError::InvalidName);
         }
-        if target == TerminalTarget::Shell
-            || matches!(
-                scroll,
-                TargetScroll::Up { lines: 0 } | TargetScroll::Down { lines: 0 }
-            )
-        {
+        if matches!(
+            target,
+            TerminalTarget::Shell | TerminalTarget::ShellIn { .. }
+        ) || matches!(
+            scroll,
+            TargetScroll::Up { lines: 0 } | TargetScroll::Down { lines: 0 }
+        ) {
             return Ok(());
         }
         self.query(QUERY_TIMEOUT, |reply| HostCommand::ScrollTarget {
@@ -890,7 +905,10 @@ impl HostHandle {
         {
             return Err(HostError::InvalidName);
         }
-        if target == TerminalTarget::Shell {
+        if matches!(
+            target,
+            TerminalTarget::Shell | TerminalTarget::ShellIn { .. }
+        ) {
             return Ok(());
         }
         self.query(QUERY_TIMEOUT, |reply| HostCommand::Navigate {

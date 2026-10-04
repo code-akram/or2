@@ -401,6 +401,39 @@ fn an_unauthorized_key_closes_with_authentication_rejected() {
 }
 
 #[test]
+fn recent_directories_are_read_over_ssh_and_a_literal_path_opens_a_shell_there() {
+    require_sshd!();
+    let live = Live::new();
+    let path = live.sshd.home().join("project's $(touch INJECTED)");
+    fs::create_dir(&path).unwrap();
+    let claude = live.sshd.home().join(".claude");
+    fs::create_dir(&claude).unwrap();
+    fs::write(claude.join("history.jsonl"), serde_json::json!({
+        "project": path.to_str().unwrap(), "timestamp": 1000, "display": "private fixture prompt"
+    }).to_string() + "\n").unwrap();
+    assert_eq!(
+        block_on(live.host.recent_directories()).unwrap(),
+        [path.to_str().unwrap()]
+    );
+    let target = TerminalTarget::ShellIn {
+        path: path.to_str().unwrap().into(),
+    };
+    let mut term = live.open("directory", target, 160, 24);
+    term.quiet();
+    let literal = path.to_str().unwrap().replace('\'', "'\\''");
+    term.send(&format!(
+        "test \"$PWD\" = '{literal}' && printf 'DIR-%s\\n' match\n"
+    ));
+    term.wait("DIR-match");
+    assert!(!live.sshd.home().join("INJECTED").exists());
+    assert!(!path.join("INJECTED").exists());
+    term.handle.disconnect();
+    assert_eq!(term.closed(), CloseReason::Disconnected);
+    live.host.disconnect();
+    assert_eq!(closed(&live.states), CloseReason::Disconnected);
+}
+
+#[test]
 fn an_rsa_client_key_authenticates_and_key_input_reaches_the_shell() {
     require_sshd!();
     // RSA exercises the signature hash negotiation against stock sshd; Ed25519 is the rest of

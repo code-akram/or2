@@ -202,6 +202,16 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         session.pidAnnounced = true
         listener.onServerPid(pid)
     }
+    var directories: List<String> = emptyList()
+    var directoriesGate: CompletableDeferred<Unit>? = null
+    var directoriesFailure: HostException? = null
+    var directoryCalls = 0
+    override suspend fun recentDirectories(): List<String> {
+        directoryCalls++
+        directoriesGate?.await()
+        directoriesFailure?.let { throw it }
+        return directories
+    }
     override suspend fun listTmuxSessions() = tmux
     override fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface {
         check(!destroyed) { "Host connection object has already been destroyed" }

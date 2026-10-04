@@ -126,7 +126,7 @@ class HomeSessionPickerDeviceTest {
         compose.onNodeWithTag("picker-gate").assertDoesNotExist() // Connected: the lists at once.
         compose.onNodeWithTag("picker-title").assertTextEquals("Alpha") // Over Home, the sheet names its host.
         compose.onNodeWithTag("home-list").assertExists()
-        compose.onNodeWithTag("picker-tab:2").assertDoesNotExist() // herdr and tmux only: no Open tab.
+        compose.onNodeWithTag("picker-tab:2").assertIsDisplayed() // Dirs, not an Open-terminal tab.
         waitFor("herdr-open:default")
         compose.onNodeWithTag("host-shell").performClick()
         waitFor("terminal-card")
@@ -134,6 +134,22 @@ class HomeSessionPickerDeviceTest {
         compose.runOnIdle {
             assertEquals(listOf(TerminalTarget.Shell), port.sessions.map { it.first })
             assertEquals(emptyList<List<Long>>(), connected) // Connected already: nothing to unlock.
+        }
+    }
+
+    @Test
+    fun aRecentDirectoryOpensANewShellThereAndDismissesThePicker() {
+        port.directories = listOf("/work/it's a project")
+        connectFirst()
+        show()
+        compose.onNodeWithTag("host:7").performClick()
+        compose.onNodeWithTag("picker-tab:2").performClick()
+        waitFor("directory-open:0")
+        compose.onNodeWithTag("directory-open:0").performClick()
+        waitFor("terminal-card")
+        compose.onNodeWithTag("session-picker").assertDoesNotExist()
+        compose.runOnIdle {
+            assertEquals(listOf(TerminalTarget.ShellIn("/work/it's a project")), port.sessions.map { it.first })
         }
     }
 

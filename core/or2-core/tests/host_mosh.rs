@@ -382,6 +382,33 @@ impl Live {
 }
 
 #[test]
+fn a_mosh_directory_shell_runs_in_the_literal_working_directory() {
+    require!();
+    let live = Live::new();
+    let path = live.sshd.home().join("project's $(touch INJECTED)");
+    fs::create_dir(&path).unwrap();
+    let mut term = live.mosh(
+        "directory",
+        TerminalTarget::ShellIn {
+            path: path.to_str().unwrap().into(),
+        },
+    );
+    term.quiet();
+    let literal = path.to_str().unwrap().replace('\'', "'\\''");
+    term.send(&format!(
+        "test \"$PWD\" = '{literal}' && printf 'DIR-%s\\n' match\n"
+    ));
+    term.wait("DIR-match");
+    assert!(!live.sshd.home().join("INJECTED").exists());
+    assert!(!path.join("INJECTED").exists());
+    term.handle.disconnect();
+    assert_eq!(term.closed(), CloseReason::Disconnected);
+    live.wait_no_servers("directory shell's server to exit");
+    live.host.disconnect();
+    assert_eq!(live.host_closed(), CloseReason::Disconnected);
+}
+
+#[test]
 fn a_mosh_terminal_echoes_resizes_roams_and_reports_health_through_a_real_host() {
     require!();
     let live = Live::new();

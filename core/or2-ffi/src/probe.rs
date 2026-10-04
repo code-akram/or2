@@ -339,6 +339,7 @@ fn target_title(target: &core_host::TerminalTarget) -> String {
     use core_host::TerminalTarget as T;
     match target {
         T::Shell => format!("{BANNER} shell"),
+        T::ShellIn { path } => format!("{BANNER} shell {path}"),
         T::Tmux { session_name } => format!("{BANNER} tmux {session_name}"),
         T::Herdr { session, pane_id } => format!(
             "{BANNER} herdr {} {}",
@@ -386,6 +387,12 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
             }
             HostCommand::MoshServer { reply } => {
                 let _ = reply.send(Ok(probe_capabilities().mosh_server));
+            }
+            HostCommand::RecentDirectories { reply } => {
+                let _ = reply.send(Ok(vec![
+                    "/home/probe/code/project".into(),
+                    "/home/probe/work".into(),
+                ]));
             }
             HostCommand::ListTmux { reply } => {
                 let _ = reply.send(Ok(probe_tmux_sessions()));

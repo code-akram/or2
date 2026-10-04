@@ -83,6 +83,8 @@ class UiPort(
     }
     override suspend fun capabilities() = caps
     override suspend fun moshServer() = caps.moshServer
+    var directories: List<String> = emptyList()
+    override suspend fun recentDirectories() = directories
     override suspend fun listTmuxSessions() = tmux
     override fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface {
         watchListeners += listener

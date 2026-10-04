@@ -128,6 +128,27 @@ class HostContractTest {
         return host
     }
 
+    @Test
+    fun recentDirectoriesAndDirectoryShellCrossTheFfiAndRejectUnsafePaths() = runBlocking {
+        connectedHost().use { host ->
+            assertEquals(listOf("/home/probe/code/project", "/home/probe/work"), host.recentDirectories())
+            val target = TerminalTarget.ShellIn("/home/probe/it's a project")
+            val (session, listener) = openShell(host, target)
+            session.use {
+                listener.awaitState<SessionState.Connected>()
+                assertEquals(SessionState.Connected, it.state())
+                it.disconnect()
+                listener.awaitState<SessionState.Closed>()
+            }
+            for (path in listOf("relative", "/bad\npath", "/bad\u202Epath")) {
+                assertThrows(HostException.InvalidName::class.java) {
+                    host.openTerminal(TerminalTarget.ShellIn(path), TerminalTransport.SSH, 80u, 24u, null, RecordingListener())
+                }
+            }
+            host.disconnect()
+        }
+    }
+
     private fun openShell(
         host: HostConnection,
         target: TerminalTarget = TerminalTarget.Shell,

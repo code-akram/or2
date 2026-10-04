@@ -54,6 +54,15 @@ class TransportChoiceTest {
     }
 
     @Test
+    fun directoryShellsUseTheShellChoiceAndNeverSwapTwoIndependentShells() {
+        val target = TerminalTarget.ShellIn("/work/project")
+        for (pref in TransportPref.entries) for (verdict in UdpVerdict.entries) for (answer in listOf(found, absent, null)) {
+            assertEquals(planOpen(pref, shell, verdict, answer), planOpen(pref, target, verdict, answer))
+            assertFalse(planOpen(pref, target, verdict, answer).background)
+        }
+    }
+
+    @Test
     fun theShellBudgetIsSixRoundTripsWithAFloorAndACeiling() {
         assertEquals(700u, shellMoshBudgetMs(0))
         assertEquals(700u, shellMoshBudgetMs(116))

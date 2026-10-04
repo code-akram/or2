@@ -70,6 +70,13 @@ sealed interface TmuxList {
     data class Failed(val message: String) : TmuxList
 }
 
+/** Recent paths on this connection, loaded independently of the capability probe. */
+sealed interface DirectoryList {
+    data object Loading : DirectoryList
+    data class Loaded(val paths: List<String>) : DirectoryList
+    data class Failed(val message: String) : DirectoryList
+}
+
 /** Mirrors the Rust rules: nonempty, at most 128 bytes, no control characters, `\`, `:` or `.`. */
 fun tmuxNameError(name: String): String? = when {
     name.isEmpty() -> "Enter a session name."
@@ -79,7 +86,7 @@ fun tmuxNameError(name: String): String? = when {
     else -> null
 }
 
-enum class PickerTab(val label: String) { HERDR("herdr"), TMUX("tmux") }
+enum class PickerTab(val label: String) { HERDR("herdr"), TMUX("tmux"), DIRS("Dirs") }
 
 /**
  * The herdr and tmux sessions of one host that already have an open terminal in or2: the picker marks their rows
@@ -164,7 +171,7 @@ fun pickerWorkspaces(view: HerdrView): List<PickerWorkspace> {
 }
 
 /**
- * The session picker over Home (a host card's header opens it): a segmented control (herdr, tmux) with a "Shell" pill
+ * The session picker over Home (a host card's header opens it): a segmented control (herdr, tmux, Dirs) with a "Shell" pill
  * (the `>_` glyph) that opens a plain shell, and one grouped list below. The herdr tab lists each running session's
  * agents from the host's live views ([herdrViews], by session: null for the default one) under the session's own row (its name and agent count);
  * tapping an agent is [openAgent]. A session that already has an open terminal is marked `● Open` ([open]): choosing
@@ -172,7 +179,8 @@ fun pickerWorkspaces(view: HerdrView): List<PickerWorkspace> {
  * spinner beside it while [refreshing]. Hosts without tmux or herdr, failed listings and errors are explained in muted
  * text, never hidden; so is mosh's UDP being blocked ([udpBlocked]), under the tabs. While [gate] is set (the host is
  * not connected yet) the sheet shows it instead: the host's progress, or why it is not connected with [gateAction]'s
- * pill; the lists follow in the same sheet once the gate is null.
+ * pill; the lists follow in the same sheet once the gate is null. Dirs has recent project paths from the connection's
+ * independent history read; a tap opens a new shell in that directory, with its own Refresh.
  */
 @Composable
 fun SessionPickerSheet(
@@ -195,6 +203,10 @@ fun SessionPickerSheet(
     openAgent: (session: String?, paneId: String) -> Unit = { _, _ -> },
     refreshing: Boolean = false,
     tmuxShown: () -> Unit = {},
+    directories: DirectoryList = DirectoryList.Loading,
+    openDirectory: (String) -> Unit = {},
+    refreshDirectories: () -> Unit = {},
+    readingDirectories: Boolean = false,
 ) {
     var chosen by remember { mutableStateOf(initialTab) }
     val tab = chosen ?: if (caps != null && caps.herdr == null && caps.tmux != null) PickerTab.TMUX else PickerTab.HERDR
@@ -237,6 +249,10 @@ fun SessionPickerSheet(
             ) {
                 when (tab) {
                     PickerTab.HERDR -> HerdrList(caps, capsError, herdrViews, open, openHerdr, openAgent)
+                    PickerTab.DIRS -> {
+                        DirectoryPane(directories, openDirectory)
+                        RefreshRow(refreshDirectories, readingDirectories)
+                    }
                     PickerTab.TMUX -> {
                         TmuxPane(caps, capsError, tmux, open, openTmux)
                         // Only here: the herdr tab is live already. It re-reads tmux and re-probes (new herdr sessions).
@@ -491,6 +507,30 @@ private fun TmuxPane(caps: HostCapabilities?, capsError: String?, tmux: TmuxList
                 }
             }
             NewTmuxSession(choose)
+        }
+    }
+}
+
+@Composable
+private fun DirectoryPane(directories: DirectoryList, open: (String) -> Unit) {
+    when (directories) {
+        DirectoryList.Loading -> Spinner(Modifier.testTag("directories-spinner"))
+        is DirectoryList.Failed -> Muted(directories.message, Modifier.testTag("directories-error"), color = Or2Colors.Danger)
+        is DirectoryList.Loaded -> {
+            if (directories.paths.isEmpty()) {
+                Muted("No recent directories in Claude Code or Codex history.", Modifier.testTag("directories-empty"))
+            } else {
+                Muted("Open a shell in a recent project.")
+                GroupCard(color = Or2Colors.SurfaceRaisedRow) {
+                    directories.paths.forEachIndexed { index, path ->
+                        if (index > 0) GroupDivider()
+                        SheetRow(
+                            "directory:$index", path.trimEnd('/').substringAfterLast('/').ifEmpty { "/" }, path,
+                            { open(path) }, "directory-open:$index",
+                        )
+                    }
+                }
+            }
         }
     }
 }

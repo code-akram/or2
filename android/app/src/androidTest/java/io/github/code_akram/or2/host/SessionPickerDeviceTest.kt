@@ -51,6 +51,7 @@ class SessionPickerDeviceTest {
         capsError: String? = null, open: OpenSessions = OpenSessions(), gate: PickerGate? = null,
         actions: MutableList<GateAction> = mutableListOf(), udpBlocked: Boolean = false,
         views: Map<String?, HerdrView> = emptyMap(), refreshing: Boolean = false, initialTab: PickerTab? = null,
+        directories: DirectoryList = DirectoryList.Loading,
     ) = compose.runOnUiThread {
         val generation = ++generations
         compose.activity.setContent {
@@ -64,6 +65,8 @@ class SessionPickerDeviceTest {
                     gate = gate, gateAction = { actions += it }, title = "Build box", udpBlocked = udpBlocked,
                     herdrViews = views, openAgent = { session, pane -> calls += "agent:$session:$pane" },
                     refreshing = refreshing, tmuxShown = { tmuxShows++ },
+                    directories = directories, openDirectory = { calls += "directory:$it" },
+                    refreshDirectories = { calls += "directory-refresh" },
                 )
             } }
         }
@@ -76,7 +79,7 @@ class SessionPickerDeviceTest {
         val calls = mutableListOf<String>()
         show(calls)
         compose.onNodeWithTag("picker-title").assertTextEquals("Build box")
-        compose.onNodeWithTag("picker-tab:2").assertDoesNotExist() // herdr and tmux only.
+        compose.onNodeWithTag("picker-tab:2").assertIsDisplayed() // Recent directories.
         // herdr is the first segment: the default session opens without a name, a named one by name, a stopped one not at all.
         compose.onNodeWithTag("herdr-open:old").assertIsNotEnabled()
         compose.onNodeWithTag("herdr-open:default").performClick()
@@ -87,6 +90,23 @@ class SessionPickerDeviceTest {
         compose.onNodeWithTag("host-shell").assertTextEquals("Shell").performClick() // A plain shell.
         compose.onNodeWithTag("host-refresh").performScrollTo().performClick()
         compose.runOnIdle { assertEquals(listOf("herdr:null", "herdr:work", "tmux:build", "shell", "refresh"), calls) }
+    }
+
+    @Test
+    fun directoriesHaveLoadingEmptyFailureAndLiteralPathRowsWithRefresh() {
+        show(initialTab = PickerTab.DIRS)
+        compose.onNodeWithTag("directories-spinner").assertIsDisplayed()
+        show(initialTab = PickerTab.DIRS, directories = DirectoryList.Loaded(emptyList()))
+        compose.onNodeWithTag("directories-empty").assertIsDisplayed()
+        show(initialTab = PickerTab.DIRS, directories = DirectoryList.Failed("History read timed out."))
+        compose.onNodeWithTag("directories-error").assertTextEquals("History read timed out.")
+        val calls = mutableListOf<String>()
+        show(calls, initialTab = PickerTab.DIRS, directories = DirectoryList.Loaded(listOf("/work/it's a project")))
+        compose.onNodeWithText("it's a project").assertIsDisplayed()
+        compose.onNodeWithText("/work/it's a project").assertIsDisplayed()
+        compose.onNodeWithTag("directory-open:0").performClick()
+        compose.onNodeWithTag("host-refresh").performClick()
+        compose.runOnIdle { assertEquals(listOf("directory:/work/it's a project", "directory-refresh"), calls) }
     }
 
     @Test

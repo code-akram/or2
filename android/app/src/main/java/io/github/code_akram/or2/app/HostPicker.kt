@@ -20,6 +20,7 @@ import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalTarget
+import io.github.code_akram.or2.host.DirectoryList
 import io.github.code_akram.or2.host.GateAction
 import io.github.code_akram.or2.host.OpenSessions
 import io.github.code_akram.or2.host.SessionPickerSheet
@@ -51,6 +52,9 @@ internal class PickerSource(
     val tmuxShown: () -> Unit,
     /** Opens [TerminalTarget] on the connection (the app's `openTerminal`: `TerminalActivations.launchOpen`). */
     val open: (TerminalTarget) -> Unit,
+    val directories: DirectoryList,
+    val readingDirectories: Boolean,
+    val refreshDirectories: () -> Unit,
 )
 
 /**
@@ -63,6 +67,12 @@ internal fun pickerSource(
     active: ActiveHost?, connections: HostConnections, openTerminal: (ActiveHost, TerminalTarget) -> Unit,
 ): PickerSource {
     val state = active?.state?.collectAsStateWithLifecycle()?.value
+    val directories = active?.directories?.collectAsStateWithLifecycle()?.value ?: DirectoryList.Loading
+    val readingDirectories = active?.readingDirectories?.collectAsStateWithLifecycle()?.value ?: false
+    var directoryReads by remember(active) { mutableIntStateOf(0) }
+    LaunchedEffect(active, directoryReads) {
+        if (active != null && directoryReads > 0) connections.refreshDirectories(active)
+    }
     val caps = active?.capabilities?.collectAsStateWithLifecycle()?.value
     val capsError = active?.capabilitiesError?.collectAsStateWithLifecycle()?.value
     val verdict = active?.udpVerdict?.collectAsStateWithLifecycle()?.value
@@ -111,6 +121,9 @@ internal fun pickerSource(
         refresh = { refreshes++; reads++ },
         tmuxShown = { if (reading == null) reads++ },
         open = { target -> active?.let { openTerminal(it, target) } },
+        directories = directories,
+        readingDirectories = readingDirectories,
+        refreshDirectories = { if (!readingDirectories) directoryReads++ },
     )
 }
 
@@ -125,6 +138,8 @@ internal class PickerChoices(
     private val dismiss: () -> Unit,
 ) {
     fun shell() = choose { open(TerminalTarget.Shell) }
+
+    fun directory(path: String) = choose { open(TerminalTarget.ShellIn(path)) }
 
     fun tmux(name: String) = choose { open(TerminalTarget.Tmux(name)) }
 
@@ -172,6 +187,8 @@ internal fun HomePickerSheet(
         },
         herdrViews = source.herdrViews, openAgent = choices::agent,
         refreshing = source.refreshing, tmuxShown = source.tmuxShown,
+        directories = source.directories, openDirectory = choices::directory,
+        refreshDirectories = source.refreshDirectories, readingDirectories = source.readingDirectories,
     )
 }
 

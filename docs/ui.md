@@ -344,7 +344,7 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   pill; an asleep host `Asleep` in muted text with **Retry**; a host that is simply not connected (a cancelled
   unlock) `Not connected` with **Connect**; a host without a key **Select a key**, which opens the
   host form. Dismissing leaves Home as it was (a connect already started carries on, and the card shows it). The
-  sheet: a segmented control (`herdr` / `tmux`; there is no `Open` tab) with a trailing **Shell** pill
+  sheet: a segmented control (`herdr` / `tmux` / `Dirs`; there is no `Open` tab) with a trailing **Shell** pill
   (`surfaceTrack`, the `>_` prompt glyph before the label, its only meaning) that opens a plain shell; the UDP line
   under them when it applies (see "UDP blocked"); below, the herdr tab's sessions or the tmux tab's list. **herdr:**
   each running session the app watches (its live view, the inbox's source) is one `surfaceRaisedRow` card: first the
@@ -358,6 +358,9 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   an inbox row does. Sessions without a live view (not running, or a host whose agents are not watched) follow in
   one card, one title-only row each with its state at the right (`● Running`, or a dim `● Not running` and a muted
   title for a stopped one), never as a second caption line as well. The herdr tab has no Refresh (it is live).
+  **Dirs** (unreleased): recent Claude Code/Codex projects, newest first; a raised grouped list of basename and full
+  path in muted mono. A tap opens a new shell there and dismisses the sheet first. Loading has a spinner, missing
+  history an empty hint, and a failed read its reason in danger; **Refresh** reads again without reconnecting.
   **tmux:** sessions (`● Attached`, with a "new session" field), then **Refresh**, whose icon starts at the rows'
   text inset. The list is read again each time the picker opens and the tab is shown: until the first answer a
   16 dp spinner stands where the list will be; a later read (or Refresh, which also re-probes the host for new

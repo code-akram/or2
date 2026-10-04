@@ -18,6 +18,7 @@ data class LastTerminal(val hostId: Long, val target: TerminalTarget, val transp
         fun opt(value: String?) = if (value == null) "-" else "=" + URLEncoder.encode(value, "UTF-8")
         val targetParts = when (target) {
             TerminalTarget.Shell -> listOf("shell")
+            is TerminalTarget.ShellIn -> listOf("shell-in", opt(target.path))
             is TerminalTarget.Tmux -> listOf("tmux", opt(target.sessionName))
             is TerminalTarget.Herdr -> listOf("herdr", opt(target.session), opt(target.paneId))
         }
@@ -36,6 +37,7 @@ data class LastTerminal(val hostId: Long, val target: TerminalTarget, val transp
                 val transport = TerminalTransport.valueOf(parts[1])
                 val target = when (parts[2]) {
                     "shell" -> if (parts.size == 3) TerminalTarget.Shell else return null
+                    "shell-in" -> if (parts.size == 4 && parts[3].startsWith("=")) TerminalTarget.ShellIn(opt(parts[3])!!) else return null
                     "tmux" -> if (parts.size == 4 && parts[3] != "-") TerminalTarget.Tmux(opt(parts[3])!!) else return null
                     "herdr" -> if (parts.size == 5) TerminalTarget.Herdr(opt(parts[3]), opt(parts[4])) else return null
                     else -> return null

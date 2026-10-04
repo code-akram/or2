@@ -1300,6 +1300,45 @@ fn terminal_setup_that_the_server_never_answers_times_out_and_closes_its_channel
 }
 
 #[test]
+fn cancelling_a_recent_directories_query_closes_its_exec_channel() {
+    let fixture = Fixture::connected(Duration::from_secs(30));
+    runtime().block_on(fixture.handle.capabilities()).unwrap();
+    let (tx, events) = sync::channel();
+    *fixture.shared.channel_events.lock().unwrap() = Some(tx);
+    fixture.shared.probe_hangs.store(true, Ordering::SeqCst);
+    let before = fixture.shared.execs.load(Ordering::SeqCst);
+    let mut query = Box::pin(fixture.handle.recent_directories());
+    runtime().block_on(async {
+        tokio::select! {
+            result = &mut query => panic!("the fixture must not answer: {result:?}"),
+            () = async {
+                while fixture.shared.execs.load(Ordering::SeqCst) == before {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            } => {}
+        }
+    });
+    let (event, channel) = events.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(event, "session");
+    drop(query); // The reply receiver closes; the host worker must drop its pending exec.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let event = events
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap();
+        if event == ("close", channel) {
+            break;
+        }
+    }
+    assert!(matches!(
+        fixture.handle.state(),
+        HostState::Connected { .. }
+    ));
+    fixture.handle.disconnect();
+    assert_eq!(closed(&fixture.states), CloseReason::Disconnected);
+}
+
+#[test]
 fn a_cancelled_exec_closes_its_channel_on_the_server() {
     let mut fixture = Fixture::connected(Duration::from_secs(30));
     let ssh = fixture.ssh();

@@ -1029,6 +1029,17 @@ fn dispatch<D: DatagramTransport>(
         HostCommand::MoshServer { reply } => spawn_query(closing, tracker, reply, async move {
             Ok(host.programs().await?.mosh_server.clone())
         }),
+        HostCommand::RecentDirectories { mut reply } => {
+            spawn_until_closed(closing, tracker, async move {
+                tokio::select! {
+                    biased;
+                    () = reply.closed() => {}
+                    result = crate::directories::recent(&*host) => {
+                        let _ = reply.send(result.map_err(HostError::from));
+                    }
+                }
+            })
+        }
         HostCommand::ListTmux { reply } => spawn_query(closing, tracker, reply, async move {
             let path = host.programs().await?.program(Program::Tmux)?;
             Ok(tmux::list_sessions(&*host, path).await?)
@@ -1273,7 +1284,7 @@ async fn scroll_target(
 ) -> Result<(), HostError> {
     let capabilities = host.programs().await?;
     match target {
-        TerminalTarget::Shell => Ok(()),
+        TerminalTarget::Shell | TerminalTarget::ShellIn { .. } => Ok(()),
         TerminalTarget::Tmux { session_name } => {
             let path = capabilities.program(Program::Tmux)?;
             // The session the terminal's client shows, as `navigate` resolves it.
@@ -1314,7 +1325,7 @@ async fn navigate(
 ) -> Result<(), HostError> {
     let capabilities = host.programs().await?;
     match target {
-        TerminalTarget::Shell => Ok(()),
+        TerminalTarget::Shell | TerminalTarget::ShellIn { .. } => Ok(()),
         TerminalTarget::Tmux { session_name } => {
             let path = capabilities.program(Program::Tmux)?;
             // A tmux that cannot record clients attached without the step (`plan`): nothing

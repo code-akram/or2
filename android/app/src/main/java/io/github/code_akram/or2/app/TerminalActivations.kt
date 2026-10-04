@@ -132,7 +132,7 @@ class TerminalActivations(private val connections: HostConnections, private val 
      * left alone.
      */
     private fun reusable(hostId: Long, target: TerminalTarget): ActiveTerminal? = when (target) {
-        TerminalTarget.Shell -> null
+        TerminalTarget.Shell, is TerminalTarget.ShellIn -> null
         is TerminalTarget.Herdr -> {
             val open = connections.openTerminals(hostId) { it is TerminalTarget.Herdr && it.session == target.session }
             open.firstOrNull { (it.target as TerminalTarget.Herdr).paneId == null } ?: open.firstOrNull()
@@ -236,7 +236,8 @@ class TerminalActivations(private val connections: HostConnections, private val 
  * it ([CLOSE_SHELL_TITLE]). A tmux or herdr terminal closes in one tap (the session keeps running on the host), and
  * a terminal that has already closed has nothing left to end.
  */
-fun closeAsks(target: TerminalTarget, closed: Boolean): Boolean = target == TerminalTarget.Shell && !closed
+fun closeAsks(target: TerminalTarget, closed: Boolean): Boolean =
+    (target is TerminalTarget.Shell || target is TerminalTarget.ShellIn) && !closed
 
 /** The confirmation of closing an open shell ([closeAsks]). */
 const val CLOSE_SHELL_TITLE = "Close shell?"

@@ -5835,3 +5835,37 @@ the agent's display name. Identifiers and the agent's name (Reply's identity com
 preparation uses versionName 0.1.4 / versionCode 5, still FFI API 20; there is no further export change or
 storage migration. The 164-test device run used only the separate device-test app. Mobile-data, handover
 and unplugged/Doze acceptance remain explicitly deferred; see `status.md` and `releases/v0.1.4.md`.
+
+## Recent directories / one-tap shells (unreleased, FFI API 21)
+
+- **Read-only discovery.** `HostConnection.recent_directories() async -> Vec<String>` reads agent histories over
+  one exec on the existing SSH connection. No daemon, installations, host writes or network path outside Transport.
+  Claude Code: the last 256 KiB of `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/history.jsonl`, JSONL `project` and millisecond
+  `timestamp`. Codex: the first 8 KiB/one line of the latest 64 `rollout-*.jsonl` files under
+  `${CODEX_HOME:-$HOME/.codex}/sessions`, reverse date/path order, `type: session_meta`, UTC RFC3339 `timestamp`
+  and `payload.cwd`. Archived Codex sessions and nonstandard history formats are not included in v1.
+- **Bounds and privacy.** Five seconds for the whole read (directory enumeration included), the existing 1 MiB
+  per-stream exec cap, 8 KiB per parsed JSON line, at most 20 distinct paths. Partial/malformed records and unknown
+  fields are ignored. Deduplicate by exact path, keep its latest timestamp, sort newest first (path breaks ties).
+  Missing histories return empty. Real exec failures return a normal host error. Claude's bounded raw tail can
+  contain prompt text; only paths leave Rust, stdout/stderr buffers are wiped on drop, no history or path is logged.
+- **Literal paths only.** Absolute Unix paths, at most 4096 bytes, no backslash, control characters, Unicode line
+  separators, or formatting characters that `herdr::display_text` would remove. Reject, never sanitize a path:
+  the command must name exactly what is displayed. Quotes, spaces and shell metacharacters are allowed because
+  the path is a separately quoted argument, never interpolated into shell code.
+- **Opening.** `TerminalTarget.ShellIn { path }` is validated before enqueueing; SSH and mosh share
+  `sh -c 'cd -- "$1" || exit 1; exec "${SHELL:-/bin/sh}" -l' or2-shell <path>` (each argument quoted by
+  `RemoteCommand`). A directory that no longer exists exits visibly instead of silently opening at home.
+  The user's login startup files still run and can deliberately change directory. This is a new independent shell,
+  never reuse an existing terminal or start two shells for AUTO's background mosh swap. Transport preference,
+  fallback, plain-shell scrolling/gestures, close confirmation and last-terminal restoration follow `Shell` rules.
+- **App.** A read starts beside the probes on connect, never in the connect/terminal critical path. Only Kotlin
+  holds the result, in memory on that connection, with a loading/loaded/failed state and coalesced refreshes;
+  cancellation releases the read flag and a retired connection cannot publish a late answer. No Room migration.
+  The host picker has a third **Dirs** tab (`picker-tab:2`), with empty/error/loading states, a Refresh row,
+  basename and full path per row. A tap dismisses the sheet first, then opens `ShellIn` through the usual activation
+  path. The plain Shell pill, herdr and tmux tabs are unchanged. Creating tmux sessions in these paths is not v1.
+- **Tests.** Rust parser/validation/date/timeout tests; hermetic local history/script tests (missing/custom roots,
+  file/read caps, literal hostile-looking paths and vanished directories); disposable SSH and mosh directory-shell
+  tests; JVM real-FFI round trip and synchronous rejection; holder read/cancellation/replacement, transport,
+  close/reuse and restoration regressions. The device UI regression is compile-checked, not run on the phone.

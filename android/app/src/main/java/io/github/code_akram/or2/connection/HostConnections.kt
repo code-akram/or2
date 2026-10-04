@@ -32,10 +32,12 @@ import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.ffi.TmuxSession
 import io.github.code_akram.or2.ffi.connectHost
+import io.github.code_akram.or2.host.DirectoryList
 import io.github.code_akram.or2.hosts.connectionAffectedBy
 import io.github.code_akram.or2.notify.HerdrIntegrations
 import io.github.code_akram.or2.notify.enableReplyFor
 import io.github.code_akram.or2.paste.ImagePaste
+import io.github.code_akram.or2.session.hostErrorMessage
 import io.github.code_akram.or2.terminal.SessionRoute
 import io.github.code_akram.or2.terminal.TargetScroller
 import kotlinx.coroutines.CancellationException
@@ -89,6 +91,7 @@ interface HostPort : AutoCloseable {
      * exec round trip, never held up by herdr's session listing).
      */
     suspend fun moshServer(): String?
+    suspend fun recentDirectories(): List<String>
     suspend fun listTmuxSessions(): List<TmuxSession>
     fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface
 
@@ -160,6 +163,7 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
     ): SessionInterface = connection.openTerminal(target, transport, columns, rows, moshBudgetMs, listener)
     override suspend fun capabilities() = connection.capabilities()
     override suspend fun moshServer() = connection.moshServer()
+    override suspend fun recentDirectories() = connection.recentDirectories()
     override suspend fun listTmuxSessions() = connection.listTmuxSessions()
     override fun watchHerdr(session: String?, listener: HerdrListener): HerdrWatchInterface =
         connection.watchHerdr(session, listener)
@@ -244,6 +248,12 @@ class ActiveHost internal constructor(val host: Host) {
 
     /** How long the last successful capability probe call took. */
     internal var capabilitiesMs = 0L
+
+    /** Recent project paths, held only for this connection; never part of the connect gate. */
+    internal val mutableDirectories = MutableStateFlow<DirectoryList>(DirectoryList.Loading)
+    val directories = mutableDirectories.asStateFlow()
+    internal val mutableReadingDirectories = MutableStateFlow(false)
+    val readingDirectories = mutableReadingDirectories.asStateFlow()
 
     /** The terminal whose background mosh attempt is this host's one in flight while the verdict is `UNKNOWN`. */
     internal var probingTerminal: ActiveTerminal? = null
@@ -411,6 +421,7 @@ fun shareTargets(terminals: List<ActiveTerminal>): List<ActiveTerminal> = termin
  */
 fun targetTitle(target: TerminalTarget): String = when (target) {
     TerminalTarget.Shell -> "shell"
+    is TerminalTarget.ShellIn -> "shell ${target.path}"
     is TerminalTarget.Tmux -> "tmux ${target.sessionName}"
     is TerminalTarget.Herdr -> "herdr" + (target.session?.let { " $it" } ?: "")
 }
@@ -563,6 +574,7 @@ class HostConnections(
                             // Beside the probe, not after it: `mosh_server()` is the program probe
                             // alone, and the transport choice needs nothing more.
                             scope.launch { askMoshServer(current) }
+                            scope.launch { refreshDirectories(current) }
                             probe(current)
                         }
                         if (state is HostState.Closed) releaseWatches(current)
@@ -1050,6 +1062,22 @@ class HostConnections(
 
     private class HerdrWatchSpec(val session: String?, val name: String)
 
+    /** Read-only, independently cancellable; a superseded connection never publishes its answer. */
+    suspend fun refreshDirectories(current: ActiveHost) {
+        if (!owns(current) || current.state.value !is HostState.Connected || current.mutableReadingDirectories.value) return
+        current.mutableReadingDirectories.value = true
+        try {
+            val result = try {
+                DirectoryList.Loaded(current.ready.await().recentDirectories())
+            } catch (error: HostException) {
+                DirectoryList.Failed(hostErrorMessage(error))
+            }
+            if (owns(current)) current.mutableDirectories.value = result
+        } finally {
+            current.mutableReadingDirectories.value = false
+        }
+    }
+
     /** tmux sessions on the host, most recently active first. */
     suspend fun listTmuxSessions(current: ActiveHost): List<TmuxSession> = current.ready.await().listTmuxSessions()
 
@@ -1077,7 +1105,7 @@ class HostConnections(
         val session = port.openTerminal(target, plan.transport, 80u, 24u, plan.moshBudgetMs, sessionListener(terminal, current, attempt = 0))
         nextTerminalId++
         // The holder's scope, not a view's: a Bottom sent as the terminal is hidden is not cancelled with the view.
-        if (target !is TerminalTarget.Shell) {
+        if (!target.isShell()) {
             terminal.targetScroller = TargetScroller(scope, { scroll -> scrollTarget(terminal, scroll) }, hostLive(current.host.id))
         }
         terminal.imagePaste = ImagePaste(scope) { bytes, extension -> uploadImage(terminal, bytes, extension) }
@@ -1211,7 +1239,7 @@ class HostConnections(
      * is missing.
      */
     private fun recheckDue(current: ActiveHost, target: TerminalTarget): Boolean =
-        current.transportPref == TransportPref.AUTO && target !is TerminalTarget.Shell &&
+        current.transportPref == TransportPref.AUTO && !target.isShell() &&
             current.udpVerdict.value == UdpVerdict.BLOCKED && current.probingTerminal == null &&
             current.moshServer.value?.let { it.path != null } != false &&
             monotonicMs() - current.blockedAtMs >= UDP_RECHECK_MS
@@ -1428,7 +1456,7 @@ class HostConnections(
      * that is not connected, and a failed move (a gesture has no error to show) are false.
      */
     suspend fun navigate(terminal: ActiveTerminal, nav: TargetNav): Boolean {
-        if (terminal.target is TerminalTarget.Shell) return false
+        if (terminal.target.isShell()) return false
         return terminal.navigation.withLock {
             if (!isLive(terminal.host.id)) return@withLock false
             try {

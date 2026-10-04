@@ -153,6 +153,7 @@ pub(super) async fn plan(
 ) -> Result<Planned, SessionFailure> {
     let (command, focus) = match target {
         TerminalTarget::Shell => (None, None),
+        TerminalTarget::ShellIn { path } => (Some(crate::directories::shell_command(path)), None),
         TerminalTarget::Tmux { session_name } => {
             let programs = host.programs().await.map_err(remote_failure)?;
             let path = programs

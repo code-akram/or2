@@ -218,6 +218,8 @@ impl From<or2_core::herdr::ReplyRoute> for ReplyRoute {
 pub enum TerminalTarget {
     /// The login shell.
     Shell,
+    /// A login shell in a literal absolute working directory (API 21).
+    ShellIn { path: String },
     /// Attach to, or create, a tmux session.
     Tmux { session_name: String },
     /// herdr in `session` (`None` is the default session), after focusing `pane_id` if given.
@@ -231,6 +233,7 @@ impl From<TerminalTarget> for core::TerminalTarget {
     fn from(target: TerminalTarget) -> Self {
         match target {
             TerminalTarget::Shell => Self::Shell,
+            TerminalTarget::ShellIn { path } => Self::ShellIn { path },
             TerminalTarget::Tmux { session_name } => Self::Tmux { session_name },
             TerminalTarget::Herdr { session, pane_id } => Self::Herdr { session, pane_id },
         }
@@ -478,6 +481,12 @@ impl HostConnection {
     /// `capabilities()`. Cancelling the coroutine drops the reply only.
     pub async fn mosh_server(&self) -> Result<Option<String>, HostError> {
         Ok(self.handle.mosh_server().await?)
+    }
+
+    /// Recent Claude Code/Codex project paths, newest first (API 21). A bounded, read-only
+    /// exec on this SSH connection; missing history is empty. Cancelling cancels the query.
+    pub async fn recent_directories(&self) -> Result<Vec<String>, HostError> {
+        Ok(self.handle.recent_directories().await?)
     }
 
     /// Most recently active first; empty when no tmux server runs.
