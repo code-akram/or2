@@ -5827,3 +5827,8 @@ non-joiner, word joiner and invisible operators, deprecated format controls, BOM
 hyphen, Mongolian vowel separator; the zero-width joiner stays for emoji) from agent titles, space and tab labels and
 the agent's display name. Identifiers and the agent's name (Reply's identity compares it) are never altered
 (`project.rs`, `bidi_and_invisible_formatting_never_survive_into_what_is_shown`).
+
+**Owner QA (2026-10-04):** Spaces works as intended on the signed implementation on the phone. Release
+preparation uses versionName 0.1.4 / versionCode 5, still FFI API 20; there is no further export change or
+storage migration. The 164-test device run used only the separate device-test app. Mobile-data, handover
+and unplugged/Doze acceptance remain explicitly deferred; see `status.md` and `releases/v0.1.4.md`.

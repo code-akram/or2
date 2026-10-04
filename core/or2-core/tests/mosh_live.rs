@@ -64,27 +64,28 @@ fn children(pid: u32) -> Vec<u32> {
         .unwrap_or_default()
 }
 
-/// The processes of this user holding a UDP socket on local `port`, found by the socket's inode
-/// in `/proc/net/udp{,6}` and the `socket:[inode]` links under `/proc/<pid>/fd`.
-fn udp_port_owners(port: u16) -> Vec<u32> {
-    let mut inodes = Vec::new();
-    for table in ["/proc/net/udp", "/proc/net/udp6"] {
-        let Ok(text) = fs::read_to_string(table) else {
-            continue;
-        };
-        for line in text.lines().skip(1) {
+/// Socket links for this fixture's IPv4 loopback endpoint, never the same port on another
+/// interface: a developer's real mosh-server may use that port too. `/proc/net/udp` writes the
+/// IPv4 address in native byte order (this Linux fixture runs on little-endian hosts).
+fn loopback_udp_inodes(text: &str, port: u16) -> Vec<String> {
+    text.lines()
+        .skip(1)
+        .filter_map(|line| {
             let fields: Vec<&str> = line.split_whitespace().collect();
-            let local_port = fields
-                .get(1)
-                .and_then(|local| local.rsplit(':').next())
-                .and_then(|hex| u16::from_str_radix(hex, 16).ok());
-            if local_port == Some(port)
-                && let Some(inode) = fields.get(9)
-            {
-                inodes.push(format!("socket:[{inode}]"));
-            }
-        }
-    }
+            let (address, local_port) = fields.get(1)?.rsplit_once(':')?;
+            (address == "0100007F" && u16::from_str_radix(local_port, 16).ok() == Some(port))
+                .then(|| fields.get(9).map(|inode| format!("socket:[{inode}]")))
+                .flatten()
+        })
+        .collect()
+}
+
+/// The processes of this user holding the fixture's UDP socket on `127.0.0.1:port`, found by
+/// its inode in `/proc/net/udp` and the `socket:[inode]` links under `/proc/<pid>/fd`.
+fn udp_port_owners(port: u16) -> Vec<u32> {
+    let inodes = fs::read_to_string("/proc/net/udp")
+        .map(|text| loopback_udp_inodes(&text, port))
+        .unwrap_or_default();
     let mut owners = Vec::new();
     let Ok(entries) = fs::read_dir("/proc") else {
         return owners;
@@ -454,13 +455,20 @@ async fn terminate_stops_a_server_nobody_connected_to() {
     // is gone: under load it can still be there, so wait for the server to be the only owner. (A
     // guard kills what it holds when dropped, so the wait reads the owners without making one.)
     let deadline = Instant::now() + Duration::from_secs(10);
-    while udp_port_owners(params.port)
-        .into_iter()
-        .filter(|owner| comm(*owner).as_deref() == Some("mosh-server"))
-        .count()
-        > 1
-        && Instant::now() < deadline
-    {
+    loop {
+        let owners: Vec<_> = udp_port_owners(params.port)
+            .into_iter()
+            .filter(|owner| comm(*owner).as_deref() == Some("mosh-server"))
+            .collect();
+        if owners == [pid] {
+            break;
+        }
+        // An empty scan, or just the exiting parent, is not a completed fork handover.
+        assert!(
+            Instant::now() < deadline,
+            "UDP port {} never settled on the reported server {pid}; owners: {owners:?}",
+            params.port
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let by_port = ServerGuard::adopt(None, params.port);
@@ -481,6 +489,23 @@ async fn terminate_stops_a_server_nobody_connected_to() {
     }
     // Already gone is not an error.
     mosh::terminate(&host, pid).await.unwrap();
+}
+
+#[test]
+fn a_port_lookup_ignores_other_interfaces_and_malformed_entries() {
+    let table =
+        "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
+0: 0100007F:EA60 00000000:0000 07 00000000:00000000 00:00000000 00000000 1000 0 101
+1: 0100000A:EA60 00000000:0000 07 00000000:00000000 00:00000000 00000000 1000 0 202
+2: 00000000:EA60 00000000:0000 07 00000000:00000000 00:00000000 00000000 1000 0 303
+3: 0100007F:EA61 00000000:0000 07 00000000:00000000 00:00000000 00000000 1000 0 404
+4: 0100007F:EA60
+5: malformed
+6: 0100007F:xxxx 00000000:0000 07 00000000:00000000 00:00000000 00000000 1000 0 505
+";
+    assert_eq!(loopback_udp_inodes(table, 60000), ["socket:[101]"]);
+    assert_eq!(loopback_udp_inodes(table, 60001), ["socket:[404]"]);
+    assert!(loopback_udp_inodes(table, 60002).is_empty());
 }
 
 #[tokio::test]

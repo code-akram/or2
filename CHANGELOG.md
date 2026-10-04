@@ -8,6 +8,10 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-04
+
+Spaces and herdr-style agent names. See [the release notes](docs/releases/v0.1.4.md).
+
 ### Added
 
 - Spaces: a third, blue disc in a herdr terminal's header (after the orange and green ones, the same size) opens
@@ -24,6 +28,14 @@ Each release's notes are in [docs/releases/](docs/releases/).
 - Agents are named as herdr names them, everywhere they appear (Inbox, the picker, Spaces, notifications): the
   agent's name when it was started by one, else herdr's display name, else its kind; then the task it is on, from
   its terminal title, on its own muted line. A notification reads `Needs input · <task>` or `Done · <task>`.
+
+### Fixed
+
+- Host-supplied agent titles, display names and space/tab labels lose Unicode bidi and invisible formatting
+  characters before being shown in the app or notifications, so those characters cannot disguise the text.
+  Identifiers and agent names used as Reply identity are unchanged.
+- The live mosh test's cleanup identifies only the fixture's IPv4 loopback socket, never another interface's
+  server using the same UDP port; its fork-handover wait requires the reported server to be the sole owner.
 
 ## [0.1.3] - 2026-10-03
 
@@ -240,7 +252,8 @@ The first release: the Android app (a signed APK) and the `or2-pair` host CLI fo
 - Optional local release signing for the APK (`~/.config/or2/signing.properties`); without it the release
   build stays unsigned for F-Droid.
 
-[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/code-akram/or2/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/code-akram/or2/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/code-akram/or2/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/code-akram/or2/compare/v0.1.0...v0.1.1

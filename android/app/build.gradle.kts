@@ -107,8 +107,8 @@ android {
         applicationId = "io.github.code_akram.or2"
         minSdk = 34
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.1.3"
+        versionCode = 5
+        versionName = "0.1.4"
         testInstrumentationRunner = "io.github.code_akram.or2.Or2TestRunner"
         manifestPlaceholders["appLabel"] = "or2"
         ndk { abiFilters += "arm64-v8a" }

@@ -2,7 +2,7 @@
 
 Read this first when picking the work up. The details are in [design](design.md) (checklists),
 [contracts](contracts.md) (what the code must do), [roadmap](roadmap.md) and [build](build.md).
-Updated 2026-10-03.
+Updated 2026-10-04.
 
 ## Where it stands
 
@@ -10,12 +10,16 @@ Updated 2026-10-03.
   Reply. The signed APK (SHA-256 `172fad74…7b5d`) and `or2-pair` for Linux x86_64/aarch64 (static) and macOS Intel/Apple
   silicon; the downloaded APK and the install one-liner were checked against the release. Earlier:
   [v0.1.2](releases/v0.1.2.md) (2026-10-03), [v0.1.1](releases/v0.1.1.md) and [v0.1.0](releases/v0.1.0.md) (2026-10-02).
-- **The owner's phone runs v0.1.3**, the published APK, installed in place (hosts and keys kept). The owner's QA
-  passed.
-- **On `main`, not released: the v0.1.4 candidate** (`d7e7d69` or later; versionName still 0.1.3, FFI API 20): the
-  Spaces sheet (a blue disc on herdr terminals) and agents named herdr-style (task titles back), Codex-reviewed (one P2
-  fixed: bidi/invisible characters stripped from host text). The owner's phone runs it as a signed build
-  (2026-10-04 00:52), awaiting QA.
+- **The owner's v0.1.3 QA passed.** The published APK was installed in place (hosts and keys kept); the
+  subsequent signed implementation now on the phone is described below.
+- **Not released: the v0.1.4 candidate** (versionCode 5, FFI API 20): the Spaces sheet (a blue disc on herdr
+  terminals) and agents named herdr-style (task titles back), Codex-reviewed (one P2 fixed: bidi/invisible
+  characters stripped from host text). The owner's phone runs the implementation as a signed build
+  (2026-10-04 00:52, still labelled 0.1.3). **The owner confirmed Spaces works as intended on 2026-10-04.**
+  Release preparation is complete: the signed versioned APK (SHA-256 `5586e541…547e`) and both static Linux
+  `or2-pair` binaries are built; [release notes](releases/v0.1.4.md) record the checks and limits. No v0.1.4 tag
+  or release has been published, and the owner's app has not been updated to the versioned APK.
+  **The owner authorised publication and the in-place phone update on 2026-10-04; both are now in progress.**
 
 ### In v0.1.2
 
@@ -50,12 +54,19 @@ Updated 2026-10-03.
   2026-10-03 work (`1064526..2743d89`) found nothing. Every finding was fixed with
   a test, apart from the accepted reply race above and the binary SFTP handles noted under Known limits.
 
-### Checks on `main` (last run)
+### Checks on the v0.1.4 preparation (2026-10-04)
 
-- All pass: `cargo fmt`, `clippy -D warnings`, `cargo test` (the whole workspace, sshd required),
-  `gen-herdr-types --check`, `gen-licenses --check`, and the Gradle build, unit tests and lint.
-- The device suite passes: 155 tests (2026-10-03, after the streamline). The two notification-posting tests skip, because the phone refuses
-  the permission to a test build.
+- Pass: `cargo fmt`, `clippy -D warnings`, the whole Rust workspace (1,041 tests at default parallelism;
+  sshd, tmux, mosh and herdr required), `gen-herdr-types --check` and `gen-licenses --check`.
+- Pass: Gradle debug/device-test/unsigned-release builds, 645 JVM tests and debug/device-test lint. The signed
+  release APK also builds; its signature, versionName 0.1.4 and versionCode 5 were verified.
+- Device suite: `OK (164 tests)` through the existing ADB tunnel, on the separate device-test app; the daily
+  app's version and update time stayed unchanged. Notification-posting tests remain permission-dependent.
+- Linux `dist --expect-version 0.1.4` passes: both static, stripped binaries built and checksummed; x86_64
+  runs, aarch64 is format-checked only. macOS builds remain the release workflow's job.
+- The ADB tunnel stopped responding after the successful device suite, during an optional notification-only
+  recheck. That recheck produced no result; no bridge, tunnel or phone-security settings were changed. The
+  connection was rechecked and working again before the authorised release update.
 
 ## Fixed: finished turns that herdr reports as Idle never notified (2026-10-03)
 
@@ -90,9 +101,9 @@ until the caller acknowledges, as a real host does.
 
 ## Next, in order
 
-1. **Done in v0.1.3: zero-config Reply** (contracts.md "# v0.1.3: zero-config Reply"): `or2-pair` checks `herdr integration status` and installs
-   the missing integrations for the agents on the host with one confirmation; the app says why a notification has
-   no Reply. Codex: known upstream (herdrdev/herdr#4649: Codex runs its hooks in a shared daemon that keeps a stale `HERDR_PANE_ID`); workaround `daemon_auto_start = false` + `codex --no-daemon`.
+1. **Publish the prepared v0.1.4** (owner authorised 2026-10-04): commit/tag the checked tree, let the release
+   workflow build the four host binaries, upload the signed APK, verify the published downloads, then update the
+   owner's phone in place when the ADB slot is available. Spaces has the owner's QA approval.
 2. **The deferred M3 acceptance**, deferred by the owner (2026-10-03) until they clear it: mobile data, the Wi-Fi to mobile handover, and
    unplugged (Doze) background runs. This is v0 acceptance step 3, still never tested.
 3. **The rest of the roadmap.**
@@ -139,5 +150,16 @@ until the caller acknowledges, as a real host does.
 
 The in-app keyboard idea (2026-10-03) was dropped by the owner the same day.
 
-**Known flaky test:** `or2-core/tests/mosh_live.rs::terminate_stops_a_server_nobody_connected_to` can fail under full-workspace
-load (mosh-server's fork handover on loopback); it passes alone (3/3 on 2026-10-03). Harden its wait when next touched.
+**Connectivity work deferred by the owner (2026-10-04):** DHCP-resistant LAN discovery/hostnames and an optional
+user-owned SSH relay for access across networks; no or2-hosted service. A changed LAN address was diagnosed and
+corrected through the app, using the existing key without re-pairing. This is not a completed discovery feature.
+
+**Mosh fixture hardened (2026-10-04):** port-owner lookup is restricted to the fixture's IPv4 loopback address
+(a real server on another interface can use the same port), with a regression test. The fork-handover wait now
+requires exactly the reported pid, not just at most one owner; three standalone runs and the full gate pass.
+
+**Intermittent tests to investigate:** during release preparation,
+`ssh::connection::tests::the_kept_session_closes_its_channel_when_dropped` timed out once, and
+`or2-pair::exchange::tests::a_state_file_no_run_holds_is_expired` reported Installed instead of Expired once.
+Both passed alone and in the final full workspace run (also at eight threads per suite). No production change
+was made for either, and their causes are not established. The isolated CLI SIGKILL/expired-pairing test passes.
