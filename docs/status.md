@@ -15,7 +15,8 @@ Updated 2026-10-04.
   directory-discovery bug report/go-ahead on 2026-10-04 at 14:50 (versionCode 7, FFI API 21; no uninstall or
   data clear). Its signing certificate matches the earlier candidate/public app; the installed APK's SHA-256
   matches the revised build (`d68017fa…6eec0`), first-install time stayed unchanged, and launch passed with no
-  fresh AndroidRuntime crash. Post-update biometric reconnect and real-project owner QA remain pending.
+  fresh AndroidRuntime crash. Post-update Mac herdr/Mosh resume was observed; Arch's separate key unlock
+  and real-project directory-shell owner QA remain pending.
   This candidate is **not publicly released**; see [candidate notes](releases/v0.1.5.md).
 - **Previous LAN upgrade QA (2026-10-04, v0.1.4):** after biometric unlock the phone resumed the same herdr
   terminal with a healthy Mosh badge and fresh output, using its existing key without re-pairing. The owner
@@ -228,5 +229,10 @@ requires exactly the reported pid, not just at most one owner; three standalone 
   simultaneous distinct hosts/concurrent refreshes and switching between their cached paths.
 - Revised v0.1.5/**versionCode 7**, still FFI API 21, installed in place at 14:50 phone-local time. Old and new
   installed APK checksums and matching certificates verified; first-install time unchanged. Test apps removed.
-  Launch passes and awaits the normal biometric reconnect. No public release/tag or host authorization,
+  Launch passes; the subsequent normal biometric reconnect resumed the live Mac herdr terminal over Mosh.
+  Opening Arch awaits its separate key's fingerprint. The exact revised reader via a temporary read-only
+  LocalHost diagnostic now returns the real Arch repository path; no raw history/prompts printed.
+- Nonpublishing Linux/macOS artifact [run 37196896791](https://github.com/code-akram/or2/actions/runs/37196896791)
+  passed on `50803fb`. All four downloaded checksums/architectures verified; native runner binaries executed,
+  cross-architectures format-checked only, publishing skipped. No public release/tag or host authorization,
   bridge/tunnel or security-setting change. Real-project QA and the deferred connectivity acceptance remain open.
