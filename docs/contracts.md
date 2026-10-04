@@ -5836,7 +5836,7 @@ preparation uses versionName 0.1.4 / versionCode 5, still FFI API 20; there is n
 storage migration. The 164-test device run used only the separate device-test app. Mobile-data, handover
 and unplugged/Doze acceptance remain explicitly deferred; see `status.md` and `releases/v0.1.4.md`.
 
-## Recent directories / one-tap shells (unreleased, FFI API 21)
+## Recent directories / one-tap shells (unreleased, FFI API 22)
 
 - **Read-only discovery.** `HostConnection.recent_directories() async -> Vec<String>` reads agent histories over
   one exec on the existing SSH connection. No daemon, installations, host writes or network path outside Transport.
@@ -5861,7 +5861,17 @@ and unplugged/Doze acceptance remain explicitly deferred; see `status.md` and `r
   The user's login startup files still run and can deliberately change directory. This is a new independent shell,
   never reuse an existing terminal or start two shells for AUTO's background mosh swap. Transport preference,
   fallback, plain-shell scrolling/gestures, close confirmation and last-terminal restoration follow `Shell` rules.
-- **App.** A read starts beside the probes on connect, never in the connect/terminal critical path. Only Kotlin
+- **Live directories (API 22).** Dirs merges the current host connection's live herdr cwd with history,
+  reusing the **same** watch views as its herdr tab: default/unnamed session first, then named sessions by name.
+  Within a session: picker agent order, each agent's cwd (pane cwd when absent), then every pane's cwd by pane id,
+  including plain shells/non-agent panes. Pi therefore needs no agent-history reader. Live paths precede history;
+  the pure `merge_directory_paths(live, recent)` FFI helper uses Rust's literal-path validator, exact dedup and
+  one shared 20-path cap. Paths are never trimmed, sanitized, inferred from titles or expanded from `~`.
+  Views must match the selected host's current Live watches; closed/retired/replaced watches cannot contribute.
+  Cwd changes/removals update the open picker automatically, without extra queries, polling or storing live paths
+  in the history cache. Valid live rows remain usable when history is loading/failed; without live rows the history
+  state is shown as before. With watching disabled/no herdr, discovery is history-only. Refresh still reads history.
+- **App.** A history read starts beside the probes on connect, never in the connect/terminal critical path. Only Kotlin
   holds the result, in memory on that connection, with a loading/loaded/failed state and coalesced refreshes;
   cancellation releases the read flag and a retired connection cannot publish a late answer. No Room migration.
   The host picker has a third **Dirs** tab (`picker-tab:2`), with empty/error/loading states, a Refresh row,

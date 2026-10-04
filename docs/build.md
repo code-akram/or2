@@ -204,7 +204,11 @@ explicit config roots, exercising the bounded read script, realistic large Codex
 field-order independence, exact-limit/overflow records, the aggregate output budget, malformed/partial records,
 newline filenames, literal shell paths and stale directories. `HostConnectionsNativeTest` also runs two
 independent disposable SSH hosts with large headers through the real FFI and repeated concurrent refreshes;
-`HomeSessionPickerDeviceTest` checks cached directories remain separate when switching hosts. `host.rs` and `host_mosh.rs` repeat a directory-shell open over the
+`HomeSessionPickerDeviceTest` checks history/live directories remain separate when switching hosts, live Pi
+and plain-shell cwd appear without history, cwd changes/unavailable watches update an open Dirs tab, and a live
+path opens ShellIn. `ProjectDirectoriesTest` crosses the real pure FFI merger for default/named session ordering,
+agent pane fallback, loading/failure fallback, unsafe paths, dedup/cap and bounded batches; `NativeDeviceTest`
+repeats the API 22 merge/validation across the packaged arm64 FFI. `host.rs` and `host_mosh.rs` repeat a directory-shell open over the
 real disposable SSH/mosh fixture. That fixture also pins `CLAUDE_CONFIG_DIR` and `CODEX_HOME` inside its
 private home, so inherited agent settings cannot cause tests to read the runner's real histories.
 

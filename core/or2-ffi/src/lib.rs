@@ -2,6 +2,7 @@
 
 uniffi::setup_scaffolding!();
 
+pub mod directories;
 pub mod frame;
 pub mod herdr;
 pub mod host;
@@ -17,7 +18,7 @@ pub struct BuildInfo {
 }
 
 /// Bumped whenever an exported signature or record changes shape.
-pub const API_VERSION: u32 = 21;
+pub const API_VERSION: u32 = 22;
 
 #[uniffi::export]
 pub fn build_info() -> BuildInfo {

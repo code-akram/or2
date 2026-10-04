@@ -26,6 +26,7 @@ import io.github.code_akram.or2.host.OpenSessions
 import io.github.code_akram.or2.host.SessionPickerSheet
 import io.github.code_akram.or2.host.TmuxList
 import io.github.code_akram.or2.host.pickerGate
+import io.github.code_akram.or2.host.projectDirectories
 import io.github.code_akram.or2.inbox.herdrViews
 import io.github.code_akram.or2.session.hostErrorMessage
 
@@ -67,7 +68,7 @@ internal fun pickerSource(
     active: ActiveHost?, connections: HostConnections, openTerminal: (ActiveHost, TerminalTarget) -> Unit,
 ): PickerSource {
     val state = active?.state?.collectAsStateWithLifecycle()?.value
-    val directories = active?.directories?.collectAsStateWithLifecycle()?.value ?: DirectoryList.Loading
+    val historyDirectories = active?.directories?.collectAsStateWithLifecycle()?.value ?: DirectoryList.Loading
     val readingDirectories = active?.readingDirectories?.collectAsStateWithLifecycle()?.value ?: false
     var directoryReads by remember(active) { mutableIntStateOf(0) }
     LaunchedEffect(active, directoryReads) {
@@ -110,14 +111,16 @@ internal fun pickerSource(
             if (probing === token) probing = null
         }
     }
-    val hostId = active?.host?.id
+    // Both tabs use exactly these current host views, never an older connection's buffered snapshot.
+    val hostViews = if (connected && active != null) connections.currentHerdrViews(active, views) else emptyMap()
+    val directories = remember(historyDirectories, hostViews) { projectDirectories(historyDirectories, hostViews) }
     return PickerSource(
         state, caps, capsError, tmux,
         // The first read shows in place of the list instead.
         refreshing = probing != null || (reading != null && tmux !is TmuxList.Loading),
         // A host without mosh-server is not a UDP problem: only say so when mosh is there and blocked.
         udpBlocked = verdict == UdpVerdict.BLOCKED && (moshServer == null || moshServer.path != null),
-        herdrViews = views.filterKeys { it.first == hostId }.mapKeys { it.key.second },
+        herdrViews = hostViews,
         refresh = { refreshes++; reads++ },
         tmuxShown = { if (reading == null) reads++ },
         open = { target -> active?.let { openTerminal(it, target) } },

@@ -12,11 +12,11 @@ Updated 2026-10-04.
   formats, the APK signature, and the public latest-release installer were verified. The installer was run
   only into a temporary directory, never against host authorization.
 - **The owner's phone now runs the revised signed v0.1.5 candidate**, updated in place after the owner's
-  directory-discovery bug report/go-ahead on 2026-10-04 at 14:50 (versionCode 7, FFI API 21; no uninstall or
-  data clear). Its signing certificate matches the earlier candidate/public app; the installed APK's SHA-256
-  matches the revised build (`d68017fa…6eec0`), first-install time stayed unchanged, and launch passed with no
-  fresh AndroidRuntime crash. Post-update Mac herdr/Mosh resume was observed; Arch's separate key unlock
-  and real-project directory-shell owner QA remain pending.
+  follow-up directory bug report on 2026-10-04 at 18:14 (versionCode 8, FFI API 22; no uninstall or data clear).
+  Dirs now includes the live herdr cwd already shown by its default/named sessions, ahead of history; both tabs
+  use current owned watches. Its signing certificate matches the earlier candidate/public app; the installed
+  APK's SHA-256 matches the build (`0b5b5135…25bd7`), first-install time stayed unchanged, and launch passed with
+  no fresh AndroidRuntime crash. Post-update biometric reconnect and real-project owner QA remain pending.
   This candidate is **not publicly released**; see [candidate notes](releases/v0.1.5.md).
 - **Previous LAN upgrade QA (2026-10-04, v0.1.4):** after biometric unlock the phone resumed the same herdr
   terminal with a healthy Mosh badge and fresh output, using its existing key without re-pairing. The owner
@@ -236,3 +236,28 @@ requires exactly the reported pid, not just at most one owner; three standalone 
   passed on `50803fb`. All four downloaded checksums/architectures verified; native runner binaries executed,
   cross-architectures format-checked only, publishing skipped. No public release/tag or host authorization,
   bridge/tunnel or security-setting change. Real-project QA and the deferred connectivity acceptance remain open.
+
+**Dirs now includes live herdr cwd (2026-10-04, revised versionCode 8 / FFI API 22):**
+- Owner QA exposed a separate source gap: Dirs read histories only, despite the herdr tab showing live project
+  cwd correctly. A new device regression fails on baseline precisely when switching from herdr's live Pi path
+  to Dirs. The live Arch snapshot confirms additional agent/pane cwd missing from history.
+- The picker now merges its current host's default/named Live views before history: picker agent order with
+  pane fallback, then all pane cwd (including plain shells). Changes/removals follow existing watches without
+  extra queries/polling/storage; history loading/failure cannot hide valid live rows. With watches disabled,
+  discovery remains history-only. Raw paths are never sanitized or inferred from titles.
+- Pure API 22 `merge_directory_paths` delegates literal validation/exact dedup/shared 20-path cap to Rust.
+  Calls use bounded batches (at most 20 accepted + 32 candidates), with early rejection of definitely overlong
+  strings; invalid/duplicate entries cannot crowd later valid paths out of the cap. Current-watch scoping
+  returns actual owned Live metadata, never another host's or a retired/stopped/lagging buffered value.
+- Fresh-context Codex design/critical patch/fix/scope reviews completed. Bulk copying was bounded and tested;
+  multi-agent fallback order is tested. Final patch/scope reviews found no actionable issues.
+- Pass: **1,067 Rust**, **661 JVM** (no failures/errors/skips), formatting, Clippy, both generated checks,
+  all Android builds and both lints. **Full device rerun: `OK (169 tests)`**, 375 s in the separate test app.
+  New cases cover live Pi/plain-shell paths, cwd changes/unavailable/return, ShellIn, cross-host live/history
+  separation and packaged FFI validation. One existing composer visibility assertion failed in the initial
+  full run, then passed in isolation and in the complete rerun; no unrelated composer change or skipped test.
+- Signed v0.1.5/**versionCode 8 / FFI API 22** installed in place at **18:14 phone-local time**. Prior installed
+  APK checksum matched preserved code 7; matching certificates and new installed/build checksum verified.
+  First-install time unchanged, launch passed, no fresh AndroidRuntime crash; test apps removed only after use.
+  No public release/tag or authorization, bridge/tunnel or security change. Post-update real-project QA on both
+  hosts and normal biometric reconnect remain pending; deferred connectivity acceptance remains untouched.

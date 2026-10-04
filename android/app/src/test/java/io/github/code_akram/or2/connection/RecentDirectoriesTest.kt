@@ -1,6 +1,9 @@
 package io.github.code_akram.or2.connection
 
 import io.github.code_akram.or2.data.TransportPref
+import io.github.code_akram.or2.ffi.HerdrPane
+import io.github.code_akram.or2.ffi.HerdrState
+import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
@@ -50,6 +53,33 @@ class RecentDirectoriesTest {
         assertTrue(active.directories.value is DirectoryList.Failed)
         assertTrue(holder.isLive(host.id))
         holder.dismissHost(host.id)
+    }
+
+    @Test
+    fun bufferedLiveViewsMustBelongToTheCurrentOwnedWatchNotAnotherHostOrRetiredConnection() = runTest {
+        val port = FakePort()
+        lateinit var listener: HostListener
+        val holder = HostConnections({ _, l -> listener = l; port }, FakeTrust(),
+            StandardTestDispatcher(testScheduler), UnconfinedTestDispatcher(testScheduler))
+        val host = testHost()
+        holder.connect(host, byteArrayOf(1))
+        port.nativeState = HostState.Connected(0u)
+        listener.onHostStateChanged(port.nativeState)
+        runCurrent()
+        val active = holder.host(host.id)!!
+        val watch = active.watches.value.single()
+        val live = HerdrView(1uL, null, emptyList(), emptyList(), listOf(HerdrPane("p", null, "/live/owned")), emptyList())
+        watch.mutableState.value = HerdrState.Live(live)
+        val other = live.copy(panes = listOf(HerdrPane("p", null, "/live/other")))
+        val buffered: Map<Pair<Long, String?>, HerdrView> = mapOf((host.id to null) to live, (99L to null) to other)
+        assertEquals(mapOf(null to live), holder.currentHerdrViews(active, buffered))
+        // A lagging/buffered view for this key never supplies its data or blanks a newer live cwd.
+        assertEquals(mapOf(null to live), holder.currentHerdrViews(active, mapOf((host.id to null) to other)))
+        watch.mutableState.value = HerdrState.Closed
+        assertTrue(holder.currentHerdrViews(active, buffered).isEmpty())
+        watch.mutableState.value = HerdrState.Live(live)
+        holder.dismissHost(host.id)
+        assertTrue(holder.currentHerdrViews(active, buffered).isEmpty())
     }
 
     @Test

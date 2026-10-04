@@ -8,17 +8,20 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
-The revised signed v0.1.5 candidate (versionCode 7, FFI API 21) is installed on the owner's phone after the full
+The revised signed v0.1.5 candidate (versionCode 8, FFI API 22) is installed on the owner's phone after the full
 review/build/device-test cycle. It is not publicly released; see [candidate notes](docs/releases/v0.1.5.md).
 
 ### Added
 
-- Recent directories: the host picker's **Dirs** tab lists recent Claude Code and Codex projects. Tap a path
-  to open a new shell there, over the existing host connection, with the host's transport preference.
-  History reads are bounded and read-only; no host daemon or storage migration (FFI API 21).
+- Project directories: the host picker's **Dirs** tab includes live herdr agent/pane working directories
+  (including Pi and plain shells), then recent Claude Code/Codex projects. Tap a path to open a new shell there
+  with the host's transport preference. Live rows follow existing watches; no extra queries, daemon or migration.
+  FFI API 22 adds pure Rust merging/validation, shared exact deduplication and a 20-path cap.
 
 ### Fixed
 
+- Dirs now reflects working directories already shown in herdr's default/named sessions, independently of
+  agent history. Changes/removals update automatically, and buffered/retired/other-host views cannot supply paths.
 - Recent-directory discovery no longer discards realistic Codex metadata headers (instructions make them
   exceed the former 8 KiB limit) or large complete Claude entries. Codex headers allow 64 KiB with a combined
   512 KiB output budget; the five-second deadline and 1 MiB exec cap remain unchanged.

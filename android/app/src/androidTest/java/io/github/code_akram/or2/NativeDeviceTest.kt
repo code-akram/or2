@@ -17,6 +17,7 @@ import io.github.code_akram.or2.ffi.contractProbeHost
 import io.github.code_akram.or2.ffi.contractProbeSession
 import io.github.code_akram.or2.ffi.generateEd25519Key
 import io.github.code_akram.or2.ffi.importPrivateKey
+import io.github.code_akram.or2.ffi.mergeDirectoryPaths
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
@@ -33,8 +34,16 @@ class NativeDeviceTest {
     @Test
     fun loadsPackagedArm64LibraryAndRoundTripsThroughUniFfi() {
         val info = buildInfo()
-        assertEquals(21u, info.apiVersion)
+        assertEquals(22u, info.apiVersion)
         assertTrue(info.version.isNotEmpty())
+    }
+
+    @Test
+    fun liveDirectoryMergingCrossesThePackagedFfiWithRustValidation() {
+        assertEquals(
+            listOf("/device/live", "/device/history"),
+            mergeDirectoryPaths(listOf("/device/live", "/hidden\u202epath"), listOf("/device/live", "/device/history", "~/relative")),
+        )
     }
 
     @Test

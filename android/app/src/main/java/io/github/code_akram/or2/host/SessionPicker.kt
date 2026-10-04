@@ -70,7 +70,7 @@ sealed interface TmuxList {
     data class Failed(val message: String) : TmuxList
 }
 
-/** Recent paths on this connection, loaded independently of the capability probe. */
+/** Project paths/history contribution on this connection, independent of the capability probe. */
 sealed interface DirectoryList {
     data object Loading : DirectoryList
     data class Loaded(val paths: List<String>) : DirectoryList
@@ -180,7 +180,7 @@ fun pickerWorkspaces(view: HerdrView): List<PickerWorkspace> {
  * text, never hidden; so is mosh's UDP being blocked ([udpBlocked]), under the tabs. While [gate] is set (the host is
  * not connected yet) the sheet shows it instead: the host's progress, or why it is not connected with [gateAction]'s
  * pill; the lists follow in the same sheet once the gate is null. Dirs has recent project paths from the connection's
- * independent history read; a tap opens a new shell in that directory, with its own Refresh.
+ * live herdr directories plus its independent history read; a tap opens a new shell there, with its own Refresh.
  */
 @Composable
 fun SessionPickerSheet(
@@ -518,9 +518,9 @@ private fun DirectoryPane(directories: DirectoryList, open: (String) -> Unit) {
         is DirectoryList.Failed -> Muted(directories.message, Modifier.testTag("directories-error"), color = Or2Colors.Danger)
         is DirectoryList.Loaded -> {
             if (directories.paths.isEmpty()) {
-                Muted("No recent directories in Claude Code or Codex history.", Modifier.testTag("directories-empty"))
+                Muted("No project directories in live herdr panes or Claude Code/Codex history.", Modifier.testTag("directories-empty"))
             } else {
-                Muted("Open a shell in a recent project.")
+                Muted("Open a shell in a project directory.")
                 GroupCard(color = Or2Colors.SurfaceRaisedRow) {
                     directories.paths.forEachIndexed { index, path ->
                         if (index > 0) GroupDivider()

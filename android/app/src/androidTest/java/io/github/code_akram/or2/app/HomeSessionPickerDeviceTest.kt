@@ -27,8 +27,10 @@ import io.github.code_akram.or2.host.DirectoryList
 import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HerdrAgent
+import io.github.code_akram.or2.ffi.HerdrPane
 import io.github.code_akram.or2.ffi.HerdrState
 import io.github.code_akram.or2.ffi.HerdrTab
+import io.github.code_akram.or2.ffi.HerdrUnavailable
 import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HerdrWorkspace
 import io.github.code_akram.or2.ffi.HostState
@@ -157,6 +159,39 @@ class HomeSessionPickerDeviceTest {
     }
 
     @Test
+    fun liveHerdrDirectoriesAppearWithoutHistoryAndUpdateWhileDirsIsOpen() {
+        connectFirst() // No histories at all; a live pi project must still appear.
+        compose.waitUntil(5_000) { port.watchListeners.isNotEmpty() }
+        fun view(version: ULong, path: String) = HerdrView(
+            version, "w1:p1", listOf(HerdrWorkspace("w1", 1u, "Project")),
+            listOf(HerdrTab("w1:t1", "w1", 1u, "pi")),
+            listOf(HerdrPane("w1:p1", "pi", path), HerdrPane("w1:p2", null, "/work/plain-shell")),
+            listOf(HerdrAgent("w1:p1", "w1:t1", "w1", null, "pi", "pi", AgentStatus.IDLE, null, 1uL, "term_1")),
+        )
+        compose.runOnUiThread { port.watchListeners.first().onHerdrStateChanged(HerdrState.Live(view(1uL, "/work/live-pi"))) }
+        show()
+        compose.onNodeWithTag("host:7").performClick()
+        waitFor("herdr-agent:default:w1:p1")
+        compose.onNodeWithText("/work/live-pi", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag("picker-tab:2").performClick()
+        compose.onNodeWithText("/work/live-pi").assertIsDisplayed()
+        compose.onNodeWithText("/work/plain-shell").assertIsDisplayed()
+        compose.runOnUiThread { port.watchListeners.first().onHerdrStateChanged(HerdrState.Live(view(2uL, "/work/moved"))) }
+        compose.waitUntil(5_000) { compose.onAllNodesWithTag("directory-open:0").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("/work/moved").assertIsDisplayed()
+        compose.onNodeWithText("/work/live-pi").assertDoesNotExist()
+        compose.runOnUiThread {
+            port.watchListeners.first().onHerdrStateChanged(HerdrState.Unavailable(HerdrUnavailable.NotRunning, "Fixture stopped"))
+        }
+        compose.onNodeWithTag("directory-open:0").assertDoesNotExist()
+        compose.runOnUiThread { port.watchListeners.first().onHerdrStateChanged(HerdrState.Live(view(3uL, "/work/moved"))) }
+        compose.onNodeWithText("/work/moved").assertIsDisplayed()
+        compose.onNodeWithTag("directory-open:0").performClick()
+        waitFor("terminal-card")
+        compose.runOnIdle { assertEquals(listOf(TerminalTarget.ShellIn("/work/moved")), port.sessions.map { it.first }) }
+    }
+
+    @Test
     fun switchingHostsNeverShowsTheOtherHostsCachedDirectories() {
         val other = uiHost(id = 8, label = "Beta")
         val second = UiPort().apply { directories = listOf("/work/second-host") }
@@ -173,7 +208,12 @@ class HomeSessionPickerDeviceTest {
                 it.hostListener!!.onHostStateChanged(it.native)
             }
         }
-        compose.waitUntil(5_000) { connections.hosts.value.values.all { it.directories.value is DirectoryList.Loaded } }
+        compose.waitUntil(5_000) { connections.hosts.value.values.all { it.directories.value is DirectoryList.Loaded } && port.watchListeners.isNotEmpty() && second.watchListeners.isNotEmpty() }
+        compose.runOnUiThread {
+            listOf(port to "/live/first-host", second to "/live/second-host").forEach { (p, cwd) ->
+                p.watchListeners.first().onHerdrStateChanged(HerdrState.Live(HerdrView(1uL, null, emptyList(), emptyList(), listOf(HerdrPane("w1:p1", null, cwd)), emptyList())))
+            }
+        }
         show(listOf(host, other), connections)
         try {
             repeat(2) {
@@ -185,6 +225,8 @@ class HomeSessionPickerDeviceTest {
                     compose.onNodeWithTag("picker-tab:2").performClick()
                     compose.onNodeWithText(expected).assertIsDisplayed()
                     compose.onNodeWithText(absent).assertDoesNotExist()
+                    compose.onNodeWithText(if (id == 7L) "/live/first-host" else "/live/second-host").assertIsDisplayed()
+                    compose.onNodeWithText(if (id == 7L) "/live/second-host" else "/live/first-host").assertDoesNotExist()
                     compose.onNodeWithContentDescription("Close sheet").performSemanticsAction(SemanticsActions.OnClick)
                 }
             }

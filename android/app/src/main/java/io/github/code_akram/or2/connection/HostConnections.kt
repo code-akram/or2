@@ -12,6 +12,7 @@ import io.github.code_akram.or2.ffi.HerdrIntegrationState
 import io.github.code_akram.or2.ffi.HerdrListener
 import io.github.code_akram.or2.ffi.HerdrState
 import io.github.code_akram.or2.ffi.HerdrUnavailable
+import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HerdrWatchInterface
 import io.github.code_akram.or2.ffi.HostAddress
 import io.github.code_akram.or2.ffi.HostCapabilities
@@ -1061,6 +1062,19 @@ class HostConnections(
     }
 
     private class HerdrWatchSpec(val session: String?, val name: String)
+
+    /**
+     * Scope the reactive watch projection to this owned connection. The caller observes the
+     * host state and watch flow. Buffered keys indicate observed live sessions, but metadata
+     * always comes from the current owned watch, not a retired snapshot or a lagging version.
+     */
+    fun currentHerdrViews(current: ActiveHost, buffered: Map<Pair<Long, String?>, HerdrView>): Map<String?, HerdrView> {
+        if (!owns(current) || current.retired || current.disconnectRequested || current.state.value !is HostState.Connected) return emptyMap()
+        val live = current.watches.value.mapNotNull { watch ->
+            (watch.state.value as? HerdrState.Live)?.let { watch.session to it.view }
+        }.toMap()
+        return live.filterKeys { session -> (current.host.id to session) in buffered }
+    }
 
     /** Read-only, independently cancellable; a superseded connection never publishes its answer. */
     suspend fun refreshDirectories(current: ActiveHost) {

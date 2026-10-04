@@ -1,6 +1,6 @@
 //! Recent project paths from bounded agent history reads. No daemon, writes or local storage.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -63,6 +63,23 @@ pub fn valid_path(path: &str) -> bool {
         && path.len() <= 4096
         && !path.contains(['\\', '\u{2028}', '\u{2029}'])
         && crate::herdr::display_text(path) == path
+}
+
+/// Merge this host's current live paths before its newest-first history. Exact deduplication,
+/// stable source order and one shared cap; reject unsafe paths without changing them. Pure:
+/// the caller supplies already-watched metadata, so no extra query or storage is needed.
+pub fn merge<'a>(
+    live: impl IntoIterator<Item = &'a str>,
+    history: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    live.into_iter()
+        .chain(history)
+        .filter(|path| valid_path(path))
+        .filter(|path| seen.insert(*path))
+        .take(MAX_DIRECTORIES)
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Shared by SSH and mosh. The path is an argument, never part of the script. A stale path
@@ -263,6 +280,51 @@ CODEX
             assert!(!valid_path(path), "{path:?}");
         }
         assert!(!valid_path(&format!("/{}", "a".repeat(4096))));
+    }
+
+    #[test]
+    fn live_paths_precede_history_and_only_exact_duplicates_are_removed() {
+        assert_eq!(
+            merge(
+                [
+                    "/work/pi",
+                    "/work/shared",
+                    "/work/pi",
+                    "/work/it's $(literal)",
+                    "/Work/pi"
+                ],
+                ["/work/shared", "/work/history", "/work/history"]
+            ),
+            [
+                "/work/pi",
+                "/work/shared",
+                "/work/it's $(literal)",
+                "/Work/pi",
+                "/work/history"
+            ]
+        );
+    }
+
+    #[test]
+    fn merging_rejects_unsafe_paths_in_both_sources_before_dedup_and_the_cap() {
+        let unsafe_paths = [
+            "relative",
+            "~/project",
+            "/hidden\u{202e}path",
+            "/hidden\u{200b}path",
+            "/new\nline",
+            "/back\\slash",
+        ];
+        assert!(merge(unsafe_paths, unsafe_paths).is_empty());
+        let paths: Vec<_> = (0..30).map(|i| format!("/live/{i}")).collect();
+        let live = unsafe_paths
+            .into_iter()
+            .chain(std::iter::repeat_n("/live/0", 25))
+            .chain(paths.iter().map(String::as_str));
+        let merged = merge(live, ["/history"]);
+        assert_eq!(merged.len(), MAX_DIRECTORIES);
+        assert_eq!(merged[0], "/live/0");
+        assert_eq!(merged[19], "/live/19");
     }
 
     #[test]
