@@ -323,6 +323,46 @@ fn params(port: u16, key: &str, columns: u16, rows: u16) -> MoshParams {
     }
 }
 
+#[test]
+fn wheel_input_publishes_nothing_but_viewport_scroll_publishes() {
+    use crate::input::ViewportScroll;
+    let (states, _) = mpsc::channel();
+    let (handle, mut driver) = channel(Arc::new(Recorder(Mutex::new(states))));
+    driver.transition(SessionState::Connected).unwrap();
+    let screen = GhosttyScreen::new(TerminalSize::new(8, 3).unwrap()).unwrap();
+    let mut session = Session::new(&Base64Key::from_printable(KEY).unwrap(), false, screen);
+    session
+        .terminal()
+        .live()
+        .engine()
+        .write(b"1\r\n2\r\n3\r\n4\x1b[?1000h\x1b[?1006h");
+    publish(&mut driver, &mut session).unwrap();
+    handle.take_frame().unwrap();
+    let mut submits = SubmitSequencer::default();
+    apply_input(
+        Command::Scroll(ViewportScroll::Wheel {
+            rows: -1,
+            column: 1,
+            row: 1,
+        }),
+        &mut driver,
+        &mut session,
+        true,
+        &mut submits,
+    )
+    .unwrap();
+    assert!(handle.take_frame().is_none());
+    apply_input(
+        Command::Scroll(ViewportScroll::Delta(-1)),
+        &mut driver,
+        &mut session,
+        true,
+        &mut submits,
+    )
+    .unwrap();
+    assert!(!handle.take_frame().unwrap().frame.rows().is_empty());
+}
+
 /// Runs a session on a thread of its own, as the host driver does, to the server at `peer` and
 /// the port in `params`.
 fn spawn<T: DatagramTransport>(

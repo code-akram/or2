@@ -516,6 +516,8 @@ screen with no colour change. Nothing holds it on screen past the first frame.
   A program can still set its own (OSC 4, 10, 11). The chrome around the terminal stays Catppuccin.
 - The grid keeps a 4 dp inset on the left and the right (the column count is measured inside it), so
   glyphs never touch the screen edge or sit under a curved bezel; the background fills the inset.
+  Glyph origins stay fixed to this grid when batched; backgrounds have hard cell edges. Merged
+  straight decorations may have small antialiasing differences at shared cell boundaries.
 - A pinch accumulates: each event's scale factor multiplies a continuous size and only the applied
   size is rounded to half steps, so a slow pinch works at the small default.
 - Navigation swipes on tmux and herdr terminals (one finger sideways: window or tab; two fingers

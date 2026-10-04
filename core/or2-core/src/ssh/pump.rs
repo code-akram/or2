@@ -245,7 +245,11 @@ impl TerminalPump {
             }
             // Its Enter follows, after the delay.
             Command::Submit(_) => self.submits.arm(),
-            Command::Scroll(_) => self.publish(driver)?,
+            Command::Scroll(_) => {
+                if let Some(frame) = self.terminal.frame_if_changed().map_err(internal)? {
+                    driver.publish(frame).map_err(internal)?;
+                }
+            }
             Command::FullFrame => {
                 self.terminal.request_full_frame();
                 self.publish(driver)?;
@@ -434,6 +438,41 @@ mod tests {
             all.push(bytes(Some(write)));
         }
         all
+    }
+
+    #[test]
+    fn wheel_input_publishes_nothing_but_viewport_scroll_publishes() {
+        use crate::input::ViewportScroll;
+        let (handle, mut driver) = channel(Arc::new(Quiet));
+        driver.transition(SessionState::Connected).unwrap();
+        let (mut pump, mut writes, _) =
+            TerminalPump::new(TerminalSize::new(8, 3).unwrap()).unwrap();
+        pump.terminal
+            .write(b"1\r\n2\r\n3\r\n4\x1b[?1000h\x1b[?1006h");
+        pump.publish(&mut driver).unwrap();
+        handle.take_frame().unwrap();
+        pump.command(
+            &mut driver,
+            Command::Scroll(ViewportScroll::Wheel {
+                rows: -1,
+                column: 1,
+                row: 1,
+            }),
+        )
+        .unwrap();
+        assert_eq!(drain(&mut writes), [b"\x1b[<64;2;2M".to_vec()]);
+        assert!(handle.take_frame().is_none());
+        pump.command(&mut driver, Command::Scroll(ViewportScroll::Delta(-1)))
+            .unwrap();
+        let frame = handle.take_frame().unwrap().frame;
+        assert!(!frame.rows().is_empty());
+        assert!(frame.cursor().is_none());
+        pump.command(&mut driver, Command::Scroll(ViewportScroll::Bottom))
+            .unwrap();
+        assert!(handle.take_frame().unwrap().frame.cursor().is_some());
+        pump.command(&mut driver, Command::Scroll(ViewportScroll::Bottom))
+            .unwrap();
+        assert!(handle.take_frame().is_none(), "already at bottom");
     }
 
     #[test]

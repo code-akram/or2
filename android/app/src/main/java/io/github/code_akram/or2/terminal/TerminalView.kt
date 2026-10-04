@@ -9,6 +9,9 @@ import android.graphics.Path
 import android.graphics.Picture
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.graphics.fonts.Font
+import android.graphics.text.PositionedGlyphs
+import android.graphics.text.TextRunShaper
 import android.net.Uri
 import android.text.InputType
 import android.util.LruCache
@@ -49,7 +52,7 @@ private const val LINK_FLASH_MS = 300L
 /** How far a navigation swipe travels before it counts. */
 private const val SWIPE_DISTANCE_DP = 56f
 
-/** Canvas is the only renderer. The cache retains glyph commands, not terminal bitmaps. */
+/** Canvas is the only renderer. Ordinary glyphs use cached shaping and explicit grid positions. */
 class TerminalView(context: Context) : View(context) {
     val grid = TerminalGrid()
     val applyTimings = FrameTimings()
@@ -63,6 +66,8 @@ class TerminalView(context: Context) : View(context) {
     // single-letter delivery with the phone's default IME passed real-SSH acceptance.
     internal var directLatinInput = false
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    // Opaque grid fills need hard boundaries; text and overlays keep their existing AA paint.
+    private val backgroundPaint = Paint()
     /**
      * The font size in density-independent pixels (not scaled by the system font size, so the
      * column count is predictable); pinch changes it and it is remembered per device ([TerminalPrefs]).
@@ -92,6 +97,15 @@ class TerminalView(context: Context) : View(context) {
         val bold: Boolean, val italic: Boolean, val faint: Boolean, val fakeBold: Boolean,
     )
     private val glyphs = LruCache<Glyph, Picture>(2048)
+    private data class ShapeKey(val text: String, val style: Int, val fakeBold: Boolean, val size: Float)
+    /** [blank]: a bounded glyph with no ink (a space), which draws nothing and need not join a batch. */
+    private data class ShapedCell(val glyphs: PositionedGlyphs, val measured: Float, val bounded: Boolean, val blank: Boolean = false)
+    private val shapes = LruCache<ShapeKey, ShapedCell>(2048)
+    /** Single ASCII characters by (style, char): no key allocation or hashing for the bulk of cells. Cleared with [shapes]. */
+    private val asciiShapes = arrayOfNulls<ShapedCell>(4 * 128)
+    private val primaryFonts = arrayOfNulls<Font>(4)
+    private var glyphIds = IntArray(128)
+    private var glyphPositions = FloatArray(256)
     var onInputChanged: () -> Unit = {}
     var onSelectionChanged: () -> Unit = {}
 
@@ -137,6 +151,7 @@ class TerminalView(context: Context) : View(context) {
     private val scroller = OverScroller(context)
     private var flingY = 0
     private var scrollRemainder = 0f
+    private val flingTick = Runnable { computeScroll() }
 
     /** The cell a swipe (and the fling after it) started on: where its wheel events are reported. */
     private var scrollCell = CellPosition(0, 0)
@@ -187,7 +202,8 @@ class TerminalView(context: Context) : View(context) {
             if (selection != null) return true
             flingY = 0
             scroller.fling(0, 0, 0, -velocityY.toInt(), 0, 0, -1_000_000, 1_000_000)
-            postInvalidateOnAnimation()
+            removeCallbacks(flingTick)
+            postOnAnimation(flingTick)
             return true
         }
     })
@@ -273,8 +289,10 @@ class TerminalView(context: Context) : View(context) {
                 appliedFrames.applied()
                 updateScrolledAway()
                 invalidate()
-            } else {
+            } else if (grid.needsFullFrame) {
                 requestSnapshot()
+            } else {
+                requestedFull = false
             }
             applyTimings.record(System.nanoTime() - start)
         }
@@ -423,6 +441,9 @@ class TerminalView(context: Context) : View(context) {
         cellHeight = ceil(textPaint.fontMetrics.bottom - textPaint.fontMetrics.top)
         baseline = -textPaint.fontMetrics.top
         glyphs.evictAll()
+        shapes.evictAll()
+        asciiShapes.fill(null)
+        primaryFonts.fill(null)
         scrollRemainder = 0f
         clearSelection()
         if (resize) resizeSession()
@@ -634,10 +655,11 @@ class TerminalView(context: Context) : View(context) {
     }
 
     override fun computeScroll() {
+        removeCallbacks(flingTick)
         if (scroller.computeScrollOffset()) {
             scrollPixels((scroller.currY - flingY).toFloat())
             flingY = scroller.currY
-            postInvalidateOnAnimation()
+            postOnAnimation(flingTick)
         }
     }
 
@@ -659,6 +681,7 @@ class TerminalView(context: Context) : View(context) {
     }
 
     override fun onDetachedFromWindow() {
+        removeCallbacks(flingTick)
         removeCallbacks(blink)
         removeCallbacks(endLinkFlash)
         tappedLink = null
@@ -693,19 +716,24 @@ class TerminalView(context: Context) : View(context) {
         // old grids during resize, cursor, selection and composing text, to this View.
         val checkpoint = canvas.save()
         canvas.clipRect(0f, 0f, width.toFloat(), height.toFloat())
-        paint.color = grid.background.opaque()
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint) // Includes grid margins.
+        backgroundPaint.color = grid.background.opaque()
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), backgroundPaint) // Includes grid margins.
         canvas.save()
         canvas.translate(horizontalInset, 0f)
         (selection?.rows ?: grid.rows).forEachIndexed { rowIndex, row ->
             val y = rowIndex * cellHeight
-            row.cells.forEachIndexed { column, cell ->
-                paint.color = cell.style.background.opaque()
-                canvas.drawRect(column * cellWidth, y, (column + 1) * cellWidth, y + cellHeight, paint)
+            var column = 0
+            while (column < row.cells.size) {
+                val first = column
+                val background = row.cells[column].style.background
+                while (column < row.cells.size && row.cells[column].style.background == background) column++
+                if (background != grid.background) {
+                    backgroundPaint.color = background.opaque()
+                    canvas.drawRect(first * cellWidth, y, column * cellWidth, y + cellHeight, backgroundPaint)
+                }
             }
-            row.cells.forEachIndexed { column, cell ->
-                if (cell.width != CellWidth.SPACER_TAIL) drawCell(canvas, column * cellWidth, y, cell)
-            }
+            drawGlyphRow(canvas, y, row)
+            drawDecorationRow(canvas, y, row)
         }
         grid.cursor?.takeIf { selection == null }?.let { cursor ->
             if (!cursor.blinking || cursorVisible) {
@@ -768,6 +796,8 @@ class TerminalView(context: Context) : View(context) {
         }
         canvas.restore()
         drawScrollIndicator(canvas)
+        // Exclude the overlay's sorting, formatting and Canvas commands from CPU record samples.
+        // It still contributes to Window metrics; switch Stats off for performance measurements.
         drawTimings.record(System.nanoTime() - start)
         if (showTimings) {
             paint.color = 0xdd000000.toInt()
@@ -798,7 +828,7 @@ class TerminalView(context: Context) : View(context) {
         canvas.drawRoundRect(right - 3 * density, top, right, top + barHeight, 1.5f * density, 1.5f * density, paint)
     }
 
-    private fun drawCell(canvas: Canvas, x: Float, y: Float, cell: ResolvedCell) {
+    private fun drawCell(canvas: Canvas, x: Float, y: Float, cell: ResolvedCell, decorate: Boolean = true) {
         val w = cellWidth * if (cell.width == CellWidth.WIDE) 2 else 1
         if (cell.text.isNotEmpty()) {
             val typeface = typefaces[(if (cell.style.bold) Typeface.BOLD else 0) or
@@ -826,11 +856,136 @@ class TerminalView(context: Context) : View(context) {
             canvas.drawPicture(picture)
             canvas.restore()
         }
-        if (cell.style.underline != Underline.NONE || cell.style.strikethrough || cell.style.overline) {
+        if (decorate && (cell.style.underline != Underline.NONE || cell.style.strikethrough || cell.style.overline)) {
             canvas.save()
             canvas.translate(x, y)
             canvas.clipRect(0f, 0f, w, cellHeight)
             decorations(canvas, w, cell.style)
+            canvas.restore()
+        }
+    }
+
+    private fun shape(cell: ResolvedCell): ShapedCell {
+        val style = (if (cell.style.bold) Typeface.BOLD else 0) or
+            (if (cell.style.italic) Typeface.ITALIC else 0)
+        val typeface = typefaces[style]
+        val fakeBold = cell.style.bold && !typeface.isBold
+        // fakeBold is fixed per style (the typefaces never change), so (style, char) is a complete key.
+        val ascii = if (cell.text.length == 1 && cell.text[0].code < 128) style * 128 + cell.text[0].code else -1
+        if (ascii >= 0) asciiShapes[ascii]?.let { return it }
+        val key = ShapeKey(cell.text, style, fakeBold, textPaint.textSize)
+        if (ascii < 0) shapes[key]?.let { return it }
+        textPaint.typeface = typeface
+        textPaint.isFakeBoldText = fakeBold
+        textPaint.alpha = 255
+        val shaped = TextRunShaper.shapeTextRun(cell.text, 0, cell.text.length, 0, cell.text.length,
+            0f, 0f, false, textPaint)
+        val measured = textPaint.measureText(cell.text)
+        val primary = primaryFonts[style] ?: TextRunShaper.shapeTextRun("M", 0, 1, 0, 1,
+            0f, 0f, false, textPaint).getFont(0).also { primaryFonts[style] = it }
+        // Conservative rule: only one code point/one glyph in the primary face, upright and
+        // without synthetic weight. Keep ALL italic/fake-bold cells clipped. Check ink, not
+        // just advance, with a pixel of AA room; fallback and complex clusters use Pictures.
+        val single = cell.text.codePointCount(0, cell.text.length) == 1
+        val mark = if (single) Character.getType(cell.text.codePointAt(0)) else -1
+        var blank = false
+        var bounded = single && mark != Character.NON_SPACING_MARK.toInt() &&
+            mark != Character.COMBINING_SPACING_MARK.toInt() && mark != Character.ENCLOSING_MARK.toInt() &&
+            shaped.glyphCount() == 1 && !cell.style.italic && !fakeBold && measured <= cellWidth
+        if (bounded) {
+            val font = shaped.getFont(0)
+            val bounds = RectF()
+            font.getGlyphBounds(shaped.getGlyphId(0), textPaint, bounds)
+            val left = ((cellWidth - measured) / 2).coerceAtLeast(0f) + shaped.getGlyphX(0)
+            val top = baseline + shaped.getGlyphY(0)
+            bounded = font == primary && shaped.getGlyphId(0) != 0 &&
+                (!cell.style.bold || font.style.weight >= 600) &&
+                (bounds.isEmpty || (left + bounds.left >= 1f && left + bounds.right <= cellWidth - 1f &&
+                    top + bounds.top >= 1f && top + bounds.bottom <= cellHeight - 1f))
+            blank = bounded && bounds.isEmpty
+        }
+        return ShapedCell(shaped, measured, bounded, blank).also { if (ascii >= 0) asciiShapes[ascii] = it else shapes.put(key, it) }
+    }
+
+    /** Device-test diagnostics: the same cached classification used by the row renderer. */
+    internal fun canBatchGlyph(cell: ResolvedCell): Boolean =
+        cell.width == CellWidth.NARROW && cell.text.isNotEmpty() && shape(cell).bounded
+
+    private fun drawGlyphRow(canvas: Canvas, y: Float, row: ResolvedRow) {
+        if (glyphIds.size < row.cells.size) {
+            glyphIds = IntArray(row.cells.size)
+            glyphPositions = FloatArray(row.cells.size * 2)
+        }
+        var count = 0
+        var font: Font? = null
+        var foreground = 0u
+        var faint = false
+        fun flush() {
+            if (count == 0) return
+            textPaint.color = foreground.opaque()
+            textPaint.alpha = if (faint) 128 else 255
+            textPaint.isFakeBoldText = false
+            // drawGlyphs uses the actual Font, ignoring Paint.typeface. Every x is absolute:
+            // ceil(M advance) is our cell width; natural text-run advances must never accumulate.
+            canvas.drawGlyphs(glyphIds, 0, glyphPositions, 0, count, font!!, textPaint)
+            count = 0
+        }
+        val cells = row.cells
+        // An index loop: withIndex() would allocate one IndexedValue per cell per frame.
+        for (column in cells.indices) {
+            val cell = cells[column]
+            if (cell.width == CellWidth.SPACER_TAIL || cell.text.isEmpty()) {
+                flush()
+                continue
+            }
+            val shape = shape(cell)
+            if (cell.width != CellWidth.NARROW || !shape.bounded) {
+                flush()
+                drawCell(canvas, column * cellWidth, y, cell, decorate = false)
+                continue
+            }
+            // Blank cells (the bulk of a terminal) add nothing to draw and do not split a batch.
+            if (shape.blank) continue
+            val actual = shape.glyphs.getFont(0)
+            if (font != actual || foreground != cell.style.foreground || faint != cell.style.faint) flush()
+            font = actual
+            foreground = cell.style.foreground
+            faint = cell.style.faint
+            glyphIds[count] = shape.glyphs.getGlyphId(0)
+            glyphPositions[count * 2] = column * cellWidth + ((cellWidth - shape.measured) / 2).coerceAtLeast(0f) +
+                shape.glyphs.getGlyphX(0)
+            glyphPositions[count * 2 + 1] = y + baseline + shape.glyphs.getGlyphY(0)
+            count++
+        }
+        flush()
+    }
+
+    private fun drawDecorationRow(canvas: Canvas, y: Float, row: ResolvedRow) {
+        var column = 0
+        while (column < row.cells.size) {
+            val first = column
+            val cell = row.cells[column]
+            val style = cell.style
+            val cells = if (cell.width == CellWidth.WIDE) 2 else 1
+            column += cells
+            if (cell.width == CellWidth.SPACER_TAIL ||
+                (style.underline == Underline.NONE && !style.overline && !style.strikethrough)) continue
+            if (style.underline == Underline.NONE || style.underline == Underline.SINGLE || style.underline == Underline.DOUBLE) {
+                while (column < row.cells.size) {
+                    val next = row.cells[column]
+                    val other = next.style
+                    if (next.width == CellWidth.SPACER_TAIL || style.underline != other.underline ||
+                        style.strikethrough != other.strikethrough || style.overline != other.overline ||
+                        style.foreground != other.foreground || style.underlineColor != other.underlineColor ||
+                        style.faint != other.faint) break
+                    column += if (next.width == CellWidth.WIDE) 2 else 1
+                }
+            }
+            canvas.save()
+            canvas.translate(first * cellWidth, y)
+            val w = (column - first) * cellWidth
+            canvas.clipRect(0f, 0f, w, cellHeight)
+            decorations(canvas, w, style)
             canvas.restore()
         }
     }

@@ -1,6 +1,7 @@
 package io.github.code_akram.or2.terminal
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Point
 import android.graphics.Rect
@@ -12,6 +13,11 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.code_akram.or2.ffi.CursorShape
 import io.github.code_akram.or2.ffi.TerminalCursor
+import io.github.code_akram.or2.ffi.CellStyle
+import io.github.code_akram.or2.ffi.CellWidth
+import io.github.code_akram.or2.ffi.TerminalCell
+import io.github.code_akram.or2.ffi.TerminalRow
+import io.github.code_akram.or2.ffi.Underline
 import java.io.File
 import io.github.code_akram.or2.ui.Or2Dimens
 import org.junit.Assert.*
@@ -22,6 +28,72 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class TerminalVisualDeviceTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
+
+    @Test fun batchedAsciiKeepsTheLegacyCellOriginsBackgroundsAndFaintAlpha() {
+        instrumentation.runOnMainSync {
+            val view = TerminalView(instrumentation.targetContext)
+            val columns = 56
+            val style = CellStyle(0xc0caf5u, DefaultBackground, null, Underline.NONE,
+                false, false, false, false, false)
+            val styles = listOf(style, style.copy(background = 0x334455u), style.copy(faint = true))
+            val frame = terminalVisualFrame(columns.toUShort(), 3u, CursorShape.BAR).copy(
+                cursor = null, background = DefaultBackground, styles = styles,
+                scrollback = io.github.code_akram.or2.ffi.Scrollback(3u, 0u),
+                changedRows = List(3) { row -> TerminalRow(row.toUShort(), false,
+                    List(columns) { column -> TerminalCell("MiW.fg"[column % 6].toString(), CellWidth.NARROW,
+                        (if (row == 0) 0 else if (row == 1 && column in 10..30) 1 else 2).toUInt()) }) })
+            val width = (view.horizontalInset * 2 + columns * view.cellWidth).toInt()
+            val height = (3 * view.cellHeight).toInt()
+            view.layout(0, 0, width, height)
+            view.grid.apply(frame)
+            assertTrue("The ordinary fixture must exercise drawGlyphs", view.grid.rows[0].cells.any { view.canBatchGlyph(it) })
+            val ordinary = ResolvedCell("M", CellWidth.NARROW, style)
+            assertFalse(view.canBatchGlyph(ordinary.copy(width = CellWidth.WIDE)))
+            assertFalse(view.canBatchGlyph(ordinary.copy(text = "e\u0301")))
+            assertFalse(view.canBatchGlyph(ordinary.copy(text = "\u0301")))
+            assertFalse(view.canBatchGlyph(ordinary.copy(style = style.copy(italic = true))))
+            assertFalse(view.canBatchGlyph(ordinary.copy(text = "😀")))
+            if (view.boldUsesFake) assertFalse(view.canBatchGlyph(ordinary.copy(style = style.copy(bold = true))))
+            val actual = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            val expected = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            try {
+                view.draw(Canvas(actual))
+                val canvas = Canvas(expected)
+                canvas.drawColor(DefaultBackground.toInt() or (0xff shl 24))
+                val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    textSize = view.fontSizeSp * view.resources.displayMetrics.density
+                    typeface = terminalTypeface(this)
+                }
+                val background = Paint()
+                val baseline = -text.fontMetrics.top
+                canvas.translate(view.horizontalInset, 0f)
+                frame.changedRows.forEach { row ->
+                    row.cells.forEachIndexed { column, cell ->
+                        val cellStyle = styles[cell.style.toInt()]
+                        val x = column * view.cellWidth
+                        val y = row.index.toInt() * view.cellHeight
+                        background.color = cellStyle.background.toInt() or (0xff shl 24)
+                        canvas.drawRect(x, y, x + view.cellWidth, y + view.cellHeight, background)
+                        text.color = cellStyle.foreground.toInt() or (0xff shl 24)
+                        text.alpha = if (cellStyle.faint) 128 else 255
+                        val measured = text.measureText(cell.text)
+                        canvas.save()
+                        canvas.translate(x, y)
+                        canvas.clipRect(0f, 0f, view.cellWidth, view.cellHeight)
+                        if (measured > view.cellWidth) canvas.scale(view.cellWidth / measured, 1f)
+                        canvas.drawText(cell.text, ((view.cellWidth - measured) / 2).coerceAtLeast(0f), baseline, text)
+                        canvas.restore()
+                    }
+                }
+                // Explicit glyph positions should produce the same raster on a software Canvas.
+                // Hardware equivalence is also reviewed with the existing captured style fixtures.
+                assertTrue("Batched text drifted from per-cell rendering", actual.sameAs(expected))
+            } finally {
+                actual.recycle()
+                expected.recycle()
+            }
+        }
+    }
 
     private fun await(scenario: ActivityScenario<TerminalProbeActivity>, predicate: (TerminalProbeActivity, TerminalView) -> Boolean) {
         val deadline = SystemClock.uptimeMillis() + 8_000

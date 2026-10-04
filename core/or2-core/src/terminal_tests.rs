@@ -18,6 +18,30 @@ fn text(row: &Row) -> String {
 }
 
 #[test]
+fn scroll_publication_checks_metadata_even_without_dirty_rows() {
+    let mut terminal = engine(8, 3);
+    terminal.frame().unwrap();
+    assert!(terminal.frame_if_changed().unwrap().is_none());
+    for bytes in [
+        b"\x1b[?1000h".as_slice(),
+        b"\x1b[?25l",
+        b"\x1b]11;#123456\x07",
+        b"\x1b[?2004h",
+    ] {
+        terminal.write(bytes);
+        assert!(terminal.frame_if_changed().unwrap().is_some());
+        assert!(terminal.frame_if_changed().unwrap().is_none());
+    }
+    terminal.write(b"\x1b[?1049h");
+    terminal.frame().unwrap();
+    assert_eq!(
+        terminal.scroll(ViewportScroll::Delta(-1)).unwrap(),
+        b"\x1b[A"
+    );
+    assert!(terminal.frame_if_changed().unwrap().is_none());
+}
+
+#[test]
 fn resolved_styles_golden() {
     let mut terminal = engine(12, 3);
     terminal

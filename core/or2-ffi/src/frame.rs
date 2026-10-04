@@ -122,48 +122,56 @@ pub struct Scrollback {
 impl From<core::TakenFrame> for TerminalFrame {
     fn from(taken: core::TakenFrame) -> Self {
         let frame = taken.frame;
-        let mut styles = Vec::new();
-        let mut index_of = HashMap::new();
-        let changed_rows = frame
-            .rows()
-            .iter()
-            .map(|row| TerminalRow {
-                index: row.index(),
-                wrapped: row.wrapped(),
-                cells: row
-                    .cells()
-                    .iter()
-                    .map(|cell| TerminalCell {
-                        text: cell.text.clone(),
-                        width: cell.width.into(),
-                        style: *index_of.entry(cell.style).or_insert_with(|| {
-                            styles.push(CellStyle::from(cell.style));
-                            u32::try_from(styles.len() - 1).expect("styles are bounded by cells")
-                        }),
-                    })
-                    .collect(),
-                links: row
-                    .links()
-                    .iter()
-                    .map(|link| CellLink {
-                        start_column: link.start_column,
-                        end_column: link.end_column,
-                        uri: link.uri.clone(),
-                    })
-                    .collect(),
-            })
-            .collect();
+        let size = frame.size();
+        let full = frame.is_full();
+        let cursor = frame.cursor();
+        let background = frame.background().packed();
         let scrollback = frame.scrollback();
         let modes = frame.modes();
+        let style_capacity = (frame.rows().len() * usize::from(size.columns())).min(16);
+        let mut styles = Vec::with_capacity(style_capacity);
+        let mut index_of = HashMap::with_capacity(style_capacity);
+        // Exact-size consuming iterators reserve row/cell/link capacities in collect().
+        let changed_rows = frame
+            .into_rows()
+            .into_iter()
+            .map(|row| {
+                let (index, wrapped, cells, links) = row.into_parts();
+                TerminalRow {
+                    index,
+                    wrapped,
+                    cells: cells
+                        .into_iter()
+                        .map(|cell| TerminalCell {
+                            text: cell.text,
+                            width: cell.width.into(),
+                            style: *index_of.entry(cell.style).or_insert_with(|| {
+                                styles.push(CellStyle::from(cell.style));
+                                u32::try_from(styles.len() - 1)
+                                    .expect("styles are bounded by cells")
+                            }),
+                        })
+                        .collect(),
+                    links: links
+                        .into_iter()
+                        .map(|link| CellLink {
+                            start_column: link.start_column,
+                            end_column: link.end_column,
+                            uri: link.uri,
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
         Self {
             sequence: taken.sequence,
-            columns: frame.size().columns(),
-            rows: frame.size().rows(),
-            full: frame.is_full(),
+            columns: size.columns(),
+            rows: size.rows(),
+            full,
             styles,
             changed_rows,
-            cursor: frame.cursor().map(Into::into),
-            background: frame.background().packed(),
+            cursor: cursor.map(Into::into),
+            background,
             scrollback: Scrollback {
                 total_rows: scrollback.total_rows,
                 offset: scrollback.offset,
@@ -278,7 +286,11 @@ mod tests {
             alternate_screen: false,
             bracketed_paste: true,
         });
+        let text_ptr = frame.rows()[0].cells()[1].text.as_ptr();
+        let uri_ptr = frame.rows()[0].links()[0].uri.as_ptr();
         let ffi = TerminalFrame::from(core::TakenFrame { sequence: 7, frame });
+        assert_eq!(ffi.changed_rows[0].cells[1].text.as_ptr(), text_ptr);
+        assert_eq!(ffi.changed_rows[0].links[0].uri.as_ptr(), uri_ptr);
         assert_eq!(
             ffi.modes,
             TerminalModes {

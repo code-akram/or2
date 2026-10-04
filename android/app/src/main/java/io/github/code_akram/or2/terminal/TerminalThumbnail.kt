@@ -63,7 +63,7 @@ fun TerminalThumbnail(terminal: ActiveTerminal, holder: HostConnections, modifie
         session.callOwn { requestFullFrame() }
         terminal.frameReady.conflate().collect {
             session.takeFrame()?.let { frame ->
-                if (grid.apply(frame)) version++ else session.callOwn { requestFullFrame() }
+                if (grid.apply(frame)) version++ else if (grid.needsFullFrame) session.callOwn { requestFullFrame() }
             }
             delay(150) // A glance, not a second terminal: a few redraws a second is plenty.
         }

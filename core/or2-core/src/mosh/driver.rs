@@ -374,7 +374,17 @@ fn apply_input(
         }
         // Its Enter follows, after the delay.
         Command::Submit(_) => submits.arm(),
-        Command::Scroll(_) => publish(driver, session)?,
+        Command::Scroll(_) => {
+            if let Some(frame) = session
+                .terminal()
+                .live()
+                .engine()
+                .frame_if_changed()
+                .map_err(internal)?
+            {
+                driver.publish(frame).map_err(internal)?;
+            }
+        }
         Command::FullFrame => {
             session.terminal().live().engine().request_full_frame();
             publish(driver, session)?;

@@ -3951,6 +3951,58 @@ once, in order. In `TargetScroller`:
   try while the host is closed, then the `Bottom` and the key over the new connection, once) and
   `closingTheTerminalDropsItsHeldInputAndStopsRetrying`.
 
+## Render performance (scrolling and drawing)
+
+
+- SSH and mosh scroll commands publish only when the terminal engine reports dirty rows, a full
+  reset, or changed cursor/default background/scrollback/modes. Wheel bytes alone publish nothing;
+  viewport movement and navigation-key fallback still check the same engine state. Kotlin skips
+  invalidation for identical deltas (including metadata); unusable deltas request a full snapshot.
+  Explicit full snapshots still redraw, including the native measurement probe. Fling ticks use
+  `postOnAnimation` independently of drawing; actual frames update the viewport indicator and target
+  scroll state still updates the scroll-to-bottom button.
+- Fill the opaque default background once, then non-default equal-colour row runs with hard cell
+  boundaries. Shape cells independently with `TextRunShaper`, cached by text/typeface style/fake bold/
+  text size, independent of colour, and cleared on pinch. `Canvas.drawGlyphs` batches consecutive
+  narrow cells sharing foreground, actual `Font` and faint alpha, with absolute column origins plus
+  the existing centring offset. Natural advances never position subsequent cells; no cross-cell
+  ligatures, contextual shaping or row bidi reordering. All batched glyphs have synthetic bold off.
+  A bounded glyph with no ink (a space) is skipped without splitting the batch.
+- The clipped/scaled per-cell Picture path remains for wide cells, multi-codepoint graphemes,
+  combining marks, fallback fonts, missing glyphs, advances wider than a cell, **all italic and
+  synthetic-bold cells**, and ink that cannot fit with one pixel of antialiasing room inside the
+  cell. Upright bold is batched only when the actual font has weight at least 600. Check actual
+  glyph bounds as well as advance; never remove clipping based on advance alone. This conservative
+  exception cache preserves synthetic italic/weight and cluster rendering. Faint remains alpha 128.
+  A block cursor still redraws the clipped cell in its background colour; frozen selection rows,
+  link feedback, IME composition and the scroll indicator retain their overlay order.
+- Single/double underline, strike and overline merge identical decoration/colour/faint runs.
+  Curly/dotted/dashed retain per-cell phase. Hard background edges and continuous straight
+  decoration edges may differ in antialiasing at shared cell boundaries; grid metrics, colours,
+  glyph origins and interactions are unchanged.
+- FFI conversion consumes owned rows, moving text and hyperlink strings, and reserves capacities.
+  Kotlin replaces changed rows by index in one shallow list copy; metadata-only deltas reuse the
+  original list. Frame-local style resolution and immutable selection snapshots remain unchanged.
+  No exported record changes: **FFI API stays 22**.
+- Tests: SSH/mosh pump regressions (wheel produces no frame, viewport scroll does), engine tests
+  for metadata-only changes and arrow fallback, FFI allocation-preserving conversion, JVM grid
+  no-op/resync/style-table/snapshot tests, device wheel-fling/no-op invalidation checks, and a raster
+  comparison against the previous per-cell renderer. Existing device fixtures cover wide/emoji/combining, cursor shapes, decoration,
+  composition and selection. `TerminalProbeActivity` reports window TOTAL/GPU/DRAW/SYNC/COMMAND_ISSUE
+  durations and dropped callbacks. CPU `drawTimings` excludes its timing overlay; disable Stats for
+  window comparisons.
+- Shaping lookups for single ASCII characters use an array by (style, char) instead of the keyed LRU
+  (no per-cell key allocation); the row loop is index-based (no per-cell iterator objects).
+- **Measured (2026-10-04, OnePlus 10 Pro, 1440x3216 @ 120 Hz, 56x47 grid, `measuresNativeProbeAnd
+  DenseFullScreenUpdatesWithWindowMetrics`, interleaved A/B, previous renderer A vs this one, median of
+  three runs at the same thermal status, p50 / p95 ms):** RenderThread `COMMAND_ISSUE` native probe
+  2.98 / 3.75 -> 1.17 / 1.75, dense 6.23 / 6.84 -> 2.97 / 3.54; window `TOTAL` dense 20.28 / 26.68 ->
+  17.53 / 22.60, probe 18.62 / 28.59 -> 17.27 / 27.53; GPU slightly lower. UI-thread record: probe
+  2.62 -> 1.15 p50, but the dense fixture (every other row bold, which keeps the per-cell path while
+  the font has no real bold face) 6.46 -> 8.01 p50 (p95 13.79 -> 10.44). No 120 Hz claim: bold-heavy
+  screens still record per cell, and a remote target's scroll still waits for the host's redraw.
+  Follow-ups: batch synthetic bold, row `RenderNode`s, scroll-region/row reuse across the FFI.
+
 ## Tap links and OSC 52 (lane Links)
 
 - **Tap a link to open it.** A single tap on a URL opens it (`Intent.ACTION_VIEW`, through the system

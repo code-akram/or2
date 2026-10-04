@@ -225,6 +225,11 @@ impl Row {
         &self.links
     }
 
+    /// Owned row payload, for marshalling without cloning cell text or link URIs.
+    pub fn into_parts(self) -> (u16, bool, Vec<Cell>, Vec<CellLink>) {
+        (self.index, self.wrapped, self.cells, self.links)
+    }
+
     fn validate(&self, size: TerminalSize) -> Result<(), FrameError> {
         let row = self.index;
         if row >= size.rows() {
@@ -352,6 +357,10 @@ impl Frame {
 
     pub fn rows(&self) -> &[Row] {
         &self.rows
+    }
+
+    pub fn into_rows(self) -> Vec<Row> {
+        self.rows
     }
 
     pub fn cursor(&self) -> Option<Cursor> {

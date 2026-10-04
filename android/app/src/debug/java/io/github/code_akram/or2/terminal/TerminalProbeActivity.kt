@@ -49,6 +49,10 @@ class TerminalProbeActivity : ComponentActivity() {
     private val frames = Channel<Unit>(Channel.CONFLATED)
     private val frameFlow = frames.receiveAsFlow()
     val renderTimings = FrameTimings()
+    val gpuTimings = FrameTimings()
+    val windowDrawTimings = FrameTimings()
+    val syncTimings = FrameTimings()
+    val commandIssueTimings = FrameTimings()
     var droppedFrameMetrics = 0
         private set
     private var stats by mutableStateOf("")
@@ -57,6 +61,15 @@ class TerminalProbeActivity : ComponentActivity() {
     private val metricsListener = Window.OnFrameMetricsAvailableListener { _, metrics, dropped ->
         // Main-thread delivery keeps the rolling samples and test reads single-threaded.
         renderTimings.record(metrics.getMetric(FrameMetrics.TOTAL_DURATION))
+        // -1 means this metric was unavailable; do not turn it into a negative duration.
+        fun record(metric: Int, timings: FrameTimings) {
+            val duration = metrics.getMetric(metric)
+            if (duration >= 0) timings.record(duration)
+        }
+        record(FrameMetrics.GPU_DURATION, gpuTimings)
+        record(FrameMetrics.DRAW_DURATION, windowDrawTimings)
+        record(FrameMetrics.SYNC_DURATION, syncTimings)
+        record(FrameMetrics.COMMAND_ISSUE_DURATION, commandIssueTimings)
         droppedFrameMetrics += dropped
     }
 
@@ -148,9 +161,10 @@ class TerminalProbeActivity : ComponentActivity() {
             view.clearSelection()
             view.input.discardComposition()
             val start = System.nanoTime()
-            check(view.grid.apply(frame))
+            val changed = view.grid.apply(frame)
+            check(!view.grid.needsFullFrame)
             view.applyTimings.record(System.nanoTime() - start)
-            view.invalidate()
+            if (changed) view.invalidate()
         }
     }
 
@@ -170,6 +184,10 @@ class TerminalProbeActivity : ComponentActivity() {
 
     fun resetTimings() {
         renderTimings.clear()
+        gpuTimings.clear()
+        windowDrawTimings.clear()
+        syncTimings.clear()
+        commandIssueTimings.clear()
         droppedFrameMetrics = 0
         terminalView()?.apply {
             applyTimings.clear()
@@ -183,7 +201,10 @@ class TerminalProbeActivity : ComponentActivity() {
                 timings.percentile(50), timings.percentile(95), timings.percentile(99))
         val view = terminalView() ?: return "No terminal view"
         return listOf(summary("apply", view.applyTimings), summary("CPU record", view.drawTimings),
-            summary("Window TOTAL_DURATION", renderTimings), "metrics callbacks dropped=$droppedFrameMetrics").joinToString("\n")
+            summary("Window TOTAL_DURATION", renderTimings), summary("Window GPU_DURATION", gpuTimings),
+            summary("Window DRAW_DURATION", windowDrawTimings), summary("Window SYNC_DURATION", syncTimings),
+            summary("Window COMMAND_ISSUE_DURATION", commandIssueTimings),
+            "metrics callbacks dropped=$droppedFrameMetrics").joinToString("\n")
     }
 
     override fun onDestroy() {

@@ -72,6 +72,29 @@ class TerminalGridTest {
         assertEquals(TerminalModes(false, false), grid.modes)
     }
 
+    @Test fun unchangedFramesAdvanceSequenceWithoutRequestingADrawOrSnapshot() {
+        val grid = TerminalGrid()
+        val full = frame(true, 2u, listOf(row(0, "A"), row(1, "B")))
+        grid.apply(full)
+        val frozen = grid.rows
+        assertFalse(grid.apply(full.copy(full = false, changedRows = emptyList(), sequence = 99u)))
+        assertSame(frozen, grid.rows)
+        assertFalse(grid.needsFullFrame)
+        assertEquals(99uL, grid.sequence)
+        assertFalse(grid.apply(full.copy(full = false)))
+        assertSame(frozen, grid.rows)
+        assertTrue(grid.apply(full.copy(full = false, changedRows = listOf(row(1, "C")))))
+        assertSame(frozen[0], grid.rows[0])
+        assertEquals("B", frozen[1].cells[0].text)
+        assertTrue(grid.apply(full.copy(full = false, changedRows = emptyList(), background = 7u)))
+        assertTrue(grid.apply(full.copy(full = false, changedRows = emptyList(), cursor =
+            io.github.code_akram.or2.ffi.TerminalCursor(0u, 0u, false,
+                io.github.code_akram.or2.ffi.CursorShape.BAR, false, 2u))))
+        assertFalse(grid.apply(full.copy(full = false, columns = 2u)))
+        assertTrue(grid.needsFullFrame)
+        assertEquals(1, grid.columns)
+    }
+
     @Test fun resizeFloorsCellsAndNeverSendsZero() {
         assertNull(gridSize(0, 20, 10f, 10f))
         assertNull(gridSize(9, 20, 10f, 10f))

@@ -120,10 +120,20 @@ pub struct TerminalEngine {
     size: TerminalSize,
     full: bool,
     colors: Option<(RgbColor, RgbColor)>,
+    presentation: Option<Presentation>,
     /// The newest clipboard write from the host not yet taken ([`TerminalEngine::take_clipboard_write`]).
     clipboard: Rc<RefCell<Option<String>>>,
     /// Scratch space for hyperlink URIs while building a frame.
     uri: Vec<u8>,
+}
+
+/// Metadata can change without dirty rows (mouse modes, cursor, OSC colours, history).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Presentation {
+    cursor: Option<Cursor>,
+    background: Rgb,
+    scrollback: Scrollback,
+    modes: TerminalModes,
 }
 
 impl TerminalEngine {
@@ -195,6 +205,7 @@ impl TerminalEngine {
             size,
             full: true,
             colors: None,
+            presentation: None,
             clipboard,
             uri: Vec::new(),
         })
@@ -247,6 +258,18 @@ impl TerminalEngine {
         self.full = true;
     }
 
+    /// Consume engine dirtiness, publishing only a local presentation change. In particular,
+    /// encoding wheel input alone does not change a frame. Navigation-key fallback can return
+    /// the viewport to the bottom, so it must be checked in exactly the same way.
+    pub fn frame_if_changed(&mut self) -> Result<Option<Frame>, TerminalError> {
+        let previous = self.presentation;
+        let frame = self.frame()?;
+        Ok(
+            (frame.is_full() || !frame.rows().is_empty() || previous != self.presentation)
+                .then_some(frame),
+        )
+    }
+
     pub fn frame(&mut self) -> Result<Frame, TerminalError> {
         // DECCOLM is unsupported: Android, not remote escape sequences, owns the PTY grid.
         if self.terminal.cols()? != self.size.columns() || self.terminal.rows()? != self.size.rows()
@@ -266,7 +289,11 @@ impl TerminalEngine {
             None
         };
         let mut cursor_wide = position.is_some_and(|position| position.at_wide_tail);
-        let mut rows = Vec::new();
+        let mut rows = Vec::with_capacity(if full {
+            usize::from(self.size.rows())
+        } else {
+            0
+        });
         let mut row_iter = self.row_iter.update(&snapshot)?;
         let mut index = 0;
         while let Some(row) = row_iter.next() {
@@ -279,7 +306,11 @@ impl TerminalEngine {
                 let linked = changed && raw_row.has_hyperlink()?;
                 let mut links: Vec<CellLink> = Vec::new();
                 let mut cell_iter = self.cell_iter.update(row)?;
-                let mut cells = Vec::new();
+                let mut cells = Vec::with_capacity(if changed {
+                    usize::from(self.size.columns())
+                } else {
+                    0
+                });
                 let mut column = 0;
                 while let Some(cell) = cell_iter.next() {
                     let raw_cell = cell.raw_cell()?;
@@ -394,6 +425,12 @@ impl TerminalEngine {
         self.full = false;
         self.colors = Some(resolved);
         let modes = self.modes()?;
+        self.presentation = Some(Presentation {
+            cursor,
+            background: rgb(colors.background),
+            scrollback,
+            modes,
+        });
         let build = if full { Frame::full } else { Frame::delta };
         Ok(build(self.size, rows, cursor, rgb(colors.background), scrollback)?.with_modes(modes))
     }

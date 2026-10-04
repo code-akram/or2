@@ -114,6 +114,51 @@ class TerminalDeviceTest {
         override fun disconnect() = Unit
     }
 
+    @Test fun remoteWheelFlingKeepsTickingWithoutRedrawingAnUnchangedGrid() {
+        ActivityScenario.launch(TerminalProbeActivity::class.java).use { scenario ->
+            val session = RecordingSession().apply {
+                fullSnapshot = terminalVisualFrame(40u, 12u, CursorShape.BAR).copy(cursor = null,
+                    modes = io.github.code_akram.or2.ffi.TerminalModes(true, false))
+            }
+            scenario.onActivity { activity ->
+                val view = TerminalView(activity)
+                session.onFrameReady = { view.frameReady() }
+                view.bind(session)
+                activity.setContentView(view)
+                view.sessionState(SessionState.Connected)
+            }
+            await(scenario) { it.grid.hasGrid && it.drawTimings.count > 0 }
+            instrumentation.waitForIdleSync()
+            var draws = 0
+            var scrollsAtRelease = 0
+            scenario.onActivity { activity ->
+                val view = activity.window.decorView.terminal()!!
+                draws = view.drawTimings.count
+                // A row-less, identical delta must neither redraw nor request another snapshot.
+                session.publish(session.fullSnapshot!!.copy(full = false, changedRows = emptyList(), sequence = 77u))
+                val down = SystemClock.uptimeMillis()
+                fun touch(action: Int, time: Long, y: Float) {
+                    val event = MotionEvent.obtain(down, time, action, view.width / 2f, y, 0)
+                    view.onTouchEvent(event)
+                    event.recycle()
+                }
+                touch(MotionEvent.ACTION_DOWN, down, view.height * .7f)
+                touch(MotionEvent.ACTION_MOVE, down + 20, view.height * .6f)
+                touch(MotionEvent.ACTION_MOVE, down + 40, view.height * .5f)
+                touch(MotionEvent.ACTION_UP, down + 60, view.height * .4f)
+                scrollsAtRelease = session.scrolls.size
+            }
+            await(scenario) { session.scrolls.size > scrollsAtRelease && it.grid.sequence == 77uL }
+            scenario.onActivity { activity ->
+                val view = activity.window.decorView.terminal()!!
+                assertEquals("Wheel fling must advance without invalidating the terminal", draws, view.drawTimings.count)
+                assertEquals("No-op delta must not request a resync", 1, session.snapshots)
+                assertTrue(session.scrolls.all { it is ViewportScroll.Wheel })
+                view.beginSelection(CellPosition(0, 0)) // Stops the remaining fling before teardown.
+            }
+        }
+    }
+
     @Test fun inputConnectionHardwareModifiersReleaseDeleteAndClosedAreSafe() {
         instrumentation.runOnMainSync {
             val view = TerminalView(instrumentation.targetContext)

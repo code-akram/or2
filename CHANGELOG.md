@@ -16,6 +16,8 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ### Changed
 
+- Terminal rendering batches bounded glyphs at exact cell positions and merges background/decorations
+  runs, reduces frame copies, and avoids redraws for wheel input that changes no local state.
 - The terminal's default colours are Tokyo Night (background `#1A1B26`, foreground `#C0CAF5`, its 16 ANSI
   colours), matching the herdr theme on the owner's machines, so herdr's chrome and pane content agree. The app
   UI stays Catppuccin Mocha; the arrow-pad keys follow the new background.

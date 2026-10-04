@@ -48,21 +48,36 @@ class TerminalGrid {
     var sequence = 0uL
         private set
     val hasGrid get() = rows.isNotEmpty()
+    var needsFullFrame = false
+        private set
 
-    /** False means a new view received a delta before its requested full snapshot. */
+    /** Returns whether drawing is needed (full snapshots redraw). [needsFullFrame] marks an unusable delta. */
     fun apply(frame: TerminalFrame): Boolean {
-        if (!frame.full && (!hasGrid || columns != frame.columns.toInt() || rows.size != frame.rows.toInt())) {
-            return false
-        }
-        val changed = frame.changedRows.associate { row ->
-            row.index.toInt() to ResolvedRow(row.cells.map { cell ->
-                ResolvedCell(cell.text, cell.width, frame.styles[cell.style.toInt()])
-            }, row.wrapped, row.links)
-        }
-        rows = if (frame.full) {
-            List(frame.rows.toInt()) { changed.getValue(it) }
-        } else {
-            rows.mapIndexed { index, row -> changed[index] ?: row }
+        needsFullFrame = !frame.full && (!hasGrid || columns != frame.columns.toInt() || rows.size != frame.rows.toInt())
+        if (needsFullFrame) return false
+        var visibleChanged = frame.full ||
+            cursor != frame.cursor || background != frame.background || scrollback != frame.scrollback || modes != frame.modes
+        // Full rows are ascending and complete; deltas replace by index in one shallow copy.
+        // Published row lists remain immutable so a selection keeps its frozen snapshot.
+        if (frame.full) {
+            rows = frame.changedRows.map { row ->
+                ResolvedRow(row.cells.map { cell ->
+                    ResolvedCell(cell.text, cell.width, frame.styles[cell.style.toInt()])
+                }, row.wrapped, row.links)
+            }
+        } else if (frame.changedRows.isNotEmpty()) {
+            val replacement = rows.toMutableList()
+            for (row in frame.changedRows) {
+                val resolved = ResolvedRow(row.cells.map { cell ->
+                    ResolvedCell(cell.text, cell.width, frame.styles[cell.style.toInt()])
+                }, row.wrapped, row.links)
+                val index = row.index.toInt()
+                if (rows[index] != resolved) {
+                    replacement[index] = resolved
+                    visibleChanged = true
+                }
+            }
+            if (visibleChanged) rows = replacement
         }
         columns = frame.columns.toInt()
         cursor = frame.cursor
@@ -70,7 +85,7 @@ class TerminalGrid {
         scrollback = frame.scrollback
         modes = frame.modes
         sequence = frame.sequence
-        return true
+        return visibleChanged
     }
 }
 
