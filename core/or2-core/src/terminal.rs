@@ -28,44 +28,46 @@ use crate::input::{Key, KeyInput, Modifiers, ViewportScroll};
 use crate::session::Command;
 use crate::term::TerminalSize;
 
-/// Default terminal colours: Catppuccin Mocha (MIT), the same palette the app UI uses. A remote
-/// program can still change any of them (OSC 4, 10 and 11) and reset back to these.
+/// Default terminal colours: Tokyo Night (Apache-2.0, folke/tokyonight.nvim `extras/ghostty/
+/// tokyonight_night`), the theme herdr uses on the owner's machines, so a herdr pane's content and
+/// herdr's own chrome agree. The app UI around the terminal stays Catppuccin Mocha. A remote program
+/// can still change any of them (OSC 4, 10 and 11) and reset back to these.
 pub const DEFAULT_FOREGROUND: RgbColor = RgbColor {
-    r: 0xcd,
-    g: 0xd6,
-    b: 0xf4,
+    r: 0xc0,
+    g: 0xca,
+    b: 0xf5,
 };
 pub const DEFAULT_BACKGROUND: RgbColor = RgbColor {
-    r: 0x1e,
-    g: 0x1e,
-    b: 0x2e,
+    r: 0x1a,
+    g: 0x1b,
+    b: 0x26,
 };
 
-/// The Catppuccin Mocha ANSI colours for palette indices 0 to 15 (the "terminal" mapping:
-/// bright colours repeat the normal ones, except black and white). Indices 16 and up keep
-/// libghostty's xterm cube and grey ramp.
-const MOCHA_ANSI: [(PaletteIndex, u32); 16] = [
-    (PaletteIndex::BLACK, 0x45475a),
-    (PaletteIndex::RED, 0xf38ba8),
-    (PaletteIndex::GREEN, 0xa6e3a1),
-    (PaletteIndex::YELLOW, 0xf9e2af),
-    (PaletteIndex::BLUE, 0x89b4fa),
-    (PaletteIndex::MAGENTA, 0xf5c2e7),
-    (PaletteIndex::CYAN, 0x94e2d5),
-    (PaletteIndex::WHITE, 0xbac2de),
-    (PaletteIndex::BRIGHT_BLACK, 0x585b70),
-    (PaletteIndex::BRIGHT_RED, 0xf38ba8),
-    (PaletteIndex::BRIGHT_GREEN, 0xa6e3a1),
-    (PaletteIndex::BRIGHT_YELLOW, 0xf9e2af),
-    (PaletteIndex::BRIGHT_BLUE, 0x89b4fa),
-    (PaletteIndex::BRIGHT_MAGENTA, 0xf5c2e7),
-    (PaletteIndex::BRIGHT_CYAN, 0x94e2d5),
-    (PaletteIndex::BRIGHT_WHITE, 0xa6adc8),
+/// The Tokyo Night ANSI colours for palette indices 0 to 15, as its Ghostty theme sets them.
+/// Indices 16 and up keep libghostty's xterm cube and grey ramp. The cursor follows the
+/// foreground, as in that theme.
+const TOKYO_NIGHT_ANSI: [(PaletteIndex, u32); 16] = [
+    (PaletteIndex::BLACK, 0x15161e),
+    (PaletteIndex::RED, 0xf7768e),
+    (PaletteIndex::GREEN, 0x9ece6a),
+    (PaletteIndex::YELLOW, 0xe0af68),
+    (PaletteIndex::BLUE, 0x7aa2f7),
+    (PaletteIndex::MAGENTA, 0xbb9af7),
+    (PaletteIndex::CYAN, 0x7dcfff),
+    (PaletteIndex::WHITE, 0xa9b1d6),
+    (PaletteIndex::BRIGHT_BLACK, 0x414868),
+    (PaletteIndex::BRIGHT_RED, 0xff899d),
+    (PaletteIndex::BRIGHT_GREEN, 0x9fe044),
+    (PaletteIndex::BRIGHT_YELLOW, 0xfaba4a),
+    (PaletteIndex::BRIGHT_BLUE, 0x8db0ff),
+    (PaletteIndex::BRIGHT_MAGENTA, 0xc7a9ff),
+    (PaletteIndex::BRIGHT_CYAN, 0xa4daff),
+    (PaletteIndex::BRIGHT_WHITE, 0xc0caf5),
 ];
 
-fn mocha_palette(base: Palette) -> Palette {
+fn tokyo_night_palette(base: Palette) -> Palette {
     let mut palette = base;
-    for (index, rgb) in MOCHA_ANSI {
+    for (index, rgb) in TOKYO_NIGHT_ANSI {
         palette.set(
             index,
             RgbColor {
@@ -167,7 +169,7 @@ impl TerminalEngine {
         terminal.set_default_fg_color(Some(DEFAULT_FOREGROUND))?;
         terminal.set_default_bg_color(Some(DEFAULT_BACKGROUND))?;
         let base = terminal.default_color_palette()?;
-        terminal.set_default_color_palette(Some(mocha_palette(base)))?;
+        terminal.set_default_color_palette(Some(tokyo_night_palette(base)))?;
         terminal.on_pty_write(move |_, bytes| reply(bytes))?;
         let clipboard = Rc::new(RefCell::new(None));
         let written = clipboard.clone();

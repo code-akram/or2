@@ -11,25 +11,25 @@ import io.github.code_akram.or2.ffi.TerminalFrame
 import io.github.code_akram.or2.ffi.TerminalRow
 import io.github.code_akram.or2.ffi.Underline
 
-/** Catppuccin Mocha terminal colours as the Rust core resolves them (core/terminal.rs). */
-private object Mocha {
-    const val FG = 0xcdd6f4u
-    const val BG = 0x1e1e2eu
-    const val MUTED = 0x6c7086u
-    const val RED = 0xf38ba8u
-    const val GREEN = 0xa6e3a1u
-    const val YELLOW = 0xf9e2afu
-    const val BLUE = 0x89b4fau
-    const val MAGENTA = 0xf5c2e7u
-    const val TEAL = 0x94e2d5u
-    const val PEACH = 0xfab387u
+/** Tokyo Night terminal colours as the Rust core resolves them (core/terminal.rs), with its comment, teal and orange for the 24-bit spans. */
+private object TokyoNight {
+    const val FG = 0xc0caf5u
+    const val BG = 0x1a1b26u
+    const val MUTED = 0x565f89u
+    const val RED = 0xf7768eu
+    const val GREEN = 0x9ece6au
+    const val YELLOW = 0xe0af68u
+    const val BLUE = 0x7aa2f7u
+    const val MAGENTA = 0xbb9af7u
+    const val TEAL = 0x73dacau
+    const val PEACH = 0xff9e64u
 }
 
-private data class Span(val text: String, val fg: UInt = Mocha.FG, val bg: UInt = Mocha.BG, val bold: Boolean = false, val underline: Boolean = false)
+private data class Span(val text: String, val fg: UInt = TokyoNight.FG, val bg: UInt = TokyoNight.BG, val bold: Boolean = false, val underline: Boolean = false)
 
 private fun line(vararg spans: Span) = spans.toList()
 private fun plain(text: String) = line(Span(text))
-private fun muted(text: String) = line(Span(text, Mocha.MUTED))
+private fun muted(text: String) = line(Span(text, TokyoNight.MUTED))
 
 /** A coding-agent session in a shell, wrapped to [columns]: what the gallery's terminals show. */
 private fun demoLines(columns: Int): List<List<Span>> {
@@ -37,40 +37,40 @@ private fun demoLines(columns: Int): List<List<Span>> {
     val bar = "─".repeat(inner + 2)
     fun boxed(vararg spans: Span): List<Span> {
         val used = spans.sumOf { it.text.length }
-        return listOf(Span("│ ", Mocha.PEACH)) + spans.toList() + Span(" ".repeat((inner - used).coerceAtLeast(0)) + " │", Mocha.PEACH)
+        return listOf(Span("│ ", TokyoNight.PEACH)) + spans.toList() + Span(" ".repeat((inner - used).coerceAtLeast(0)) + " │", TokyoNight.PEACH)
     }
     // Earlier output, so a tall terminal is full like a real session.
     val history = (1..28).flatMap { i ->
         listOf(
-            line(Span("test ", Mocha.FG), Span("terminal::tests::case_$i", Mocha.MUTED), Span(" ... ", Mocha.FG), Span("ok", Mocha.GREEN)),
-            if (i % 7 == 0) line(Span("warning: ", Mocha.YELLOW, bold = true), Span("unused import `Palette` in tests", Mocha.FG)) else
-                line(Span("  \u23bf ", Mocha.MUTED), Span("Read", Mocha.TEAL), Span("(core/or2-core/src/part_$i.rs)", Mocha.MUTED)),
+            line(Span("test ", TokyoNight.FG), Span("terminal::tests::case_$i", TokyoNight.MUTED), Span(" ... ", TokyoNight.FG), Span("ok", TokyoNight.GREEN)),
+            if (i % 7 == 0) line(Span("warning: ", TokyoNight.YELLOW, bold = true), Span("unused import `Palette` in tests", TokyoNight.FG)) else
+                line(Span("  \u23bf ", TokyoNight.MUTED), Span("Read", TokyoNight.TEAL), Span("(core/or2-core/src/part_$i.rs)", TokyoNight.MUTED)),
         )
     }
     return history + listOf(
-        line(Span("  claude code ", Mocha.BLUE, bold = true), Span("v2.1.4", Mocha.MUTED)),
+        line(Span("  claude code ", TokyoNight.BLUE, bold = true), Span("v2.1.4", TokyoNight.MUTED)),
         muted("  ~/code/or2 · m2/ui-polish"),
         plain(""),
-        line(Span("● ", Mocha.GREEN), Span("I'll match the toolbar to docs/ui.md.")),
-        line(Span("  ⎿ ", Mocha.MUTED), Span("Read", Mocha.TEAL), Span("(ui/Theme.kt)", Mocha.MUTED)),
-        line(Span("  ⎿ ", Mocha.MUTED), Span("Edit", Mocha.TEAL), Span("(terminal/TerminalChrome.kt)", Mocha.MUTED)),
-        line(Span("      + ", Mocha.GREEN), Span("val Key = TextStyle(fontFamily = mono)", Mocha.GREEN)),
-        line(Span("      - ", Mocha.RED), Span("val Key = TextStyle(fontSize = 14.sp)", Mocha.RED)),
+        line(Span("● ", TokyoNight.GREEN), Span("I'll match the toolbar to docs/ui.md.")),
+        line(Span("  ⎿ ", TokyoNight.MUTED), Span("Read", TokyoNight.TEAL), Span("(ui/Theme.kt)", TokyoNight.MUTED)),
+        line(Span("  ⎿ ", TokyoNight.MUTED), Span("Edit", TokyoNight.TEAL), Span("(terminal/TerminalChrome.kt)", TokyoNight.MUTED)),
+        line(Span("      + ", TokyoNight.GREEN), Span("val Key = TextStyle(fontFamily = mono)", TokyoNight.GREEN)),
+        line(Span("      - ", TokyoNight.RED), Span("val Key = TextStyle(fontSize = 14.sp)", TokyoNight.RED)),
         plain(""),
-        line(Span("╭" + bar + "╮", Mocha.PEACH)),
-        boxed(Span("Do you want to apply this edit?", Mocha.FG, bold = true)),
-        boxed(Span("❯ 1. Yes", Mocha.BLUE)),
-        boxed(Span("  2. Yes, and don't ask again", Mocha.FG)),
-        boxed(Span("  3. No, tell Claude what to do instead", Mocha.FG)),
-        line(Span("╰" + bar + "╯", Mocha.PEACH)),
+        line(Span("╭" + bar + "╮", TokyoNight.PEACH)),
+        boxed(Span("Do you want to apply this edit?", TokyoNight.FG, bold = true)),
+        boxed(Span("❯ 1. Yes", TokyoNight.BLUE)),
+        boxed(Span("  2. Yes, and don't ask again", TokyoNight.FG)),
+        boxed(Span("  3. No, tell Claude what to do instead", TokyoNight.FG)),
+        line(Span("╰" + bar + "╯", TokyoNight.PEACH)),
         plain(""),
-        line(Span("dev", Mocha.GREEN), Span("@", Mocha.MUTED), Span("workstation ", Mocha.BLUE), Span("~/code/or2 ", Mocha.MAGENTA), Span("(m2/ui-polish)", Mocha.YELLOW)),
-        line(Span("$ ", Mocha.GREEN), Span("cargo test -p or2-core", Mocha.FG)),
-        line(Span("   Compiling ", Mocha.GREEN, bold = true), Span("or2-core v0.1.0", Mocha.FG)),
-        line(Span("test result: ", Mocha.FG), Span("ok", Mocha.GREEN), Span(". 23 passed; 0 failed", Mocha.FG)),
-        line(Span("✗ ", Mocha.RED), Span("1 warning emitted", Mocha.YELLOW)),
-        line(Span("dev", Mocha.GREEN), Span("@", Mocha.MUTED), Span("workstation ", Mocha.BLUE), Span("~/code/or2 ", Mocha.MAGENTA), Span("(m2/ui-polish)", Mocha.YELLOW)),
-        line(Span("❯ ", Mocha.GREEN)),
+        line(Span("dev", TokyoNight.GREEN), Span("@", TokyoNight.MUTED), Span("workstation ", TokyoNight.BLUE), Span("~/code/or2 ", TokyoNight.MAGENTA), Span("(m2/ui-polish)", TokyoNight.YELLOW)),
+        line(Span("$ ", TokyoNight.GREEN), Span("cargo test -p or2-core", TokyoNight.FG)),
+        line(Span("   Compiling ", TokyoNight.GREEN, bold = true), Span("or2-core v0.1.0", TokyoNight.FG)),
+        line(Span("test result: ", TokyoNight.FG), Span("ok", TokyoNight.GREEN), Span(". 23 passed; 0 failed", TokyoNight.FG)),
+        line(Span("✗ ", TokyoNight.RED), Span("1 warning emitted", TokyoNight.YELLOW)),
+        line(Span("dev", TokyoNight.GREEN), Span("@", TokyoNight.MUTED), Span("workstation ", TokyoNight.BLUE), Span("~/code/or2 ", TokyoNight.MAGENTA), Span("(m2/ui-polish)", TokyoNight.YELLOW)),
+        line(Span("❯ ", TokyoNight.GREEN)),
     )
 }
 
@@ -81,7 +81,7 @@ private fun denseLines(columns: Int, rows: Int): List<List<Span>> {
     return List(rows) { row ->
         val start = (row * 17) % words.length
         val text = (words.repeat(columns / words.length + 2)).substring(start, start + columns)
-        val colour = listOf(Mocha.FG, Mocha.MUTED, Mocha.GREEN, Mocha.TEAL, Mocha.YELLOW)[row % 5]
+        val colour = listOf(TokyoNight.FG, TokyoNight.MUTED, TokyoNight.GREEN, TokyoNight.TEAL, TokyoNight.YELLOW)[row % 5]
         line(Span(text, colour))
     }
 }
@@ -97,7 +97,7 @@ fun terminalDemoFrame(columns: Int, rows: Int, sequence: ULong = 1u, dense: Bool
     val blank = rows - lines.size
     val styleIndex = LinkedHashMap<Triple<UInt, UInt, Int>, UInt>()
     fun style(fg: UInt, bg: UInt, flags: Int): UInt = styleIndex.getOrPut(Triple(fg, bg, flags)) { styleIndex.size.toUInt() }
-    style(Mocha.FG, Mocha.BG, 0) // index 0 is the plain style
+    style(TokyoNight.FG, TokyoNight.BG, 0) // index 0 is the plain style
     val changed = List(rows) { rowIndex ->
         val spans = lines.getOrNull(rowIndex - blank).orEmpty()
         val cells = ArrayList<TerminalCell>(columns)
@@ -117,7 +117,7 @@ fun terminalDemoFrame(columns: Int, rows: Int, sequence: ULong = 1u, dense: Bool
     val promptColumn = 2
     return TerminalFrame(
         sequence, columns.toUShort(), rows.toUShort(), true, styles, changed,
-        TerminalCursor(promptColumn.toUShort(), (rows - 1).toUShort(), false, CursorShape.BLOCK, false, Mocha.BLUE),
-        Mocha.BG, Scrollback((rows * 3).toULong(), (rows * 2).toULong()), TerminalModes(mouseTracking, mouseTracking),
+        TerminalCursor(promptColumn.toUShort(), (rows - 1).toUShort(), false, CursorShape.BLOCK, false, TokyoNight.BLUE),
+        TokyoNight.BG, Scrollback((rows * 3).toULong(), (rows * 2).toULong()), TerminalModes(mouseTracking, mouseTracking),
     )
 }

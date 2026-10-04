@@ -38,8 +38,8 @@ class ThemeTest {
         assertEquals("#F38BA8", hex(Or2Colors.Danger))
         assertEquals(Or2Colors.Accent, Or2Colors.Working)
         assertEquals(Or2Colors.Subtle, Or2Colors.Idle)
-        // The terminal card follows the terminal's default background (core/terminal.rs).
-        assertEquals("#1E1E2E", hex(Or2Colors.TerminalBackground))
+        // The terminal card follows the terminal's default background (core/terminal.rs): Tokyo Night.
+        assertEquals("#1A1B26", hex(Or2Colors.TerminalBackground))
         assertTrue(Or2Colors.Scrim.alpha in 0.65f..0.75f)
     }
 
@@ -125,7 +125,7 @@ class ThemeTest {
     @Test
     fun arrowPadKeysAreBlueAndStandOutFromTheTerminal() {
         // Owner feedback on v0.1.1: `surface` keys on the terminal were hard to tell apart from it.
-        assertEquals("#38425F", hex(Or2Colors.PadKey))
+        assertEquals("#354059", hex(Or2Colors.PadKey))
         assertEquals(1f, Or2Colors.PadKey.alpha, 0f) // Opaque: terminal text never shows through a key.
         assertEquals(hex(Or2Colors.Accent.copy(alpha = 0.24f).compositeOver(Or2Colors.TerminalBackground)), hex(Or2Colors.PadKey))
         assertEquals(Or2Colors.Accent.copy(alpha = 0.55f), Or2Colors.PadKeyEdge)

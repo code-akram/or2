@@ -63,7 +63,8 @@ or2 is built on other people's open-source work, and is better for every project
   make the app; [CameraX](https://developer.android.com/media/camera/camerax) and
   [ZXing](https://github.com/zxing/zxing) read Easy pair's QR code, and
   [qrcode](https://github.com/kennytm/qrcode-rust) draws it on the host.
-- [Catppuccin](https://github.com/catppuccin/catppuccin) (Mocha) gives it its colours.
+- [Catppuccin](https://github.com/catppuccin/catppuccin) (Mocha) gives it its colours, and
+  [Tokyo Night](https://github.com/folke/tokyonight.nvim) the terminal's.
 
 **Moshi.** The [Moshi](https://getmoshi.app) app was the direct reference and inspiration for or2's
 onboarding, the Easy pair QR flow and the compact terminal UI. Thank you to its makers for showing how

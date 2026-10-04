@@ -13,12 +13,12 @@ import io.github.code_akram.or2.ffi.Underline
 
 /** Local, debug-only visual fixtures augment the native probe without changing its contract. */
 fun terminalVisualFrame(columns: UShort, rows: UShort, shape: CursorShape): TerminalFrame {
-    val plain = CellStyle(0xcdd6f4u, 0x1e1e2eu, null, Underline.NONE, false, false, false, false, false)
-    val styles = listOf(plain, plain.copy(bold = true, foreground = 0xf38ba8u),
+    val plain = CellStyle(0xc0caf5u, 0x1a1b26u, null, Underline.NONE, false, false, false, false, false)
+    val styles = listOf(plain, plain.copy(bold = true, foreground = 0xf7768eu),
         plain.copy(italic = true), plain.copy(faint = true),
         plain.copy(strikethrough = true), plain.copy(overline = true)) +
-        Underline.entries.filter { it != Underline.NONE }.map { plain.copy(underline = it, underlineColor = 0x89b4fau) } +
-        plain.copy(foreground = 0x1e1e2eu, background = 0xcdd6f4u)
+        Underline.entries.filter { it != Underline.NONE }.map { plain.copy(underline = it, underlineColor = 0x7aa2f7u) } +
+        plain.copy(foreground = 0x1a1b26u, background = 0xc0caf5u)
     val labels = listOf("Canvas styles (debug fixture)", "Bold foreground", "Italic foreground",
         "Faint foreground", "Strikethrough", "Overline", "Single underline", "Double underline",
         "Curly underline", "Dotted underline", "Dashed underline", "", "Resolved FG / BG")
@@ -45,15 +45,15 @@ fun terminalVisualFrame(columns: UShort, rows: UShort, shape: CursorShape): Term
         TerminalRow(row.toUShort(), false, cells)
     }
     return TerminalFrame(1u, columns, rows, true, styles, changed,
-        if (rows > 11u && columns >= 3u) TerminalCursor(1u, 11u, true, shape, false, 0x89b4fau) else null,
-        0x1e1e2eu, Scrollback(rows.toULong(), 0u), TerminalModes(false, false))
+        if (rows > 11u && columns >= 3u) TerminalCursor(1u, 11u, true, shape, false, 0x7aa2f7u) else null,
+        0x1a1b26u, Scrollback(rows.toULong(), 0u), TerminalModes(false, false))
 }
 
 /** Dense all-row update; frame production is excluded from measured apply/record durations. */
 fun terminalStressFrame(columns: UShort, rows: UShort, sequence: ULong): TerminalFrame {
     val styles = listOf(
-        CellStyle(0xcdd6f4u, 0x1e1e2eu, null, Underline.NONE, false, false, false, false, false),
-        CellStyle(0x89b4fau, 0x313244u, null, Underline.NONE, true, false, false, false, false),
+        CellStyle(0xc0caf5u, 0x1a1b26u, null, Underline.NONE, false, false, false, false, false),
+        CellStyle(0x7aa2f7u, 0x292e42u, null, Underline.NONE, true, false, false, false, false),
     )
     val alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
     return TerminalFrame(sequence, columns, rows, true, styles, List(rows.toInt()) { row ->
@@ -61,5 +61,5 @@ fun terminalStressFrame(columns: UShort, rows: UShort, sequence: ULong): Termina
             TerminalCell(alphabet[(column + row + (sequence % alphabet.length.toULong()).toInt()) % alphabet.length].toString(),
                 CellWidth.NARROW, (row % 2).toUInt())
         })
-    }, null, 0x1e1e2eu, Scrollback(rows.toULong(), 0u), TerminalModes(false, false))
+    }, null, 0x1a1b26u, Scrollback(rows.toULong(), 0u), TerminalModes(false, false))
 }

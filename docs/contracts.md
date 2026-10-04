@@ -4358,7 +4358,7 @@ Enter keeps its place like any input (`SubmitSequencer` orders it). The contract
 ## Arrow pad colours
 
 - Two tokens (`Or2Colors`, docs/ui.md): **`padKey`** `#38425F`, `accent` at 24 % composited over the
-  terminal's default background `#1E1E2E`, stored opaque so terminal text never shows through a key;
+  terminal's default background `#1E1E2E` (since the Tokyo Night terminal default, `#354059` over `#1A1B26`), stored opaque so terminal text never shows through a key;
   **`padKeyEdge`**, `accent` at 55 %.
 - Each pad key: `padKey` fill, `accent` glyph, `padKeyEdge` hairline (was `surface` with a `divider`
   hairline and a `text` glyph). **Enter**, the primary key: `accent` fill, `background` glyph (was

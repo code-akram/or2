@@ -29,7 +29,8 @@ pad extras 36, notice-strip actions 28, header discs 16 in a 26 x 36 dp box) and
 
 ## Palette
 
-Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same palette.
+Catppuccin Mocha (MIT). Dark only. The terminal's default colours are Tokyo Night instead (see Terminal defaults),
+the theme herdr uses on the owner's machines, so herdr's chrome and the panes' content agree.
 
 | Token | Hex | Use |
 |---|---|---|
@@ -46,10 +47,10 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 | `subtle` | `#6C7086` (overlay0) | icons, chevrons, drag handles, idle dots: dim by design, never used for text |
 | `handle` | `#585B70` (surface2) | the terminal header's drag handle: quieter than `subtle`, a hint rather than a control |
 | `crust` | `#11111B` | the composer card: darker than the terminal and the key pills around it; the hairline under the terminal header |
-| `terminalHeader` | `#222232` | the terminal card's header and its notice strip: halfway between the terminal background `#1E1E2E` and `surface`, one slight tonal step above the grid |
+| `terminalHeader` | `#222232` | the terminal card's header and its notice strip: between the terminal background `#1A1B26` and `surface`, one slight tonal step above the grid |
 | `accent` | `#89B4FA` | primary buttons, FAB, toggles, selection, links, checkmarks; text on accent is `background` |
 | `accentMuted` | `#343B53` fill with `accent` text | a latched key (`Ctrl`, `Alt`), icon tiles, the disabled primary button |
-| `padKey` | `#38425F` (`accent` at 24 % over the terminal's `#1E1E2E`, opaque) with an `accent` glyph (4.7:1) | arrow-pad keys: blue, clearly apart from the terminal (1.65:1 against it, where `surface` was 1.1:1), and opaque so terminal text never shows through |
+| `padKey` | `#354059` (`accent` at 24 % over the terminal's `#1A1B26`, opaque) with an `accent` glyph (4.7:1) | arrow-pad keys: blue, clearly apart from the terminal (1.65:1 against it, where `surface` was 1.1:1), and opaque so terminal text never shows through |
 | `padKeyEdge` | `accent` at 55 % (3.3:1 on the terminal) | the hairline of the arrow-pad keys and of the extras pill |
 | `attention` | `#FAB387` (peach) | blocked agents, warnings, "needs attention" dots |
 | `attentionSurface` | `#30272B` fill, `#6F4E3C` 1 px border | warning cards |
@@ -508,8 +509,11 @@ screen with no colour change. Nothing holds it on screen past the first frame.
   deliberately in density-independent pixels rather than sp so the column count does not depend
   on the system font size. Pinch zooms between 6 and 28 dp and the size is remembered per device
   (the app's private preferences; Rust has no storage).
-- Terminal colours default to the same Catppuccin Mocha palette (background `#1E1E2E`, the core's own
-  default: a unit test compares the two).
+- Terminal colours default to Tokyo Night (folke/tokyonight.nvim's Ghostty theme, Apache-2.0): background
+  `#1A1B26` (the core's own default; a unit test compares the two), foreground and cursor `#C0CAF5`, ANSI
+  0–7 `#15161E #F7768E #9ECE6A #E0AF68 #7AA2F7 #BB9AF7 #7DCFFF #A9B1D6`, 8–15 `#414868 #FF899D
+  #9FE044 #FABA4A #8DB0FF #C7A9FF #A4DAFF #C0CAF5`; indices 16–255 are the xterm cube and grey ramp.
+  A program can still set its own (OSC 4, 10, 11). The chrome around the terminal stays Catppuccin.
 - The grid keeps a 4 dp inset on the left and the right (the column count is measured inside it), so
   glyphs never touch the screen edge or sit under a curved bezel; the background fills the inset.
 - A pinch accumulates: each event's scale factor multiplies a continuous size and only the applied

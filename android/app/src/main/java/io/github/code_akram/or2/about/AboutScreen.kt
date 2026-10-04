@@ -47,7 +47,7 @@ const val ACKNOWLEDGEMENT =
     "or2 stands on other people's open-source work. Ghostty's libghostty-vt draws the terminal, russh " +
         "speaks SSH, and mosh and mosh-rs keep a session alive across networks. herdr and tmux are what or2 " +
         "drives, and UniFFI, tokio, Jetpack Compose, Room and AndroidX Biometric hold the app together, " +
-        "in the Catppuccin colours. Thank you to everyone who writes and shares software like this. " +
+        "in the Catppuccin colours, with Tokyo Night in the terminal. Thank you to everyone who writes and shares software like this. " +
         "Every project that ships inside or2, with its licence, is listed below."
 
 /** What the About screen reports about the build. */

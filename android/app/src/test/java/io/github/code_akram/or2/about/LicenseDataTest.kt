@@ -56,7 +56,7 @@ class LicenseDataTest {
     @Test
     fun theVendoredListComesFromTheNoticesTable() {
         assertEquals(
-            listOf("Gradle 8.13", "herdr 0.9.3 API schema", "Catppuccin Mocha", "mosh-rs"),
+            listOf("Gradle 8.13", "herdr 0.9.3 API schema", "Catppuccin Mocha", "Tokyo Night", "mosh-rs"),
             data.vendored.map { it.name },
         )
         val mosh = data.vendored.single { it.name == "mosh-rs" }
@@ -67,6 +67,10 @@ class LicenseDataTest {
         assertTrue(mosh.texts.single().body.contains("GNU GENERAL PUBLIC LICENSE"))
         val catppuccin = data.vendored.single { it.name == "Catppuccin Mocha" }
         assertTrue(catppuccin.texts.single().body.contains("Copyright (c) 2021 Catppuccin"))
+        val tokyo = data.vendored.single { it.name == "Tokyo Night" }
+        assertEquals("Apache-2.0", tokyo.license)
+        assertEquals("9172737", tokyo.version)
+        assertTrue(tokyo.texts.single().body.contains("Apache License"))
         assertTrue(data.vendored.single { it.name == "Gradle 8.13" }.texts.single().body.contains("Apache License"))
     }
 

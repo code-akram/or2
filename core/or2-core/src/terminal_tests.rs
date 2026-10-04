@@ -570,17 +570,17 @@ fn default_colours_set_reset_query_and_reverse_screen_resync_clean_rows() {
     terminal.write(b"\x1b]10;?\x07\x1b]11;?\x07");
     assert_eq!(
         *replies.borrow(),
-        b"\x1b]10;rgb:cdcd/d6d6/f4f4\x07\x1b]11;rgb:1e1e/1e1e/2e2e\x07"
+        b"\x1b]10;rgb:c0c0/caca/f5f5\x07\x1b]11;rgb:1a1a/1b1b/2626\x07"
     );
     terminal.write(b"cached");
     terminal.frame().unwrap();
     for (sequence, foreground, background) in [
-        (b"\x1b]10;#123456\x07".as_slice(), 0x123456, 0x1e1e2e),
+        (b"\x1b]10;#123456\x07".as_slice(), 0x123456, 0x1a1b26),
         (b"\x1b]11;#abcdef\x07".as_slice(), 0x123456, 0xabcdef),
         (b"\x1b[?5h".as_slice(), 0xabcdef, 0x123456),
         (b"\x1b[?5l".as_slice(), 0x123456, 0xabcdef),
-        (b"\x1b]110\x07".as_slice(), 0xcdd6f4, 0xabcdef),
-        (b"\x1b]111\x07".as_slice(), 0xcdd6f4, 0x1e1e2e),
+        (b"\x1b]110\x07".as_slice(), 0xc0caf5, 0xabcdef),
+        (b"\x1b]111\x07".as_slice(), 0xc0caf5, 0x1a1b26),
     ] {
         assert!(terminal.frame().unwrap().rows().is_empty());
         terminal.write(sequence);
@@ -600,7 +600,7 @@ fn default_colours_set_reset_query_and_reverse_screen_resync_clean_rows() {
     terminal.write(b"\x1b]10;?\x07\x1b]11;?\x07");
     assert_eq!(
         *replies.borrow(),
-        b"\x1b]10;rgb:cdcd/d6d6/f4f4\x07\x1b]11;rgb:1e1e/1e1e/2e2e\x07"
+        b"\x1b]10;rgb:c0c0/caca/f5f5\x07\x1b]11;rgb:1a1a/1b1b/2626\x07"
     );
 }
 
@@ -621,7 +621,7 @@ fn remote_column_switching_is_contained_at_the_embedder_geometry() {
 }
 
 #[test]
-fn default_colours_and_ansi_palette_are_catppuccin_mocha() {
+fn default_colours_and_ansi_palette_are_tokyo_night() {
     let mut terminal = engine(40, 2);
     // Plain text, the 16 ANSI colours as foregrounds, two cube/grey entries, then SGR 41.
     terminal.write(b"a");
@@ -630,13 +630,13 @@ fn default_colours_and_ansi_palette_are_catppuccin_mocha() {
     }
     terminal.write(b"\x1b[38;5;16mx\x1b[38;5;231my\x1b[38;5;232mz\x1b[0m\x1b[41mB\x1b[0m");
     let frame = terminal.frame().unwrap();
-    assert_eq!(frame.background().packed(), 0x1e1e2e);
+    assert_eq!(frame.background().packed(), 0x1a1b26);
     let cells = frame.rows()[0].cells();
-    assert_eq!(cells[0].style.foreground.packed(), 0xcdd6f4);
-    assert_eq!(cells[0].style.background.packed(), 0x1e1e2e);
+    assert_eq!(cells[0].style.foreground.packed(), 0xc0caf5);
+    assert_eq!(cells[0].style.background.packed(), 0x1a1b26);
     let expected = [
-        0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de, 0x585b70,
-        0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xa6adc8,
+        0x15161e, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6, 0x414868,
+        0xff899d, 0x9fe044, 0xfaba4a, 0x8db0ff, 0xc7a9ff, 0xa4daff, 0xc0caf5,
     ];
     for (index, colour) in expected.into_iter().enumerate() {
         assert_eq!(
@@ -649,8 +649,8 @@ fn default_colours_and_ansi_palette_are_catppuccin_mocha() {
     assert_eq!(cells[17].style.foreground.packed(), 0x000000);
     assert_eq!(cells[18].style.foreground.packed(), 0xffffff);
     assert_eq!(cells[19].style.foreground.packed(), 0x080808);
-    assert_eq!(cells[20].style.background.packed(), 0xf38ba8);
-    // An OSC 4 override still wins; resetting the palette (OSC 104) returns to Mocha.
+    assert_eq!(cells[20].style.background.packed(), 0xf7768e);
+    // An OSC 4 override still wins; resetting the palette (OSC 104) returns to Tokyo Night.
     terminal.write(b"\x1b]4;1;#010203\x07\x1b[31mC\x1b[0m");
     let frame = terminal.frame().unwrap();
     assert_eq!(
@@ -661,7 +661,7 @@ fn default_colours_and_ansi_palette_are_catppuccin_mocha() {
     let frame = terminal.frame().unwrap();
     assert_eq!(
         frame.rows()[0].cells()[21].style.foreground.packed(),
-        0xf38ba8
+        0xf7768e
     );
 }
 

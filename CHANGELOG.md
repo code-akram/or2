@@ -14,6 +14,12 @@ Each release's notes are in [docs/releases/](docs/releases/).
   layer for Android's themed icons. The app previously showed Android's default icon.
 - A minimalist launch splash: the white mark alone on the app's background, fading into the first screen.
 
+### Changed
+
+- The terminal's default colours are Tokyo Night (background `#1A1B26`, foreground `#C0CAF5`, its 16 ANSI
+  colours), matching the herdr theme on the owner's machines, so herdr's chrome and pane content agree. The app
+  UI stays Catppuccin Mocha; the arrow-pad keys follow the new background.
+
 ## [0.1.5] - 2026-10-04
 
 Project directories and one-tap shells (versionCode 8, FFI API 22). See [the release notes](docs/releases/v0.1.5.md).

@@ -64,8 +64,8 @@ object Or2Colors {
     /** The composer card: Catppuccin crust, darker than the terminal and the key pills around it. */
     val Crust = Color(0xFF11111B)
 
-    /** The terminal card follows the terminal's own default background (core/terminal.rs). */
-    val TerminalBackground = Color(0xFF1E1E2E)
+    /** The terminal card follows the terminal's own default background (core/terminal.rs): Tokyo Night's, like the herdr theme. */
+    val TerminalBackground = Color(0xFF1A1B26)
 
     /**
      * The terminal card's header (and any notice strip under it): halfway between the terminal's
@@ -84,7 +84,7 @@ object Or2Colors {
      * key reads blue against the terminal and no terminal text shows through it. Its glyph is `accent`
      * (4.7:1 here, ThemeTest).
      */
-    val PadKey = Color(0xFF38425F)
+    val PadKey = Color(0xFF354059)
 
     /** The hairline of the arrow-pad keys and of the extras pill: `accent` at 55 % (3:1 on the terminal, ThemeTest). */
     val PadKeyEdge = Accent.copy(alpha = 0.55f)
