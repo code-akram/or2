@@ -94,7 +94,7 @@ generation and import, `connect_host` with the `HostConnection`, `Session` and `
 objects and their listeners, pairing, and two test fixtures (`contract_probe_session`,
 `contract_probe_host`) that drive the real objects without a network. There is no export that
 connects a single shell: terminals are channels of a host connection. API 21 adds a bounded recent-directory
-history read and `TerminalTarget.ShellIn` for one-tap project shells (unreleased). API 22 adds pure directory
+history read and `TerminalTarget.ShellIn` for one-tap project shells (v0.1.5). API 22 adds pure directory
 merging/validation so Dirs includes the live herdr agent/pane cwd already watched by the picker, ahead of history,
 without another query. See [build instructions](build.md) for the shared toolchain and verification commands.
 

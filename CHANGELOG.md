@@ -8,8 +8,9 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
-The revised signed v0.1.5 candidate (versionCode 8, FFI API 22) is installed on the owner's phone after the full
-review/build/device-test cycle. It is not publicly released; see [candidate notes](docs/releases/v0.1.5.md).
+## [0.1.5] - 2026-10-04
+
+Project directories and one-tap shells (versionCode 8, FFI API 22). See [the release notes](docs/releases/v0.1.5.md).
 
 ### Added
 

@@ -358,9 +358,12 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
   an inbox row does. Sessions without a live view (not running, or a host whose agents are not watched) follow in
   one card, one title-only row each with its state at the right (`● Running`, or a dim `● Not running` and a muted
   title for a stopped one), never as a second caption line as well. The herdr tab has no Refresh (it is live).
-  **Dirs** (unreleased): recent Claude Code/Codex projects, newest first; a raised grouped list of basename and full
-  path in muted mono. A tap opens a new shell there and dismisses the sheet first. Loading has a spinner, missing
-  history an empty hint, and a failed read its reason in danger; **Refresh** reads again without reconnecting.
+  **Dirs** (v0.1.5): current-host live herdr agent/pane working directories first (default then named sessions,
+  picker agent order with pane fallback, then all panes), followed by recent Claude Code/Codex projects, newest
+  first. A raised grouped list shows basename and full path in muted mono, exact-deduplicated and capped at 20
+  by Rust. A tap opens a new shell there and dismisses the sheet first. Live paths follow the same owned watches
+  as herdr; loading/failed history cannot hide them. Without live paths, loading has a spinner, missing history
+  an empty hint, and a failed read its reason in danger; **Refresh** reads history again without reconnecting.
   **tmux:** sessions (`● Attached`, with a "new session" field), then **Refresh**, whose icon starts at the rows'
   text inset. The list is read again each time the picker opens and the tab is shown: until the first answer a
   16 dp spinner stands where the list will be; a later read (or Refresh, which also re-probes the host for new

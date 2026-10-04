@@ -5836,7 +5836,7 @@ preparation uses versionName 0.1.4 / versionCode 5, still FFI API 20; there is n
 storage migration. The 164-test device run used only the separate device-test app. Mobile-data, handover
 and unplugged/Doze acceptance remain explicitly deferred; see `status.md` and `releases/v0.1.4.md`.
 
-## Recent directories / one-tap shells (unreleased, FFI API 22)
+## Recent directories / one-tap shells (v0.1.5, FFI API 22)
 
 - **Read-only discovery.** `HostConnection.recent_directories() async -> Vec<String>` reads agent histories over
   one exec on the existing SSH connection. No daemon, installations, host writes or network path outside Transport.
@@ -5880,6 +5880,8 @@ and unplugged/Doze acceptance remain explicitly deferred; see `status.md` and `r
 - **Tests.** Rust parser/validation/date/timeout tests; hermetic local history/script tests (missing/custom roots,
   file/read caps, literal hostile-looking paths and vanished directories); disposable SSH and mosh directory-shell
   tests; JVM real-FFI round trip and synchronous rejection; holder read/cancellation/replacement, transport,
-  close/reuse and restoration regressions. The device UI regressions passed in the full 166-test phone suite
-  on 2026-10-04, in the separate device-test app. The synthetic Dirs gallery was visually inspected; a signed
-  v0.1.5 candidate was installed in place afterwards. No real-host or deferred connectivity acceptance is claimed.
+  close/reuse and restoration regressions; current live watch ownership, metadata changes/removal, per-host
+  separation, history loading/failure and bounded FFI batches. The final release gate passes 1,067 Rust, 661 JVM
+  and 169 phone tests on 2026-10-04, using the separate device-test app. The synthetic Dirs gallery was visually
+  inspected; the signed v0.1.5 APK was installed in place afterwards. No real-project manual or deferred
+  connectivity acceptance is claimed.

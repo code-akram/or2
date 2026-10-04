@@ -11,13 +11,13 @@ Updated 2026-10-04.
   Linux x86_64/aarch64 (static) and macOS Intel/Apple silicon are published. All downloads' checksums and
   formats, the APK signature, and the public latest-release installer were verified. The installer was run
   only into a temporary directory, never against host authorization.
-- **The owner's phone now runs the revised signed v0.1.5 candidate**, updated in place after the owner's
-  follow-up directory bug report on 2026-10-04 at 18:14 (versionCode 8, FFI API 22; no uninstall or data clear).
-  Dirs now includes the live herdr cwd already shown by its default/named sessions, ahead of history; both tabs
-  use current owned watches. Its signing certificate matches the earlier candidate/public app; the installed
-  APK's SHA-256 matches the build (`0b5b5135…25bd7`), first-install time stayed unchanged, and launch passed with
-  no fresh AndroidRuntime crash. Post-update biometric reconnect and real-project owner QA remain pending.
-  This candidate is **not publicly released**; see [candidate notes](releases/v0.1.5.md).
+- **v0.1.5 release prepared and publication authorized by the owner** (2026-10-04; versionCode 8, FFI API 22).
+  The final signed rebuild was installed in place at **18:40 phone-local time**, no uninstall/data clear.
+  Dirs includes current live herdr cwd ahead of history; both tabs use owned watches. The signature matches
+  the existing app and installed/build SHA-256 matches (`9f35619e…5dff3`); first-install time is unchanged,
+  hosts remain visible, launch passes and no fresh AndroidRuntime crash was found. Final full gates pass below.
+  Tag/publication verification is next; [release notes](releases/v0.1.5.md). Post-update biometric reconnect and
+  real-project manual QA are not independently established; deferred connectivity acceptance stays untouched.
 - **Previous LAN upgrade QA (2026-10-04, v0.1.4):** after biometric unlock the phone resumed the same herdr
   terminal with a healthy Mosh badge and fresh output, using its existing key without re-pairing. The owner
   confirmed Spaces works as intended. This was LAN only, not the deferred M3 acceptance; real key unlock and
@@ -111,7 +111,7 @@ until the caller acknowledges, as a real host does.
    unplugged (Doze) background runs. This is v0 acceptance step 3, still never tested.
 2. **The rest of the roadmap.**
    - Next items: scanning for SSH servers, app lock. Recent directories is implemented, reviewed and installed
-     on the phone below; the v0.1.5 candidate is not publicly released. Owner QA on real projects remains.
+     on the phone below; the owner authorized the v0.1.5 release cycle. Real-project manual QA is not claimed.
    - M4: history sheet, ntfy, dictation, Wake-on-LAN.
    - M5: Chat View, diff viewer, web preview.
 
@@ -264,3 +264,17 @@ requires exactly the reported pid, not just at most one owner; three standalone 
 - Nonpublishing artifact [run 37208934830](https://github.com/code-akram/or2/actions/runs/37208934830) passed on
   `1095b4c`. All four downloaded Linux/macOS checksums/architectures verified; native runner binaries executed,
   cross-architectures format-checked only; publishing skipped. Implementation and verification records pushed.
+
+**Final v0.1.5 release cycle (2026-10-04, owner authorized):**
+- Fresh-context `codex exec` critical review of the complete `v0.1.4..HEAD` release range found no actionable
+  bugs. No host/device/credential access by the reviewer; automated checks do not prove manual acceptance.
+- **1,067 Rust tests**, requiring sshd/tmux/mosh/herdr; formatting, Clippy with warnings denied and both generator
+  checks pass. Gradle reran all tasks: **661 JVM tests** (no failures/errors/skips), all Android builds and lints.
+- Full separate-device suite passes **`OK (169 tests)`**, 326 s. Daily app version/update time stayed unchanged
+  during tests; the two separate test apps were removed. Permission-dependent notification coverage stays conditional.
+- Linux `dist --expect-version 0.1.5` passes, both checksums/static stripped architectures verified, x86_64
+  executed (0.1.5), aarch64 format-checked only. Final signed rebuild's SHA-256 is in the release notes; it differs
+  from the earlier candidate APK despite unchanged versionCode/source. Signature/package/version checks pass.
+- Installed final build in place at 18:40; installed SHA-256 verified on-device, first-install time unchanged,
+  hosts visible, successful launch/no fresh AndroidRuntime crash. A large APK pull timed out partially; on-device
+  SHA-256 completed instead, without changing the bridge/tunnel. No real-host authentication/authorization change.

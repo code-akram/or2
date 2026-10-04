@@ -22,10 +22,11 @@ a herdr agent inbox, composer/quick replies, multi-address hosts, compact UI, an
 **Next (small, high value):**
 - **Scan for SSH servers** in "Add host": mDNS (`_ssh._tcp`) and the current subnet's port 22,
   through `Transport`, with a short time limit; it fills the manual form.
-- **Recent directories / one-tap shells:** implemented 2026-10-04, unreleased (FFI API 21): on connect,
-  read bounded Claude Code/Codex histories over exec, no daemon; the picker's **Dirs** tab opens a new shell
-  there in one tap. Reviewed, all suites passed (including 166 on-device tests), signed v0.1.5 candidate
-  installed on the owner's phone. Real-project owner QA and public release remain; a tmux-in-directory option is later.
+- **Recent directories / one-tap shells:** v0.1.5 (2026-10-04, FFI API 22): the picker's **Dirs** tab merges
+  current live herdr agent/pane cwd ahead of bounded Claude Code/Codex histories, no daemon or extra watch query;
+  opens a new shell there in one tap. Reviewed; 1,067 Rust, 661 JVM and 169 device tests pass; signed APK installed
+  in place on the owner's phone. Real-project manual QA is not established by these suites; a tmux-in-directory
+  option is later.
 - **Gestures:** swipe for the next tmux window or herdr tab, two-finger swipe for panes,
   two-finger vertical swipe for sessions/workspaces; pinch already zooms.
 - **Hardware keyboard shortcuts:** show shortcuts, switch session 1–9, close session, paste,
