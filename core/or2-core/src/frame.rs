@@ -8,9 +8,13 @@
 //!
 //! [`FrameMailbox`] is the backpressure point: the session publishes frames into it as output
 //! arrives and the renderer takes the merged result when it draws. Nothing queues; memory is
-//! bounded by one viewport.
+//! bounded by one pending viewport. The engine retains one previous published viewport for
+//! exact moved-row detection; row payloads are shared internally, never stored persistently.
 
 use crate::term::TerminalSize;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rgb {
@@ -72,7 +76,7 @@ impl CellStyle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CellWidth {
     Narrow,
     /// Head of a double-width grapheme; the glyph spans this and the next column.
@@ -81,7 +85,7 @@ pub enum CellWidth {
     SpacerTail,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Cell {
     /// One grapheme cluster (possibly several code points); empty for blank cells and tails.
     pub text: String,
@@ -94,14 +98,14 @@ pub struct Row {
     index: u16,
     /// Soft-wrapped into the next row: selection joins them without a newline.
     wrapped: bool,
-    cells: Vec<Cell>,
+    cells: Arc<Vec<Cell>>,
     /// OSC 8 hyperlinks, ascending by column and not overlapping; empty when none.
-    links: Vec<CellLink>,
+    links: Arc<Vec<CellLink>>,
 }
 
 /// An OSC 8 hyperlink over a run of a row's cells: `start_column..=end_column` (both
 /// inclusive; a wide character's spacer tail is part of the run).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CellLink {
     pub start_column: u16,
     pub end_column: u16,
@@ -155,6 +159,7 @@ pub struct Frame {
     size: TerminalSize,
     full: bool,
     rows: Vec<Row>,
+    row_moves: Vec<RowMove>,
     /// `None` when hidden or outside the viewport.
     cursor: Option<Cursor>,
     /// Default background for clearing and margins.
@@ -191,6 +196,16 @@ pub enum FrameError {
     SizeMismatch,
     #[error("delta frame has no full frame to update")]
     NoBase,
+    #[error("row moves require a delta, valid sources and distinct ascending destinations")]
+    InvalidRowMoves,
+}
+
+/// At publication: source in the previous published grid. At take: source in the last taken
+/// grid. The mailbox composes these references; application is simultaneous, never in-place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowMove {
+    pub index: u16,
+    pub previous: u16,
 }
 
 impl Row {
@@ -198,14 +213,14 @@ impl Row {
         Self {
             index,
             wrapped,
-            cells,
-            links: Vec::new(),
+            cells: Arc::new(cells),
+            links: Arc::new(Vec::new()),
         }
     }
 
     /// The row with its OSC 8 hyperlinks.
     pub fn with_links(mut self, links: Vec<CellLink>) -> Self {
-        self.links = links;
+        self.links = Arc::new(links);
         self
     }
 
@@ -225,9 +240,34 @@ impl Row {
         &self.links
     }
 
-    /// Owned row payload, for marshalling without cloning cell text or link URIs.
+    /// Owned row payload. Unshared cell/link strings move; still-retained payloads clone once
+    /// for marshalling so the engine can compare the next publication exactly.
     pub fn into_parts(self) -> (u16, bool, Vec<Cell>, Vec<CellLink>) {
-        (self.index, self.wrapped, self.cells, self.links)
+        (
+            self.index,
+            self.wrapped,
+            Arc::unwrap_or_clone(self.cells),
+            Arc::unwrap_or_clone(self.links),
+        )
+    }
+
+    fn at(&self, index: u16) -> Self {
+        Self {
+            index,
+            ..self.clone()
+        }
+    }
+
+    fn same_content(&self, other: &Self) -> bool {
+        self.wrapped == other.wrapped && self.cells == other.cells && self.links == other.links
+    }
+
+    fn content_hash(&self) -> u64 {
+        let mut hash = DefaultHasher::new();
+        self.wrapped.hash(&mut hash);
+        self.cells.hash(&mut hash);
+        self.links.hash(&mut hash);
+        hash.finish()
     }
 
     fn validate(&self, size: TerminalSize) -> Result<(), FrameError> {
@@ -243,7 +283,7 @@ impl Row {
             });
         }
         let mut previous = CellWidth::Narrow;
-        for (column, cell) in (0u16..).zip(&self.cells) {
+        for (column, cell) in (0u16..).zip(self.cells.iter()) {
             match (previous, cell.width) {
                 (CellWidth::Wide, CellWidth::SpacerTail) => {}
                 (CellWidth::Wide, _) => {
@@ -267,7 +307,7 @@ impl Row {
             });
         }
         let mut next_free = 0u16;
-        for link in &self.links {
+        for link in self.links.iter() {
             if link.start_column < next_free
                 || link.end_column < link.start_column
                 || link.end_column >= size.columns()
@@ -330,6 +370,7 @@ impl Frame {
             size,
             full,
             rows,
+            row_moves: Vec::new(),
             cursor,
             background,
             scrollback,
@@ -359,6 +400,25 @@ impl Frame {
         &self.rows
     }
 
+    pub fn row_moves(&self) -> &[RowMove] {
+        &self.row_moves
+    }
+
+    pub fn with_row_moves(mut self, moves: Vec<RowMove>) -> Result<Self, FrameError> {
+        if (!moves.is_empty() && self.full)
+            || moves.windows(2).any(|pair| pair[0].index >= pair[1].index)
+            || moves.iter().any(|m| {
+                m.index >= self.size.rows()
+                    || m.previous >= self.size.rows()
+                    || self.rows.binary_search_by_key(&m.index, Row::index).is_ok()
+            })
+        {
+            return Err(FrameError::InvalidRowMoves);
+        }
+        self.row_moves = moves;
+        Ok(self)
+    }
+
     pub fn into_rows(self) -> Vec<Row> {
         self.rows
     }
@@ -375,25 +435,119 @@ impl Frame {
         self.scrollback
     }
 
-    /// Applies a newer delta of the same size: its rows replace ours, its scalars win.
+    /// Compose simultaneous newer references against our still-pending state, never against
+    /// already replaced destinations. A pending full has cells for every source, so remains full.
     fn absorb(&mut self, newer: Frame) {
-        let mut merged = Vec::with_capacity(self.rows.len() + newer.rows.len());
-        let mut older = std::mem::take(&mut self.rows).into_iter().peekable();
-        for row in newer.rows {
-            while older.peek().is_some_and(|old| old.index < row.index) {
-                merged.extend(older.next());
-            }
-            if older.peek().is_some_and(|old| old.index == row.index) {
-                older.next();
-            }
-            merged.push(row);
+        #[derive(Clone)]
+        enum Update {
+            Cells(Row),
+            Previous(u16),
         }
-        merged.extend(older);
-        self.rows = merged;
+        let mut updates = BTreeMap::new();
+        for row in std::mem::take(&mut self.rows) {
+            updates.insert(row.index, Update::Cells(row));
+        }
+        for m in std::mem::take(&mut self.row_moves) {
+            updates.insert(m.index, Update::Previous(m.previous));
+        }
+        let moves: Vec<_> = newer
+            .row_moves
+            .iter()
+            .map(|m| {
+                let resolved = match updates.get(&m.previous) {
+                    Some(Update::Cells(row)) => Update::Cells(row.at(m.index)),
+                    Some(Update::Previous(previous)) => Update::Previous(*previous),
+                    None => Update::Previous(m.previous),
+                };
+                (m.index, resolved)
+            })
+            .collect();
+        updates.extend(moves);
+        for row in newer.rows {
+            updates.insert(row.index, Update::Cells(row));
+        }
+        for (index, update) in updates {
+            match update {
+                Update::Cells(row) => self.rows.push(row),
+                Update::Previous(previous) => self.row_moves.push(RowMove { index, previous }),
+            }
+        }
         self.cursor = newer.cursor;
         self.background = newer.background;
         self.scrollback = newer.scrollback;
         self.modes = newer.modes;
+    }
+}
+
+/// Producer-side moved-row detection. Retains one published viewport with shared row payloads.
+/// Hashes select candidates only; resolved cells, wrap and links must also compare equal.
+#[derive(Debug, Default)]
+pub(crate) struct PublishedRows {
+    size: Option<TerminalSize>,
+    rows: Vec<Row>,
+    hashes: Vec<u64>,
+}
+
+impl PublishedRows {
+    /// Explicit reset snapshots must pass `false`. A native whole-screen dirty report may pass
+    /// `true`: only an actual moved-content match permits converting it to a delta.
+    pub(crate) fn encode(&mut self, mut frame: Frame, allow_full_delta: bool) -> Frame {
+        // Cursor/mode-only publications (and no-op wheel checks) need no row bookkeeping.
+        if frame.rows.is_empty() {
+            return frame;
+        }
+        let compatible = self.size == Some(frame.size);
+        if compatible && (!frame.full || allow_full_delta) {
+            let mut candidates: HashMap<u64, Vec<usize>> = HashMap::new();
+            for (index, &hash) in self.hashes.iter().enumerate() {
+                candidates.entry(hash).or_default().push(index);
+            }
+            let mut moves = Vec::new();
+            let mut retained = Vec::new();
+            // Snapshot the previous publication before replacing any destination.
+            let mut next = self.rows.clone();
+            let mut next_hashes = self.hashes.clone();
+            for row in frame.rows {
+                let index = usize::from(row.index);
+                let hash = row.content_hash();
+                let source = if row.same_content(&self.rows[index]) {
+                    None
+                } else {
+                    candidates.get(&hash).and_then(|indices| {
+                        indices
+                            .iter()
+                            .copied()
+                            .find(|&source| row.same_content(&self.rows[source]))
+                    })
+                };
+                next_hashes[index] = hash;
+                if let Some(source) = source {
+                    next[index] = self.rows[source].at(row.index);
+                    moves.push(RowMove {
+                        index: row.index,
+                        previous: source as u16,
+                    });
+                } else {
+                    next[index] = row.clone();
+                    retained.push(row);
+                }
+            }
+            if frame.full && moves.is_empty() {
+                // Preserve full-reset behaviour when no content actually moved.
+                frame.rows = retained;
+            } else {
+                frame.full = false;
+                frame.rows = retained;
+                frame.row_moves = moves;
+            }
+            self.rows = next;
+            self.hashes = next_hashes;
+        } else if frame.full {
+            self.rows = frame.rows.clone();
+            self.hashes = self.rows.iter().map(Row::content_hash).collect();
+        }
+        self.size = Some(frame.size);
+        frame
     }
 }
 
@@ -786,5 +940,257 @@ mod tests {
     fn packs_rgb_as_0x00rrggbb() {
         assert_eq!(Rgb::new(0x12, 0x34, 0x56).packed(), 0x0012_3456);
         assert_eq!(Rgb::new(0xff, 0, 0).packed(), 0x00ff_0000);
+    }
+
+    fn apply_rows(base: &[Row], frame: &Frame) -> Vec<Row> {
+        if frame.full {
+            return frame.rows.clone();
+        }
+        let mut next = base.to_vec();
+        for m in &frame.row_moves {
+            next[usize::from(m.index)] = base[usize::from(m.previous)].at(m.index);
+        }
+        for row in &frame.rows {
+            next[usize::from(row.index)] = row.clone();
+        }
+        next
+    }
+
+    #[test]
+    fn moves_validate_and_are_simultaneous_including_cycles_and_duplicates() {
+        let base = full(1, 3, "a");
+        let valid = vec![
+            RowMove {
+                index: 0,
+                previous: 1,
+            },
+            RowMove {
+                index: 1,
+                previous: 0,
+            },
+        ];
+        assert_eq!(
+            base.with_row_moves(valid.clone()),
+            Err(FrameError::InvalidRowMoves)
+        );
+        for invalid in [
+            vec![RowMove {
+                index: 3,
+                previous: 0,
+            }],
+            vec![RowMove {
+                index: 0,
+                previous: 3,
+            }],
+            vec![
+                RowMove {
+                    index: 1,
+                    previous: 0,
+                },
+                RowMove {
+                    index: 1,
+                    previous: 2,
+                },
+            ],
+        ] {
+            assert_eq!(
+                delta(1, 3, &[], 0).with_row_moves(invalid),
+                Err(FrameError::InvalidRowMoves)
+            );
+        }
+        assert_eq!(
+            delta(1, 3, &[(0, "x")], 0).with_row_moves(valid),
+            Err(FrameError::InvalidRowMoves)
+        );
+        // Exhaust all three-source assignments across two coalesced publications. This includes
+        // cycles, repeated sources and overwritten sources, with and without a pending full.
+        for pending_full in [false, true] {
+            for first in 0..27 {
+                for second in 0..27 {
+                    let mut mailbox = FrameMailbox::default();
+                    let initial = Frame::full(
+                        size(1, 3),
+                        vec![
+                            text_row(0, "a", 1),
+                            text_row(1, "b", 1),
+                            text_row(2, "c", 1),
+                        ],
+                        None,
+                        BG,
+                        Scrollback::default(),
+                    )
+                    .unwrap();
+                    let mut expected = initial.rows.clone();
+                    mailbox.publish(initial).unwrap();
+                    if !pending_full {
+                        mailbox.take().unwrap();
+                    }
+                    for assignment in [first, second] {
+                        let moves = (0..3)
+                            .map(|index| RowMove {
+                                index,
+                                previous: (assignment / 3u16.pow(u32::from(index))) % 3,
+                            })
+                            .collect();
+                        let update = delta(1, 3, &[], 0).with_row_moves(moves).unwrap();
+                        expected = apply_rows(&expected, &update);
+                        mailbox.publish(update).unwrap();
+                    }
+                    // A new cell followed by a move of that cell must materialize it, because
+                    // the consumer never saw the intermediate payload/table.
+                    let update = delta(1, 3, &[(1, "x")], 0);
+                    expected = apply_rows(&expected, &update);
+                    mailbox.publish(update).unwrap();
+                    let update = delta(1, 3, &[], 0)
+                        .with_row_moves(vec![RowMove {
+                            index: 0,
+                            previous: 1,
+                        }])
+                        .unwrap();
+                    expected = apply_rows(&expected, &update);
+                    mailbox.publish(update).unwrap();
+                    let taken = mailbox.take().unwrap();
+                    let base = vec![
+                        text_row(0, "a", 1),
+                        text_row(1, "b", 1),
+                        text_row(2, "c", 1),
+                    ];
+                    assert_eq!(apply_rows(&base, &taken.frame), expected);
+                    assert_eq!(taken.frame.full, pending_full);
+                    if pending_full {
+                        assert!(taken.frame.row_moves.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn moved_content_checks_resolved_styles_wrap_links_and_hash_collisions() {
+        let base = Frame::full(
+            size(1, 3),
+            vec![
+                text_row(0, "a", 1),
+                text_row(1, "b", 1),
+                text_row(2, "c", 1),
+            ],
+            None,
+            BG,
+            Scrollback::default(),
+        )
+        .unwrap();
+        let mut published = PublishedRows::default();
+        published.encode(base.clone(), false);
+        let moved = published.encode(delta(1, 3, &[(0, "b"), (1, "c"), (2, "d")], 0), true);
+        assert_eq!(
+            moved.row_moves,
+            [
+                RowMove {
+                    index: 0,
+                    previous: 1
+                },
+                RowMove {
+                    index: 1,
+                    previous: 2
+                }
+            ]
+        );
+        assert_eq!(texts(&moved), [(2, "d".into())]);
+        for change in 0..3 {
+            published.encode(base.clone(), false);
+            let mut changed = text_row(0, "b", 1);
+            match change {
+                0 => Arc::make_mut(&mut changed.cells)[0].style.bold = true,
+                1 => changed.wrapped = true,
+                _ => {
+                    changed = changed.with_links(vec![CellLink {
+                        start_column: 0,
+                        end_column: 0,
+                        uri: "https://example.org".into(),
+                    }])
+                }
+            }
+            // Force a candidate hash collision: equality must still reject it.
+            published.hashes[1] = changed.content_hash();
+            let update =
+                Frame::delta(size(1, 3), vec![changed], None, BG, Scrollback::default()).unwrap();
+            assert!(published.encode(update, true).row_moves.is_empty());
+        }
+        // Resync and resized snapshots are always self-contained.
+        assert!(published.encode(base, false).row_moves.is_empty());
+        assert!(published.encode(full(2, 2, "b"), true).is_full());
+    }
+
+    #[test]
+    fn coalesced_moves_keep_untaken_styles_links_wrap_and_full_resets_drop_references() {
+        let mut mailbox = FrameMailbox::default();
+        mailbox.publish(full(1, 3, "a")).unwrap();
+        mailbox.take().unwrap();
+        let mut annotated = text_row(1, "x", 1).with_links(vec![CellLink {
+            start_column: 0,
+            end_column: 0,
+            uri: "https://example.org".into(),
+        }]);
+        annotated.wrapped = true;
+        Arc::make_mut(&mut annotated.cells)[0].style.bold = true;
+        let update = Frame::delta(
+            size(1, 3),
+            vec![annotated.clone()],
+            None,
+            BG,
+            Scrollback::default(),
+        )
+        .unwrap();
+        mailbox.publish(update).unwrap();
+        let modes = TerminalModes {
+            mouse_tracking: true,
+            ..TerminalModes::default()
+        };
+        mailbox
+            .publish(
+                delta(1, 3, &[], 0)
+                    .with_modes(modes)
+                    .with_row_moves(vec![RowMove {
+                        index: 0,
+                        previous: 1,
+                    }])
+                    .unwrap(),
+            )
+            .unwrap();
+        let taken = mailbox.take().unwrap();
+        assert!(taken.frame.row_moves.is_empty());
+        assert_eq!(taken.frame.rows, [annotated.at(0), annotated]);
+        assert_eq!(taken.frame.modes, modes);
+
+        mailbox
+            .publish(
+                delta(1, 3, &[], 0)
+                    .with_row_moves(vec![RowMove {
+                        index: 0,
+                        previous: 1,
+                    }])
+                    .unwrap(),
+            )
+            .unwrap();
+        mailbox.publish(full(1, 3, "r")).unwrap(); // requestFullFrame supersedes pending moves.
+        let reset = mailbox.take().unwrap();
+        assert!(reset.frame.full && reset.frame.row_moves.is_empty());
+        assert_eq!(
+            texts(&reset.frame),
+            [(0, "r".into()), (1, "r".into()), (2, "r".into())]
+        );
+        assert_eq!(
+            mailbox.publish(
+                delta(1, 2, &[], 0)
+                    .with_row_moves(vec![RowMove {
+                        index: 0,
+                        previous: 1
+                    }])
+                    .unwrap()
+            ),
+            Err(FrameError::SizeMismatch)
+        );
+        mailbox.publish(full(1, 2, "s")).unwrap();
+        assert!(mailbox.take().unwrap().frame.row_moves.is_empty());
     }
 }

@@ -164,7 +164,8 @@ writing run concurrently, so a large paste never blocks output.
 The renderer pulls; Rust never queues frames.
 
 1. The driver publishes frames into a mailbox as output arrives. Deltas merge by row index into
-   the pending frame; a full frame replaces it. Memory is bounded by one viewport.
+   the pending frame; a full frame replaces it. Memory is bounded by one pending viewport;
+   the engine also retains one published viewport with shared payloads for moved-row detection.
 2. `on_frame_ready` fires when the mailbox goes from empty to non-empty, and not again until
    `take_frame()` empties it. The renderer takes on its next vsync.
 3. `take_frame()` returns the merged `TerminalFrame` or `null`. `sequence` starts at 1 and
@@ -177,7 +178,12 @@ The renderer pulls; Rust never queues frames.
 `offset + rows == total_rows`). Each `TerminalRow` has exactly `columns` cells and a `wrapped`
 flag (soft-wrapped into the next row). `TerminalCell`: `text` (one grapheme cluster; empty for
 blanks and tails), `width` (`NARROW`, `WIDE` head spanning two columns, `SPACER_TAIL` with no
-text) and `style` (index into `styles`).
+text) and `style` (index into `styles`). API 23 adds `row_moves` (default empty), each
+`TerminalRowMove { index, previous }` copying an entire resolved row from the **last taken**
+frame (`sequence - 1`) to `index`. Sources are read simultaneously from the old grid;
+destinations are ascending, distinct, in bounds and disjoint from `changed_rows`. A full frame
+has no moves. Moves carry wrapping, links and already resolved styles, never style indices
+into the current table. A consumer missing that base/sequence requests a full snapshot.
 
 Style indices are scoped to their own frame's `styles` table. When applying a delta, resolve
 each changed cell's style through that delta's table; rows the delta does not contain keep the
@@ -196,6 +202,8 @@ Full frames are sent first after `Connected`, after every resize, when libghostt
 whole screen dirty (alternate screen switch, clear, palette change), and after
 `request_full_frame()`. The renderer calls `request_full_frame()` whenever it creates a new
 view for a connected session. A delta always matches the size of the grid the renderer holds.
+Whole-screen dirtiness with verified moved rows can instead produce a delta; explicit full
+requests, resizes, default-colour resets and alternate-screen switches always stay full.
 
 Lane A's libghostty-vt adapter follows the render-state API: build rows from dirty rows (all
 rows when `Dirty::Full`), then clear both dirty layers; map `SpacerHead` to a blank narrow cell;
@@ -3966,12 +3974,12 @@ once, in order. In `TargetScroller`:
   text size, independent of colour, and cleared on pinch. `Canvas.drawGlyphs` batches consecutive
   narrow cells sharing foreground, actual `Font` and faint alpha, with absolute column origins plus
   the existing centring offset. Natural advances never position subsequent cells; no cross-cell
-  ligatures, contextual shaping or row bidi reordering. All batched glyphs have synthetic bold off.
+  ligatures, contextual shaping or row bidi reordering. Synthetic bold is a batch attribute too.
   A bounded glyph with no ink (a space) is skipped without splitting the batch.
 - The clipped/scaled per-cell Picture path remains for wide cells, multi-codepoint graphemes,
-  combining marks, fallback fonts, missing glyphs, advances wider than a cell, **all italic and
-  synthetic-bold cells**, and ink that cannot fit with one pixel of antialiasing room inside the
-  cell. Upright bold is batched only when the actual font has weight at least 600. Check actual
+  combining marks, fallback fonts, missing glyphs, advances wider than a cell, **all italic
+  cells**, and ink that cannot fit with one pixel of antialiasing room inside the
+  cell. Upright bold batches with a real weight at least 600 or with the legacy fake-bold flag. Check actual
   glyph bounds as well as advance; never remove clipping based on advance alone. This conservative
   exception cache preserves synthetic italic/weight and cluster rendering. Faint remains alpha 128.
   A block cursor still redraws the clipped cell in its background colour; frozen selection rows,
@@ -3983,7 +3991,7 @@ once, in order. In `TargetScroller`:
 - FFI conversion consumes owned rows, moving text and hyperlink strings, and reserves capacities.
   Kotlin replaces changed rows by index in one shallow list copy; metadata-only deltas reuse the
   original list. Frame-local style resolution and immutable selection snapshots remain unchanged.
-  No exported record changes: **FFI API stays 22**.
+  **FFI API 23** adds row references; frames with no references keep their existing behaviour.
 - Tests: SSH/mosh pump regressions (wheel produces no frame, viewport scroll does), engine tests
   for metadata-only changes and arrow fallback, FFI allocation-preserving conversion, JVM grid
   no-op/resync/style-table/snapshot tests, device wheel-fling/no-op invalidation checks, and a raster
@@ -4001,7 +4009,79 @@ once, in order. In `TargetScroller`:
   2.62 -> 1.15 p50, but the dense fixture (every other row bold, which keeps the per-cell path while
   the font has no real bold face) 6.46 -> 8.01 p50 (p95 13.79 -> 10.44). No 120 Hz claim: bold-heavy
   screens still record per cell, and a remote target's scroll still waits for the host's redraw.
-  Follow-ups: batch synthetic bold, row `RenderNode`s, scroll-region/row reuse across the FFI.
+  These are the measurements of **3a8c4a1**, before the changes below (measured after them: see
+  the end of "Next rendering round").
+
+**Next rendering round (API 23):**
+
+1. **Upright synthetic bold batches.** HWUI's explicit-font `Canvas::drawGlyphs` copies the paint
+   and calls `populateSkFont`; Android 14's implementation ORs font fakery with the existing
+   `SkFont::isEmbolden()` flag. `Paint.isFakeBoldText` therefore reaches the same Skia emboldening
+   as the legacy `drawText`/Picture path. No stroke approximation or substitute weight is used.
+   Bounds are queried with that flag set: Android 14's `Font_getGlyphBounds` installs only the
+   typeface, preserving the paint's emboldening before `getWidthsBounds`. The one-pixel AA margin
+   thus checks **emboldened ink**, including for blank-glyph classification. Italic, fallback,
+   wide, combining, missing, oversized and overhanging cells retain clipped Pictures.
+   Sources: [HWUI glyph path](https://android.googlesource.com/platform/frameworks/base/+/master/libs/hwui/hwui/Canvas.cpp),
+   [Android 14 font population](https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android-14.0.0_r1/libs/hwui/hwui/MinikinSkia.cpp),
+   [Android 14 bounds JNI](https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android-14.0.0_r1/libs/hwui/jni/fonts/Font.cpp).
+   The regular and bold software raster comparisons require exact pixels; the hardware comparison
+   requires exact pixels against the legacy clipped Pictures at 10, 13 and 16.5 dp, including
+   faint alpha. These tests compile here; equivalence on the phone remains a required device gate.
+2. **Retained rows.** Hardware canvases cache one `RenderNode` per resolved painted cell list
+   (text, width, every style field). A row's hash is computed once and equality verifies content;
+   wrapping and OSC 8 targets are excluded because they do not paint. Font/metrics/size are a
+   view-wide cache generation, cleared on every font change; default-background changes clear
+   it too. Background runs, glyph batches, exceptional Pictures and decorations record at y=0.
+   Nodes stay at (0,0); each occurrence draws via canvas translation, including duplicate rows.
+   Cursor (including recoloured block glyph), frozen-row selection tint, flashed links, IME and
+   scroll indicator stay outside the nodes in their original order. Frozen selection content
+   supplies the rows to cache. Software canvases draw directly, including thumbnails/Bitmap tests.
+   LRU retention is bounded to three viewport heights of rows. Eviction, detach and font changes
+   discard display lists. Only visible rows are visited, so offscreen old grids cannot evict nodes
+   already referenced in the current draw. Debuggable builds report hits/misses/retained count;
+   resetting timings resets counters, keeping the warmed cache. Display lists save recording;
+   they do not promise to eliminate GPU work. [RenderNode API](https://developer.android.com/reference/android/graphics/RenderNode).
+3. **Moved rows over FFI.** `PublishedRows` compares newly extracted engine rows against the
+   previous publication, hashing full resolved cells/wrap/links and verifying equality after a
+   hash match. Same-position content keeps the ordinary cell-row path. Matched moved payloads
+   are shared internally; new rows are retained for the next detection. The mailbox composes
+   incoming references before overwriting any destination: a pending cell source materializes
+   cells at the destination, a pending reference supplies its original source, and an untouched
+   source refers to the last taken grid. This handles cycles, repeated sources, multiple scrolls
+   and scrolls mixed with edits. A pending full contains every source and materializes all moves;
+   a newer full supersedes pending updates and resets the baseline. Nothing refers to an untaken
+   intermediate style table. Kotlin takes references from the old list and reuses the complete
+   `ResolvedRow` object; new cell rows resolve this frame's styles. Selection snapshots remain
+   immutable. Invalid/missing bases, sequence gaps, sizes or destinations request a full frame.
+   Internally retaining engine payloads means FFI must clone a still-shared **cell row** when
+   marshalling it (unshared payloads still move strings); moved rows carry only two u16s. Check
+   full-frame allocation/timing on the phone as well as the expected scroll savings.
+
+Tests for this round: JVM cache content/LRU/release tests, simultaneous row identity/style/link/wrap
+and resync tests, an end-to-end native scroll/FFI/grid test, Rust exhaustive three-source two-update
+coalescing tests (cycles and duplicate sources, pending delta/full, moves of untaken new cells),
+forced hash-collision/content checks, FFI reference conversion and native workload tests.
+Hardware comparisons cover duplicate-node placement, cursor shapes, IME, frozen selections,
+background invalidation and detach. The dense fixture now asserts bold rows exercise batching.
+`TerminalProbeActivity` adds **Native scroll**: fixture-only commands start a real native engine
+filled with dense, uniquely numbered ASCII rows, alternating regular/fake bold; each step appends
+one line and scrolls one row. Its timing device test warms 10 and measures 60 updates through
+takeFrame/FFI/apply/draw alongside the unchanged full-snapshot and dense Kotlin workloads, with
+cache counters. A 56x47 native unit fixture verifies 46 references + one cell row per step and
+45 references + two cell rows after two coalesced steps. Stats must remain off for comparisons.
+
+**Measured (2026-10-04, same phone and test, interleaved with 3a8c4a1, median of three, thermal
+status 1, p50 / p95 ms):** dense fixture UI record 8.15 / 10.69 -> 1.21 / 1.53, `COMMAND_ISSUE`
+2.92 / 3.37 -> 1.26 / 1.49, window `TOTAL` 17.52 / 24.22 -> 8.77 / 11.67 (its content repeats, so
+the row cache hits 100 %: an upper bound). New native one-line scroll (real engine, FFI, apply,
+draw): apply 4.35 / 5.06, record 1.69 / 3.06, 97.9 % row-cache hits (one new row per step),
+`TOTAL` 16.80 / 23.21. Native full snapshots (fixture frames, which bypass move detection) are
+unchanged within run-to-run noise (apply p50 6.4-10.4 for the same build). Known cost, not
+measured by these fixtures: an engine full frame now clones its row text once at the FFI, because
+the move detector retains the rows; a follow-up could retain 128-bit row fingerprints instead.
+The probe fixture's `scroll:stop` command publishes its fixed screen once (it published twice,
+leaving a second full frame behind the first take, which the JVM test caught).
 
 ## Tap links and OSC 52 (lane Links)
 
@@ -5937,3 +6017,14 @@ and unplugged/Doze acceptance remain explicitly deferred; see `status.md` and `r
   and 169 phone tests on 2026-10-04, using the separate device-test app. The synthetic Dirs gallery was visually
   inspected; the signed v0.1.5 APK was installed in place afterwards. No real-project manual or deferred
   connectivity acceptance is claimed.
+
+## Retained terminal rows and scroll references (FFI API 23)
+
+API **23** adds `TerminalFrame.row_moves: Vec<TerminalRowMove>` (Kotlin `rowMoves`, default empty)
+and `TerminalRowMove { index: u16, previous: u16 }`. Both indices address complete viewport rows.
+A taken delta's references use the last taken frame, `sequence - 1`, and apply simultaneously;
+full frames remain complete cell snapshots with an empty move list. Destinations are ascending,
+unique and disjoint from `changed_rows`. Moved rows retain their resolved styles, wrapping and links;
+only cell payloads use this frame's style table. No Session method or protocol export changes.
+Frames without moves remain valid. See [Render performance](#render-performance-scrolling-and-drawing)
+for producer detection, mailbox composition, renderer caching and validation.

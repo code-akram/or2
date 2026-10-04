@@ -21,8 +21,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::frame::{
-    Cell, CellLink, CellStyle, CellWidth, Cursor, CursorShape, Frame, Rgb, Row, Scrollback,
-    TerminalModes, Underline,
+    Cell, CellLink, CellStyle, CellWidth, Cursor, CursorShape, Frame, PublishedRows, Rgb, Row,
+    Scrollback, TerminalModes, Underline,
 };
 use crate::input::{Key, KeyInput, Modifiers, ViewportScroll};
 use crate::session::Command;
@@ -121,6 +121,7 @@ pub struct TerminalEngine {
     full: bool,
     colors: Option<(RgbColor, RgbColor)>,
     presentation: Option<Presentation>,
+    published_rows: PublishedRows,
     /// The newest clipboard write from the host not yet taken ([`TerminalEngine::take_clipboard_write`]).
     clipboard: Rc<RefCell<Option<String>>>,
     /// Scratch space for hyperlink URIs while building a frame.
@@ -206,6 +207,7 @@ impl TerminalEngine {
             full: true,
             colors: None,
             presentation: None,
+            published_rows: PublishedRows::default(),
             clipboard,
             uri: Vec::new(),
         })
@@ -264,10 +266,11 @@ impl TerminalEngine {
     pub fn frame_if_changed(&mut self) -> Result<Option<Frame>, TerminalError> {
         let previous = self.presentation;
         let frame = self.frame()?;
-        Ok(
-            (frame.is_full() || !frame.rows().is_empty() || previous != self.presentation)
-                .then_some(frame),
-        )
+        Ok((frame.is_full()
+            || !frame.rows().is_empty()
+            || !frame.row_moves().is_empty()
+            || previous != self.presentation)
+            .then_some(frame))
     }
 
     pub fn frame(&mut self) -> Result<Frame, TerminalError> {
@@ -278,11 +281,17 @@ impl TerminalEngine {
                 .resize(self.size.columns(), self.size.rows(), 0, 0)?;
             self.full = true;
         }
+        let modes = self.modes()?;
         let snapshot = self.render.update(&self.terminal)?;
         let colors = snapshot.colors()?;
         let resolved = (colors.foreground, colors.background);
         // OSC default-colour changes and reverse-screen do not dirty native rows at this pin.
-        let full = self.full || snapshot.dirty()? == Dirty::Full || self.colors != Some(resolved);
+        let reset = self.full
+            || self.colors != Some(resolved)
+            || self
+                .presentation
+                .is_some_and(|p| p.modes.alternate_screen != modes.alternate_screen);
+        let full = reset || snapshot.dirty()? == Dirty::Full;
         let position = if snapshot.cursor_visible()? {
             snapshot.cursor_viewport()?
         } else {
@@ -424,7 +433,6 @@ impl TerminalEngine {
         snapshot.set_dirty(Dirty::Clean)?;
         self.full = false;
         self.colors = Some(resolved);
-        let modes = self.modes()?;
         self.presentation = Some(Presentation {
             cursor,
             background: rgb(colors.background),
@@ -432,7 +440,9 @@ impl TerminalEngine {
             modes,
         });
         let build = if full { Frame::full } else { Frame::delta };
-        Ok(build(self.size, rows, cursor, rgb(colors.background), scrollback)?.with_modes(modes))
+        let frame =
+            build(self.size, rows, cursor, rgb(colors.background), scrollback)?.with_modes(modes);
+        Ok(self.published_rows.encode(frame, !reset))
     }
 
     /// The modes a swipe is routed by (whether the program tracks the mouse and which screen

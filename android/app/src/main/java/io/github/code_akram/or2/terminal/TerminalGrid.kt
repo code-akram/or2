@@ -19,7 +19,9 @@ val DefaultBackground: UInt = (Or2Colors.TerminalBackground.toArgb() and 0xFFFFF
 
 data class ResolvedCell(val text: String, val width: CellWidth, val style: CellStyle)
 /** [links] are the row's OSC 8 hyperlinks (inclusive column runs), empty when none. */
-data class ResolvedRow(val cells: List<ResolvedCell>, val wrapped: Boolean, val links: List<CellLink> = emptyList())
+data class ResolvedRow(val cells: List<ResolvedCell>, val wrapped: Boolean, val links: List<CellLink> = emptyList()) {
+    internal val painted: PaintedRow by lazy(LazyThreadSafetyMode.NONE) { PaintedRow(cells) }
+}
 data class GridSize(val columns: UShort, val rows: UShort)
 
 fun gridSize(width: Int, height: Int, cellWidth: Float, cellHeight: Float): GridSize? {
@@ -54,6 +56,24 @@ class TerminalGrid {
     /** Returns whether drawing is needed (full snapshots redraw). [needsFullFrame] marks an unusable delta. */
     fun apply(frame: TerminalFrame): Boolean {
         needsFullFrame = !frame.full && (!hasGrid || columns != frame.columns.toInt() || rows.size != frame.rows.toInt())
+        if (frame.rowMoves.isNotEmpty()) {
+            // Sources refer to the last *taken* state, never to replacements in this delta.
+            needsFullFrame = needsFullFrame || frame.full || frame.sequence != sequence + 1u
+            val destinations = BooleanArray(rows.size)
+            var last = -1
+            for (move in frame.rowMoves) {
+                val index = move.index.toInt()
+                if (index <= last || index !in rows.indices || move.previous.toInt() !in rows.indices) {
+                    needsFullFrame = true
+                    break
+                }
+                destinations[index] = true
+                last = index
+            }
+            needsFullFrame = needsFullFrame || frame.changedRows.any {
+                it.index.toInt() !in rows.indices || destinations[it.index.toInt()]
+            }
+        }
         if (needsFullFrame) return false
         var visibleChanged = frame.full ||
             cursor != frame.cursor || background != frame.background || scrollback != frame.scrollback || modes != frame.modes
@@ -65,8 +85,14 @@ class TerminalGrid {
                     ResolvedCell(cell.text, cell.width, frame.styles[cell.style.toInt()])
                 }, row.wrapped, row.links)
             }
-        } else if (frame.changedRows.isNotEmpty()) {
+        } else if (frame.changedRows.isNotEmpty() || frame.rowMoves.isNotEmpty()) {
             val replacement = rows.toMutableList()
+            for (move in frame.rowMoves) {
+                val resolved = rows[move.previous.toInt()]
+                val index = move.index.toInt()
+                replacement[index] = resolved
+                if (rows[index] != resolved) visibleChanged = true
+            }
             for (row in frame.changedRows) {
                 val resolved = ResolvedRow(row.cells.map { cell ->
                     ResolvedCell(cell.text, cell.width, frame.styles[cell.style.toInt()])
@@ -77,7 +103,8 @@ class TerminalGrid {
                     visibleChanged = true
                 }
             }
-            if (visibleChanged) rows = replacement
+            // Even equal-content copies preserve the source object's identity for the cache.
+            if (visibleChanged || frame.rowMoves.isNotEmpty()) rows = replacement
         }
         columns = frame.columns.toInt()
         cursor = frame.cursor

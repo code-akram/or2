@@ -113,4 +113,42 @@ class TerminalGridTest {
         timings.record(10_000_000L)
         assertEquals(10.0, timings.percentile(95), 0.0)
     }
+
+    @Test fun movesReuseResolvedObjectsSimultaneouslyWithoutUsingTheNewStyleTable() {
+        val grid = TerminalGrid()
+        val link = io.github.code_akram.or2.ffi.CellLink(0u, 0u, "https://example.org")
+        grid.apply(frame(true, 0xff0000u, listOf(row(0, "A").copy(wrapped = true, links = listOf(link)), row(1, "B"))))
+        val frozen = grid.rows
+        val moves = listOf(io.github.code_akram.or2.ffi.TerminalRowMove(0u, 1u),
+            io.github.code_akram.or2.ffi.TerminalRowMove(1u, 0u))
+        assertTrue(grid.apply(frame(false, 0x0000ffu, emptyList()).copy(sequence = 2u, rowMoves = moves)))
+        assertSame(frozen[1], grid.rows[0])
+        assertSame(frozen[0], grid.rows[1])
+        assertEquals(0xff0000u, grid.rows[1].cells[0].style.foreground)
+        assertEquals(listOf(link), grid.rows[1].links)
+        assertTrue(grid.rows[1].wrapped)
+        assertEquals("A", frozen[0].cells[0].text)
+        assertTrue(grid.apply(frame(false, 7u, listOf(row(1, "C"))).copy(sequence = 3u,
+            rowMoves = listOf(io.github.code_akram.or2.ffi.TerminalRowMove(0u, 1u)))))
+        assertSame(frozen[0], grid.rows[0])
+        assertEquals(7u, grid.rows[1].cells[0].style.foreground)
+    }
+
+    @Test fun invalidMovesRequestAFullSnapshotWithoutPartialApplication() {
+        val full = frame(true, 1u, listOf(row(0, "A"), row(1, "B")))
+        val move = io.github.code_akram.or2.ffi.TerminalRowMove(0u, 1u)
+        for (invalid in listOf(full.copy(rowMoves = listOf(move)),
+            full.copy(full = false, sequence = 3u, changedRows = emptyList(), rowMoves = listOf(move)),
+            full.copy(full = false, sequence = 2u, rowMoves = listOf(move)),
+            full.copy(full = false, sequence = 2u, changedRows = emptyList(), rowMoves = listOf(move, move)),
+            full.copy(full = false, sequence = 2u, changedRows = emptyList(), rowMoves = listOf(move.copy(previous = 2u))))) {
+            val grid = TerminalGrid()
+            grid.apply(full)
+            val before = grid.rows
+            assertFalse(grid.apply(invalid))
+            assertTrue(grid.needsFullFrame)
+            assertSame(before, grid.rows)
+            assertEquals(1uL, grid.sequence)
+        }
+    }
 }

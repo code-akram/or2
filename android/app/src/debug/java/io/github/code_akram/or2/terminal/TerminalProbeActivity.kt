@@ -58,6 +58,7 @@ class TerminalProbeActivity : ComponentActivity() {
     private var stats by mutableStateOf("")
     private var shapeIndex = 0
     private var stressSequence = 0uL
+    private var nativeScrolling = false
     private val metricsListener = Window.OnFrameMetricsAvailableListener { _, metrics, dropped ->
         // Main-thread delivery keeps the rolling samples and test reads single-threaded.
         renderTimings.record(metrics.getMetric(FrameMetrics.TOTAL_DURATION))
@@ -100,6 +101,7 @@ class TerminalProbeActivity : ComponentActivity() {
                             }
                         }) { Text("Styles / cursor") }
                         TextButton(onClick = { fullScreenUpdate() }) { Text("Full update") }
+                        TextButton(onClick = { if (nativeScrolling) nativeScrollStep() else startNativeScroll() }) { Text("Native scroll") }
                         TextButton(onClick = { terminalView()?.input?.compose("e\u0301界😀") }) { Text("Compose") }
                         TextButton(onClick = {
                             terminalView()?.let { view ->
@@ -178,8 +180,24 @@ class TerminalProbeActivity : ComponentActivity() {
         terminalView()?.let { view ->
             if (view.selection != null) view.clearSelection()
             if (view.input.composing.isNotEmpty()) view.input.discardComposition()
-            view.sessionCall { requestFullFrame() }
+            view.sessionCall {
+                if (nativeScrolling) sendText("\u001bor2:scroll:stop") else requestFullFrame()
+            }
+            nativeScrolling = false
         }
+    }
+
+    fun startNativeScroll() {
+        terminalView()?.let { view ->
+            view.clearSelection()
+            view.input.discardComposition()
+            nativeScrolling = true
+            view.sessionCall { sendText("\u001bor2:scroll:start") }
+        }
+    }
+
+    fun nativeScrollStep() {
+        terminalView()?.sessionCall { sendText("\u001bor2:scroll:step") }
     }
 
     fun resetTimings() {
@@ -192,6 +210,7 @@ class TerminalProbeActivity : ComponentActivity() {
         terminalView()?.apply {
             applyTimings.clear()
             drawTimings.clear()
+            resetRowCacheCounters()
         }
     }
 
@@ -200,10 +219,13 @@ class TerminalProbeActivity : ComponentActivity() {
             "$label n=${timings.count} p50=%.3f p95=%.3f p99=%.3f ms".format(
                 timings.percentile(50), timings.percentile(95), timings.percentile(99))
         val view = terminalView() ?: return "No terminal view"
+        val lookups = view.rowCacheHits + view.rowCacheMisses
+        val hitRate = if (lookups == 0L) 0.0 else 100.0 * view.rowCacheHits / lookups
         return listOf(summary("apply", view.applyTimings), summary("CPU record", view.drawTimings),
             summary("Window TOTAL_DURATION", renderTimings), summary("Window GPU_DURATION", gpuTimings),
             summary("Window DRAW_DURATION", windowDrawTimings), summary("Window SYNC_DURATION", syncTimings),
             summary("Window COMMAND_ISSUE_DURATION", commandIssueTimings),
+            "row cache hits=${view.rowCacheHits} misses=${view.rowCacheMisses} hit=%.1f%% retained=${view.rowCacheSize}/${view.rowCacheLimit}".format(hitRate),
             "metrics callbacks dropped=$droppedFrameMetrics").joinToString("\n")
     }
 

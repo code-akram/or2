@@ -11,7 +11,7 @@ pub struct TerminalFrame {
     pub sequence: u64,
     pub columns: u16,
     pub rows: u16,
-    /// Replaces the whole grid. Otherwise only `changed_rows` changed, at the same size.
+    /// Replaces the whole grid. Otherwise `changed_rows` and `row_moves` update it at the same size.
     pub full: bool,
     pub styles: Vec<CellStyle>,
     /// Ascending by index. A full frame lists every row.
@@ -21,6 +21,15 @@ pub struct TerminalFrame {
     pub scrollback: Scrollback,
     /// What a vertical swipe scrolls (contracts.md, "Wheel-aware scrolling").
     pub modes: TerminalModes,
+    /// Simultaneous copies from the last taken frame (sequence - 1). Never present in full frames.
+    #[uniffi(default)]
+    pub row_moves: Vec<TerminalRowMove>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct TerminalRowMove {
+    pub index: u16,
+    pub previous: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
@@ -128,6 +137,14 @@ impl From<core::TakenFrame> for TerminalFrame {
         let background = frame.background().packed();
         let scrollback = frame.scrollback();
         let modes = frame.modes();
+        let row_moves = frame
+            .row_moves()
+            .iter()
+            .map(|m| TerminalRowMove {
+                index: m.index,
+                previous: m.previous,
+            })
+            .collect();
         let style_capacity = (frame.rows().len() * usize::from(size.columns())).min(16);
         let mut styles = Vec::with_capacity(style_capacity);
         let mut index_of = HashMap::with_capacity(style_capacity);
@@ -181,6 +198,7 @@ impl From<core::TakenFrame> for TerminalFrame {
                 alternate_screen: modes.alternate_screen,
                 bracketed_paste: modes.bracketed_paste,
             },
+            row_moves,
         }
     }
 }
@@ -241,6 +259,35 @@ mod tests {
     use or2_core::term::TerminalSize;
 
     use super::*;
+
+    #[test]
+    fn row_references_cross_without_cells_or_style_indices() {
+        let frame = core::Frame::delta(
+            TerminalSize::new(56, 47).unwrap(),
+            vec![],
+            None,
+            core::Rgb::new(1, 2, 3),
+            core::Scrollback::default(),
+        )
+        .unwrap()
+        .with_row_moves(vec![core::RowMove {
+            index: 0,
+            previous: 1,
+        }])
+        .unwrap();
+        let ffi = TerminalFrame::from(core::TakenFrame { sequence: 9, frame });
+        assert!(!ffi.full);
+        assert_eq!(ffi.sequence, 9);
+        assert_eq!(
+            ffi.row_moves,
+            [TerminalRowMove {
+                index: 0,
+                previous: 1
+            }]
+        );
+        assert!(ffi.changed_rows.is_empty());
+        assert!(ffi.styles.is_empty());
+    }
 
     #[test]
     fn styles_are_deduplicated_in_first_use_order_and_rows_keep_their_indices() {

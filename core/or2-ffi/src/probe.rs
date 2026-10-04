@@ -32,6 +32,7 @@ use or2_core::session::{
 };
 use or2_core::submit::submit_text_bytes;
 use or2_core::term::TerminalSize;
+use or2_core::terminal::TerminalEngine;
 use or2_core::trust::{self, HostKey, HostKeyVerdict};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -45,6 +46,10 @@ const FOREGROUND: Rgb = Rgb::new(0xd0, 0xd0, 0xd0);
 const BACKGROUND: Rgb = Rgb::new(0x10, 0x10, 0x18);
 const HISTORY_ROWS: u64 = 100;
 const BANNER: &str = "or2 contract probe";
+// Debug workload commands, consumed only by this local fixture. Never sent to a host.
+const SCROLL_START: &str = "\u{1b}or2:scroll:start";
+const SCROLL_STEP: &str = "\u{1b}or2:scroll:step";
+const SCROLL_STOP: &str = "\u{1b}or2:scroll:stop";
 /// What a probe mosh terminal reports through `on_link_health`, in order, right after its first
 /// frame: healthy, stale (past the app's 5 s grey-out threshold), recovered.
 const MOSH_HEALTH_SEQUENCE: [LinkHealth; 3] = [
@@ -121,6 +126,7 @@ async fn serve_terminal(
     mut stop: watch::Receiver<Option<CloseReason>>,
 ) {
     let mut screen = Screen::new(size, title);
+    let mut scrolling: Option<ScrollProbeHandle> = None;
     publish(&mut driver, screen.full());
     if mosh {
         for health in MOSH_HEALTH_SEQUENCE {
@@ -135,9 +141,42 @@ async fn serve_terminal(
                 return driver.close(reason);
             }
         };
+        if scrolling.is_some()
+            && !matches!(
+                &command,
+                Command::Resize(_) | Command::FullFrame | Command::Disconnect
+            )
+            // SCROLL_STOP publishes the fixed screen itself, once; resetting here too would
+            // publish it twice and leave a second full frame behind the first take.
+            && !matches!(&command, Command::Text(text)
+                if text == SCROLL_START || text == SCROLL_STEP || text == SCROLL_STOP)
+        {
+            // Ordinary fixture input restores the fixed screen. The engine's row-reference
+            // baseline must never be used after another producer has replaced its rows.
+            scrolling = None;
+            publish(&mut driver, screen.full());
+        }
         match command {
             Command::Resize(new_size) => {
                 screen.size = new_size;
+                if let Some(scroll) = &mut scrolling {
+                    publish(&mut driver, scroll.frame(ScrollAction::Resize(new_size)));
+                } else {
+                    publish(&mut driver, screen.full());
+                }
+            }
+            Command::Text(text) if text == SCROLL_START => {
+                let scroll = ScrollProbeHandle::new(screen.size);
+                publish(&mut driver, scroll.frame(ScrollAction::Full));
+                scrolling = Some(scroll);
+            }
+            Command::Text(text) if text == SCROLL_STEP => {
+                if let Some(scroll) = &mut scrolling {
+                    publish(&mut driver, scroll.frame(ScrollAction::Step));
+                }
+            }
+            Command::Text(text) if text == SCROLL_STOP => {
+                scrolling = None;
                 publish(&mut driver, screen.full());
             }
             Command::Text(text) => {
@@ -196,7 +235,13 @@ async fn serve_terminal(
                 screen.key_echo = format!("click {column} {row}");
                 publish(&mut driver, screen.delta(3));
             }
-            Command::FullFrame => publish(&mut driver, screen.full()),
+            Command::FullFrame => {
+                if let Some(scroll) = &mut scrolling {
+                    publish(&mut driver, scroll.frame(ScrollAction::Full));
+                } else {
+                    publish(&mut driver, screen.full());
+                }
+            }
             Command::Roam => {
                 if mosh {
                     screen.roams += 1;
@@ -208,6 +253,140 @@ async fn serve_terminal(
         if matches!(driver.state(), SessionState::Closed(_)) {
             return;
         }
+    }
+}
+
+enum ScrollAction {
+    Full,
+    Step,
+    Resize(TerminalSize),
+}
+
+/// TerminalEngine is !Send. Construct, use and drop it on one dedicated fixture thread;
+/// only commands and owned frames cross back to the asynchronous probe script.
+struct ScrollProbeHandle {
+    commands: std::sync::mpsc::Sender<(ScrollAction, std::sync::mpsc::Sender<Frame>)>,
+}
+
+impl ScrollProbeHandle {
+    fn new(size: TerminalSize) -> Self {
+        let (commands, receiver) =
+            std::sync::mpsc::channel::<(ScrollAction, std::sync::mpsc::Sender<Frame>)>();
+        std::thread::Builder::new()
+            .name("or2-scroll-probe".into())
+            .spawn(move || {
+                let mut probe = ScrollProbe::new(size);
+                while let Ok((action, reply)) = receiver.recv() {
+                    let frame = match action {
+                        ScrollAction::Step => probe.step(),
+                        ScrollAction::Full => {
+                            probe.engine.request_full_frame();
+                            probe.engine.frame().expect("probe full scroll frame")
+                        }
+                        ScrollAction::Resize(size) => {
+                            probe.engine.resize(size).expect("probe resize");
+                            probe.columns = usize::from(size.columns());
+                            probe.engine.frame().expect("probe resize frame")
+                        }
+                    };
+                    if reply.send(frame).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawning native scroll probe");
+        Self { commands }
+    }
+
+    fn frame(&self, action: ScrollAction) -> Frame {
+        let (reply, receiver) = std::sync::mpsc::channel();
+        self.commands
+            .send((action, reply))
+            .expect("scroll probe alive");
+        receiver.recv().expect("scroll probe frame")
+    }
+}
+
+/// Real native parser/frame extraction, no network or synthetic Kotlin merge. Every step
+/// appends a dense ASCII line at the bottom and scrolls the entire viewport exactly once.
+struct ScrollProbe {
+    engine: TerminalEngine,
+    line: u64,
+    columns: usize,
+}
+
+impl ScrollProbe {
+    fn new(size: TerminalSize) -> Self {
+        let mut probe = Self {
+            engine: TerminalEngine::new(size, |_| {}).expect("probe engine"),
+            line: 0,
+            columns: usize::from(size.columns()),
+        };
+        probe.engine.write(b"\x1b[?25l");
+        for row in 0..size.rows() {
+            if row > 0 {
+                probe.engine.write(b"\r\n");
+            }
+            probe.write_line();
+        }
+        probe
+    }
+
+    fn write_line(&mut self) {
+        let label = format!("{:08} ", self.line);
+        let alphabet = b"abcdefghijklmnopqrstuvwxyz0123456789";
+        let text: Vec<u8> = (0..self.columns)
+            .map(|column| {
+                label
+                    .as_bytes()
+                    .get(column)
+                    .copied()
+                    .unwrap_or(alphabet[(column + self.line as usize) % alphabet.len()])
+            })
+            .collect();
+        self.engine.write(if self.line.is_multiple_of(2) {
+            b"\x1b[0m"
+        } else {
+            b"\x1b[1m"
+        });
+        self.engine.write(&text);
+        self.line += 1;
+    }
+
+    fn step(&mut self) -> Frame {
+        self.engine.write(b"\r\n");
+        self.write_line();
+        self.engine.frame().expect("probe scroll frame")
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+    use or2_core::frame::FrameMailbox;
+
+    #[test]
+    fn scroll_workload_transfers_one_row_and_composes_when_consumer_is_slow() {
+        let mut probe = ScrollProbe::new(TerminalSize::new(56, 47).unwrap());
+        let mut mailbox = FrameMailbox::default();
+        mailbox.publish(probe.engine.frame().unwrap()).unwrap();
+        mailbox.take().unwrap();
+        let first = probe.step();
+        assert!(!first.is_full());
+        assert_eq!(first.rows().len(), 1);
+        assert_eq!(first.row_moves().len(), 46);
+        assert_eq!(first.row_moves()[0].previous, 1);
+        mailbox.publish(first).unwrap();
+        mailbox.publish(probe.step()).unwrap();
+        let taken = mailbox.take().unwrap();
+        assert_eq!(taken.frame.rows().len(), 2);
+        assert_eq!(taken.frame.row_moves().len(), 45);
+        assert_eq!(taken.frame.row_moves()[0].previous, 2);
+        probe.engine.request_full_frame();
+        mailbox.publish(probe.engine.frame().unwrap()).unwrap();
+        let full = mailbox.take().unwrap();
+        assert!(full.frame.is_full());
+        assert!(full.frame.row_moves().is_empty());
     }
 }
 

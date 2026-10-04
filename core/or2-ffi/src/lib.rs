@@ -18,7 +18,7 @@ pub struct BuildInfo {
 }
 
 /// Bumped whenever an exported signature or record changes shape.
-pub const API_VERSION: u32 = 22;
+pub const API_VERSION: u32 = 23;
 
 #[uniffi::export]
 pub fn build_info() -> BuildInfo {

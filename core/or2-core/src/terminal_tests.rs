@@ -210,7 +210,14 @@ fn alternate_screen_and_scrollback_golden() {
     );
     assert_eq!(
         frame.rows().iter().map(text).collect::<Vec<_>>(),
-        ["L0      ", "L1      ", "L2      "]
+        ["L0      ", "L1      "]
+    );
+    assert_eq!(
+        frame.row_moves(),
+        [crate::frame::RowMove {
+            index: 2,
+            previous: 0
+        }]
     );
     assert!(frame.cursor().is_none());
     terminal.scroll(ViewportScroll::Delta(1)).unwrap();

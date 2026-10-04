@@ -30,11 +30,19 @@ class TerminalVisualDeviceTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
 
     @Test fun batchedAsciiKeepsTheLegacyCellOriginsBackgroundsAndFaintAlpha() {
+        compareLegacyAscii(false)
+    }
+
+    @Test fun batchedSyntheticBoldKeepsTheLegacyFakeBoldRaster() {
+        compareLegacyAscii(true)
+    }
+
+    private fun compareLegacyAscii(bold: Boolean) {
         instrumentation.runOnMainSync {
             val view = TerminalView(instrumentation.targetContext)
             val columns = 56
             val style = CellStyle(0xc0caf5u, DefaultBackground, null, Underline.NONE,
-                false, false, false, false, false)
+                bold, false, false, false, false)
             val styles = listOf(style, style.copy(background = 0x334455u), style.copy(faint = true))
             val frame = terminalVisualFrame(columns.toUShort(), 3u, CursorShape.BAR).copy(
                 cursor = null, background = DefaultBackground, styles = styles,
@@ -53,16 +61,22 @@ class TerminalVisualDeviceTest {
             assertFalse(view.canBatchGlyph(ordinary.copy(text = "\u0301")))
             assertFalse(view.canBatchGlyph(ordinary.copy(style = style.copy(italic = true))))
             assertFalse(view.canBatchGlyph(ordinary.copy(text = "😀")))
-            if (view.boldUsesFake) assertFalse(view.canBatchGlyph(ordinary.copy(style = style.copy(bold = true))))
             val actual = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             val expected = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             try {
                 view.draw(Canvas(actual))
+                assertEquals("Software canvases must not create RenderNodes", 0, view.rowCacheSize)
                 val canvas = Canvas(expected)
                 canvas.drawColor(DefaultBackground.toInt() or (0xff shl 24))
                 val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                     textSize = view.fontSizeSp * view.resources.displayMetrics.density
                     typeface = terminalTypeface(this)
+                    if (bold) {
+                        if (typeface == android.graphics.Typeface.MONOSPACE) {
+                            typeface = android.graphics.Typeface.create(typeface, android.graphics.Typeface.BOLD)
+                        }
+                        isFakeBoldText = !typeface.isBold
+                    }
                 }
                 val background = Paint()
                 val baseline = -text.fontMetrics.top
@@ -92,6 +106,128 @@ class TerminalVisualDeviceTest {
                 actual.recycle()
                 expected.recycle()
             }
+        }
+    }
+
+    private fun raster(scenario: ActivityScenario<TerminalProbeActivity>, change: (TerminalView) -> Unit): Bitmap {
+        var draws = 0
+        var bounds = Rect()
+        scenario.onActivity { activity ->
+            val view = activity.terminalView()!!
+            draws = view.drawTimings.count
+            change(view)
+            val position = IntArray(2)
+            view.getLocationOnScreen(position)
+            bounds = Rect(position[0], position[1], position[0] + view.width, position[1] + view.height)
+            view.invalidate()
+        }
+        await(scenario) { _, view -> view.drawTimings.count > draws }
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(100)
+        val screenshot = instrumentation.uiAutomation.takeScreenshot()!!
+        return try {
+            Bitmap.createBitmap(screenshot, bounds.left, bounds.top, bounds.width(), bounds.height())
+        } finally {
+            screenshot.recycle()
+        }
+    }
+
+    @Test fun hardwareSyntheticBoldAndCachedDuplicateRowsKeepTheLegacyRaster() {
+        ActivityScenario.launch(TerminalProbeActivity::class.java).use { scenario ->
+            await(scenario) { _, view -> view.grid.hasGrid }
+            // Fractional text sizes and both alpha levels; every row is duplicated on screen.
+            for (size in listOf(10f, 13f, 16.5f)) {
+                scenario.onActivity { activity ->
+                    val view = activity.terminalView()!!
+                    view.setFontSize(size)
+                }
+                await(scenario) { _, view -> view.currentGridSize()?.let {
+                    view.grid.columns == it.columns.toInt() && view.grid.rows.size == it.rows.toInt()
+                } == true }
+                scenario.onActivity { activity ->
+                    val view = activity.terminalView()!!
+                    val frame = terminalStressFrame(view.grid.columns.toUShort(), view.grid.rows.size.toUShort(), 1u)
+                    activity.display(frame.copy(changedRows = frame.changedRows.map { row ->
+                        row.copy(cells = frame.changedRows[row.index.toInt() % 2].cells)
+                    }, styles = frame.styles.map { it.copy(faint = size == 13f) }))
+                    assertTrue(view.grid.rows[1].cells.any { view.canBatchGlyph(it) })
+                }
+                val legacy = raster(scenario) { it.cacheRows = false; it.batchGlyphs = false }
+                val batch = raster(scenario) { it.batchGlyphs = true }
+                val cached = raster(scenario) { it.cacheRows = true; it.resetRowCacheCounters() }
+                try {
+                    assertTrue("HWUI synthetic bold changed pixels at size $size", legacy.sameAs(batch))
+                    assertTrue("Duplicate RenderNode placement changed pixels at size $size", batch.sameAs(cached))
+                    scenario.onActivity { activity ->
+                        val view = activity.terminalView()!!
+                        assertEquals(2, view.rowCacheSize)
+                        assertEquals(2L, view.rowCacheMisses)
+                        assertTrue(view.rowCacheHits >= view.grid.rows.size - 2L)
+                        view.setFontSize(size + .5f, resize = false)
+                        assertEquals("Font change releases display lists immediately", 0, view.rowCacheSize)
+                    }
+                } finally {
+                    legacy.recycle(); batch.recycle(); cached.recycle()
+                }
+            }
+        }
+    }
+
+    @Test fun rowCacheKeepsCursorCompositionAndFrozenSelectionOutsideTheRows() {
+        var detached: TerminalView? = null
+        ActivityScenario.launch(TerminalProbeActivity::class.java).use { scenario ->
+            await(scenario) { _, view -> view.grid.hasGrid && view.grid.rows.size > 12 }
+            for (shape in CursorShape.entries) {
+                scenario.onActivity { activity ->
+                    val view = activity.terminalView()!!
+                    activity.display(terminalVisualFrame(view.grid.columns.toUShort(), view.grid.rows.size.toUShort(), shape))
+                }
+                for (overlay in 0..2) {
+                    scenario.onActivity { activity ->
+                        val view = activity.terminalView()!!
+                        view.clearSelection()
+                        view.input.discardComposition()
+                        if (overlay == 1) view.input.compose("e\u0301界😀")
+                        if (overlay == 2) {
+                            view.beginSelection(CellPosition(2, 11))
+                            view.selection!!.end = CellPosition(5, 11)
+                            // New live content while selection continues to paint frozen rows.
+                            view.grid.apply(terminalStressFrame(view.grid.columns.toUShort(), view.grid.rows.size.toUShort(), 2u))
+                        }
+                    }
+                    val direct = raster(scenario) { it.cacheRows = false }
+                    val cached = raster(scenario) { it.cacheRows = true }
+                    try {
+                        assertTrue("Row cache changed $shape overlay=$overlay", direct.sameAs(cached))
+                    } finally {
+                        direct.recycle(); cached.recycle()
+                    }
+                }
+            }
+            scenario.onActivity { activity ->
+                val view = activity.terminalView()!!
+                view.clearSelection()
+                view.input.discardComposition()
+                val frame = terminalStressFrame(view.grid.columns.toUShort(), view.grid.rows.size.toUShort(), 3u)
+                activity.display(frame)
+            }
+            val before = raster(scenario) { it.cacheRows = true }
+            before.recycle()
+            val themed = raster(scenario) { view ->
+                view.resetRowCacheCounters()
+                view.grid.apply(terminalStressFrame(view.grid.columns.toUShort(), view.grid.rows.size.toUShort(), 3u)
+                    .copy(background = 0x334455u))
+            }
+            themed.recycle()
+            scenario.onActivity { activity ->
+                val view = activity.terminalView()!!
+                assertTrue("Default background change must re-record rows", view.rowCacheMisses > 0)
+                assertTrue(view.rowCacheSize <= view.rowCacheLimit)
+                detached = view
+            }
+        }
+        instrumentation.runOnMainSync {
+            assertEquals("Detach releases display lists", 0, detached!!.rowCacheSize)
         }
     }
 
@@ -277,7 +413,7 @@ class TerminalVisualDeviceTest {
         val reports = mutableListOf<String>()
         ActivityScenario.launch(TerminalProbeActivity::class.java).use { scenario ->
             await(scenario) { activity, view -> view.grid.hasGrid && activity.renderTimings.count > 0 }
-            fun sample(dense: Boolean) {
+            fun sample(workload: Int) {
                 var oldMetrics = 0
                 var oldDraws = 0
                 var oldSequence = 0uL
@@ -286,17 +422,29 @@ class TerminalVisualDeviceTest {
                     val view = activity.terminalView()!!
                     oldDraws = view.drawTimings.count
                     oldSequence = view.grid.sequence
-                    if (dense) activity.fullScreenUpdate() else activity.requestProbeFrame()
+                    when (workload) {
+                        0 -> activity.requestProbeFrame()
+                        1 -> activity.fullScreenUpdate()
+                        else -> activity.nativeScrollStep()
+                    }
                 }
                 await(scenario) { activity, view ->
                     activity.renderTimings.count > oldMetrics && view.drawTimings.count > oldDraws &&
-                        (dense || view.grid.sequence > oldSequence)
+                        (workload == 1 || view.grid.sequence > oldSequence)
                 }
             }
-            for (dense in listOf(false, true)) {
-                repeat(10) { sample(dense) } // Warm glyph cache and render pipeline.
+            for (workload in 0..2) {
+                if (workload == 2) {
+                    var sequence = 0uL
+                    scenario.onActivity { activity ->
+                        sequence = activity.terminalView()!!.grid.sequence
+                        activity.startNativeScroll()
+                    }
+                    await(scenario) { _, view -> view.grid.sequence > sequence && view.grid.cursor == null }
+                }
+                repeat(10) { sample(workload) } // Warm glyph/row cache and render pipeline.
                 scenario.onActivity { it.resetTimings() }
-                repeat(60) { sample(dense) }
+                repeat(60) { sample(workload) }
                 scenario.onActivity { activity ->
                     val view = activity.terminalView()!!
                     assertTrue(view.isHardwareAccelerated)
@@ -304,8 +452,19 @@ class TerminalVisualDeviceTest {
                     assertTrue(view.drawTimings.count >= 60)
                     assertTrue(activity.renderTimings.count >= 60)
                     assertTrue(activity.renderTimings.percentile(95) > 0)
-                    val workload = if (dense) "Dense synthetic full-screen grid (Kotlin merge; excludes FFI)" else "Native probe full snapshots (takeFrame + merge; includes FFI)"
-                    reports += "$workload ${view.grid.columns}x${view.grid.rows.size}\n${activity.timingReport()}"
+                    if (workload == 2) {
+                        assertTrue("Scrolling must reuse row display lists", view.rowCacheHits >= 60L * (view.grid.rows.size - 1))
+                        assertTrue("Only appended rows should be recorded", view.rowCacheMisses <= 60L)
+                    }
+                    if (workload == 1) {
+                        assertTrue("Dense bold rows must exercise batching", view.grid.rows[1].cells.any { view.canBatchGlyph(it) })
+                    }
+                    val label = when (workload) {
+                        0 -> "Native probe full snapshots (takeFrame + merge; includes FFI)"
+                        1 -> "Dense synthetic full-screen grid (Kotlin merge; excludes FFI)"
+                        else -> "Native one-line full-screen scroll (takeFrame + FFI + apply + draw)"
+                    }
+                    reports += "$label ${view.grid.columns}x${view.grid.rows.size}\n${activity.timingReport()}"
                 }
             }
         }

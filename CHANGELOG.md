@@ -16,6 +16,8 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ### Changed
 
+- Terminal rendering batches synthetic bold, caches row display lists across scrolling, and reuses
+  moved rows over the FFI with coalescing-safe references (API 23); the native probe measures scrolling.
 - Terminal rendering batches bounded glyphs at exact cell positions and merges background/decorations
   runs, reduces frame copies, and avoids redraws for wheel input that changes no local state.
 - The terminal's default colours are Tokyo Night (background `#1A1B26`, foreground `#C0CAF5`, its 16 ANSI

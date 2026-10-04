@@ -8,6 +8,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Picture
 import android.graphics.RectF
+import android.graphics.RenderNode
 import android.graphics.Typeface
 import android.graphics.fonts.Font
 import android.graphics.text.PositionedGlyphs
@@ -99,13 +100,33 @@ class TerminalView(context: Context) : View(context) {
     private val glyphs = LruCache<Glyph, Picture>(2048)
     private data class ShapeKey(val text: String, val style: Int, val fakeBold: Boolean, val size: Float)
     /** [blank]: a bounded glyph with no ink (a space), which draws nothing and need not join a batch. */
-    private data class ShapedCell(val glyphs: PositionedGlyphs, val measured: Float, val bounded: Boolean, val blank: Boolean = false)
+    private data class ShapedCell(val glyphs: PositionedGlyphs, val measured: Float, val bounded: Boolean, val blank: Boolean = false,
+        val fakeBold: Boolean = false)
     private val shapes = LruCache<ShapeKey, ShapedCell>(2048)
     /** Single ASCII characters by (style, char): no key allocation or hashing for the bulk of cells. Cleared with [shapes]. */
     private val asciiShapes = arrayOfNulls<ShapedCell>(4 * 128)
     private val primaryFonts = arrayOfNulls<Font>(4)
     private var glyphIds = IntArray(128)
     private var glyphPositions = FloatArray(256)
+    private val rowCache = TerminalRowCache<RenderNode> { it.discardDisplayList() }
+    private val countRowCache = context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
+    private var rowCacheBackground = grid.background
+    internal val rowCacheHits get() = rowCache.hits
+    internal val rowCacheMisses get() = rowCache.misses
+    internal val rowCacheSize get() = rowCache.size
+    internal val rowCacheLimit get() = rowCache.limit
+    internal fun resetRowCacheCounters() = rowCache.resetCounters()
+    // Device comparisons render the exact same content with/without retained display lists.
+    internal var cacheRows = true
+        set(value) {
+            if (field != value) rowCache.clear()
+            field = value
+        }
+    internal var batchGlyphs = true
+        set(value) {
+            if (field != value) rowCache.clear()
+            field = value
+        }
     var onInputChanged: () -> Unit = {}
     var onSelectionChanged: () -> Unit = {}
 
@@ -444,6 +465,7 @@ class TerminalView(context: Context) : View(context) {
         shapes.evictAll()
         asciiShapes.fill(null)
         primaryFonts.fill(null)
+        rowCache.clear()
         scrollRemainder = 0f
         clearSelection()
         if (resize) resizeSession()
@@ -681,6 +703,7 @@ class TerminalView(context: Context) : View(context) {
     }
 
     override fun onDetachedFromWindow() {
+        rowCache.clear()
         removeCallbacks(flingTick)
         removeCallbacks(blink)
         removeCallbacks(endLinkFlash)
@@ -720,20 +743,37 @@ class TerminalView(context: Context) : View(context) {
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), backgroundPaint) // Includes grid margins.
         canvas.save()
         canvas.translate(horizontalInset, 0f)
+        if (rowCacheBackground != grid.background) {
+            rowCache.clear()
+            rowCacheBackground = grid.background
+        }
+        rowCache.limit = 3 * ceil(height / cellHeight).toInt().coerceAtLeast(1)
         (selection?.rows ?: grid.rows).forEachIndexed { rowIndex, row ->
             val y = rowIndex * cellHeight
-            var column = 0
-            while (column < row.cells.size) {
-                val first = column
-                val background = row.cells[column].style.background
-                while (column < row.cells.size && row.cells[column].style.background == background) column++
-                if (background != grid.background) {
-                    backgroundPaint.color = background.opaque()
-                    canvas.drawRect(first * cellWidth, y, column * cellWidth, y + cellHeight, backgroundPaint)
+            // A retained grid/selection can exceed the viewport during resize. Do not record
+            // invisible rows and evict nodes that this display list has just referenced.
+            if (y >= height) return@forEachIndexed
+            if (canvas.isHardwareAccelerated && cacheRows) {
+                val node = rowCache.getOrPut(row.painted, countRowCache) {
+                    RenderNode("terminal row").also { node ->
+                        val rowWidth = ceil(row.cells.size * cellWidth).toInt()
+                        node.setPosition(0, 0, rowWidth, ceil(cellHeight).toInt())
+                        node.setClipToBounds(false)
+                        val recording = node.beginRecording()
+                        try {
+                            drawRow(recording, 0f, row)
+                        } finally {
+                            node.endRecording()
+                        }
+                    }
                 }
+                canvas.save()
+                canvas.translate(0f, y)
+                canvas.drawRenderNode(node)
+                canvas.restore()
+            } else {
+                drawRow(canvas, y, row)
             }
-            drawGlyphRow(canvas, y, row)
-            drawDecorationRow(canvas, y, row)
         }
         grid.cursor?.takeIf { selection == null }?.let { cursor ->
             if (!cursor.blinking || cursorVisible) {
@@ -814,6 +854,21 @@ class TerminalView(context: Context) : View(context) {
         if (appliedFrames.drawn()) viewTreeObserver.registerFrameCommitCallback { onFrameDrawn() }
     }
 
+    private fun drawRow(canvas: Canvas, y: Float, row: ResolvedRow) {
+        var column = 0
+        while (column < row.cells.size) {
+            val first = column
+            val background = row.cells[column].style.background
+            while (column < row.cells.size && row.cells[column].style.background == background) column++
+            if (background != grid.background) {
+                backgroundPaint.color = background.opaque()
+                canvas.drawRect(first * cellWidth, y, column * cellWidth, y + cellHeight, backgroundPaint)
+            }
+        }
+        drawGlyphRow(canvas, y, row)
+        drawDecorationRow(canvas, y, row)
+    }
+
     /** A thin accent bar on the right edge showing where the viewport sits in the scrollback. */
     private fun drawScrollIndicator(canvas: Canvas) {
         val total = grid.scrollback.totalRows.toFloat()
@@ -883,15 +938,15 @@ class TerminalView(context: Context) : View(context) {
         val measured = textPaint.measureText(cell.text)
         val primary = primaryFonts[style] ?: TextRunShaper.shapeTextRun("M", 0, 1, 0, 1,
             0f, 0f, false, textPaint).getFont(0).also { primaryFonts[style] = it }
-        // Conservative rule: only one code point/one glyph in the primary face, upright and
-        // without synthetic weight. Keep ALL italic/fake-bold cells clipped. Check ink, not
+        // Conservative rule: only one code point/one glyph in the primary face, upright.
+        // HWUI populateSkFont preserves Paint's embolden flag for drawGlyphs. Check ink, not
         // just advance, with a pixel of AA room; fallback and complex clusters use Pictures.
         val single = cell.text.codePointCount(0, cell.text.length) == 1
         val mark = if (single) Character.getType(cell.text.codePointAt(0)) else -1
         var blank = false
         var bounded = single && mark != Character.NON_SPACING_MARK.toInt() &&
             mark != Character.COMBINING_SPACING_MARK.toInt() && mark != Character.ENCLOSING_MARK.toInt() &&
-            shaped.glyphCount() == 1 && !cell.style.italic && !fakeBold && measured <= cellWidth
+            shaped.glyphCount() == 1 && !cell.style.italic && measured <= cellWidth
         if (bounded) {
             val font = shaped.getFont(0)
             val bounds = RectF()
@@ -899,12 +954,12 @@ class TerminalView(context: Context) : View(context) {
             val left = ((cellWidth - measured) / 2).coerceAtLeast(0f) + shaped.getGlyphX(0)
             val top = baseline + shaped.getGlyphY(0)
             bounded = font == primary && shaped.getGlyphId(0) != 0 &&
-                (!cell.style.bold || font.style.weight >= 600) &&
+                (!cell.style.bold || fakeBold || font.style.weight >= 600) &&
                 (bounds.isEmpty || (left + bounds.left >= 1f && left + bounds.right <= cellWidth - 1f &&
                     top + bounds.top >= 1f && top + bounds.bottom <= cellHeight - 1f))
             blank = bounded && bounds.isEmpty
         }
-        return ShapedCell(shaped, measured, bounded, blank).also { if (ascii >= 0) asciiShapes[ascii] = it else shapes.put(key, it) }
+        return ShapedCell(shaped, measured, bounded, blank, fakeBold).also { if (ascii >= 0) asciiShapes[ascii] = it else shapes.put(key, it) }
     }
 
     /** Device-test diagnostics: the same cached classification used by the row renderer. */
@@ -912,6 +967,13 @@ class TerminalView(context: Context) : View(context) {
         cell.width == CellWidth.NARROW && cell.text.isNotEmpty() && shape(cell).bounded
 
     private fun drawGlyphRow(canvas: Canvas, y: Float, row: ResolvedRow) {
+        if (!batchGlyphs) {
+            for (column in row.cells.indices) {
+                val cell = row.cells[column]
+                if (cell.width != CellWidth.SPACER_TAIL) drawCell(canvas, column * cellWidth, y, cell, decorate = false)
+            }
+            return
+        }
         if (glyphIds.size < row.cells.size) {
             glyphIds = IntArray(row.cells.size)
             glyphPositions = FloatArray(row.cells.size * 2)
@@ -920,11 +982,12 @@ class TerminalView(context: Context) : View(context) {
         var font: Font? = null
         var foreground = 0u
         var faint = false
+        var fakeBold = false
         fun flush() {
             if (count == 0) return
             textPaint.color = foreground.opaque()
             textPaint.alpha = if (faint) 128 else 255
-            textPaint.isFakeBoldText = false
+            textPaint.isFakeBoldText = fakeBold
             // drawGlyphs uses the actual Font, ignoring Paint.typeface. Every x is absolute:
             // ceil(M advance) is our cell width; natural text-run advances must never accumulate.
             canvas.drawGlyphs(glyphIds, 0, glyphPositions, 0, count, font!!, textPaint)
@@ -947,10 +1010,11 @@ class TerminalView(context: Context) : View(context) {
             // Blank cells (the bulk of a terminal) add nothing to draw and do not split a batch.
             if (shape.blank) continue
             val actual = shape.glyphs.getFont(0)
-            if (font != actual || foreground != cell.style.foreground || faint != cell.style.faint) flush()
+            if (font != actual || foreground != cell.style.foreground || faint != cell.style.faint || fakeBold != shape.fakeBold) flush()
             font = actual
             foreground = cell.style.foreground
             faint = cell.style.faint
+            fakeBold = shape.fakeBold
             glyphIds[count] = shape.glyphs.getGlyphId(0)
             glyphPositions[count * 2] = column * cellWidth + ((cellWidth - shape.measured) / 2).coerceAtLeast(0f) +
                 shape.glyphs.getGlyphX(0)
