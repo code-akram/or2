@@ -481,7 +481,7 @@ session picker over Home for a connected host), `home-picker-many` (the picker a
 `home-options` (a host card's long-press options sheet), `home-picker-connecting` (over Home while its host connects:
 spinner and progress line), `home-picker-failed` (the failure and **Retry**), `inbox`, `inbox-empty`, `host` (a
 connected host's screen), `picker-herdr`, `picker-many` (the host screen's picker at full height), `picker-tmux`,
-`picker-recent`, `host-form`, `host-form-new-key` (no stored key: **New key** chosen), `host-form-edit`, `keys`,
+`picker-directories`, `host-form`, `host-form-new-key` (no stored key: **New key** chosen), `host-form-edit`, `keys`,
 `keys-empty`, `key-sheet` (a key's own sheet), `settings`, `about`, `licenses`, `license-text` (the GPL text page),
 `hostkey-first`, `hostkey-changed`, `hostkey-changed-many` (the tallest trust dialog), `shortcuts` (the gestures and
 keyboard shortcuts sheet), `add-host` (the add-host chooser in its sheet; `home-empty` shows it inline), `pair-scan`,
@@ -566,7 +566,7 @@ its data) and starts it:
 adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" install -r android/app/build/outputs/apk/deviceTest/app-deviceTest.apk
 adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" install -r android/app/build/outputs/apk/androidTest/deviceTest/app-deviceTest-androidTest.apk
 adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am instrument -w io.github.code_akram.or2.devicetest.test/io.github.code_akram.or2.Or2TestRunner
-adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" install -r android/app/build/outputs/apk/release/app-release.apk
 adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$ANDROID_SERIAL" shell am start -W -n io.github.code_akram.or2/.MainActivity
 ```
 

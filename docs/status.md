@@ -11,11 +11,15 @@ Updated 2026-10-04.
   Linux x86_64/aarch64 (static) and macOS Intel/Apple silicon are published. All downloads' checksums and
   formats, the APK signature, and the public latest-release installer were verified. The installer was run
   only into a temporary directory, never against host authorization.
-- **The owner's phone runs the published v0.1.4 APK**, installed in place on 2026-10-04 at 08:33 (no uninstall
-  or data clear). The APK's signing certificate matches the previous app; version and successful launch were
-  verified. After biometric unlock the phone resumed the same herdr terminal with a healthy Mosh badge and
-  fresh output, using the existing key without re-pairing (LAN only, not the deferred M3 acceptance).
-  **The owner confirmed Spaces works as intended on 2026-10-04**, on the preceding signed implementation.
+- **The owner's phone now runs the signed v0.1.5 candidate**, installed in place with the owner's explicit
+  approval on 2026-10-04 at 12:54 (versionCode 6, FFI API 21; no uninstall or data clear). The signing certificate
+  matches installed v0.1.4; the installed APK's full SHA-256 matches the candidate (`d09ad503…ac633`), first-install
+  time stayed unchanged, the existing hosts remain visible, and launch passed with no fresh AndroidRuntime crash.
+  This candidate is **not publicly released**; see [candidate notes](releases/v0.1.5.md).
+- **Previous LAN upgrade QA (2026-10-04, v0.1.4):** after biometric unlock the phone resumed the same herdr
+  terminal with a healthy Mosh badge and fresh output, using its existing key without re-pairing. The owner
+  confirmed Spaces works as intended. This was LAN only, not the deferred M3 acceptance; real key unlock and
+  a live-host connection were not repeated during the v0.1.5 candidate's automated cycle.
 - **Release workflow passed:** [run 37177173798](https://github.com/code-akram/or2/actions/runs/37177173798).
   Earlier releases: [v0.1.3](releases/v0.1.3.md) and [v0.1.2](releases/v0.1.2.md) (2026-10-03),
   [v0.1.1](releases/v0.1.1.md) and [v0.1.0](releases/v0.1.0.md) (2026-10-02).
@@ -104,8 +108,8 @@ until the caller acknowledges, as a real host does.
 1. **The deferred M3 acceptance**, deferred by the owner (2026-10-03) until they clear it: mobile data, the Wi-Fi to mobile handover, and
    unplugged (Doze) background runs. This is v0 acceptance step 3, still never tested.
 2. **The rest of the roadmap.**
-   - Next items: scanning for SSH servers, app lock. Recent directories is implemented below, unreleased;
-     external review and device/owner QA remain before shipping.
+   - Next items: scanning for SSH servers, app lock. Recent directories is implemented, reviewed and installed
+     on the phone below; the v0.1.5 candidate is not publicly released. Owner QA on real projects remains.
    - M4: history sheet, ntfy, dictation, Wake-on-LAN.
    - M5: Chat View, diff viewer, web preview.
 
@@ -180,12 +184,24 @@ requires exactly the reported pid, not just at most one owner; three standalone 
 - Deterministic regressions cover metadata parsing, limits and malformed inputs, unsafe/injected-looking paths,
   newline file names, stale directories, timeout/cancellation, retired connections, shell transport/close/reuse
   rules, restoration and the real FFI. Disposable SSH and mosh hosts verify the actual working directory.
+- **Full cycle, explicitly requested by the owner:** Codex reviewed `0ae18cc..f754316` and the follow-up
+  version/fixture diff, with no actionable findings. Versions advance together to **0.1.5 / versionCode 6**
+  (FFI API 21); the JVM sshd fixture also pins agent config roots under its temporary home.
 - Pass: all-features Rust workspace **1,060 tests** with sshd/tmux/mosh/herdr required, formatting, Clippy with
-  warnings denied, both generated-file checks; Android debug/device-test/unsigned-release builds, **650 JVM tests**,
-  and debug/device-test lint. Device UI tests compile, but have **not** run on the phone. Gallery:
-  `picker-directories` (synthetic paths only). External review and owner/device QA are still pending.
+  warnings denied, both generated-file checks; Android debug/device-test/**signed release** builds, **650 JVM
+  tests** (zero failures/errors/skips), and debug/device-test lint. Linux `dist --expect-version 0.1.5` passes:
+  static, stripped x86_64/aarch64 formats and checksums verified; x86_64 runs, aarch64 is format-checked only.
+- **Device suite passed: `OK (166 tests)`**, on the separate device-test app, in 272 s through the existing ADB
+  tunnel. The daily app's version and update time stayed unchanged during the suite. Notification tests remain
+  permission-dependent. `picker-directories` was rendered and visually inspected on the phone with synthetic
+  paths; its labels, tabs, Shell pill, paths and Refresh fit correctly.
+- **Installed the signed candidate in place** only after the device suite passed. Its certificate matches the
+  previously installed published v0.1.4 APK (which was pulled and checksum-verified); the phone's new APK hash
+  matches the built artifact. v0.1.5/versionCode 6, unchanged first-install time, saved hosts, successful launch
+  and no fresh AndroidRuntime crash were verified. No real-host connection or biometric key unlock was driven.
+  The test APKs were removed afterwards; the daily app remains installed and open.
 - One initial workspace invocation was backgrounded, so its children inherited ignored SIGINT and the existing
   pairing CLI Ctrl-C test waited indefinitely. Only that disposable fixture child was killed; the foreground
   workspace rerun passed. This was a test-launch issue, not a new pairing change.
-- No release, signing-key use, phone install/test run, real-host history read or authorization change. The owner's
-  phone remains on published v0.1.4; connectivity and mobile-data/Doze acceptance remain owner-deferred.
+- No public release/tag, real-host authorization change, ADB bridge/tunnel or security-setting change.
+  Connectivity and mobile-data/Doze acceptance remain owner-deferred; real-project owner QA is not claimed.

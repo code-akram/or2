@@ -8,6 +8,9 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+The signed v0.1.5 candidate (versionCode 6, FFI API 21) is installed on the owner's phone after the full
+review/build/device-test cycle. It is not publicly released; see [candidate notes](docs/releases/v0.1.5.md).
+
 ### Added
 
 - Recent directories: the host picker's **Dirs** tab lists recent Claude Code and Codex projects. Tap a path

@@ -81,7 +81,7 @@ internal class OpenSshFixture(
                 PubkeyAuthentication yes
                 PrintMotd no
                 PrintLastLog no
-                SetEnv HOME=$directory ${extraSetEnv(directory).joinToString("") { "$it " }}HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR=$directory TMUX_TMPDIR=${directory.resolve("tmux")} PATH=$bin:/usr/bin:/bin
+                SetEnv HOME=$directory CLAUDE_CONFIG_DIR=${directory.resolve(".claude")} CODEX_HOME=${directory.resolve(".codex")} ${extraSetEnv(directory).joinToString("") { "$it " }}HISTFILE=/dev/null ENV=/dev/null BASH_ENV=/dev/null ZDOTDIR=$directory TMUX_TMPDIR=${directory.resolve("tmux")} PATH=$bin:/usr/bin:/bin
                 LogLevel VERBOSE
                 """.trimIndent() + "\n"
             // A free port is found by binding and releasing it, so another process (often a

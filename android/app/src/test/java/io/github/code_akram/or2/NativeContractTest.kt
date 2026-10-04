@@ -8,7 +8,7 @@ class NativeContractTest {
     @Test
     fun loadsRustAndReportsTheScaffoldContract() {
         val info = buildInfo()
-        assertEquals("0.1.4", info.version)
+        assertEquals("0.1.5", info.version)
         assertEquals(21u, info.apiVersion)
     }
 }

@@ -24,7 +24,8 @@ a herdr agent inbox, composer/quick replies, multi-address hosts, compact UI, an
   through `Transport`, with a short time limit; it fills the manual form.
 - **Recent directories / one-tap shells:** implemented 2026-10-04, unreleased (FFI API 21): on connect,
   read bounded Claude Code/Codex histories over exec, no daemon; the picker's **Dirs** tab opens a new shell
-  there in one tap. Review and phone QA remain; a tmux-in-directory option is later.
+  there in one tap. Reviewed, all suites passed (including 166 on-device tests), signed v0.1.5 candidate
+  installed on the owner's phone. Real-project owner QA and public release remain; a tmux-in-directory option is later.
 - **Gestures:** swipe for the next tmux window or herdr tab, two-finger swipe for panes,
   two-finger vertical swipe for sessions/workspaces; pinch already zooms.
 - **Hardware keyboard shortcuts:** show shortcuts, switch session 1–9, close session, paste,

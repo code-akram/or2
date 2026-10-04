@@ -5868,4 +5868,6 @@ and unplugged/Doze acceptance remain explicitly deferred; see `status.md` and `r
 - **Tests.** Rust parser/validation/date/timeout tests; hermetic local history/script tests (missing/custom roots,
   file/read caps, literal hostile-looking paths and vanished directories); disposable SSH and mosh directory-shell
   tests; JVM real-FFI round trip and synchronous rejection; holder read/cancellation/replacement, transport,
-  close/reuse and restoration regressions. The device UI regression is compile-checked, not run on the phone.
+  close/reuse and restoration regressions. The device UI regressions passed in the full 166-test phone suite
+  on 2026-10-04, in the separate device-test app. The synthetic Dirs gallery was visually inspected; a signed
+  v0.1.5 candidate was installed in place afterwards. No real-host or deferred connectivity acceptance is claimed.
