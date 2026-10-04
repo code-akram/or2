@@ -13,7 +13,8 @@ Updated 2026-10-04.
   only into a temporary directory, never against host authorization.
 - **The owner's phone runs the published v0.1.4 APK**, installed in place on 2026-10-04 at 08:33 (no uninstall
   or data clear). The APK's signing certificate matches the previous app; version and successful launch were
-  verified. Auto-resume reached the biometric prompt; a post-update reconnect still needs the owner's unlock.
+  verified. After biometric unlock the phone resumed the same herdr terminal with a healthy Mosh badge and
+  fresh output, using the existing key without re-pairing (LAN only, not the deferred M3 acceptance).
   **The owner confirmed Spaces works as intended on 2026-10-04**, on the preceding signed implementation.
 - **Release workflow passed:** [run 37177173798](https://github.com/code-akram/or2/actions/runs/37177173798).
   Earlier releases: [v0.1.3](releases/v0.1.3.md) and [v0.1.2](releases/v0.1.2.md) (2026-10-03),
