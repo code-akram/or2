@@ -6,24 +6,24 @@ Updated 2026-10-04.
 
 ## Where it stands
 
-- **Released: [v0.1.4](releases/v0.1.4.md)** (2026-10-04, tag `v0.1.4`, commit `21c2e35`, versionCode 5,
-  FFI API 20): Spaces and herdr-style agent names. The signed APK (SHA-256 `5586e541…547e`) and `or2-pair` for
-  Linux x86_64/aarch64 (static) and macOS Intel/Apple silicon are published. All downloads' checksums and
-  formats, the APK signature, and the public latest-release installer were verified. The installer was run
-  only into a temporary directory, never against host authorization.
-- **v0.1.5 release prepared and publication authorized by the owner** (2026-10-04; versionCode 8, FFI API 22).
-  The final signed rebuild was installed in place at **18:40 phone-local time**, no uninstall/data clear.
-  Dirs includes current live herdr cwd ahead of history; both tabs use owned watches. The signature matches
-  the existing app and installed/build SHA-256 matches (`9f35619e…5dff3`); first-install time is unchanged,
-  hosts remain visible, launch passes and no fresh AndroidRuntime crash was found. Final full gates pass below.
-  Tag/publication verification is next; [release notes](releases/v0.1.5.md). Post-update biometric reconnect and
-  real-project manual QA are not independently established; deferred connectivity acceptance stays untouched.
+- **Released: [v0.1.5](releases/v0.1.5.md)** (2026-10-04, tag `v0.1.5`, commit `d27f725`, versionCode 8,
+  FFI API 22): project directories and one-tap shells. The signed APK (SHA-256 `9f35619e…5dff3`) and `or2-pair`
+  for Linux x86_64/aarch64 (static) and macOS Intel/Apple silicon are published. All downloaded checksums/formats,
+  APK signature and public latest-release installer were verified. The installer ran only in a temporary
+  directory, never against host authorization. Publication was explicitly requested by the owner.
+- **The owner's phone runs the public v0.1.5 APK**, installed in place at **18:40 phone-local time**,
+  no uninstall/data clear. Dirs includes current live herdr cwd ahead of history; both tabs use owned watches.
+  The signature matches the existing app; installed/build/public-download SHA-256 matches. First-install time
+  is unchanged, hosts remain visible, launch passes and no fresh AndroidRuntime crash was found. Final full
+  gates pass below. Post-update biometric reconnect and real-project manual QA are not independently established;
+  deferred connectivity acceptance stays untouched.
 - **Previous LAN upgrade QA (2026-10-04, v0.1.4):** after biometric unlock the phone resumed the same herdr
   terminal with a healthy Mosh badge and fresh output, using its existing key without re-pairing. The owner
   confirmed Spaces works as intended. This was LAN only, not the deferred M3 acceptance; real key unlock and
   a live-host connection were not repeated during the v0.1.5 candidate's automated cycle.
-- **Release workflow passed:** [run 37177173798](https://github.com/code-akram/or2/actions/runs/37177173798).
-  Earlier releases: [v0.1.3](releases/v0.1.3.md) and [v0.1.2](releases/v0.1.2.md) (2026-10-03),
+- **Release workflow passed:** [run 37210428881](https://github.com/code-akram/or2/actions/runs/37210428881),
+  Linux/macOS builds and publication all successful. Earlier releases: [v0.1.4](releases/v0.1.4.md) (2026-10-04),
+  [v0.1.3](releases/v0.1.3.md) and [v0.1.2](releases/v0.1.2.md) (2026-10-03),
   [v0.1.1](releases/v0.1.1.md) and [v0.1.0](releases/v0.1.0.md) (2026-10-02).
 
 ### In v0.1.2
@@ -111,7 +111,7 @@ until the caller acknowledges, as a real host does.
    unplugged (Doze) background runs. This is v0 acceptance step 3, still never tested.
 2. **The rest of the roadmap.**
    - Next items: scanning for SSH servers, app lock. Recent directories is implemented, reviewed and installed
-     on the phone below; the owner authorized the v0.1.5 release cycle. Real-project manual QA is not claimed.
+     on the phone and publicly released as v0.1.5 below. Real-project manual QA is not claimed.
    - M4: history sheet, ntfy, dictation, Wake-on-LAN.
    - M5: Chat View, diff viewer, web preview.
 
@@ -278,3 +278,9 @@ requires exactly the reported pid, not just at most one owner; three standalone 
 - Installed final build in place at 18:40; installed SHA-256 verified on-device, first-install time unchanged,
   hosts visible, successful launch/no fresh AndroidRuntime crash. A large APK pull timed out partially; on-device
   SHA-256 completed instead, without changing the bridge/tunnel. No real-host authentication/authorization change.
+- Tagged/pushed **`v0.1.5` at `d27f725`**; tag-triggered [run 37210428881](https://github.com/code-akram/or2/actions/runs/37210428881)
+  built Linux/macOS and published successfully. Signed APK uploaded locally; all six public assets downloaded.
+  Four host checksums/formats and APK hash/signature verified; public APK is byte-identical to the installed build.
+  Linux x86_64/macOS arm64 executed on native runners, other architectures format-checked only. Public latest-release
+  installer fetched/compared with source and run into a temporary directory, producing `or2-pair 0.1.5` with a
+  matching checksum. No host installation or authorization change. Verification notes pushed; working tree clean.
