@@ -10,5 +10,9 @@
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
+        <!-- Launch splash (platform API, Android 12+): the white or2 mark alone on the app's background, so
+             it fades straight into the first screen. -->
+        <item name="android:windowSplashScreenBackground">@color/or2_window_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_splash</item>
     </style>
 </resources>

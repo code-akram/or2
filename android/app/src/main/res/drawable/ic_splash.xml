@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The splash screen's mark: the launcher icon's "or" grid (ic_launcher_foreground.xml) with a 4-unit cell,
+     32 x 20 of the 108 canvas, so about 85 x 53 dp at the system's 288 dp splash-icon size. White, no disc. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- o -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M38,44 H54 V64 H38 Z M42,48 V60 H50 V48 Z" />
+    <!-- r -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M58,44 H70 V52 H62 V64 H58 Z" />
+</vector>

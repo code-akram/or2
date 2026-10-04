@@ -59,6 +59,21 @@ Catppuccin Mocha (MIT). Dark only; the terminal default theme uses the same pale
 | `danger` | `#F38BA8` (red) | destructive actions, failed connections, changed host keys |
 | `teal` | `#0FA89A` | the `Mosh` transport pill, with `background` text (Moshi's own pill) |
 
+## Logo
+
+The or2 mark is a blocky "or" on an 8 × 5 grid: the "o" is 4 × 5 units with a 2 × 3 hole, then a
+1-unit gap, then the "r", a 1-unit stem with a 3 × 2 arm at the top. It is white on pure black, not in
+the Catppuccin palette. The launcher icon is one adaptive vector (`mipmap-anydpi/ic_launcher.xml`,
+foreground `drawable/ic_launcher_foreground.xml`): a 6 dp unit makes the mark 48 × 30 dp, centred in
+the 108 dp canvas and inside the 66 dp safe zone. The same foreground is the monochrome layer, so
+themed icons show the mark too. The status-bar notification icon stays the `>_` prompt
+(`drawable/ic_stat_or2.xml`).
+
+The launch splash is the platform one (Android 12+, no library), set in `Theme.Or2`: the white mark
+alone (`drawable/ic_splash.xml`: the same grid with a 4-unit cell in the 108 canvas, about 85 × 53 dp on
+screen), no icon disc, on `background` (`#181825`, the window background), so it fades into the first
+screen with no colour change. Nothing holds it on screen past the first frame.
+
 ## Type
 
 - UI sans: the system sans (Roboto/OxygenOS) in **light/regular** weights. Large titles are

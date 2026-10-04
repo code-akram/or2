@@ -8,6 +8,12 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+### Added
+
+- A launcher icon: the or2 mark (a blocky "or", white on black) as an adaptive icon with a monochrome
+  layer for Android's themed icons. The app previously showed Android's default icon.
+- A minimalist launch splash: the white mark alone on the app's background, fading into the first screen.
+
 ## [0.1.5] - 2026-10-04
 
 Project directories and one-tap shells (versionCode 8, FFI API 22). See [the release notes](docs/releases/v0.1.5.md).

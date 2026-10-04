@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The or2 mark: a blocky "or" on an 8 x 5 grid, one unit = 6 dp. The "o" is 4 x 5 units with a
+     2 x 3 hole, a 1-unit gap, then the "r": a 1-unit stem with a 3 x 2 arm at the top. The mark is
+     48 x 30 dp, centred in the 108 dp adaptive-icon canvas so its corners stay inside the 66 dp safe
+     zone under any launcher mask. White on transparent: it is also the themed-icon (monochrome) layer. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- o -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M30,39 H54 V69 H30 Z M36,45 V63 H48 V45 Z" />
+    <!-- r -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M60,39 H78 V51 H66 V69 H60 Z" />
+</vector>

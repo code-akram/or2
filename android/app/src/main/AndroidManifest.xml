@@ -19,6 +19,7 @@
         android:name=".app.Or2Application"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@mipmap/ic_launcher"
         android:label="${appLabel}"
         android:supportsRtl="true"
         android:theme="@style/Theme.Or2">
