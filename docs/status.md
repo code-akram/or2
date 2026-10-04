@@ -261,3 +261,6 @@ requires exactly the reported pid, not just at most one owner; three standalone 
   First-install time unchanged, launch passed, no fresh AndroidRuntime crash; test apps removed only after use.
   No public release/tag or authorization, bridge/tunnel or security change. Post-update real-project QA on both
   hosts and normal biometric reconnect remain pending; deferred connectivity acceptance remains untouched.
+- Nonpublishing artifact [run 37208934830](https://github.com/code-akram/or2/actions/runs/37208934830) passed on
+  `1095b4c`. All four downloaded Linux/macOS checksums/architectures verified; native runner binaries executed,
+  cross-architectures format-checked only; publishing skipped. Implementation and verification records pushed.
