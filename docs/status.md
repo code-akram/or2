@@ -6,20 +6,18 @@ Updated 2026-10-04.
 
 ## Where it stands
 
-- **Released: [v0.1.3](releases/v0.1.3.md)** (2026-10-03, tag `v0.1.3`, versionCode 4, FFI API 19): zero-config
-  Reply. The signed APK (SHA-256 `172fad74…7b5d`) and `or2-pair` for Linux x86_64/aarch64 (static) and macOS Intel/Apple
-  silicon; the downloaded APK and the install one-liner were checked against the release. Earlier:
-  [v0.1.2](releases/v0.1.2.md) (2026-10-03), [v0.1.1](releases/v0.1.1.md) and [v0.1.0](releases/v0.1.0.md) (2026-10-02).
-- **The owner's v0.1.3 QA passed.** The published APK was installed in place (hosts and keys kept); the
-  subsequent signed implementation now on the phone is described below.
-- **Not released: the v0.1.4 candidate** (versionCode 5, FFI API 20): the Spaces sheet (a blue disc on herdr
-  terminals) and agents named herdr-style (task titles back), Codex-reviewed (one P2 fixed: bidi/invisible
-  characters stripped from host text). The owner's phone runs the implementation as a signed build
-  (2026-10-04 00:52, still labelled 0.1.3). **The owner confirmed Spaces works as intended on 2026-10-04.**
-  Release preparation is complete: the signed versioned APK (SHA-256 `5586e541…547e`) and both static Linux
-  `or2-pair` binaries are built; [release notes](releases/v0.1.4.md) record the checks and limits. No v0.1.4 tag
-  or release has been published, and the owner's app has not been updated to the versioned APK.
-  **The owner authorised publication and the in-place phone update on 2026-10-04; both are now in progress.**
+- **Released: [v0.1.4](releases/v0.1.4.md)** (2026-10-04, tag `v0.1.4`, commit `21c2e35`, versionCode 5,
+  FFI API 20): Spaces and herdr-style agent names. The signed APK (SHA-256 `5586e541…547e`) and `or2-pair` for
+  Linux x86_64/aarch64 (static) and macOS Intel/Apple silicon are published. All downloads' checksums and
+  formats, the APK signature, and the public latest-release installer were verified. The installer was run
+  only into a temporary directory, never against host authorization.
+- **The owner's phone runs the published v0.1.4 APK**, installed in place on 2026-10-04 at 08:33 (no uninstall
+  or data clear). The APK's signing certificate matches the previous app; version and successful launch were
+  verified. Auto-resume reached the biometric prompt; a post-update reconnect still needs the owner's unlock.
+  **The owner confirmed Spaces works as intended on 2026-10-04**, on the preceding signed implementation.
+- **Release workflow passed:** [run 37177173798](https://github.com/code-akram/or2/actions/runs/37177173798).
+  Earlier releases: [v0.1.3](releases/v0.1.3.md) and [v0.1.2](releases/v0.1.2.md) (2026-10-03),
+  [v0.1.1](releases/v0.1.1.md) and [v0.1.0](releases/v0.1.0.md) (2026-10-02).
 
 ### In v0.1.2
 
@@ -63,7 +61,8 @@ Updated 2026-10-04.
 - Device suite: `OK (164 tests)` through the existing ADB tunnel, on the separate device-test app; the daily
   app's version and update time stayed unchanged. Notification-posting tests remain permission-dependent.
 - Linux `dist --expect-version 0.1.4` passes: both static, stripped binaries built and checksummed; x86_64
-  runs, aarch64 is format-checked only. macOS builds remain the release workflow's job.
+  runs, aarch64 is format-checked only. The release workflow built both macOS binaries; the downloaded Mach-O
+  formats and all four host binaries' checksums were verified (macOS binaries not run on Linux).
 - The ADB tunnel stopped responding after the successful device suite, during an optional notification-only
   recheck. That recheck produced no result; no bridge, tunnel or phone-security settings were changed. The
   connection was rechecked and working again before the authorised release update.
@@ -101,12 +100,9 @@ until the caller acknowledges, as a real host does.
 
 ## Next, in order
 
-1. **Publish the prepared v0.1.4** (owner authorised 2026-10-04): commit/tag the checked tree, let the release
-   workflow build the four host binaries, upload the signed APK, verify the published downloads, then update the
-   owner's phone in place when the ADB slot is available. Spaces has the owner's QA approval.
-2. **The deferred M3 acceptance**, deferred by the owner (2026-10-03) until they clear it: mobile data, the Wi-Fi to mobile handover, and
+1. **The deferred M3 acceptance**, deferred by the owner (2026-10-03) until they clear it: mobile data, the Wi-Fi to mobile handover, and
    unplugged (Doze) background runs. This is v0 acceptance step 3, still never tested.
-3. **The rest of the roadmap.**
+2. **The rest of the roadmap.**
    - Next items: scanning for SSH servers, recent directories, app lock.
    - M4: history sheet, ntfy, dictation, Wake-on-LAN.
    - M5: Chat View, diff viewer, web preview.
