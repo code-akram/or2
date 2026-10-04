@@ -191,6 +191,10 @@ requires exactly the reported pid, not just at most one owner; three standalone 
   warnings denied, both generated-file checks; Android debug/device-test/**signed release** builds, **650 JVM
   tests** (zero failures/errors/skips), and debug/device-test lint. Linux `dist --expect-version 0.1.5` passes:
   static, stripped x86_64/aarch64 formats and checksums verified; x86_64 runs, aarch64 is format-checked only.
+- **Cross-platform CI passed:** the nonpublishing release [run 37190954376](https://github.com/code-akram/or2/actions/runs/37190954376)
+  on `053b403` built all four Linux/macOS artifacts. Downloads' checksums and ELF/Mach-O architectures verified;
+  x86_64 Linux and Apple-silicon macOS ran and reported 0.1.5 on their runners, the other architectures not run.
+  The publish job was skipped. Implementation and candidate preparation are pushed to `main`.
 - **Device suite passed: `OK (166 tests)`**, on the separate device-test app, in 272 s through the existing ADB
   tunnel. The daily app's version and update time stayed unchanged during the suite. Notification tests remain
   permission-dependent. `picker-directories` was rendered and visually inspected on the phone with synthetic
