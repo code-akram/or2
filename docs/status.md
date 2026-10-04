@@ -15,8 +15,9 @@ Updated 2026-10-04.
   no uninstall/data clear. Dirs includes current live herdr cwd ahead of history; both tabs use owned watches.
   The signature matches the existing app; installed/build/public-download SHA-256 matches. First-install time
   is unchanged, hosts remain visible, launch passes and no fresh AndroidRuntime crash was found. Final full
-  gates pass below. Post-update biometric reconnect and real-project manual QA are not independently established;
-  deferred connectivity acceptance stays untouched.
+  gates pass below. **Owner QA confirmed after publication (2026-10-04): “it works.”** This records acceptance
+  of the directory fix, not a separately observed per-host biometric/`pwd`/close checklist; deferred connectivity
+  acceptance stays untouched.
 - **Previous LAN upgrade QA (2026-10-04, v0.1.4):** after biometric unlock the phone resumed the same herdr
   terminal with a healthy Mosh badge and fresh output, using its existing key without re-pairing. The owner
   confirmed Spaces works as intended. This was LAN only, not the deferred M3 acceptance; real key unlock and
@@ -111,7 +112,7 @@ until the caller acknowledges, as a real host does.
    unplugged (Doze) background runs. This is v0 acceptance step 3, still never tested.
 2. **The rest of the roadmap.**
    - Next items: scanning for SSH servers, app lock. Recent directories is implemented, reviewed and installed
-     on the phone and publicly released as v0.1.5 below. Real-project manual QA is not claimed.
+     on the phone and publicly released as v0.1.5 below; the owner confirmed it works after publication.
    - M4: history sheet, ntfy, dictation, Wake-on-LAN.
    - M5: Chat View, diff viewer, web preview.
 
