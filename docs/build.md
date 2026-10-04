@@ -200,8 +200,11 @@ refused channels, terminal setup timeout, cancelled execs, the connect timer aro
 host-key prompt and a dying connection task.
 
 `core/or2-core/tests/directories.rs` reads only temporary Claude Code/Codex histories over `LocalHost` with
-explicit config roots, exercising the bounded read script, malformed/partial records, newline filenames,
-literal shell paths and stale directories. `host.rs` and `host_mosh.rs` repeat a directory-shell open over the
+explicit config roots, exercising the bounded read script, realistic large Codex headers/Claude entries,
+field-order independence, exact-limit/overflow records, the aggregate output budget, malformed/partial records,
+newline filenames, literal shell paths and stale directories. `HostConnectionsNativeTest` also runs two
+independent disposable SSH hosts with large headers through the real FFI and repeated concurrent refreshes;
+`HomeSessionPickerDeviceTest` checks cached directories remain separate when switching hosts. `host.rs` and `host_mosh.rs` repeat a directory-shell open over the
 real disposable SSH/mosh fixture. That fixture also pins `CLAUDE_CONFIG_DIR` and `CODEX_HOME` inside its
 private home, so inherited agent settings cannot cause tests to read the runner's real histories.
 

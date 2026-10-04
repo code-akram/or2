@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use or2_core::directories::{recent, shell_command};
 use or2_core::remote::{ExecOutput, LocalHost, RemoteError, RemoteHost};
@@ -10,6 +11,7 @@ use or2_core::remote::{ExecOutput, LocalHost, RemoteError, RemoteHost};
 struct Histories {
     root: tempfile::TempDir,
     shell: PathBuf,
+    stdout_len: AtomicUsize,
 }
 
 impl Histories {
@@ -30,7 +32,11 @@ impl Histories {
             .write_all(b"#!/bin/sh\npwd\nprintf 'login-arg:%s\\n' \"$1\"\n")
             .unwrap();
         assert!(child.wait().unwrap().success());
-        Self { root, shell }
+        Self {
+            root,
+            shell,
+            stdout_len: AtomicUsize::new(0),
+        }
     }
 
     fn write(&self, path: &str, text: &str) {
@@ -53,7 +59,10 @@ impl RemoteHost for Histories {
             self.shell.display(),
             line.replace('\'', "'\\''")
         );
-        LocalHost::new().exec_rendered(&wrapped).await
+        let output = LocalHost::new().exec_rendered(&wrapped).await?;
+        self.stdout_len
+            .store(output.stdout.len(), Ordering::Relaxed);
+        Ok(output)
     }
 
     async fn open_unix(&self, _path: &str) -> Result<Self::Stream, RemoteError> {
@@ -90,6 +99,28 @@ async fn custom_config_roots_and_jsonl_metadata_are_read_without_transcripts() {
 }
 
 #[tokio::test]
+async fn realistic_large_metadata_and_claude_entries_keep_projects_not_prompts() {
+    let host = Histories::new();
+    // Real Codex headers include base instructions and exceed 18–22 KiB. Put cwd AFTER
+    // the large unknown field too: reading metadata must not depend on field order.
+    host.write("codex/sessions/2026/10/04/rollout-large.jsonl", &format!(
+        "{{\"payload\":{{\"base_instructions\":{{\"text\":\"{}\"}},\"cwd\":\"/work/codex\"}},\"timestamp\":\"2026-10-04T01:00:00Z\",\"type\":\"session_meta\"}}\n{{\"type\":\"session_meta\",\"timestamp\":\"2026-10-04T03:00:00Z\",\"payload\":{{\"cwd\":\"/transcript-not-metadata\"}}}}\n",
+        "private instructions ".repeat(2500)
+    ));
+    host.write(
+        "claude/history.jsonl",
+        &format!(
+            "{{\"display\":\"{}\",\"timestamp\":1791072000000,\"project\":\"/work/claude\"}}\n",
+            "private prompt ".repeat(2000)
+        ),
+    );
+    assert_eq!(
+        recent(&host).await.unwrap(),
+        ["/work/codex", "/work/claude"]
+    );
+}
+
+#[tokio::test]
 async fn only_the_latest_64_codex_files_and_bounded_first_records_are_read() {
     let host = Histories::new();
     for index in 0..70 {
@@ -110,6 +141,63 @@ async fn only_the_latest_64_codex_files_and_bounded_first_records_are_read() {
             .iter()
             .any(|path| path.contains("zzz"))
     );
+}
+
+#[tokio::test]
+async fn large_codex_headers_have_an_aggregate_budget_without_losing_claude() {
+    let host = Histories::new();
+    host.write(
+        "claude/history.jsonl",
+        &format!(
+            "{}\n{{\"project\":\"/work/claude\",\"timestamp\":0}}\n",
+            "x".repeat(262144)
+        ),
+    );
+    for index in 0..64 {
+        host.write(&format!("codex/sessions/2026/10/04/rollout-{index:03}.jsonl"),
+            &format!("{{\"type\":\"session_meta\",\"timestamp\":\"1970-01-01T00:00:01Z\",\"payload\":{{\"cwd\":\"/project/{index:03}\",\"instructions\":\"{}\"}}}}\n", "x".repeat(60_000)));
+    }
+    let paths = recent(&host).await.unwrap();
+    assert!(paths.iter().any(|path| path == "/project/063"));
+    assert!(paths.iter().any(|path| path == "/work/claude"));
+    assert!(!paths.iter().any(|path| path == "/project/000"));
+    // 256 KiB Claude + 512 KiB Codex + format markers. A larger per-file limit alone
+    // would exceed RemoteHost's 1 MiB output cap and lose even the Claude result.
+    assert_eq!(
+        host.stdout_len.load(Ordering::Relaxed),
+        262144 + 524288 + 14
+    );
+    assert!(host.stdout_len.load(Ordering::Relaxed) < or2_core::remote::OUTPUT_CAP);
+}
+
+#[tokio::test]
+async fn codex_record_at_the_limit_is_accepted_but_one_byte_over_is_rejected() {
+    let host = Histories::new();
+    for (name, size, path) in [
+        ("valid", 65536, "/boundary"),
+        ("over", 65537, "/over-limit"),
+    ] {
+        let prefix = format!(
+            "{{\"type\":\"session_meta\",\"timestamp\":\"1970-01-01T00:00:01Z\",\"payload\":{{\"cwd\":\"{path}\",\"instructions\":\""
+        );
+        let record = format!("{prefix}{}\"}}}}", "x".repeat(size - prefix.len() - 3));
+        assert_eq!(record.len(), size);
+        host.write(
+            &format!("codex/sessions/2026/10/04/rollout-{name}.jsonl"),
+            &format!("{record}\n"),
+        );
+    }
+    assert_eq!(recent(&host).await.unwrap(), ["/boundary"]);
+}
+
+#[tokio::test]
+async fn overlong_or_partial_metadata_is_skipped_and_never_reads_later_records() {
+    let host = Histories::new();
+    let prefix = "{\"type\":\"session_meta\",\"timestamp\":\"1970-01-01T00:00:01Z\",\"payload\":{\"cwd\":\"/too-large\",\"instructions\":\"";
+    host.write("codex/sessions/2026/10/04/rollout-large.jsonl", &format!(
+        "{prefix}{}\"}}}}\n{{\"type\":\"session_meta\",\"timestamp\":\"1970-01-01T00:00:02Z\",\"payload\":{{\"cwd\":\"/later-record\"}}}}\n", "x".repeat(70_000)));
+    host.write("codex/sessions/2026/10/04/rollout-partial.jsonl", prefix);
+    assert!(recent(&host).await.unwrap().is_empty());
 }
 
 #[tokio::test]

@@ -5841,12 +5841,14 @@ and unplugged/Doze acceptance remain explicitly deferred; see `status.md` and `r
 - **Read-only discovery.** `HostConnection.recent_directories() async -> Vec<String>` reads agent histories over
   one exec on the existing SSH connection. No daemon, installations, host writes or network path outside Transport.
   Claude Code: the last 256 KiB of `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/history.jsonl`, JSONL `project` and millisecond
-  `timestamp`. Codex: the first 8 KiB/one line of the latest 64 `rollout-*.jsonl` files under
+  `timestamp`. Codex: the first record of up to the latest 64 `rollout-*.jsonl` files under
   `${CODEX_HOME:-$HOME/.codex}/sessions`, reverse date/path order, `type: session_meta`, UTC RFC3339 `timestamp`
-  and `payload.cwd`. Archived Codex sessions and nonstandard history formats are not included in v1.
+  and `payload.cwd`. Each header may be up to 64 KiB (instructions make real headers exceed 8 KiB); one extra
+  byte detects overflow. Codex output has a combined 512 KiB budget: large recent headers can exhaust it before
+  all 64 files, and the final partial record is ignored. Archived sessions and nonstandard formats are not v1.
 - **Bounds and privacy.** Five seconds for the whole read (directory enumeration included), the existing 1 MiB
-  per-stream exec cap, 8 KiB per parsed JSON line, at most 20 distinct paths. Partial/malformed records and unknown
-  fields are ignored. Deduplicate by exact path, keep its latest timestamp, sort newest first (path breaks ties).
+  per-stream exec cap; complete parsed lines up to 256 KiB for Claude and 64 KiB for Codex; at most 20 distinct
+  paths. Partial, malformed and overlong records are ignored; unknown fields are ignored. Deduplicate by exact path, keep its latest timestamp, sort newest first (path breaks ties).
   Missing histories return empty. Real exec failures return a normal host error. Claude's bounded raw tail can
   contain prompt text; only paths leave Rust, stdout/stderr buffers are wiped on drop, no history or path is logged.
 - **Literal paths only.** Absolute Unix paths, at most 4096 bytes, no backslash, control characters, Unicode line

@@ -13,6 +13,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performSemanticsAction
 import io.github.code_akram.or2.MainActivity
@@ -20,7 +21,9 @@ import io.github.code_akram.or2.connection.HostConnections
 import io.github.code_akram.or2.connection.UiPort
 import io.github.code_akram.or2.connection.UiTrust
 import io.github.code_akram.or2.connection.uiHost
+import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.KeyRecord
+import io.github.code_akram.or2.host.DirectoryList
 import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HerdrAgent
@@ -69,11 +72,11 @@ class HomeSessionPickerDeviceTest {
     @After
     fun stop() = scope.cancel()
 
-    private fun show() = compose.runOnUiThread {
+    private fun show(hosts: List<Host> = listOf(host), connections: HostConnections = holder) = compose.runOnUiThread {
         compose.activity.setContent {
             key(Unit) {
                 Or2App(
-                    listOf(host), listOf(key), null, busy = busy, holder,
+                    hosts, listOf(key), null, busy = busy, connections,
                     AppActions(
                         saveHost = { _, _ -> }, deleteHost = {}, generateKey = { _, _ -> }, importKey = { _, _, _ -> }, deleteKey = {},
                         connect = { list ->
@@ -82,7 +85,7 @@ class HomeSessionPickerDeviceTest {
                             scope.launch {
                                 delay(50) // The unlock: a frame or two, so Home sees busy come and go.
                                 try {
-                                    holder.connect(list, byteArrayOf(1))
+                                    connections.connect(list, byteArrayOf(1))
                                 } finally {
                                     busy = false
                                 }
@@ -150,6 +153,46 @@ class HomeSessionPickerDeviceTest {
         compose.onNodeWithTag("session-picker").assertDoesNotExist()
         compose.runOnIdle {
             assertEquals(listOf(TerminalTarget.ShellIn("/work/it's a project")), port.sessions.map { it.first })
+        }
+    }
+
+    @Test
+    fun switchingHostsNeverShowsTheOtherHostsCachedDirectories() {
+        val other = uiHost(id = 8, label = "Beta")
+        val second = UiPort().apply { directories = listOf("/work/second-host") }
+        port.directories = listOf("/work/first-host")
+        val ports = listOf(port, second).iterator()
+        val connections = HostConnections({ _, listener -> ports.next().also { it.hostListener = listener } }, UiTrust(), worker = Dispatchers.Unconfined)
+        compose.runOnUiThread {
+            runBlocking {
+                connections.connect(host, byteArrayOf(1))
+                connections.connect(other, byteArrayOf(1))
+            }
+            listOf(port, second).forEach {
+                it.native = HostState.Connected(0u)
+                it.hostListener!!.onHostStateChanged(it.native)
+            }
+        }
+        compose.waitUntil(5_000) { connections.hosts.value.values.all { it.directories.value is DirectoryList.Loaded } }
+        show(listOf(host, other), connections)
+        try {
+            repeat(2) {
+                for ((id, expected, absent) in listOf(
+                    Triple(7L, "/work/first-host", "/work/second-host"),
+                    Triple(8L, "/work/second-host", "/work/first-host"),
+                )) {
+                    compose.onNodeWithTag("host:$id").performClick()
+                    compose.onNodeWithTag("picker-tab:2").performClick()
+                    compose.onNodeWithText(expected).assertIsDisplayed()
+                    compose.onNodeWithText(absent).assertDoesNotExist()
+                    compose.onNodeWithContentDescription("Close sheet").performSemanticsAction(SemanticsActions.OnClick)
+                }
+            }
+        } finally {
+            compose.runOnUiThread {
+                connections.release(host.id, closeTerminals = true)
+                connections.release(other.id, closeTerminals = true)
+            }
         }
     }
 

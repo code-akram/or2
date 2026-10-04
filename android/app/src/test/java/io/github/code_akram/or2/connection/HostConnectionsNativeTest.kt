@@ -19,6 +19,10 @@ import io.github.code_akram.or2.ffi.TerminalFrame
 import io.github.code_akram.or2.ffi.TerminalTarget
 import io.github.code_akram.or2.ffi.TerminalTransport
 import io.github.code_akram.or2.ffi.generateEd25519Key
+import io.github.code_akram.or2.host.DirectoryList
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -28,6 +32,7 @@ import kotlinx.coroutines.withTimeout
 import org.junit.Assert.*
 import org.junit.Test
 import java.net.InetAddress
+import java.nio.file.Files
 import java.util.concurrent.Executors
 
 /** Exercises the production connector (`connect_host`); only a disposable loopback sshd is contacted. */
@@ -121,6 +126,56 @@ class HostConnectionsNativeTest {
                         assertEquals(1, store.replacements) // Reject never overwrites old trust.
                     } finally { bytes.fill(0); client.privateKey.fill(0); holder.release(host.id, closeTerminals = true) }
                 }
+            }
+        }
+    }
+
+    @Test
+    fun simultaneousRealHostsKeepTheirLargeHistoryResultsSeparateAcrossRefreshes() = runBlocking {
+        assumeSshd()
+        OpenSshFixture().use { first ->
+            OpenSshFixture().use { second ->
+                val fixtures = listOf(first, second)
+                val paths = listOf("/work/first-host", "/work/second-host")
+                val client = generateEd25519Key("")
+                try {
+                    fixtures.forEachIndexed { index, fixture ->
+                        fixture.directory.resolve("authorized").toFile().writeText(client.publicKey.openssh + "\n")
+                        val sessions = Files.createDirectories(fixture.directory.resolve(".codex/sessions/2026/10/04"))
+                        sessions.resolve("rollout-large.jsonl").toFile().writeText(
+                            "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-04T01:00:00Z\",\"payload\":{\"cwd\":\"${paths[index]}\",\"base_instructions\":\"${"x".repeat(24_000)}\"}}\n",
+                        )
+                    }
+                    Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { main ->
+                        withContext(main) {
+                            val hosts = fixtures.mapIndexed { index, fixture ->
+                                Host(HostRecord(index + 1L, "Fixture $index", System.getProperty("user.name")!!, "ephemeral"),
+                                    listOf(HostEndpoint(InetAddress.getLoopbackAddress().hostAddress!!, fixture.port)))
+                            }
+                            val store = object : TrustStore {
+                                override suspend fun trustedKeys(hostId: Long) = listOf(fixtures[(hostId - 1).toInt()].hostPublicKey)
+                                override suspend fun replaceTrust(host: Host, presented: PublicKeyInfo) = error("Already pinned")
+                            }
+                            val holder = HostConnections(HostConnector.Native, store, main)
+                            try {
+                                holder.connect(hosts, client.privateKey.copyOf())
+                                val active = hosts.map { holder.host(it.id)!! }
+                                active.forEach { connection ->
+                                    withTimeout(5000) { connection.state.first { it is HostState.Connected } }
+                                    withTimeout(5000) { connection.directories.first { it is DirectoryList.Loaded } }
+                                }
+                                repeat(3) {
+                                    coroutineScope { active.map { connection -> async { holder.refreshDirectories(connection) } }.awaitAll() }
+                                    active.forEachIndexed { index, connection ->
+                                        assertEquals(DirectoryList.Loaded(listOf(paths[index])), connection.directories.value)
+                                    }
+                                }
+                            } finally {
+                                hosts.forEach { holder.release(it.id, closeTerminals = true) }
+                            }
+                        }
+                    }
+                } finally { client.privateKey.fill(0) }
             }
         }
     }

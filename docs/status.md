@@ -11,10 +11,11 @@ Updated 2026-10-04.
   Linux x86_64/aarch64 (static) and macOS Intel/Apple silicon are published. All downloads' checksums and
   formats, the APK signature, and the public latest-release installer were verified. The installer was run
   only into a temporary directory, never against host authorization.
-- **The owner's phone now runs the signed v0.1.5 candidate**, installed in place with the owner's explicit
-  approval on 2026-10-04 at 12:54 (versionCode 6, FFI API 21; no uninstall or data clear). The signing certificate
-  matches installed v0.1.4; the installed APK's full SHA-256 matches the candidate (`d09ad503…ac633`), first-install
-  time stayed unchanged, the existing hosts remain visible, and launch passed with no fresh AndroidRuntime crash.
+- **The owner's phone now runs the revised signed v0.1.5 candidate**, updated in place after the owner's
+  directory-discovery bug report/go-ahead on 2026-10-04 at 14:50 (versionCode 7, FFI API 21; no uninstall or
+  data clear). Its signing certificate matches the earlier candidate/public app; the installed APK's SHA-256
+  matches the revised build (`d68017fa…6eec0`), first-install time stayed unchanged, and launch passed with no
+  fresh AndroidRuntime crash. Post-update biometric reconnect and real-project owner QA remain pending.
   This candidate is **not publicly released**; see [candidate notes](releases/v0.1.5.md).
 - **Previous LAN upgrade QA (2026-10-04, v0.1.4):** after biometric unlock the phone resumed the same herdr
   terminal with a healthy Mosh badge and fresh output, using its existing key without re-pairing. The owner
@@ -209,3 +210,23 @@ requires exactly the reported pid, not just at most one owner; three standalone 
   workspace rerun passed. This was a test-launch issue, not a new pairing change.
 - No public release/tag, real-host authorization change, ADB bridge/tunnel or security-setting change.
   Connectivity and mobile-data/Doze acceptance remain owner-deferred; real-project owner QA is not claimed.
+
+**Recent directories: owner QA bug diagnosed/fixed (2026-10-04, revised candidate):**
+- The original reader required complete JSON but read only 8 KiB of a Codex header. Real metadata on both
+  hosts includes large instructions (about 19–23 KiB), silently losing project paths. Complete large Claude
+  entries hit the same parser cap. Realistic regressions failed on the old code and pass on the fix.
+- Allow complete Codex headers up to 64 KiB, an extra byte to detect overflow, and a combined 512 KiB Codex
+  output budget (fewer than 64 files if large headers exhaust it). Claude lines may use the existing 256 KiB
+  tail allowance. Full JSON validation, the five-second timeout, 1 MiB exec cap and unsafe-path rejection stay.
+  Worst-case output is tested at 786,446 bytes; no transcript records are used as Codex metadata.
+- Read-only diagnostics through the phone's existing Mac connection confirmed Mac-local metadata and 22.7 KiB
+  headers. Refresh corrected the initially displayed stale Linux path; subsequent host switches retained
+  separate paths. Its original source remains unproven, not assumed to be copied history or a cache race.
+- Fresh-context `codex exec` diagnosis and patch reviews completed; the patch has no actionable findings.
+  **1,064 Rust**, **651 JVM** (no failures/errors/skips), and **167 device tests** pass, plus formatting,
+  Clippy, generated checks, all Android builds and both lints. New real-FFI and device UI regressions cover
+  simultaneous distinct hosts/concurrent refreshes and switching between their cached paths.
+- Revised v0.1.5/**versionCode 7**, still FFI API 21, installed in place at 14:50 phone-local time. Old and new
+  installed APK checksums and matching certificates verified; first-install time unchanged. Test apps removed.
+  Launch passes and awaits the normal biometric reconnect. No public release/tag or host authorization,
+  bridge/tunnel or security-setting change. Real-project QA and the deferred connectivity acceptance remain open.

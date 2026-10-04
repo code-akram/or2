@@ -14,7 +14,12 @@ pub const MAX_DIRECTORIES: usize = 20;
 // Codex rollout names start with an ISO date: reverse lexical order finds recent sessions,
 // independently of when a file was copied. Read only their first (session_meta) record.
 // find/sort can be expensive on a huge tree, so the entire query has its own 5 s deadline.
+// Complete Codex metadata can include large instructions. Allow 64 KiB per header, plus
+// one overflow byte so an overlong record is rejected, and cap their combined output at
+// 512 KiB. With Claude's 256 KiB tail and framing this stays below the 1 MiB exec cap.
 // Markers separate the two JSONL formats; prompts never leave this module or get logged.
+const CLAUDE_LINE_CAP: usize = 262144;
+const CODEX_LINE_CAP: usize = 65536;
 const READ_HISTORY: &str = r#"
 printf "CLAUDE
 "
@@ -31,10 +36,10 @@ find "$root/sessions" -type f -name "rollout-*.jsonl" 2>/dev/null |
             *) continue ;;
         esac
         case "$file" in *"/../"*|*"/./"*) continue ;; esac
-        head -c 8192 "$file" 2>/dev/null | head -n 1
+        head -c 65537 "$file" 2>/dev/null | head -n 1
         printf "
 "
-    done
+    done | head -c 524288
 "#;
 
 /// Missing histories are an empty list; exec failures remain errors. Dropping cancels the exec.
@@ -104,7 +109,12 @@ fn parse(bytes: &[u8]) -> Vec<String> {
             }
             _ => {}
         }
-        if line.len() > 8192 {
+        let line_cap = if codex {
+            CODEX_LINE_CAP
+        } else {
+            CLAUDE_LINE_CAP
+        };
+        if line.len() > line_cap {
             continue;
         }
         let entry = if codex {

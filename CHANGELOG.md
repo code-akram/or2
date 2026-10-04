@@ -8,7 +8,7 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
-The signed v0.1.5 candidate (versionCode 6, FFI API 21) is installed on the owner's phone after the full
+The revised signed v0.1.5 candidate (versionCode 7, FFI API 21) is installed on the owner's phone after the full
 review/build/device-test cycle. It is not publicly released; see [candidate notes](docs/releases/v0.1.5.md).
 
 ### Added
@@ -19,6 +19,9 @@ review/build/device-test cycle. It is not publicly released; see [candidate note
 
 ### Fixed
 
+- Recent-directory discovery no longer discards realistic Codex metadata headers (instructions make them
+  exceed the former 8 KiB limit) or large complete Claude entries. Codex headers allow 64 KiB with a combined
+  512 KiB output budget; the five-second deadline and 1 MiB exec cap remain unchanged.
 - Pairing lock guards explicitly unlock on drop, so a child inheriting a descriptor between fork and exec
   cannot keep an ended run looking live or delay the next authorization change.
 - The SFTP test fixture no longer races the client's channel Close with its own close-on-drop, avoiding a
