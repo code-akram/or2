@@ -6,7 +6,7 @@ Updated 2026-10-05.
 
 ## Where it stands
 
-### Published v0.1.6 / Android update blocked (2026-10-05)
+### Published v0.1.6 / installed on Android (2026-10-05)
 
 - Owner accepted picker polish (“good job”) and explicitly requested publication plus installation of
   the latest build. Rendering/scrolling and Mac/Arch colour QA were already accepted. **Published
@@ -26,20 +26,24 @@ Updated 2026-10-05.
   notification-permission skips**, then timed out while ADB cleanup was unresponsive. Logcat records a
   Home gesture entering the launcher during the license test before the missing-Compose-hierarchy failure.
   Packaged 0.1.6/API 23 and the terminal/picker tests passed. The local
-  test launcher was stopped, not the ADB server/bridge; no security or host changes. Hardware rerun
-  and signed install are pending an available existing ADB connection. This attempt is not a passing gate.
-- **Android release installation is not complete:** initial checks timed out; later default ADB checks
-  reported no devices. Owner then confirmed the phone **is connected to ADB on the Mac**. Diagnostics
-  show this agent runs on Arch, the SSH-forwarded listener is gone, and a default check **automatically
-  started an empty runner-local ADB daemon on port 5037**. The saved output confirms this; earlier
-  “no server changes” wording did not account for ADB's automatic startup. No Mac ADB restart, SSH
-  authorization/security change, daily-app uninstall or data clear was performed. The empty runner
-  daemon has not been stopped; restore the owner's loopback-only SSH ADB route on a free runner port
-  and explicitly pass that endpoint/serial to every ADB command, rather than checking default ADB.
-  Last verified daily app: **0.1.5 / versionCode 11**. The public signed code-12 APK is ready at
-  `/tmp/or2-release-v0.1.6/or2-v0.1.6.apk`. After the route is restored and phone is idle, rerun
-  About/native/picker coverage, install in place, verify installed/public/build checksum and unchanged
-  first-install time, and update this record.
+  test launcher was stopped, not the ADB server/bridge; no security or host changes. This first attempt
+  is not a passing full gate; the interrupted case and related coverage passed on the restored route below.
+- **ADB route incident resolved:** the phone was connected on the owner's Mac, but this agent runs on
+  Arch and the SSH-forwarded endpoint had disappeared. A default check automatically started an empty
+  runner-local ADB daemon on 5037; its device list was not the Mac's phone. Owner restored a loopback-only
+  SSH forward on **5038**. Every subsequent ADB call explicitly supplies endpoint/port/serial, with no
+  Mac ADB restart or SSH authorization/security change. The empty runner daemon was not stopped.
+- **Restored-route hardware rerun passes: `OK (29 tests)`**, 66 s, no failures/skips. About/license list
+  (including the interrupted case), packaged **0.1.6/API 23**, and both picker/Home suites pass. This
+  focused rerun is not another full 179-case run. Daily app version/install/update timestamps stayed
+  unchanged during tests; only separate device-test packages were installed and subsequently removed.
+- **Public release installed in place at 14:25 phone-local time:** **0.1.6 / versionCode 12 / FFI API 23**.
+  The prior installed code-11 APK matches its preserved backup; signing identity matches. Installed APK
+  SHA-256 matches the local build and public download above; first-install time is unchanged. No daily-app
+  uninstall/data clear, host/theme/authorization or security changes. Successful cold launch, app remains
+  running, no fresh AndroidRuntime errors. No real-host biometric/terminal interaction was driven after
+  the update; owner feature acceptance is on the preceding QA builds. Release and requested installation
+  are complete; mobile-data/Doze acceptance remains owner-deferred. Evidence: `/tmp/or2-release-v0.1.6/`.
 
 ### Host picker capsule polish (2026-10-05, prerelease QA history)
 
