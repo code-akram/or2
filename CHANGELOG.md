@@ -28,6 +28,9 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ### Fixed
 
+- SSH/Mosh terminal launches advertise true-colour support, so programs keep their exact RGB
+  themes instead of falling back to 256 colours (notably Pi in a plain Mac shell). Host themes
+  and or2's palette are unchanged; new shells preserve login startup and directory selection.
 - Cached terminal rows restore HWUI display lists discarded while offscreen instead of returning
   blank after scrolling; immutable drawing commands survive without reshaping cells.
 - Every terminal delta rejects a missing sequence base, not just moved rows, and requests a full

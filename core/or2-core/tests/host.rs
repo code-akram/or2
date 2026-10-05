@@ -728,6 +728,51 @@ fn open_unix_with_streamlocal_forwarding_forbidden_is_refused_and_the_connection
 }
 
 #[test]
+fn interactive_shells_advertise_truecolor_and_preserve_exact_rgb() {
+    require_sshd!();
+    // No AcceptEnv allowance: the capability must not depend on sshd accepting env requests.
+    let live = Live::new();
+    let directory = live.sshd.home().join("colour project");
+    fs::create_dir(&directory).unwrap();
+    for target in [
+        TerminalTarget::Shell,
+        TerminalTarget::ShellIn {
+            path: directory.to_str().unwrap().into(),
+        },
+    ] {
+        let mut term = live.open("colour", target, 100, 24);
+        term.quiet();
+        // Reproduce a program's capability-dependent theme choice, without a Pi dependency.
+        term.send(concat!(
+            "printf 'COLOUR-%s\\n' \"${COLORTERM-unset}\"; ",
+            "if test \"$COLORTERM\" = truecolor; then ",
+            "printf '\\033[48;2;12;32;48mRGB-MATCH\\033[0m\\n'; else ",
+            "printf '\\033[48;5;17mRGB-MATCH\\033[0m\\n'; fi\n"
+        ));
+        term.wait("COLOUR-truecolor");
+        term.wait("RGB-MATCH");
+        assert!(
+            term.grid.rows.iter().flatten().any(|row| {
+                row.cells().iter().any(|cell| {
+                    cell.text == "R"
+                        && cell.style.background == or2_core::frame::Rgb::new(12, 32, 48)
+                })
+            }),
+            "The theme's dark teal must remain exact RGB, not palette index 17"
+        );
+        term.send("exit 17\n");
+        assert_eq!(
+            term.closed(),
+            CloseReason::RemoteExited {
+                exit_status: Some(17)
+            }
+        );
+    }
+    live.host.disconnect();
+    assert_eq!(closed(&live.states), CloseReason::Disconnected);
+}
+
+#[test]
 fn shell_terminal_echoes_resizes_before_and_after_connected_and_reports_the_exit_status() {
     require_sshd!();
     let live = Live::new();

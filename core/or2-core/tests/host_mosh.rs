@@ -409,6 +409,46 @@ fn a_mosh_directory_shell_runs_in_the_literal_working_directory() {
 }
 
 #[test]
+fn interactive_shells_advertise_truecolor_and_preserve_exact_rgb() {
+    require!();
+    let live = Live::new();
+    let directory = live.sshd.home().join("colour project");
+    fs::create_dir(&directory).unwrap();
+    for target in [
+        TerminalTarget::Shell,
+        TerminalTarget::ShellIn {
+            path: directory.to_str().unwrap().into(),
+        },
+    ] {
+        let mut term = live.mosh("colour", target);
+        term.quiet();
+        // The server's inherited environment must reach both its shell and an explicit target.
+        term.send(concat!(
+            "printf 'COLOUR-%s\\n' \"${COLORTERM-unset}\"; ",
+            "if test \"$COLORTERM\" = truecolor; then ",
+            "printf '\\033[48;2;12;32;48mRGB-MATCH\\033[0m\\n'; else ",
+            "printf '\\033[48;5;17mRGB-MATCH\\033[0m\\n'; fi\n"
+        ));
+        term.wait("COLOUR-truecolor");
+        term.wait("RGB-MATCH");
+        assert!(
+            term.grid.rows.iter().flatten().any(|row| {
+                row.cells().iter().any(|cell| {
+                    cell.text == "R"
+                        && cell.style.background == or2_core::frame::Rgb::new(12, 32, 48)
+                })
+            }),
+            "Real mosh must preserve the theme's exact RGB background"
+        );
+        term.handle.disconnect();
+        assert_eq!(term.closed(), CloseReason::Disconnected);
+        live.wait_no_servers("colour shell's server to exit");
+    }
+    live.host.disconnect();
+    assert_eq!(live.host_closed(), CloseReason::Disconnected);
+}
+
+#[test]
 fn a_mosh_terminal_echoes_resizes_roams_and_reports_health_through_a_real_host() {
     require!();
     let live = Live::new();

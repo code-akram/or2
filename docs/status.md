@@ -6,6 +6,38 @@ Updated 2026-10-05.
 
 ## Where it stands
 
+### True-colour capability fix / owner QA (2026-10-05, unreleased)
+
+- **Owner accepted rendering and scrolling:** “rendering and scrolling is solved.” The remaining
+  colour papercut was diagnosed read-only before approval: Mac and Arch Pi use the same `arch-ice`
+  theme (identical file checksum), Pi 1.0.2, herdr 0.9.3 and matching herdr theme settings. Arch's
+  Pi under herdr has `COLORTERM=truecolor`; the Mac's plain or2 Mosh shell had only `TERM=xterm-256color`.
+  Pi quantized `#0C2030` to palette index 17. A subprocess-only A/B on the same Mac connection
+  reproduced dark blue versus the correct RGB dark teal, with no theme/config changes.
+- Owner approved the minimal fix and installation: Mosh bootstrap supplies `COLORTERM=truecolor`
+  to the server/child; SSH wraps interactive programs with the same environment, retaining a
+  plain shell's login startup through `exec "${SHELL:-/bin/sh}" -l`. The shared Mosh argv plan,
+  terminal palette, Kotlin UI, FFI API 23 and stored settings are unchanged; no host files are edited.
+- Both new disposable SSH/Mosh tests fail on baseline and pass on the fix: plain/directory shells
+  receive the capability and preserve exact RGB. Quoting/login-shell unit tests and existing
+  lifecycle/cwd tests pass. The SSH fake fixture now recognizes the env-wrapped login shell;
+  the initial all-features run exposed its obsolete shell-request assumption, and the full rerun passes.
+- Fresh checks: **1,080 Rust**, formatting, Clippy with warnings denied and both generator checks;
+  **675 JVM** (zero failures/errors/skips), Android debug/device-test/**signed release** builds and
+  both lints pass. Focused packaged-native/terminal device suite: **13 passed, no failures/skips**;
+  daily app version/update time stayed unchanged during it. This is a focused rerun, not another
+  full device suite; the preceding full renderer suite remains 176 passed/two permission skips.
+- **Owner-authorized signed update installed in place at 13:02 phone-local time (2026-10-05):**
+  **0.1.5 / versionCode 10 / FFI API 23**. Certificate matches the previous signed candidate;
+  prior installed APK checksum matches the preserved code-9 APK. Installed/build SHA-256 match:
+  `e4ca50c21c396db3648d3bb05b7576826bee465755d84660ce3e81b1c2e71ca5`.
+  First-install time unchanged, no uninstall/data clear, successful cold launch and no fresh
+  AndroidRuntime errors; the daily app is open/running. No biometric unlock or real-host colour
+  acceptance was driven after the update. Colour QA needs a **newly opened shell and fresh Pi
+  invocation**: existing processes cannot inherit a changed environment. See [manual QA](qa-terminal.md).
+  Host themes, authorization, bridge/tunnel and security settings are untouched. No tag/public
+  release or deferred connectivity/Doze acceptance; awaiting the owner's colour QA.
+
 ### Unreleased terminal work (2026-10-05)
 
 - `main` is ahead of v0.1.5: launcher mark/splash, Tokyo Night terminal colours, batched glyphs,
@@ -36,7 +68,8 @@ Updated 2026-10-05.
   `4496cd61c20425214d9e88a4bae9c32c7ee88e2d88ece0ceca855616e96e5f83`.
   First-install time unchanged; no uninstall/data clear, host authorization or security-setting change.
   Launch reports `Status: ok`, the app remains foreground/running and no fresh AndroidRuntime errors
-  were found. No biometric unlock or real-host terminal QA was driven; manual acceptance is pending.
+  were found. No biometric unlock or real-host terminal QA was driven in that installation cycle.
+  Owner subsequently accepted rendering/scrolling; colour QA is tracked separately above.
 - VersionName/workspace version stay 0.1.5; **no tag or public release**. [Manual owner QA](qa-terminal.md)
   covers live output, scrolling, view lifecycle, resizing and existing features. Previous synthetic
   timing gains are not proof of real-host acceptance; connectivity/Doze acceptance remains owner-deferred.

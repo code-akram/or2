@@ -1,10 +1,27 @@
-# Manual owner QA: terminal rendering candidate
+# Manual owner QA: terminal colour candidate
 
 Prepared 2026-10-05. This is an **unreleased signed candidate**, not a public release:
-**versionName 0.1.5, versionCode 9, FFI API 23**. The installation verification and build
+**versionName 0.1.5, versionCode 10, FFI API 23**. The installation verification and build
 checksum are recorded in [status](status.md). The candidate includes the launcher/splash,
 Tokyo Night terminal colours, batched glyph drawing, retained rows, moved-row FFI frames,
-and off-main native frame decoding.
+and off-main native frame decoding. Rendering/scrolling are owner-accepted; this candidate adds
+correct true-colour capability signalling to SSH/Mosh launches without changing any theme.
+
+## This QA pass: matching Mac/Arch colours
+
+1. Unlock/connect normally, then open a **new Mac shell** in or2. Reopening an existing terminal
+   does not give its running processes a new environment.
+2. Run `printf '%s\n' "$COLORTERM"`; expect **`truecolor`**. The same should hold in a new
+   project shell opened from Dirs. Check SSH too if you normally use it, not only Mosh.
+3. Start a fresh Pi invocation in that new shell, or resume your session there using your normal
+   workflow. Keep the existing `arch-ice` theme; no theme or settings edits are needed.
+4. Compare Pi's prompt/message backgrounds, borders and text with Arch. The user-message panel
+   should be dark teal (`#0C2030`), not the conspicuous dark blue produced by palette index 17.
+5. Check normal typing/output and a short scroll. Existing Pi/herdr/tmux processes may retain
+   their original environment; restart only what you choose to refresh, not all agent panes.
+
+The checks below are the earlier renderer checklist, retained for regression reference; the
+owner has already confirmed rendering and scrolling are solved.
 
 ## Before testing
 

@@ -224,6 +224,16 @@ fn herdr_failure(error: HerdrError) -> SessionFailure {
     }
 }
 
+/// Advertise the renderer's RGB support without depending on sshd's AcceptEnv policy.
+/// A plain shell still runs the user's login startup files; target arguments stay quoted.
+/// Kept on the SSH path: adding environment to the shared plan would break mosh's argv handoff.
+fn ssh_command(command: Option<RemoteCommand>) -> Result<String, RemoteError> {
+    command
+        .unwrap_or_else(|| RemoteCommand::new("sh").args(["-c", "exec \"${SHELL:-/bin/sh}\" -l"]))
+        .env("COLORTERM", "truecolor")
+        .render()
+}
+
 /// Opens the PTY channel, starts the program and pumps it. Returns why it ended; `Disconnected`
 /// only when asked to stop, after closing the channel.
 pub(super) async fn channel_task(
@@ -244,7 +254,7 @@ pub(super) async fn channel_task(
         () = stopped(stop.clone()) => return CloseReason::Disconnected,
     };
     let Planned { command, focus } = planned;
-    let command = match command.map(|command| command.render()).transpose() {
+    let command = match ssh_command(command) {
         Ok(line) => line,
         Err(error) => return CloseReason::Failed(internal(error)),
     };
@@ -304,7 +314,7 @@ pub(super) async fn channel_task(
     // From here on a channel exists: every exit closes it, an abort of this task included (the
     // guard closes it when dropped; `close` and `into_inner` are the deliberate ways out).
     let started = tokio::select! {
-        started = timeout(limit, start_program(&mut channel, command.as_deref(), events, &size)) => {
+        started = timeout(limit, start_program(&mut channel, &command, events, &size)) => {
             started.unwrap_or(Err(SessionFailure::TimedOut))
         }
         () = stopped(stop.clone()) => {
@@ -323,11 +333,11 @@ pub(super) async fn channel_task(
     }
 }
 
-/// `pty-req` at the current size, then the shell or the command, then any resize that
-/// happened meanwhile (latest wins, so the PTY is at the right size before `Connected`).
+/// `pty-req` at the current size, then the command (a login-shell wrapper for plain shells),
+/// then any resize meanwhile (latest wins, so the PTY is at the right size before `Connected`).
 async fn start_program(
     channel: &mut russh::Channel<russh::client::Msg>,
-    command: Option<&str>,
+    command: &str,
     events: &mpsc::Sender<Event>,
     size: &watch::Receiver<TerminalSize>,
 ) -> Result<(), SessionFailure> {
@@ -345,11 +355,10 @@ async fn start_program(
         .await
         .map_err(connection_error)?;
     request_accepted(channel, events).await?;
-    match command {
-        None => channel.request_shell(true).await,
-        Some(line) => channel.exec(true, line).await,
-    }
-    .map_err(connection_error)?;
+    channel
+        .exec(true, command)
+        .await
+        .map_err(connection_error)?;
     request_accepted(channel, events).await?;
     let latest = *size.borrow();
     if latest != initial {
@@ -359,4 +368,26 @@ async fn start_program(
             .map_err(connection_error)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_login_shell_advertises_truecolor_and_remains_a_login_shell() {
+        assert_eq!(
+            ssh_command(None).unwrap(),
+            "env 'COLORTERM=truecolor' 'sh' '-c' 'exec \"${SHELL:-/bin/sh}\" -l'"
+        );
+    }
+
+    #[test]
+    fn ssh_targets_keep_literal_arguments_and_gain_truecolor() {
+        let command = RemoteCommand::new("/opt/bin/herdr").args(["--session", "it's"]);
+        assert_eq!(
+            ssh_command(Some(command)).unwrap(),
+            "env 'COLORTERM=truecolor' '/opt/bin/herdr' '--session' 'it'\\''s'"
+        );
+    }
 }

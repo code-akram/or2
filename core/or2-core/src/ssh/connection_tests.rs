@@ -673,9 +673,14 @@ impl server::Handler for Server {
         command: &[u8],
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        let command = String::from_utf8_lossy(command).into_owned();
+        if command == "env 'COLORTERM=truecolor' 'sh' '-c' 'exec \"${SHELL:-/bin/sh}\" -l'" {
+            // Plain shells now use an env-wrapped exec rather than shell-request. Keep the
+            // same withheld-reply and channel-close observations for their lifecycle tests.
+            return self.shell_request(channel, session).await;
+        }
         self.shared.sessions.lock().unwrap().remove(&channel);
         self.shared.execs.fetch_add(1, Ordering::SeqCst);
-        let command = String::from_utf8_lossy(command).into_owned();
         if command.contains("'integration'") {
             self.shared
                 .integrations

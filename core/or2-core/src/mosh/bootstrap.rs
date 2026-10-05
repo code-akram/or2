@@ -116,11 +116,13 @@ const DETAIL_BYTES: usize = 400;
 /// <target>`. `target` is the program and arguments to run in the session; empty runs the
 /// user's login shell. The locale travels twice because the first sets the environment of
 /// `mosh-server` itself, which refuses to start without a UTF-8 locale, and the second is what
-/// it gives the program it runs.
+/// it gives the program it runs. COLORTERM advertises the client's RGB renderer to the server
+/// and its child, so programs do not quantize their themes merely because TERM is xterm-256color.
 pub fn command(mosh_server: &str, utf8_locale: &str, target: &[String]) -> RemoteCommand {
     let locale = format!("LANG={utf8_locale}");
     let mut command = RemoteCommand::new(mosh_server)
         .env("LANG", utf8_locale)
+        .env("COLORTERM", "truecolor")
         .args(["new", "-s", "-c", "256", "-l"])
         .arg(locale);
     if !target.is_empty() {
@@ -392,7 +394,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             line,
-            "env 'LANG=C.UTF-8' '/usr/bin/mosh-server' 'new' '-s' '-c' '256' '-l' 'LANG=C.UTF-8'"
+            "env 'LANG=C.UTF-8' 'COLORTERM=truecolor' '/usr/bin/mosh-server' 'new' '-s' '-c' '256' '-l' 'LANG=C.UTF-8'"
         );
         let target = [
             "tmux".to_owned(),
@@ -406,7 +408,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             line,
-            "env 'LANG=en_US.UTF-8' '/usr/bin/mosh-server' 'new' '-s' '-c' '256' '-l' \
+            "env 'LANG=en_US.UTF-8' 'COLORTERM=truecolor' '/usr/bin/mosh-server' 'new' '-s' '-c' '256' '-l' \
              'LANG=en_US.UTF-8' '--' 'tmux' 'new-session' '-A' '-s' 'it'\\''s'"
         );
     }
@@ -561,7 +563,7 @@ mod tests {
         assert_eq!(ran.len(), 1);
         assert_eq!(
             ran[0],
-            "env 'LANG=C.UTF-8' '/opt/bin/mosh-server' 'new' '-s' '-c' '256' '-l' \
+            "env 'LANG=C.UTF-8' 'COLORTERM=truecolor' '/opt/bin/mosh-server' 'new' '-s' '-c' '256' '-l' \
              'LANG=C.UTF-8' '--' 'tmux' 'attach'"
         );
     }

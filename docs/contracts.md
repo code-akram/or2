@@ -640,11 +640,18 @@ budget, concurrent read/write. Closing a session closes only its channel.
 for it, never `Some(name)`, which runs `herdr --session <name>` and may differ. Otherwise the
 inbox would watch one session twice):
 
-| Target | Remote command (PTY, `TERM=xterm-256color`) |
+| Target | Remote command (PTY, `TERM=xterm-256color`, `COLORTERM=truecolor`) |
 |---|---|
-| `Shell` | the login shell (`request_shell`) |
+| `Shell` | `env COLORTERM=truecolor sh -c 'exec "${SHELL:-/bin/sh}" -l'` (login startup retained) |
 | `Tmux { session_name }` | `<tmux> -u new-session -A -s <name>` (attach or create) |
 | `Herdr { session, pane_id }` | if `pane_id`: `herdr::focus_pane` first; then `<herdr>` (default session) or `<herdr> --session <name>` |
+
+Interactive SSH commands are prefixed with `env COLORTERM=truecolor` in the SSH-only launch
+path, not the shared target plan. This avoids depending on sshd's `AcceptEnv` policy, while
+retaining literal argument quoting and the directory shell's cwd. The renderer supports RGB;
+without this marker a program may quantize a truecolour theme before or2 receives the bytes.
+No host configuration is written, and `TERM_PROGRAM` is not spoofed (which could advertise
+unsupported image protocols). Existing processes do not gain the new environment retroactively.
 
 The pane focus in the last row happens once, when the terminal opens. It does not pin the
 terminal to the pane: to reuse an agent terminal the app calls `focus_herdr_pane` (FFI section,
@@ -661,7 +668,7 @@ Lane A1 (`ssh/terminal_session.rs`, `ssh/pump.rs`): the session is a thread `or2
 owning the engine and the `SessionDriver`, plus a task owning the channel; `ssh/pump.rs` is the
 terminal pump M1's one-connection session shares (`TerminalPump`: engine, reply budget,
 commands, frames; `pump_channel`: concurrent channel read and write). Order: for tmux and herdr
-the probe (cached), then the channel (`pty-req` at the requested size, `shell` or `exec`, then a
+the probe (cached), then the channel (`pty-req` at the requested size, env-wrapped `exec`, then a
 window change if the size changed meanwhile), then `Connected`; a herdr pane's focus runs **beside
 the channel open** (they do not depend on each other: the herdr client follows herdr's focus, so a
 focus that lands a moment after the client starts only changes what it shows next), and the session
@@ -1107,8 +1114,11 @@ pub async fn bootstrap(host: &impl RemoteHost, caps: &HostCapabilities, size: Te
                        target: &[String]) -> Result<MoshParams, BootstrapError>;
 ```
 
-Runs `env 'LANG=<utf8>' '<mosh-server>' 'new' '-s' '-c' '256' '-l' 'LANG=<utf8>' ['--'
-<target…>]` through `host.exec` (the locale through `RemoteCommand.env`). `mosh-server` and
+Runs `env 'LANG=<utf8>' 'COLORTERM=truecolor' '<mosh-server>' 'new' '-s' '-c' '256' '-l'
+'LANG=<utf8>' ['--' <target…>]` through `host.exec` (locale and RGB capability through
+`RemoteCommand.env`). The server and its shell/explicit target inherit the capability;
+the target's argv is unchanged. Real-Mosh regressions check exact RGB survives the `-c 256`
+path, so no transport/protocol or palette change is needed. `mosh-server` and
 the UTF-8 locale come from the capability probe; no `mosh_server` is `NotInstalled` and runs
 nothing. `target` is the argv to run in the session, empty for the user's login shell; lane A1
 builds the tmux or herdr argv. `size` is carried into `MoshParams`: `mosh-server` has no size
