@@ -6,24 +6,34 @@ Updated 2026-10-05.
 
 ## Where it stands
 
-### v0.1.6 release preparation (2026-10-05)
+### Published v0.1.6 / Android update blocked (2026-10-05)
 
 - Owner accepted picker polish (“good job”) and explicitly requested publication plus installation of
-  the latest build. Rendering/scrolling and Mac/Arch colour QA were already accepted. Preparing
-  **v0.1.6 / versionCode 12 / FFI API 23**, with no additional feature changes.
+  the latest build. Rendering/scrolling and Mac/Arch colour QA were already accepted. **Published
+  [v0.1.6](releases/v0.1.6.md) / versionCode 12 / FFI API 23**, with no additional feature changes.
 - Fresh release gates pass: **1,080 Rust** (sshd/tmux/mosh/herdr required; no ignored/failures),
   formatting, Clippy with warnings denied and both generators; **675 JVM** (no failures/errors/skips),
   Android builds including signed release and both lints, all 183 Gradle tasks rerun. Linux `dist
   --expect-version 0.1.6` passes for both static/stripped architectures; x86_64 executes, aarch64 format-only.
 - Release APK is signed by the existing key, version/metadata verified. SHA-256:
   `31c3266ba0503f17d55dd508dbcb0e6e578a9d678e5d2a238069e89ce609b38f`.
-  The code-11 APK is preserved for rollback. No tag/publication or release install yet.
+  The code-11 APK is preserved for rollback. Tag `v0.1.6` points to `f50ea84`; [release run 37294065194](https://github.com/code-akram/or2/actions/runs/37294065194)
+  passes (Linux/macOS/build/publication). All six public assets downloaded and verified: four binary
+  checksums/formats, APK checksum/signature matching the local build and existing signing identity.
+  Public latest-release installer matches source and installs `or2-pair 0.1.6` into a temporary directory
+  with matching checksum; no existing host install or authorization changes.
 - Full device attempt recorded **179 cases: 176 passed, one About/license-screen failure, two
   notification-permission skips**, then timed out while ADB cleanup was unresponsive. Logcat records a
   Home gesture entering the launcher during the license test before the missing-Compose-hierarchy failure.
   Packaged 0.1.6/API 23 and the terminal/picker tests passed. The local
   test launcher was stopped, not the ADB server/bridge; no security or host changes. Hardware rerun
   and signed install are pending an available existing ADB connection. This attempt is not a passing gate.
+- **Android release installation is not complete:** bounded ADB checks initially timed out; the latest
+  check reaches ADB but reports **no devices/emulators found**. No bridge, tunnel, server or security changes
+  were made. Last verified daily app: **0.1.5 / versionCode 11**.
+  The public, signed code-12 APK is ready at `/tmp/or2-release-v0.1.6/or2-v0.1.6.apk`. Restore the existing
+  authorized ADB link and leave the phone idle, rerun About/native/picker coverage, then install in place,
+  verify installed/public/build checksum and unchanged first-install time, and update this record.
 
 ### Host picker capsule polish (2026-10-05, prerelease QA history)
 
