@@ -55,7 +55,11 @@ class TerminalGrid {
 
     /** Returns whether drawing is needed (full snapshots redraw). [needsFullFrame] marks an unusable delta. */
     fun apply(frame: TerminalFrame): Boolean {
-        needsFullFrame = !frame.full && (!hasGrid || columns != frame.columns.toInt() || rows.size != frame.rows.toInt())
+        // Every delta depends on the last taken state, including cell-only and metadata-only
+        // deltas. A gap cannot be silently accepted and then used as the base for row moves.
+        // Keep the broken-base latch until a self-contained full frame arrives.
+        needsFullFrame = !frame.full && (needsFullFrame || !hasGrid || frame.sequence != sequence + 1u ||
+            columns != frame.columns.toInt() || rows.size != frame.rows.toInt())
         if (frame.rowMoves.isNotEmpty()) {
             // Sources refer to the last *taken* state, never to replacements in this delta.
             needsFullFrame = needsFullFrame || frame.full || frame.sequence != sequence + 1u

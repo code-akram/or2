@@ -34,7 +34,7 @@ class TerminalGridTest {
     @Test fun deltaResolvesItsOwnTableWithoutRecolouringCachedRows() {
         val grid = TerminalGrid()
         assertTrue(grid.apply(frame(true, 0xff0000u, listOf(row(0, "A"), row(1, "B")))))
-        assertTrue(grid.apply(frame(false, 0x0000ffu, listOf(row(1, "C")))))
+        assertTrue(grid.apply(frame(false, 0x0000ffu, listOf(row(1, "C"))).copy(sequence = 2u)))
         assertEquals(0xff0000u, grid.rows[0].cells[0].style.foreground)
         assertEquals(0x0000ffu, grid.rows[1].cells[0].style.foreground)
         assertEquals("C", grid.rows[1].cells[0].text)
@@ -49,7 +49,7 @@ class TerminalGridTest {
         assertTrue(grid.apply(frame(true, 1u, listOf(row(0, "A").copy(links = listOf(link)), row(1, "B")))))
         assertEquals(listOf(link), grid.rows[0].links)
         assertEquals(emptyList<Any>(), grid.rows[1].links)
-        assertTrue(grid.apply(frame(false, 1u, listOf(row(0, "C")))))
+        assertTrue(grid.apply(frame(false, 1u, listOf(row(0, "C"))).copy(sequence = 2u)))
         assertEquals(emptyList<Any>(), grid.rows[0].links)
     }
 
@@ -57,7 +57,7 @@ class TerminalGridTest {
         val grid = TerminalGrid()
         assertFalse(grid.apply(frame(false, 1u, listOf(row(1, "C")))))
         grid.apply(frame(true, 2u, listOf(row(0, "A"), row(1, "B"))))
-        assertTrue(grid.apply(frame(false, 3u, emptyList()).copy(scrollback = Scrollback(9u, 4u))))
+        assertTrue(grid.apply(frame(false, 3u, emptyList()).copy(sequence = 2u, scrollback = Scrollback(9u, 4u))))
         assertEquals(4uL, grid.scrollback.offset)
         assertEquals(2u, grid.rows[1].cells[0].style.foreground)
     }
@@ -68,7 +68,7 @@ class TerminalGridTest {
         grid.apply(frame(true, 2u, listOf(row(0, "A"), row(1, "B"))).copy(modes = TerminalModes(true, true)))
         assertEquals(TerminalModes(true, true), grid.modes)
         // A delta without rows (a mode change dirties none) still updates them.
-        assertTrue(grid.apply(frame(false, 2u, emptyList())))
+        assertTrue(grid.apply(frame(false, 2u, emptyList()).copy(sequence = 2u)))
         assertEquals(TerminalModes(false, false), grid.modes)
     }
 
@@ -77,20 +77,20 @@ class TerminalGridTest {
         val full = frame(true, 2u, listOf(row(0, "A"), row(1, "B")))
         grid.apply(full)
         val frozen = grid.rows
-        assertFalse(grid.apply(full.copy(full = false, changedRows = emptyList(), sequence = 99u)))
+        assertFalse(grid.apply(full.copy(full = false, changedRows = emptyList(), sequence = 2u)))
         assertSame(frozen, grid.rows)
         assertFalse(grid.needsFullFrame)
-        assertEquals(99uL, grid.sequence)
-        assertFalse(grid.apply(full.copy(full = false)))
+        assertEquals(2uL, grid.sequence)
+        assertFalse(grid.apply(full.copy(full = false, sequence = 3u)))
         assertSame(frozen, grid.rows)
-        assertTrue(grid.apply(full.copy(full = false, changedRows = listOf(row(1, "C")))))
+        assertTrue(grid.apply(full.copy(full = false, sequence = 4u, changedRows = listOf(row(1, "C")))))
         assertSame(frozen[0], grid.rows[0])
         assertEquals("B", frozen[1].cells[0].text)
-        assertTrue(grid.apply(full.copy(full = false, changedRows = emptyList(), background = 7u)))
-        assertTrue(grid.apply(full.copy(full = false, changedRows = emptyList(), cursor =
+        assertTrue(grid.apply(full.copy(full = false, sequence = 5u, changedRows = emptyList(), background = 7u)))
+        assertTrue(grid.apply(full.copy(full = false, sequence = 6u, changedRows = emptyList(), cursor =
             io.github.code_akram.or2.ffi.TerminalCursor(0u, 0u, false,
                 io.github.code_akram.or2.ffi.CursorShape.BAR, false, 2u))))
-        assertFalse(grid.apply(full.copy(full = false, columns = 2u)))
+        assertFalse(grid.apply(full.copy(full = false, sequence = 7u, columns = 2u)))
         assertTrue(grid.needsFullFrame)
         assertEquals(1, grid.columns)
     }
@@ -132,6 +132,28 @@ class TerminalGridTest {
             rowMoves = listOf(io.github.code_akram.or2.ffi.TerminalRowMove(0u, 1u)))))
         assertSame(frozen[0], grid.rows[0])
         assertEquals(7u, grid.rows[1].cells[0].style.foreground)
+    }
+
+    @Test fun aCellOnlySequenceGapCannotBecomeTheBaseForLaterMoves() {
+        val grid = TerminalGrid()
+        val full = frame(true, 1u, listOf(row(0, "A"), row(1, "B")))
+        grid.apply(full)
+        val frozen = grid.rows
+        // Another consumer took sequence 2, changing row 0. A metadata-only sequence 3
+        // must not make our stale A/B grid look like a valid sequence-3 base.
+        assertFalse(grid.apply(full.copy(full = false, sequence = 3u, changedRows = emptyList())))
+        assertTrue(grid.needsFullFrame)
+        assertEquals(1uL, grid.sequence)
+        assertSame(frozen, grid.rows)
+        assertFalse(grid.apply(full.copy(full = false, sequence = 2u, changedRows = emptyList())))
+        assertTrue("Only a full snapshot can recover a broken base", grid.needsFullFrame)
+        assertFalse(grid.apply(full.copy(full = false, sequence = 4u, changedRows = emptyList(),
+            rowMoves = listOf(io.github.code_akram.or2.ffi.TerminalRowMove(1u, 0u)))))
+        assertTrue(grid.apply(full.copy(sequence = 5u, changedRows = listOf(row(0, "C"), row(1, "D")))))
+        assertFalse(grid.needsFullFrame)
+        assertTrue(grid.apply(full.copy(full = false, sequence = 6u, changedRows = emptyList(),
+            rowMoves = listOf(io.github.code_akram.or2.ffi.TerminalRowMove(1u, 0u)))))
+        assertEquals("C", grid.rows[1].cells[0].text)
     }
 
     @Test fun invalidMovesRequestAFullSnapshotWithoutPartialApplication() {

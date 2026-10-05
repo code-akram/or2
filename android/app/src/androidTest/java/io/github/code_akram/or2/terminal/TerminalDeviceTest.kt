@@ -87,7 +87,8 @@ class TerminalDeviceTest {
         var error: SessionException? = null
         var snapshots = 0
         var fullSnapshot: TerminalFrame? = null
-        var pending: TerminalFrame? = null
+        @Volatile var pending: TerminalFrame? = null
+        @Volatile var tookFrameOnMain = false
         var deferSnapshot = false
         var onFrameReady: () -> Unit = {}
         private var sequence = 0uL
@@ -104,8 +105,11 @@ class TerminalDeviceTest {
             snapshots++
             if (!deferSnapshot) fullSnapshot?.let { publish(it.copy(sequence = ++sequence)) }
         }
-        fun publish(frame: TerminalFrame) { pending = frame; onFrameReady() }
-        override fun takeFrame(): TerminalFrame? = pending.also { pending = null }
+        @Synchronized fun publish(frame: TerminalFrame) { pending = frame; onFrameReady() }
+        @Synchronized override fun takeFrame(): TerminalFrame? {
+            if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) tookFrameOnMain = true
+            return pending.also { pending = null }
+        }
         override fun state(): SessionState = SessionState.Connected
         override fun transport() = TerminalTransport.SSH
         override fun serverPid(): UInt? = null
@@ -135,7 +139,7 @@ class TerminalDeviceTest {
                 val view = activity.window.decorView.terminal()!!
                 draws = view.drawTimings.count
                 // A row-less, identical delta must neither redraw nor request another snapshot.
-                session.publish(session.fullSnapshot!!.copy(full = false, changedRows = emptyList(), sequence = 77u))
+                session.publish(session.fullSnapshot!!.copy(full = false, changedRows = emptyList(), sequence = 2u))
                 val down = SystemClock.uptimeMillis()
                 fun touch(action: Int, time: Long, y: Float) {
                     val event = MotionEvent.obtain(down, time, action, view.width / 2f, y, 0)
@@ -148,11 +152,12 @@ class TerminalDeviceTest {
                 touch(MotionEvent.ACTION_UP, down + 60, view.height * .4f)
                 scrollsAtRelease = session.scrolls.size
             }
-            await(scenario) { session.scrolls.size > scrollsAtRelease && it.grid.sequence == 77uL }
+            await(scenario) { session.scrolls.size > scrollsAtRelease && it.grid.sequence == 2uL }
             scenario.onActivity { activity ->
                 val view = activity.window.decorView.terminal()!!
                 assertEquals("Wheel fling must advance without invalidating the terminal", draws, view.drawTimings.count)
                 assertEquals("No-op delta must not request a resync", 1, session.snapshots)
+                assertFalse("Native pull/decode must not block the UI thread", session.tookFrameOnMain)
                 assertTrue(session.scrolls.all { it is ViewportScroll.Wheel })
                 view.beginSelection(CellPosition(0, 0)) // Stops the remaining fling before teardown.
             }
@@ -288,10 +293,11 @@ class TerminalDeviceTest {
                 mount(activity)
                 assertEquals(3, session.snapshots)
             }
-            await(scenario) { !it.grid.hasGrid && session.pending == null }
+            // A worker emptying the mailbox is not the same as main applying/rejecting it.
+            await(scenario) { !it.grid.hasGrid && session.snapshots == 4 }
             scenario.onActivity {
                 assertFalse(current.grid.hasGrid) // A delta must not manufacture a partial grid.
-                assertEquals(3, session.snapshots) // Already awaiting the requested full snapshot.
+                assertEquals(4, session.snapshots) // Retry: the unusable take releases the old full-request latch.
                 session.publish(snapshot.copy(sequence = 4u))
             }
             await(scenario) { it.grid.hasGrid && it.grid.sequence == 4uL }
@@ -299,7 +305,7 @@ class TerminalDeviceTest {
                 assertEquals(8, current.grid.columns)
                 assertEquals(14, current.grid.rows.size)
                 assertEquals("e\u0301", current.grid.rows[11].cells[5].text)
-                assertEquals(3, session.snapshots)
+                assertEquals(4, session.snapshots)
             }
         }
     }

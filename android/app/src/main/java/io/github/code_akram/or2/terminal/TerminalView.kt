@@ -44,6 +44,9 @@ import io.github.code_akram.or2.ffi.ViewportScroll
 import io.github.code_akram.or2.ui.Or2Colors
 import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.copyText
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlin.math.ceil
 import kotlin.math.hypot
 import kotlin.math.roundToInt
@@ -57,6 +60,9 @@ private const val SWIPE_DISTANCE_DP = 56f
 class TerminalView(context: Context) : View(context) {
     val grid = TerminalGrid()
     val applyTimings = FrameTimings()
+    internal val takeTimings = FrameTimings()
+    internal val mergeTimings = FrameTimings()
+    internal val ingressTimings = FrameTimings()
     /** CPU display-list recording only; Window frame metrics measure the render pipeline. */
     val drawTimings = FrameTimings()
     /** Main-thread, unclipped Compose layout bounds of the key toolbar for content-free device diagnostics. */
@@ -108,14 +114,23 @@ class TerminalView(context: Context) : View(context) {
     private val primaryFonts = arrayOfNulls<Font>(4)
     private var glyphIds = IntArray(128)
     private var glyphPositions = FloatArray(256)
-    private val rowCache = TerminalRowCache<RenderNode> { it.discardDisplayList() }
+    // RenderNodes are transient HWUI resources: leaving the tree may discard their display
+    // lists. Retain immutable row commands independently so returning rows never go blank and
+    // can restore their nodes without reshaping/classifying every cell.
+    private class CachedRow(val picture: Picture, val node: RenderNode)
+    private val rowCache = TerminalRowCache<CachedRow> { it.node.discardDisplayList() }
+    internal var rowDisplayListRestores = 0L
+        private set
     private val countRowCache = context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
     private var rowCacheBackground = grid.background
     internal val rowCacheHits get() = rowCache.hits
     internal val rowCacheMisses get() = rowCache.misses
     internal val rowCacheSize get() = rowCache.size
     internal val rowCacheLimit get() = rowCache.limit
-    internal fun resetRowCacheCounters() = rowCache.resetCounters()
+    internal fun resetRowCacheCounters() {
+        rowCache.resetCounters()
+        rowDisplayListRestores = 0
+    }
     // Device comparisons render the exact same content with/without retained display lists.
     internal var cacheRows = true
         set(value) {
@@ -296,11 +311,21 @@ class TerminalView(context: Context) : View(context) {
             postDelayed(this, 500)
         }
     }
+    private val frameReader = TerminalFrameReader(
+        CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+        session::prepareFrameRead,
+        ::scheduleFrame,
+        session::frameSourceGone,
+    )
     private val frameCallback = Choreographer.FrameCallback {
         framePending = false
         val start = System.nanoTime()
-        session.takeFrame()?.let { frame ->
-            if (grid.apply(frame)) {
+        frameReader.take()?.let { read ->
+            takeTimings.record(read.nanos)
+            val changed = grid.apply(read.frame)
+            mergeTimings.record(System.nanoTime() - start)
+            ingressTimings.record(System.nanoTime() - read.requestedAt)
+            if (changed) {
                 requestedFull = false
                 cursorVisible = true
                 if (grid.background != reportedBackground) {
@@ -311,11 +336,15 @@ class TerminalView(context: Context) : View(context) {
                 updateScrolledAway()
                 invalidate()
             } else if (grid.needsFullFrame) {
+                // A previous full request can have been consumed by a retiring display. Any
+                // unusable take releases its latch so this display always gets another chance.
+                requestedFull = false
                 requestSnapshot()
             } else {
                 requestedFull = false
             }
-            applyTimings.record(System.nanoTime() - start)
+            // Service cost includes the worker's native read/decode; it is no longer UI blocking.
+            applyTimings.record(read.nanos + System.nanoTime() - start)
         }
     }
 
@@ -346,6 +375,10 @@ class TerminalView(context: Context) : View(context) {
     }
 
     fun frameReady() {
+        if (!session.gone) frameReader.request()
+    }
+
+    private fun scheduleFrame() {
         if (!session.gone && !framePending && isAttachedToWindow) {
             framePending = true
             Choreographer.getInstance().postFrameCallback(frameCallback)
@@ -688,7 +721,7 @@ class TerminalView(context: Context) : View(context) {
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         postDelayed(blink, 500)
-        frameReady() // Also drain an event that arrived before attachment.
+        frameReader.start() // Also drain an event that arrived before attachment.
     }
 
     override fun onWindowVisibilityChanged(visibility: Int) {
@@ -703,6 +736,7 @@ class TerminalView(context: Context) : View(context) {
     }
 
     override fun onDetachedFromWindow() {
+        frameReader.stop()
         rowCache.clear()
         removeCallbacks(flingTick)
         removeCallbacks(blink)
@@ -754,22 +788,33 @@ class TerminalView(context: Context) : View(context) {
             // invisible rows and evict nodes that this display list has just referenced.
             if (y >= height) return@forEachIndexed
             if (canvas.isHardwareAccelerated && cacheRows) {
-                val node = rowCache.getOrPut(row.painted, countRowCache) {
-                    RenderNode("terminal row").also { node ->
-                        val rowWidth = ceil(row.cells.size * cellWidth).toInt()
-                        node.setPosition(0, 0, rowWidth, ceil(cellHeight).toInt())
-                        node.setClipToBounds(false)
-                        val recording = node.beginRecording()
-                        try {
-                            drawRow(recording, 0f, row)
-                        } finally {
-                            node.endRecording()
-                        }
+                val cached = rowCache.getOrPut(row.painted, countRowCache) {
+                    val rowWidth = ceil(row.cells.size * cellWidth).toInt()
+                    val picture = Picture()
+                    val recording = picture.beginRecording(rowWidth, ceil(cellHeight).toInt())
+                    try {
+                        drawRow(recording, 0f, row)
+                    } finally {
+                        picture.endRecording()
                     }
+                    val node = RenderNode("terminal row").apply {
+                        setPosition(0, 0, rowWidth, ceil(cellHeight).toInt())
+                        setClipToBounds(false)
+                    }
+                    CachedRow(picture, node)
+                }
+                if (!cached.node.hasDisplayList()) {
+                    val recording = cached.node.beginRecording()
+                    try {
+                        recording.drawPicture(cached.picture)
+                    } finally {
+                        cached.node.endRecording()
+                    }
+                    if (countRowCache) rowDisplayListRestores++
                 }
                 canvas.save()
                 canvas.translate(0f, y)
-                canvas.drawRenderNode(node)
+                canvas.drawRenderNode(cached.node)
                 canvas.restore()
             } else {
                 drawRow(canvas, y, row)

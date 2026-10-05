@@ -165,7 +165,9 @@ class TerminalProbeActivity : ComponentActivity() {
             val start = System.nanoTime()
             val changed = view.grid.apply(frame)
             check(!view.grid.needsFullFrame)
-            view.applyTimings.record(System.nanoTime() - start)
+            val elapsed = System.nanoTime() - start
+            view.applyTimings.record(elapsed)
+            view.mergeTimings.record(elapsed)
             if (changed) view.invalidate()
         }
     }
@@ -209,6 +211,9 @@ class TerminalProbeActivity : ComponentActivity() {
         droppedFrameMetrics = 0
         terminalView()?.apply {
             applyTimings.clear()
+            takeTimings.clear()
+            mergeTimings.clear()
+            ingressTimings.clear()
             drawTimings.clear()
             resetRowCacheCounters()
         }
@@ -221,11 +226,14 @@ class TerminalProbeActivity : ComponentActivity() {
         val view = terminalView() ?: return "No terminal view"
         val lookups = view.rowCacheHits + view.rowCacheMisses
         val hitRate = if (lookups == 0L) 0.0 else 100.0 * view.rowCacheHits / lookups
-        return listOf(summary("apply", view.applyTimings), summary("CPU record", view.drawTimings),
+        return listOf(summary("apply", view.applyTimings), summary("native take/decode", view.takeTimings),
+            summary("grid merge", view.mergeTimings), summary("read-request-to-apply latency", view.ingressTimings),
+            summary("CPU record", view.drawTimings),
             summary("Window TOTAL_DURATION", renderTimings), summary("Window GPU_DURATION", gpuTimings),
             summary("Window DRAW_DURATION", windowDrawTimings), summary("Window SYNC_DURATION", syncTimings),
             summary("Window COMMAND_ISSUE_DURATION", commandIssueTimings),
             "row cache hits=${view.rowCacheHits} misses=${view.rowCacheMisses} hit=%.1f%% retained=${view.rowCacheSize}/${view.rowCacheLimit}".format(hitRate),
+            "row display lists restored=${view.rowDisplayListRestores}",
             "metrics callbacks dropped=$droppedFrameMetrics").joinToString("\n")
     }
 

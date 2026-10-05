@@ -60,6 +60,15 @@ internal class TerminalSession {
         }
     }
 
+    /** Capture on main; only the native call/record decoding runs on the reader's worker. */
+    fun prepareFrameRead(): (() -> TerminalFrame?)? = handle?.let { source -> { source.takeFrame() } }
+
+    /** The reader reports destruction on main, never mutating session ownership from its worker. */
+    fun frameSourceGone() {
+        handle = null
+        gone = true
+    }
+
     fun takeFrame(): TerminalFrame? = try {
         handle?.takeFrame()
     } catch (_: IllegalStateException) {

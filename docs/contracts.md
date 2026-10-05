@@ -167,7 +167,13 @@ The renderer pulls; Rust never queues frames.
    the pending frame; a full frame replaces it. Memory is bounded by one pending viewport;
    the engine also retains one published viewport with shared payloads for moved-row detection.
 2. `on_frame_ready` fires when the mailbox goes from empty to non-empty, and not again until
-   `take_frame()` empties it. The renderer takes on its next vsync.
+   `take_frame()` empties it. Android pulls/decodes on a worker and applies on the next vsync.
+   `TerminalFrameReader` is controlled on main: at most one read is in flight and one taken
+   frame waits for application. It cannot take the next frame until main consumes the pending
+   one; Rust keeps coalescing its mailbox meanwhile. Notifications during an empty read retry
+   once, not by polling. Detach pauses new reads but retains an in-flight/already pending frame
+   for reattachment, including a final frame after `Closed`. The borrowed handle is captured
+   on main; destruction is reported back on main without changing session ownership on a worker.
 3. `take_frame()` returns the merged `TerminalFrame` or `null`. `sequence` starts at 1 and
    increases by one per take. Frames published before `Closed` remain takeable, so the last
    screen can stay visible.
@@ -183,7 +189,12 @@ text) and `style` (index into `styles`). API 23 adds `row_moves` (default empty)
 frame (`sequence - 1`) to `index`. Sources are read simultaneously from the old grid;
 destinations are ascending, distinct, in bounds and disjoint from `changed_rows`. A full frame
 has no moves. Moves carry wrapping, links and already resolved styles, never style indices
-into the current table. A consumer missing that base/sequence requests a full snapshot.
+into the current table. Every delta requires the immediately preceding taken sequence, even
+without moves or changed cells. A consumer missing that base/sequence keeps its last displayed
+state and latches the need for a full snapshot; later deltas cannot clear that latch. Only a
+self-contained full frame recovers it. Rejecting an unusable take also releases Android's
+outstanding-full-request latch and requests again: a retiring display may have consumed the
+previously requested full frame.
 
 Style indices are scoped to their own frame's `styles` table. When applying a delta, resolve
 each changed cell's style through that delta's table; rows the delta does not contain keep the
@@ -4028,19 +4039,23 @@ once, in order. In `TargetScroller`:
    The regular and bold software raster comparisons require exact pixels; the hardware comparison
    requires exact pixels against the legacy clipped Pictures at 10, 13 and 16.5 dp, including
    faint alpha. These tests compile here; equivalence on the phone remains a required device gate.
-2. **Retained rows.** Hardware canvases cache one `RenderNode` per resolved painted cell list
-   (text, width, every style field). A row's hash is computed once and equality verifies content;
+2. **Retained rows.** Hardware canvases cache an immutable `Picture` plus a `RenderNode` per
+   resolved painted cell list (text, width, every style field). A row's hash is computed once and equality verifies content;
    wrapping and OSC 8 targets are excluded because they do not paint. Font/metrics/size are a
    view-wide cache generation, cleared on every font change; default-background changes clear
-   it too. Background runs, glyph batches, exceptional Pictures and decorations record at y=0.
-   Nodes stay at (0,0); each occurrence draws via canvas translation, including duplicate rows.
+   it too. Background runs, glyph batches, exceptional Pictures and decorations record at y=0
+   into the row Picture. Before drawing, a node without a display list replays that Picture:
+   HWUI may discard lists for retained nodes that leave the render tree during scrolling. A
+   cache hit must not draw a blank row or require cell reshaping to restore it. Nodes stay at
+   (0,0); each occurrence draws via canvas translation, including duplicate rows.
    Cursor (including recoloured block glyph), frozen-row selection tint, flashed links, IME and
    scroll indicator stay outside the nodes in their original order. Frozen selection content
    supplies the rows to cache. Software canvases draw directly, including thumbnails/Bitmap tests.
    LRU retention is bounded to three viewport heights of rows. Eviction, detach and font changes
    discard display lists. Only visible rows are visited, so offscreen old grids cannot evict nodes
    already referenced in the current draw. Debuggable builds report hits/misses/retained count;
-   resetting timings resets counters, keeping the warmed cache. Display lists save recording;
+   resetting timings resets counters, keeping the warmed cache. A separate counter records
+   display-list creation/restoration from retained commands. Display lists save recording;
    they do not promise to eliminate GPU work. [RenderNode API](https://developer.android.com/reference/android/graphics/RenderNode).
 3. **Moved rows over FFI.** `PublishedRows` compares newly extracted engine rows against the
    previous publication, hashing full resolved cells/wrap/links and verifying equality after a
@@ -4082,6 +4097,33 @@ measured by these fixtures: an engine full frame now clones its row text once at
 the move detector retains the rows; a follow-up could retain 128-bit row fingerprints instead.
 The probe fixture's `scroll:stop` command publishes its fixed screen once (it published twice,
 leaving a second full frame behind the first take, which the JVM test caught).
+
+### Scrolling correctness and worker frame ingress (2026-10-05, unreleased)
+
+Dynamic hardware comparisons exposed off-tree retained RenderNodes returning without a display
+list; the immutable row Picture above repairs that without reshaping. Independent cached/legacy
+views now compare exact pixels over 100 scrolling/edit/eviction updates, including wide CJK,
+emoji, combining clusters, faint/italic text and decorations. Native moved-row scrolling is
+compared against an explicit native full snapshot (both resolved rows and pixels), then against
+the uncached/unbatched path. A Rust differential test compares coalesced output with a separate
+engine forced to produce full snapshots, mixing edits, scroll regions, viewport scrolling,
+alternate screens, links, modes, colours, resizes and full requests; the final batch is checked.
+
+Frame ingress timings separate worker native take/decode from main-thread grid merging.
+`apply` is combined service cost, **not UI blocking time**; `read-request-to-apply latency`
+includes worker dispatch/decode and waiting for vsync, starting when the read is issued (not
+when an earlier notification first arrived). Synthetic Kotlin-only fixtures have no native
+read samples. Rendering comparisons must include these costs and correct pixels, not just
+cache hits: retained row commands can still need HWUI replay and GPU work.
+
+The bounded-reader JVM tests cover coalescing, base ordering, detach during a read, detach with
+an already pending frame, notification during an empty read, attachment before binding,
+non-polling empty reads and destruction. Device remount checks await **main's rejection/resync**,
+not just the worker emptying the mailbox. Full checks: 1,076 Rust, 675 JVM, debug/device-test/
+unsigned-release builds, both lints and generated checks pass. The fresh separate-app device
+report has 178 tests, zero failures, two notification-permission skips; the daily app's version
+and install/update timestamps remain unchanged. This is automated fixture validation, not
+owner acceptance of real-host scrolling or the deferred M3 connectivity/Doze work.
 
 ## Tap links and OSC 52 (lane Links)
 

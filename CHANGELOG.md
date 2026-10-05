@@ -16,6 +16,8 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ### Changed
 
+- Native terminal frame pulls and UniFFI decoding run off the UI thread, with bounded ordered
+  handoff to vsync; the probe reports native reads, grid merges and ingress latency separately.
 - Terminal rendering batches synthetic bold, caches row display lists across scrolling, and reuses
   moved rows over the FFI with coalescing-safe references (API 23); the native probe measures scrolling.
 - Terminal rendering batches bounded glyphs at exact cell positions and merges background/decorations
@@ -23,6 +25,13 @@ Each release's notes are in [docs/releases/](docs/releases/).
 - The terminal's default colours are Tokyo Night (background `#1A1B26`, foreground `#C0CAF5`, its 16 ANSI
   colours), matching the herdr theme on the owner's machines, so herdr's chrome and pane content agree. The app
   UI stays Catppuccin Mocha; the arrow-pad keys follow the new background.
+
+### Fixed
+
+- Cached terminal rows restore HWUI display lists discarded while offscreen instead of returning
+  blank after scrolling; immutable drawing commands survive without reshaping cells.
+- Every terminal delta rejects a missing sequence base, not just moved rows, and requests a full
+  snapshot until recovery. A remount retries when a retiring display consumed its requested frame.
 
 ## [0.1.5] - 2026-10-04
 

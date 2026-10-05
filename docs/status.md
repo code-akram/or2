@@ -2,16 +2,47 @@
 
 Read this first when picking the work up. The details are in [design](design.md) (checklists),
 [contracts](contracts.md) (what the code must do), [roadmap](roadmap.md) and [build](build.md).
-Updated 2026-10-04.
+Updated 2026-10-05.
 
 ## Where it stands
+
+### Unreleased terminal work (2026-10-05)
+
+- `main` is ahead of v0.1.5: launcher mark/splash, Tokyo Night terminal colours, batched glyphs,
+  cached rows and coalescing-safe moved rows over FFI **API 23** are committed (`649c174` through
+  `0c86c04`). The public release remains v0.1.5/API 22; the manual-QA candidate includes API 23.
+- The follow-up fixes retained rows returning blank after HWUI discards an
+  off-tree RenderNode's display list: keep immutable row Pictures and replay missing lists without
+  reshaping cells. Native frame pulls/UniFFI decoding now run on a worker, with a main-thread
+  controller permitting only one in-flight read and one pending frame. Detach retains pending/final
+  frames, notifications coalesce, and moved-row bases stay ordered.
+- All deltas reject sequence gaps, including cell-only/metadata-only frames; the broken-base latch
+  clears only on a full snapshot. An unusable take retries the full request, which a retiring display
+  may have consumed. The remount test waits for main's resync, not only the worker's mailbox take.
+- New coverage: bounded-reader lifecycle/wakeup JVM tests; independent hardware pixel comparisons
+  over scrolling/edit/cache eviction; native moved rows against an explicit native full snapshot and
+  legacy drawing; a Rust full-snapshot oracle over mixed edits, regions, viewports, modes, colours,
+  resizes and slow consumption. Details: contracts, "Scrolling correctness and worker frame ingress".
+- Fresh checks pass: **1,076 Rust** tests (sshd/tmux/mosh/herdr required), formatting, Clippy with
+  warnings denied, both generated checks; **675 JVM** tests (zero failures/errors/skips), all Android
+  builds including **unsigned** release, and debug/device-test lint. Separate-app device report:
+  **178 tests, 176 passed, two notification-permission skips, zero failures**. The daily app's version
+  and first-install/update timestamps are unchanged; test apps were cleaned up by Gradle.
+- Owner authorized committing/pushing the follow-up and an in-place signed installation for
+  manual QA (2026-10-05). Candidate **0.1.5 / versionCode 9 / FFI API 23** is being prepared;
+  versionName/workspace version remain unchanged, with no tag or public release. Installation
+  verification will be recorded below after it completes. [Manual owner QA](qa-terminal.md) covers
+  live output, scrolling, view lifecycle, resizing and existing features. Previous synthetic timing
+  gains are not proof of real-host acceptance; connectivity/Doze acceptance remains owner-deferred.
+
+### Published release
 
 - **Released: [v0.1.5](releases/v0.1.5.md)** (2026-10-04, tag `v0.1.5`, commit `d27f725`, versionCode 8,
   FFI API 22): project directories and one-tap shells. The signed APK (SHA-256 `9f35619e…5dff3`) and `or2-pair`
   for Linux x86_64/aarch64 (static) and macOS Intel/Apple silicon are published. All downloaded checksums/formats,
   APK signature and public latest-release installer were verified. The installer ran only in a temporary
   directory, never against host authorization. Publication was explicitly requested by the owner.
-- **The owner's phone runs the public v0.1.5 APK**, installed in place at **18:40 phone-local time**,
+- **At publication the owner's phone ran the public v0.1.5 APK**, installed in place at **18:40 phone-local time**,
   no uninstall/data clear. Dirs includes current live herdr cwd ahead of history; both tabs use owned watches.
   The signature matches the existing app; installed/build/public-download SHA-256 matches. First-install time
   is unchanged, hosts remain visible, launch passes and no fresh AndroidRuntime crash was found. Final full

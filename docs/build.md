@@ -630,8 +630,14 @@ restores the real file name when the run ends. The composer-geometry test waits 
 (1.02x per event), the finger left after a pinch not scrolling, the composer keeping a message it
 could not send, and the multi-line confirmation. Tests that call `show()` more than once wrap the content in a fresh `key(...)`, because
 `remember`/`rememberSaveable` state survives a second `setContent` otherwise. `TerminalDeviceTest` covers IME composition, keys, selection,
-resize and remount snapshots; `TerminalVisualDeviceTest` captures renderer fixtures and reports
-frame timings.
+resize and remount snapshots, including off-main frame pulls; `TerminalVisualDeviceTest` captures
+renderer fixtures and reports frame timings. `TerminalScrollVisualDeviceTest` compares cached and
+legacy hardware pixels across scrolling/edit/cache eviction, compares native moved rows against an
+explicit native full snapshot, and reports legacy/batched/retained scroll service and Window timings.
+The probe separates worker native take/decode, main grid merge, and read-request-to-apply latency;
+combined `apply` cost is not main-thread blocking time. `TerminalFrameReaderTest` covers the bounded
+reader's lifecycle/wakeup ordering on the JVM, and `core/or2-core/tests/render_consistency.rs` checks
+coalesced rendering against an independent full-snapshot engine.
 
 Manual phone checks still required:
 - Easy pair: Add host, Easy pair shows the code `K`; run `or2-pair` on a host and type it; the camera permission
