@@ -565,6 +565,9 @@ Never point a test command at `io.github.code_akram.or2`: no `pm clear`, `adb un
 
 Use an already-authorized ADB endpoint. For a remote server, supply the endpoint explicitly to
 every command; do not start/kill the server or change SSH authorization as part of these tests.
+Check that the expected forwarded listener exists before using ADB: a default command can automatically
+start an empty local daemon if the SSH forward disappeared. Its empty device list says nothing about the
+phone connected to the remote server; do not ask the owner to reconnect the phone on that evidence alone.
 The generic example below uses caller-supplied endpoint and serial variables, not real hosts. It runs
 the suite by hand against the device-test app, then updates the daily app in place (`install -r` keeps
 its data) and starts it:

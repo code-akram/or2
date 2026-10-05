@@ -28,12 +28,18 @@ Updated 2026-10-05.
   Packaged 0.1.6/API 23 and the terminal/picker tests passed. The local
   test launcher was stopped, not the ADB server/bridge; no security or host changes. Hardware rerun
   and signed install are pending an available existing ADB connection. This attempt is not a passing gate.
-- **Android release installation is not complete:** bounded ADB checks initially timed out; the latest
-  check reaches ADB but reports **no devices/emulators found**. No bridge, tunnel, server or security changes
-  were made. Last verified daily app: **0.1.5 / versionCode 11**.
-  The public, signed code-12 APK is ready at `/tmp/or2-release-v0.1.6/or2-v0.1.6.apk`. Restore the existing
-  authorized ADB link and leave the phone idle, rerun About/native/picker coverage, then install in place,
-  verify installed/public/build checksum and unchanged first-install time, and update this record.
+- **Android release installation is not complete:** initial checks timed out; later default ADB checks
+  reported no devices. Owner then confirmed the phone **is connected to ADB on the Mac**. Diagnostics
+  show this agent runs on Arch, the SSH-forwarded listener is gone, and a default check **automatically
+  started an empty runner-local ADB daemon on port 5037**. The saved output confirms this; earlier
+  “no server changes” wording did not account for ADB's automatic startup. No Mac ADB restart, SSH
+  authorization/security change, daily-app uninstall or data clear was performed. The empty runner
+  daemon has not been stopped; restore the owner's loopback-only SSH ADB route on a free runner port
+  and explicitly pass that endpoint/serial to every ADB command, rather than checking default ADB.
+  Last verified daily app: **0.1.5 / versionCode 11**. The public signed code-12 APK is ready at
+  `/tmp/or2-release-v0.1.6/or2-v0.1.6.apk`. After the route is restored and phone is idle, rerun
+  About/native/picker coverage, install in place, verify installed/public/build checksum and unchanged
+  first-install time, and update this record.
 
 ### Host picker capsule polish (2026-10-05, prerelease QA history)
 
