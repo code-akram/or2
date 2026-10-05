@@ -8,6 +8,11 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-10-05
+
+Terminal rendering, scrolling, RGB themes and launcher/picker polish (versionCode 12, FFI API 23).
+See [the release notes](docs/releases/v0.1.6.md).
+
 ### Added
 
 - A launcher icon: the or2 mark (a blocky "or", white on black) as an adaptive icon with a monochrome
@@ -304,7 +309,9 @@ The first release: the Android app (a signed APK) and the `or2-pair` host CLI fo
 - Optional local release signing for the APK (`~/.config/or2/signing.properties`); without it the release
   build stays unsigned for F-Droid.
 
-[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/code-akram/or2/compare/v0.1.5...v0.1.6
+[0.1.5]: https://github.com/code-akram/or2/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/code-akram/or2/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/code-akram/or2/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/code-akram/or2/compare/v0.1.1...v0.1.2

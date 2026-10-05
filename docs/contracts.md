@@ -4108,7 +4108,7 @@ the move detector retains the rows; a follow-up could retain 128-bit row fingerp
 The probe fixture's `scroll:stop` command publishes its fixed screen once (it published twice,
 leaving a second full frame behind the first take, which the JVM test caught).
 
-### Scrolling correctness and worker frame ingress (2026-10-05, unreleased)
+### Scrolling correctness and worker frame ingress (v0.1.6, 2026-10-05)
 
 Dynamic hardware comparisons exposed off-tree retained RenderNodes returning without a display
 list; the immutable row Picture above repairs that without reshaping. Independent cached/legacy

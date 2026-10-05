@@ -96,7 +96,7 @@ objects and their listeners, pairing, and two test fixtures (`contract_probe_ses
 connects a single shell: terminals are channels of a host connection. API 21 adds a bounded recent-directory
 history read and `TerminalTarget.ShellIn` for one-tap project shells (v0.1.5). API 22 adds pure directory
 merging/validation so Dirs includes the live herdr agent/pane cwd already watched by the picker, ahead of history,
-without another query. Unreleased API 23 adds coalescing-safe moved-row references to terminal
+without another query. API 23 (v0.1.6) adds coalescing-safe moved-row references to terminal
 frames; Android reuses resolved rows, retains their drawing commands, and pulls/decodes frames
 off main before applying at vsync. See [contracts: Frames](contracts.md#frames) and the
 [build instructions](build.md) for the shared toolchain and verification commands.

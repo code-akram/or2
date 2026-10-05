@@ -1,7 +1,7 @@
-# Manual owner QA: terminal colour candidate
+# Terminal QA regression checklist
 
-Prepared 2026-10-05. This is an **unreleased signed candidate**, not a public release:
-**versionName 0.1.5, versionCode 11, FFI API 23**. The installation verification and build
+Owner-accepted 2026-10-05 on the preceding **signed QA candidate**:
+**versionName 0.1.5, versionCode 11, FFI API 23**. Release v0.1.6 is versionCode 12 with the same features. The installation verification and build
 checksum are recorded in [status](status.md). The candidate includes the launcher/splash,
 Tokyo Night terminal colours, batched glyph drawing, retained rows, moved-row FFI frames,
 and off-main native frame decoding. Rendering/scrolling are owner-accepted; this candidate adds

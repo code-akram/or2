@@ -6,7 +6,26 @@ Updated 2026-10-05.
 
 ## Where it stands
 
-### Host picker capsule polish (2026-10-05, unreleased)
+### v0.1.6 release preparation (2026-10-05)
+
+- Owner accepted picker polish (“good job”) and explicitly requested publication plus installation of
+  the latest build. Rendering/scrolling and Mac/Arch colour QA were already accepted. Preparing
+  **v0.1.6 / versionCode 12 / FFI API 23**, with no additional feature changes.
+- Fresh release gates pass: **1,080 Rust** (sshd/tmux/mosh/herdr required; no ignored/failures),
+  formatting, Clippy with warnings denied and both generators; **675 JVM** (no failures/errors/skips),
+  Android builds including signed release and both lints, all 183 Gradle tasks rerun. Linux `dist
+  --expect-version 0.1.6` passes for both static/stripped architectures; x86_64 executes, aarch64 format-only.
+- Release APK is signed by the existing key, version/metadata verified. SHA-256:
+  `31c3266ba0503f17d55dd508dbcb0e6e578a9d678e5d2a238069e89ce609b38f`.
+  The code-11 APK is preserved for rollback. No tag/publication or release install yet.
+- Full device attempt recorded **179 cases: 176 passed, one About/license-screen failure, two
+  notification-permission skips**, then timed out while ADB cleanup was unresponsive. Logcat records a
+  Home gesture entering the launcher during the license test before the missing-Compose-hierarchy failure.
+  Packaged 0.1.6/API 23 and the terminal/picker tests passed. The local
+  test launcher was stopped, not the ADB server/bridge; no security or host changes. Hardware rerun
+  and signed install are pending an available existing ADB connection. This attempt is not a passing gate.
+
+### Host picker capsule polish (2026-10-05, prerelease QA history)
 
 - Owner requested lowercase `shell` / `dirs` and the shell pill to match the left tab capsule's height.
   The mismatch was the generic pill's 36 dp minimum versus the segmented track's 32 dp. The picker
@@ -22,7 +41,7 @@ Updated 2026-10-05.
   Cold launch succeeds, no fresh AndroidRuntime errors. App is ready for the owner's visual check;
   no real host/biometric interaction was driven. No tag/public release.
 
-### True-colour capability fix / owner QA (2026-10-05, unreleased)
+### True-colour capability fix / owner QA (2026-10-05, prerelease QA history)
 
 - **Owner accepted rendering and scrolling:** “rendering and scrolling is solved.” The remaining
   colour papercut was diagnosed read-only before approval: Mac and Arch Pi use the same `arch-ice`
@@ -55,11 +74,11 @@ Updated 2026-10-05.
   release or deferred connectivity/Doze acceptance. **Owner accepted the colour fix:** “good, its solved.”
   Rendering, scrolling and Mac/Arch colour matching are now owner-accepted.
 
-### Unreleased terminal work (2026-10-05)
+### Terminal work (2026-10-05, prerelease QA history)
 
 - `main` is ahead of v0.1.5: launcher mark/splash, Tokyo Night terminal colours, batched glyphs,
   cached rows and coalescing-safe moved rows over FFI **API 23** are committed (`649c174` through
-  `0c86c04`). The public release remains v0.1.5/API 22; the manual-QA candidate includes API 23.
+  `0c86c04`). Before v0.1.6, the public release was v0.1.5/API 22; the manual-QA candidate included API 23.
 - Follow-up **`3457b7b`** is committed and pushed: fixes retained rows returning blank after HWUI
   discards an off-tree RenderNode's display list; keep immutable row Pictures and replay missing lists without
   reshaping cells. Native frame pulls/UniFFI decoding now run on a worker, with a main-thread
@@ -87,11 +106,12 @@ Updated 2026-10-05.
   Launch reports `Status: ok`, the app remains foreground/running and no fresh AndroidRuntime errors
   were found. No biometric unlock or real-host terminal QA was driven in that installation cycle.
   Owner subsequently accepted rendering/scrolling; colour QA is tracked separately above.
-- VersionName/workspace version stay 0.1.5; **no tag or public release**. [Manual owner QA](qa-terminal.md)
+- These candidates kept versionName/workspace version 0.1.5 and had **no tag or public release**.
+  [Manual owner QA](qa-terminal.md)
   covers live output, scrolling, view lifecycle, resizing and existing features. Previous synthetic
   timing gains are not proof of real-host acceptance; connectivity/Doze acceptance remains owner-deferred.
 
-### Published release
+### Previous published release
 
 - **Released: [v0.1.5](releases/v0.1.5.md)** (2026-10-04, tag `v0.1.5`, commit `d27f725`, versionCode 8,
   FFI API 22): project directories and one-tap shells. The signed APK (SHA-256 `9f35619e…5dff3`) and `or2-pair`
