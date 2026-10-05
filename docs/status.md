@@ -11,8 +11,8 @@ Updated 2026-10-05.
 - `main` is ahead of v0.1.5: launcher mark/splash, Tokyo Night terminal colours, batched glyphs,
   cached rows and coalescing-safe moved rows over FFI **API 23** are committed (`649c174` through
   `0c86c04`). The public release remains v0.1.5/API 22; the manual-QA candidate includes API 23.
-- The follow-up fixes retained rows returning blank after HWUI discards an
-  off-tree RenderNode's display list: keep immutable row Pictures and replay missing lists without
+- Follow-up **`3457b7b`** is committed and pushed: fixes retained rows returning blank after HWUI
+  discards an off-tree RenderNode's display list; keep immutable row Pictures and replay missing lists without
   reshaping cells. Native frame pulls/UniFFI decoding now run on a worker, with a main-thread
   controller permitting only one in-flight read and one pending frame. Detach retains pending/final
   frames, notifications coalesce, and moved-row bases stay ordered.
@@ -26,14 +26,20 @@ Updated 2026-10-05.
 - Fresh checks pass: **1,076 Rust** tests (sshd/tmux/mosh/herdr required), formatting, Clippy with
   warnings denied, both generated checks; **675 JVM** tests (zero failures/errors/skips), all Android
   builds including **unsigned** release, and debug/device-test lint. Separate-app device report:
-  **178 tests, 176 passed, two notification-permission skips, zero failures**. The daily app's version
-  and first-install/update timestamps are unchanged; test apps were cleaned up by Gradle.
-- Owner authorized committing/pushing the follow-up and an in-place signed installation for
-  manual QA (2026-10-05). Candidate **0.1.5 / versionCode 9 / FFI API 23** is being prepared;
-  versionName/workspace version remain unchanged, with no tag or public release. Installation
-  verification will be recorded below after it completes. [Manual owner QA](qa-terminal.md) covers
-  live output, scrolling, view lifecycle, resizing and existing features. Previous synthetic timing
-  gains are not proof of real-host acceptance; connectivity/Doze acceptance remains owner-deferred.
+  **178 tests, 176 passed, two notification-permission skips, zero failures**. During that separate-app
+  suite the daily app's version and install/update timestamps stayed unchanged; test apps were cleaned up.
+- **Owner-authorized signed candidate installed in place (2026-10-05, 11:07 phone-local time):**
+  **0.1.5 / versionCode 9 / FFI API 23**, from `3457b7b`. The signed release build and refreshed
+  debug/device-test builds, 675 JVM tests and both lints pass. Existing APK preserved and checksum-
+  verified; candidate and existing signing certificate SHA-256 match (`1418c4aa…cbe1a2a2`). Installed
+  APK SHA-256 matches the built candidate:
+  `4496cd61c20425214d9e88a4bae9c32c7ee88e2d88ece0ceca855616e96e5f83`.
+  First-install time unchanged; no uninstall/data clear, host authorization or security-setting change.
+  Launch reports `Status: ok`, the app remains foreground/running and no fresh AndroidRuntime errors
+  were found. No biometric unlock or real-host terminal QA was driven; manual acceptance is pending.
+- VersionName/workspace version stay 0.1.5; **no tag or public release**. [Manual owner QA](qa-terminal.md)
+  covers live output, scrolling, view lifecycle, resizing and existing features. Previous synthetic
+  timing gains are not proof of real-host acceptance; connectivity/Doze acceptance remains owner-deferred.
 
 ### Published release
 

@@ -26,7 +26,7 @@ and off-main native frame decoding.
    SSH shell, use or2's local scrollback. Mosh's limited local history is unchanged. Return to
    the bottom and confirm fresh output appears correctly.
 3. **Rich text.** Inspect your usual coloured/bold agent output. In a disposable shell (not an
-   agent's prompt), optionally run `printf 'plain bold? CJK: 界 emoji: 😀 combining: é\n'` and
+   agent's prompt), optionally run `printf 'plain \033[1mbold\033[0m CJK: 界 emoji: 😀 combining: é\n'` and
    `seq 1 200`; check glyph placement and that numbered lines remain in order when scrolling.
 4. **View lifecycle.** Go Home, reopen the same terminal, switch to another open terminal and
    back, then briefly background/foreground the app. The current screen should return without
