@@ -1,13 +1,18 @@
 # Manual owner QA: terminal colour candidate
 
 Prepared 2026-10-05. This is an **unreleased signed candidate**, not a public release:
-**versionName 0.1.5, versionCode 10, FFI API 23**. The installation verification and build
+**versionName 0.1.5, versionCode 11, FFI API 23**. The installation verification and build
 checksum are recorded in [status](status.md). The candidate includes the launcher/splash,
 Tokyo Night terminal colours, batched glyph drawing, retained rows, moved-row FFI frames,
 and off-main native frame decoding. Rendering/scrolling are owner-accepted; this candidate adds
 correct true-colour capability signalling to SSH/Mosh launches without changing any theme.
+VersionCode 11 additionally aligns the host picker's `shell` pill with its tab capsule and uses
+lowercase `shell` / `dirs`; the colour fix was owner-accepted on versionCode 10.
 
-## This QA pass: matching Mac/Arch colours
+**Owner acceptance (2026-10-05):** rendering/scrolling and the Mac/Arch colour fix are solved.
+The following checks are retained for regression reference, not pending acceptance.
+
+## Colour regression checks: matching Mac/Arch colours
 
 1. Unlock/connect normally, then open a **new Mac shell** in or2. Reopening an existing terminal
    does not give its running processes a new environment.

@@ -7,6 +7,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -87,9 +88,21 @@ class SessionPickerDeviceTest {
         pickerTab(1)
         compose.onNodeWithText("3 windows · 1 attached").assertIsDisplayed()
         compose.onNodeWithTag("tmux-attach:build").performClick()
-        compose.onNodeWithTag("host-shell").assertTextEquals("Shell").performClick() // A plain shell.
+        compose.onNodeWithTag("host-shell").assertTextEquals("shell").performClick() // A plain shell.
         compose.onNodeWithTag("host-refresh").performScrollTo().performClick()
         compose.runOnIdle { assertEquals(listOf("herdr:null", "herdr:work", "tmux:build", "shell", "refresh"), calls) }
+    }
+
+    @Test
+    fun shellMatchesTheTabCapsuleHeightAndBothLabelsAreLowercase() {
+        show()
+        val tabs = compose.onNodeWithTag("picker-tabs").getUnclippedBoundsInRoot()
+        val shell = compose.onNodeWithTag("host-shell").getUnclippedBoundsInRoot()
+        assertEquals("Capsules have the same height", tabs.bottom - tabs.top, shell.bottom - shell.top)
+        assertEquals("Capsules align at the top", tabs.top, shell.top)
+        assertEquals("Capsules align at the bottom", tabs.bottom, shell.bottom)
+        compose.onNodeWithTag("host-shell").assertTextEquals("shell")
+        compose.onNodeWithTag("picker-tab:2").assertTextEquals("dirs")
     }
 
     @Test

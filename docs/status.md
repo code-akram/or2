@@ -6,6 +6,22 @@ Updated 2026-10-05.
 
 ## Where it stands
 
+### Host picker capsule polish (2026-10-05, unreleased)
+
+- Owner requested lowercase `shell` / `dirs` and the shell pill to match the left tab capsule's height.
+  The mismatch was the generic pill's 36 dp minimum versus the segmented track's 32 dp. The picker
+  now explicitly uses the 32 dp height; shared buttons, shell actions and tabs are otherwise unchanged.
+- Hardware regression fails before the fix (32 dp versus 36 dp), then passes with matching height,
+  top/bottom alignment and lowercase labels. **22 picker/Home device tests pass**, zero failures/skips;
+  **675 JVM**, debug/device-test/signed release builds and both lints pass. Daily app metadata stayed
+  unchanged during the separate-app tests. Rust/FFI are unchanged; no fresh Rust gate was needed.
+- Signed **0.1.5 / versionCode 11 / FFI API 23** installed in place at **13:23 phone-local time**.
+  Prior installed code-10 APK matches its preserved backup; same signing certificate, unchanged
+  first-install time, no uninstall/data clear. Installed/build SHA-256 match:
+  `6ccc803439c9dcc1203c986088415f1cb968afb9e546cfb0a5fe38ee79e7b024`.
+  Cold launch succeeds, no fresh AndroidRuntime errors. App is ready for the owner's visual check;
+  no real host/biometric interaction was driven. No tag/public release.
+
 ### True-colour capability fix / owner QA (2026-10-05, unreleased)
 
 - **Owner accepted rendering and scrolling:** “rendering and scrolling is solved.” The remaining
@@ -36,7 +52,8 @@ Updated 2026-10-05.
   acceptance was driven after the update. Colour QA needs a **newly opened shell and fresh Pi
   invocation**: existing processes cannot inherit a changed environment. See [manual QA](qa-terminal.md).
   Host themes, authorization, bridge/tunnel and security settings are untouched. No tag/public
-  release or deferred connectivity/Doze acceptance; awaiting the owner's colour QA.
+  release or deferred connectivity/Doze acceptance. **Owner accepted the colour fix:** “good, its solved.”
+  Rendering, scrolling and Mac/Arch colour matching are now owner-accepted.
 
 ### Unreleased terminal work (2026-10-05)
 

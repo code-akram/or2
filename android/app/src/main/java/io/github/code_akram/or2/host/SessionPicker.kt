@@ -86,7 +86,7 @@ fun tmuxNameError(name: String): String? = when {
     else -> null
 }
 
-enum class PickerTab(val label: String) { HERDR("herdr"), TMUX("tmux"), DIRS("Dirs") }
+enum class PickerTab(val label: String) { HERDR("herdr"), TMUX("tmux"), DIRS("dirs") }
 
 /**
  * The herdr and tmux sessions of one host that already have an open terminal in or2: the picker marks their rows
@@ -171,7 +171,7 @@ fun pickerWorkspaces(view: HerdrView): List<PickerWorkspace> {
 }
 
 /**
- * The session picker over Home (a host card's header opens it): a segmented control (herdr, tmux, Dirs) with a "Shell" pill
+ * The session picker over Home (a host card's header opens it): a segmented control (herdr, tmux, dirs) with a "shell" pill
  * (the `>_` glyph) that opens a plain shell, and one grouped list below. The herdr tab lists each running session's
  * agents from the host's live views ([herdrViews], by session: null for the default one) under the session's own row (its name and agent count);
  * tapping an agent is [openAgent]. A session that already has an open terminal is marked `● Open` ([open]): choosing
@@ -230,10 +230,13 @@ fun SessionPickerSheet(
             Row(Modifier.fillMaxWidth().padding(horizontal = Or2Dimens.Gutter), verticalAlignment = Alignment.CenterVertically) {
                 Segmented(
                     PickerTab.entries.map { it.label }, tab.ordinal, { chosen = PickerTab.entries[it] },
-                    tagPrefix = "picker-tab",
+                    modifier = Modifier.testTag("picker-tabs"), tagPrefix = "picker-tab",
                 )
                 Spacer(Modifier.weight(1f))
-                PillButton("Shell", openShell, Modifier.testTag("host-shell"), icon = Or2Icons.Terminal, iconFirst = true)
+                PillButton(
+                    "shell", openShell, Modifier.height(Or2Dimens.Segmented).testTag("host-shell"),
+                    icon = Or2Icons.Terminal, iconFirst = true,
+                )
             }
             if (udpBlocked) {
                 // Why this host's terminals use SSH: said once, here, and nowhere on the terminals themselves.

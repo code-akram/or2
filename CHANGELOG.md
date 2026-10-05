@@ -28,6 +28,7 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ### Fixed
 
+- Host picker uses lowercase `shell` / `dirs`, with the shell pill matching the tab capsule's height.
 - SSH/Mosh terminal launches advertise true-colour support, so programs keep their exact RGB
   themes instead of falling back to 256 colours (notably Pi in a plain Mac shell). Host themes
   and or2's palette are unchanged; new shells preserve login startup and directory selection.

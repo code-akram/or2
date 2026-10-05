@@ -360,8 +360,9 @@ screen with no colour change. Nothing holds it on screen past the first frame.
   pill; an asleep host `Asleep` in muted text with **Retry**; a host that is simply not connected (a cancelled
   unlock) `Not connected` with **Connect**; a host without a key **Select a key**, which opens the
   host form. Dismissing leaves Home as it was (a connect already started carries on, and the card shows it). The
-  sheet: a segmented control (`herdr` / `tmux` / `Dirs`; there is no `Open` tab) with a trailing **Shell** pill
-  (`surfaceTrack`, the `>_` prompt glyph before the label, its only meaning) that opens a plain shell; the UDP line
+  sheet: a segmented control (`herdr` / `tmux` / `dirs`; there is no `Open` tab) with a trailing **shell** pill
+  (`surfaceTrack`, the same 32 dp visual height as the tab capsule, the `>_` prompt glyph before the label,
+  its only meaning) that opens a plain shell; the UDP line
   under them when it applies (see "UDP blocked"); below, the herdr tab's sessions or the tmux tab's list. **herdr:**
   each running session the app watches (its live view, the inbox's source) is one `surfaceRaisedRow` card: first the
   session's own row, named as a tmux row is (its name, the default session by its name alone, never `(default)`,
