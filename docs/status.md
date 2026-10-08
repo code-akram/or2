@@ -2,9 +2,24 @@
 
 Read this first when picking the work up. The details are in [design](design.md) (checklists),
 [contracts](contracts.md) (what the code must do), [roadmap](roadmap.md) and [build](build.md).
-Updated 2026-10-05.
+Updated 2026-10-08.
 
 ## Where it stands
+
+### README demo GIF (2026-10-08, branch `readme-demo`, unreleased)
+
+- The README opens with `docs/media/or2-demo.gif` (840 x 740, 31 s at 20 fps, 3.2 MiB): the real app on the
+  phone, driven by `ReadmeDemoDeviceTest` through an invented world (`DemoWorld`: hosts `atlas` and `build-box`,
+  herdr agents, tmux, shells; no network, keys or real hosts), filmed with `UiAutomation` screenshots and rendered
+  by the new `cargo xtask demo-gif` into a card with the six scene captions and touch marks. How to re-record:
+  build.md, "README demo". The test is skipped in suite runs (one more skip); `demo-gif --check` joins the gates.
+- Only the device-test app was used, and its demo hosts, key and settings were removed after each run; the daily
+  app was not touched. `screenrecord` does not work on this OxygenOS 16 build: it runs in its own SELinux domain
+  (`screen_record`), cannot write to `/data/local/tmp` or `/sdcard`, and when piped waits forever for
+  `hwservicemanager`. The shell cannot signal it, so the two processes left by the first attempts stay until the
+  phone restarts (idle, logging a wait line a second).
+- Checks: xtask tests and Clippy, formatting, `demo-gif --check`, the device-test builds and their lint. The GIF
+  was looked through frame by frame: no status bar, notification or real data in it.
 
 ### Published v0.1.6 / installed on Android (2026-10-05)
 

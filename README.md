@@ -3,6 +3,11 @@
 A free, open-source Android client for SSH and mosh, built for driving coding agents that run in
 tmux or herdr on your own machines.
 
+<p align="center">
+  <img src="docs/media/or2-demo.gif" width="840" alt="or2 on a phone: two hosts with live terminal previews, the agent inbox across both hosts, a tap on a blocked agent that opens its pane, an answer typed in the composer while the agent finishes its work, the herdr Spaces sheet switching to another agent, and the session picker with its herdr, tmux and dirs tabs">
+</p>
+<p align="center"><sub>The real app on a phone, driven through invented hosts and agents (<a href="docs/build.md#readme-demo">how it is made</a>).</sub></p>
+
 Status: v0.1.6 released (terminal rendering, scrolling, RGB themes and launcher/picker polish). One SSH connection per host carries
 terminals, tmux and a live herdr agent inbox across hosts; tap an agent to open its pane and answer
 from the composer, or let a notification bring you there. Terminals open at once and switch to mosh in

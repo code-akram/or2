@@ -72,6 +72,7 @@ cargo test --manifest-path core/Cargo.toml --workspace --all-features --locked
 cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
 cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- gen-herdr-types --offline --check
 cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- gen-licenses --check
+cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- demo-gif --check
 android/gradlew -p android :app:assembleDebug :app:testDebugUnitTest :app:assembleDeviceTest :app:assembleDeviceTestAndroidTest :app:lintDebug :app:lintDeviceTest :app:assembleRelease
 ```
 
@@ -85,7 +86,9 @@ cargo alias in `core/.cargo/config.toml` makes it `cargo xtask <task>`; from the
 same task as `cargo run --quiet --locked --manifest-path core/Cargo.toml -p xtask -- <task>` (the form
 used above). The generators are `gen-herdr-types` and `gen-licenses`; each regenerates checked-in files and
 has a `--check` mode that writes nothing and fails when they are stale. `dist` builds the `or2-pair` release
-binaries (below; it generates nothing that is checked in). `xtask` is a workspace member
+binaries (below; it generates nothing that is checked in). `demo-gif` renders the README's GIF from a
+recording made on a phone (see "README demo"); the recording is not checked in, so its `--check` checks the
+GIF itself rather than regenerating it. `xtask` is a workspace member
 but is not linked into the app library, so it never appears in the licence data. Its unit tests run
 with the rest of the workspace, and so does its integration test `core/xtask/tests/install_or2_pair.rs`,
 which runs `scripts/install-or2-pair.sh` (see "or2-pair release binaries" below).
@@ -560,6 +563,43 @@ hand as below) after granting it once.
 
 Never point a test command at `io.github.code_akram.or2`: no `pm clear`, `adb uninstall` or
 `run-as` writes against it, and no instrumentation targeting it.
+
+## README demo
+
+The README's GIF (`docs/media/or2-demo.gif`) is the real app on a phone, filmed while
+`ReadmeDemoDeviceTest` (`androidTest/.../demo/`) drives it through an invented world: two hosts (`atlas`,
+`build-box` at a documentation address), herdr agents, tmux and shells, all scripted in `DemoWorld` behind
+`Or2Application.connectorOverride`. Nothing touches a network, a key or a real host. The hosts are connected
+before the app opens, so no biometric prompt appears. Touches go through the system's input path (ripples,
+sheets and the keyboard behave as by hand), and the screen is filmed with `UiAutomation` screenshots:
+`screenrecord` cannot write a file or start on this Android 16 build. The test is skipped unless asked
+(`-e or2.demo 1`), so the device suite reports it as one more skipped test.
+
+It needs the device-test app with no stored hosts (a fresh install); its demo hosts, key and settings are removed
+and restored when it ends. Record, pull the recording, then render the GIF on the computer:
+
+```sh
+android/gradlew -p android :app:assembleDeviceTest :app:assembleDeviceTestAndroidTest
+adb install -r android/app/build/outputs/apk/deviceTest/app-deviceTest.apk
+adb install -r android/app/build/outputs/apk/androidTest/deviceTest/app-deviceTest-androidTest.apk
+adb shell am instrument -w -e or2.demo 1 -e class io.github.code_akram.or2.demo.ReadmeDemoDeviceTest \
+  io.github.code_akram.or2.devicetest.test/io.github.code_akram.or2.Or2TestRunner
+mkdir -p /tmp/or2-demo && adb exec-out run-as io.github.code_akram.or2.devicetest tar -c -C files demo | tar -x -C /tmp/or2-demo
+cargo xtask demo-gif /tmp/or2-demo/demo        # from core/: writes docs/media/or2-demo.gif
+adb uninstall io.github.code_akram.or2.devicetest.test
+adb uninstall io.github.code_akram.or2.devicetest
+```
+
+The recording is about 30 s of 1080-pixel JPEGs (`-e or2.demo.width N` for another width), with
+`frames.txt` and `timeline.json`: the screen's size and system bars, the scenes (the GIF's captions) and every
+touch, on the frames' clock. `demo-gif` crops the system bars away (no clock, notifications or battery in the
+GIF), puts the screen in a bezel on an 840 x 740 card next to the six captions, lights the current one, and
+marks each touch where and when it landed. It needs `magick` (ImageMagick 7), `ffmpeg` and Noto Sans through
+fontconfig, and fails over the 8 MiB budget (`--fps`, default 20, lowers it). Look through the GIF before committing it: a
+heads-up notification that arrived during the recording is filmed too (Do Not Disturb keeps them away). The recording comes from a
+device, so the GIF cannot be regenerated as a check; `cargo xtask demo-gif --check` checks the checked-in GIF:
+a GIF89a on the card's size, within budget, shown by the README. The storyboard is the test's `tour`, the
+captions its `scene` calls, and what the hosts show is `Content.kt`.
 
 ## Phone smoke test
 
