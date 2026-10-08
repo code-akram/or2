@@ -17,11 +17,14 @@ Updated 2026-10-08.
 - Device suite (separate app): 180 cases, 176 passed, 3 skipped (demo, two notification-permission), 1 failure: the
   header pixel check of `TerminalVisualDeviceTest` once saw another colour, then passed five reruns. A second
   full run lost its stream at case 166 to a USB link reset (162 passed so far); the remaining 15 passed alone.
-  The daily app stayed on 0.1.6 (not installed: not asked for).
+  The daily app stayed on 0.1.6 during the tests.
 - **Published and verified:** [run 37758561140](https://github.com/code-akram/or2/actions/runs/37758561140) built and
   published; the signed APK was uploaded. All six public assets downloaded and checked (checksums, formats, APK hash
   and certificate); public `or2-pair 0.1.7` runs, and the installer from `main` installs it into a temporary
   directory. The README's GIF is served from `main`. Latest release is v0.1.7.
+- **Installed in place** (owner's request) at 13:51 phone-local time: 0.1.7 / code 13; replaced APK matched public v0.1.6
+  on device, installed APK matches the release hash, first-install time unchanged, cold launch clean. At the owner's
+  request the GitHub release v0.1.6 is now marked pre-release; v0.1.7 stays the latest.
 
 ### README demo GIF (2026-10-08, merged for v0.1.7)
 
