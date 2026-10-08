@@ -8,12 +8,12 @@ tmux or herdr on your own machines.
 </p>
 <p align="center"><sub>The real app on a phone, driven through invented hosts and agents (<a href="docs/build.md#readme-demo">how it is made</a>).</sub></p>
 
-Status: v0.1.6 released (terminal rendering, scrolling, RGB themes and launcher/picker polish). One SSH connection per host carries
+Status: v0.1.7 released (the demo above and the tooling that makes it; v0.1.6 brought terminal rendering, scrolling, RGB themes and picker polish). One SSH connection per host carries
 terminals, tmux and a live herdr agent inbox across hosts; tap an agent to open its pane and answer
 from the composer, or let a notification bring you there. Terminals open at once and switch to mosh in
 the background; mosh roams across networks, a foreground service keeps sessions open in the background,
 and the app reattaches to the last pane. What is not tested yet is listed in
-[the release notes](docs/releases/v0.1.6.md#verified-and-still-untested); changes are in the
+[the release notes](docs/releases/v0.1.7.md#verified-and-still-untested); changes are in the
 [changelog](CHANGELOG.md).
 See [status and next steps](docs/status.md), [the design](docs/design.md), [contracts](docs/contracts.md)
 and [build instructions](docs/build.md).

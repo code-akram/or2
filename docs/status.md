@@ -6,7 +6,20 @@ Updated 2026-10-08.
 
 ## Where it stands
 
-### README demo GIF (2026-10-08, branch `readme-demo`, unreleased)
+### Release v0.1.7 (2026-10-08)
+
+- Owner asked for the GIF on GitHub and a patch release: **v0.1.7 / versionCode 13 / FFI API 23**, the README
+  demo and its tooling (below) with no app change besides the version. [Release notes](releases/v0.1.7.md).
+- Gates: **1,087 Rust** (sshd/tmux/mosh/herdr required), formatting, Clippy, both generators, `demo-gif --check`;
+  **675 JVM**, all builds incl. the signed release (same certificate as v0.1.6), both lints, 183 tasks rerun;
+  Linux `dist --expect-version 0.1.7`. Signed APK SHA-256
+  `2f342ff1cc50d454ae0f266cb2f162ad9bd85c837ccc42e6c30cc9fd6c8881b5`; evidence in `/tmp/or2-release-v0.1.7/`.
+- Device suite (separate app): 180 cases, 176 passed, 3 skipped (demo, two notification-permission), 1 failure: the
+  header pixel check of `TerminalVisualDeviceTest` once saw another colour, then passed five reruns. A second
+  full run lost its stream at case 166 to a USB link reset (162 passed so far); the remaining 15 passed alone.
+  The daily app stayed on 0.1.6 (not installed: not asked for).
+
+### README demo GIF (2026-10-08, merged for v0.1.7)
 
 - The README opens with `docs/media/or2-demo.gif` (840 x 740, 31 s at 20 fps, 3.2 MiB): the real app on the
   phone, driven by `ReadmeDemoDeviceTest` through an invented world (`DemoWorld`: hosts `atlas` and `build-box`,

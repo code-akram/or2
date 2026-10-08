@@ -8,6 +8,11 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-10-08
+
+A demo of the app in the README, and the tooling that makes it (versionCode 13, FFI API 23; the app is
+unchanged from 0.1.6 apart from its version). See [the release notes](docs/releases/v0.1.7.md).
+
 ### Added
 
 - The README opens with a demo GIF: the real app on a phone, driven by `ReadmeDemoDeviceTest` through
@@ -316,7 +321,8 @@ The first release: the Android app (a signed APK) and the `or2-pair` host CLI fo
 - Optional local release signing for the APK (`~/.config/or2/signing.properties`); without it the release
   build stays unsigned for F-Droid.
 
-[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/code-akram/or2/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/code-akram/or2/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/code-akram/or2/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/code-akram/or2/compare/v0.1.3...v0.1.4
