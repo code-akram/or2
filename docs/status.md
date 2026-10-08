@@ -18,6 +18,10 @@ Updated 2026-10-08.
   header pixel check of `TerminalVisualDeviceTest` once saw another colour, then passed five reruns. A second
   full run lost its stream at case 166 to a USB link reset (162 passed so far); the remaining 15 passed alone.
   The daily app stayed on 0.1.6 (not installed: not asked for).
+- **Published and verified:** [run 37758561140](https://github.com/code-akram/or2/actions/runs/37758561140) built and
+  published; the signed APK was uploaded. All six public assets downloaded and checked (checksums, formats, APK hash
+  and certificate); public `or2-pair 0.1.7` runs, and the installer from `main` installs it into a temporary
+  directory. The README's GIF is served from `main`. Latest release is v0.1.7.
 
 ### README demo GIF (2026-10-08, merged for v0.1.7)
 
