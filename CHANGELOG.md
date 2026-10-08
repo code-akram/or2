@@ -8,6 +8,13 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+### Added
+
+- The README opens with a demo GIF: the real app on a phone, driven by `ReadmeDemoDeviceTest` through
+  invented hosts and agents (no network, keys or real hosts), filmed with screenshots and rendered by
+  `cargo xtask demo-gif` into a captioned card with touch marks. `demo-gif --check` checks the checked-in
+  GIF. See docs/build.md, "README demo".
+
 ## [0.1.6] - 2026-10-05
 
 Terminal rendering, scrolling, RGB themes and launcher/picker polish (versionCode 12, FFI API 23).

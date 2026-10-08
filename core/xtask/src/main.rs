@@ -6,6 +6,7 @@
 //! generator has a `--check` mode. Nothing here is shipped: the crate is outside the licence
 //! data of the Android library.
 
+mod demo_gif;
 mod dist;
 mod herdr;
 mod json;
@@ -41,7 +42,10 @@ Tasks:
       regenerate the open-source licence data (Android assets, core/or2-pair/THIRD_PARTY.md)
   dist [--target TRIPLE]... [--out DIR] [--expect-version VERSION]
       build the or2-pair release binaries this host can build (Linux: static musl, x86_64 and
-      aarch64; macOS: x86_64 and aarch64) into core/target/dist, with SHA256SUMS";
+      aarch64; macOS: x86_64 and aarch64) into core/target/dist, with SHA256SUMS
+  demo-gif <recording-dir> [--out FILE] [--fps N] | --check
+      render the README demo GIF (docs/media/or2-demo.gif) from a ReadmeDemoDeviceTest recording,
+      or check the checked-in one";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -49,6 +53,7 @@ fn main() -> ExitCode {
         Some("gen-herdr-types") => herdr::run(&args[1..]).map_err(|e| ("gen-herdr-types", e)),
         Some("gen-licenses") => licenses::run(&args[1..]).map_err(|e| ("gen-licenses", e)),
         Some("dist") => dist::run(&args[1..]).map_err(|e| ("dist", e)),
+        Some("demo-gif") => demo_gif::run(&args[1..]).map_err(|e| ("demo-gif", e)),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
