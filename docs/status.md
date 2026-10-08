@@ -25,6 +25,7 @@ Updated 2026-10-08.
 - **Installed in place** (owner's request) at 13:51 phone-local time: 0.1.7 / code 13; replaced APK matched public v0.1.6
   on device, installed APK matches the release hash, first-install time unchanged, cold launch clean. At the owner's
   request the GitHub release v0.1.6 is now marked pre-release; v0.1.7 stays the latest.
+- **Owner confirmed v0.1.7 on the phone:** connecting with the fingerprint unlock for SSH "works fine and is solid".
 
 ### README demo GIF (2026-10-08, merged for v0.1.7)
 
