@@ -20,6 +20,9 @@ Updated 2026-10-08.
   phone restarts (idle, logging a wait line a second).
 - Checks: xtask tests and Clippy, formatting, `demo-gif --check`, the device-test builds and their lint. The GIF
   was looked through frame by frame: no status bar, notification or real data in it.
+- A full-screen video of the same tour was also filmed by the phone's own recorder (the test's
+  `-e or2.demo.frames 0`, cut by `elapsedRealtime`; build.md, "README demo"); the owner chose the GIF for GitHub,
+  so the video is not checked in.
 
 ### Published v0.1.6 / installed on Android (2026-10-05)
 

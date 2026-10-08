@@ -38,8 +38,10 @@ import java.io.File
  *
  * It writes the app's `files/demo/`: `frames/` (JPEGs `or2.demo.width` pixels wide, default 1080, and `frames.txt`
  * giving each one's time) and `timeline.json` (the screen, the scenes and every touch, on the frames' clock), which
- * `cargo xtask demo-gif` turns into `docs/media/or2-demo.gif`. The device-test app must have no stored hosts; the demo's
- * hosts, key and settings are removed and restored afterwards.
+ * `cargo xtask demo-gif` turns into `docs/media/or2-demo.gif`. With `-e or2.demo.frames 0` it takes no screenshots,
+ * for a full video by the phone's own screen recorder; `timeline.json` then says when the tour started on the
+ * `elapsedRealtime` clock (`t0ElapsedRealtime`) and how long it ran (`lengthMs`). The device-test app must have no
+ * stored hosts; the demo's hosts, key and settings are removed and restored afterwards.
  */
 @RunWith(AndroidJUnit4::class)
 class ReadmeDemoDeviceTest {
@@ -101,17 +103,26 @@ class ReadmeDemoDeviceTest {
             val out = File(context.filesDir, "demo").apply { deleteRecursively(); mkdirs() }
             val frameWidth = args.getString("or2.demo.width")?.toInt() ?: 1080
             val screen = screenOf(activity)
-            recorder = driver.Recorder(File(out, "frames"), frameWidth)
+            // `-e or2.demo.frames 0` leaves the filming to the phone's own screen recorder (a full video): no
+            // screenshots, so nothing competes with it for the GPU.
+            if (args.getString("or2.demo.frames") != "0") recorder = driver.Recorder(File(out, "frames"), frameWidth)
             driver.t0 = SystemClock.uptimeMillis()
-            recorder.start()
+            // The timeline's zero on the clock screen recorders count from, to cut a phone's own recording to the tour.
+            val t0Elapsed = SystemClock.elapsedRealtime()
+            Log.i(TAG, "Tour starts: elapsedRealtime $t0Elapsed")
+            recorder?.start()
             SystemClock.sleep(400)
 
             tour(world, driver, atlasId, buildBoxId)
 
             SystemClock.sleep(600)
-            Log.i(TAG, "Recorded ${recorder.stop()}")
+            val length = driver.now()
+            recorder?.let { Log.i(TAG, "Recorded ${it.stop()}") }
             recorder = null
-            File(out, "timeline.json").writeText(driver.timeline(screen, frameWidth).toString(2))
+            Log.i(TAG, "Tour ends: elapsedRealtime ${t0Elapsed + length}")
+            File(out, "timeline.json").writeText(
+                driver.timeline(screen, frameWidth).put("t0ElapsedRealtime", t0Elapsed).put("lengthMs", length).toString(2),
+            )
         } finally {
             recorder?.stop()
             world.stop()

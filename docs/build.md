@@ -601,6 +601,23 @@ device, so the GIF cannot be regenerated as a check; `cargo xtask demo-gif --che
 a GIF89a on the card's size, within budget, shown by the README. The storyboard is the test's `tour`, the
 captions its `scene` calls, and what the hosts show is `Content.kt`.
 
+The same tour can also be a full video of the whole screen (status bar included), filmed by the phone's own
+screen recorder (not checked in: the README shows the GIF): start it, run the test with `-e or2.demo.frames 0`
+(no screenshots competing with the recorder), stop it. The test logs `Tour starts: elapsedRealtime <ms>` and writes it to `timeline.json` as
+`t0ElapsedRealtime`, with `lengthMs`. OxygenOS's recorder logs its own start on the same clock
+(`adb logcat -d | grep OplusScreenRecorder | grep baseTimeMillis`), so the tour begins
+`(t0ElapsedRealtime - baseTimeMillis) / 1000` seconds into its file (found with
+`adb shell content query --uri content://media/external/video/media --projection _data --sort "date_added DESC"`).
+Cut from 0.1 s after that to 0.3 s before its end, without the audio, as H.264 for the web:
+
+```sh
+ffmpeg -ss <start> -to <end> -i Record_<...>.mp4 -an -map_metadata -1 -vf fps=30,format=yuv420p \
+  -c:v libx264 -preset slow -crf 23 -profile:v high -movflags +faststart or2-demo.mp4
+```
+
+GitHub does not play a video from the repository inside a README; such a video is for a release page (or a
+README embed through an uploaded attachment). Look through it as through the GIF: a notification is filmed too.
+
 ## Phone smoke test
 
 Use an already-authorized ADB endpoint. For a remote server, supply the endpoint explicitly to
