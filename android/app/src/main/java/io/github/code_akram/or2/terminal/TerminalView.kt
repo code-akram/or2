@@ -99,6 +99,9 @@ class TerminalView(context: Context) : View(context) {
     var cellHeight = ceil(textPaint.fontMetrics.bottom - textPaint.fontMetrics.top)
         private set
     private var baseline = -textPaint.fontMetrics.top
+    private var spriteFont = spriteFont(textPaint, baseline)
+    /** Box drawing, blocks and the other [isSprite] characters: drawn as shapes, not text. */
+    private val spritePaint = Paint()
     private data class Glyph(
         val text: String, val wide: Boolean, val foreground: UInt,
         val bold: Boolean, val italic: Boolean, val faint: Boolean, val fakeBold: Boolean,
@@ -494,6 +497,7 @@ class TerminalView(context: Context) : View(context) {
         cellWidth = ceil(textPaint.measureText("M"))
         cellHeight = ceil(textPaint.fontMetrics.bottom - textPaint.fontMetrics.top)
         baseline = -textPaint.fontMetrics.top
+        spriteFont = spriteFont(textPaint, baseline)
         glyphs.evictAll()
         shapes.evictAll()
         asciiShapes.fill(null)
@@ -939,15 +943,22 @@ class TerminalView(context: Context) : View(context) {
             val picture = glyphs[key] ?: Picture().also { picture ->
                 val glyphCanvas = picture.beginRecording(ceil(w).toInt(), ceil(cellHeight).toInt())
                 glyphCanvas.clipRect(0f, 0f, w, cellHeight)
-                textPaint.typeface = typeface
-                textPaint.isFakeBoldText = fakeBold
-                textPaint.color = cell.style.foreground.opaque()
-                textPaint.alpha = if (cell.style.faint) 128 else 255
-                val measured = textPaint.measureText(cell.text)
-                glyphCanvas.save()
-                if (measured > w) glyphCanvas.scale(w / measured, 1f)
-                glyphCanvas.drawText(cell.text, ((w - measured) / 2).coerceAtLeast(0f), baseline, textPaint)
-                glyphCanvas.restore()
+                val sprite = spriteOf(cell.text)
+                if (sprite >= 0) {
+                    spritePaint.color = cell.style.foreground.opaque()
+                    spritePaint.alpha = if (cell.style.faint) 128 else 255
+                    drawSprite(glyphCanvas, sprite, w.toInt(), cellHeight.toInt(), spriteFont, spritePaint)
+                } else {
+                    textPaint.typeface = typeface
+                    textPaint.isFakeBoldText = fakeBold
+                    textPaint.color = cell.style.foreground.opaque()
+                    textPaint.alpha = if (cell.style.faint) 128 else 255
+                    val measured = textPaint.measureText(cell.text)
+                    glyphCanvas.save()
+                    if (measured > w) glyphCanvas.scale(w / measured, 1f)
+                    glyphCanvas.drawText(cell.text, ((w - measured) / 2).coerceAtLeast(0f), baseline, textPaint)
+                    glyphCanvas.restore()
+                }
                 picture.endRecording()
                 glyphs.put(key, picture)
             }
@@ -985,8 +996,9 @@ class TerminalView(context: Context) : View(context) {
             0f, 0f, false, textPaint).getFont(0).also { primaryFonts[style] = it }
         // Conservative rule: only one code point/one glyph in the primary face, upright.
         // HWUI populateSkFont preserves Paint's embolden flag for drawGlyphs. Check ink, not
-        // just advance, with a pixel of AA room; fallback and complex clusters use Pictures.
-        val single = cell.text.codePointCount(0, cell.text.length) == 1
+        // just advance, with a pixel of AA room; fallback and complex clusters use Pictures,
+        // and so do sprites (box drawing, blocks), which are drawn as shapes, never as a glyph.
+        val single = cell.text.codePointCount(0, cell.text.length) == 1 && spriteOf(cell.text) < 0
         val mark = if (single) Character.getType(cell.text.codePointAt(0)) else -1
         var blank = false
         var bounded = single && mark != Character.NON_SPACING_MARK.toInt() &&

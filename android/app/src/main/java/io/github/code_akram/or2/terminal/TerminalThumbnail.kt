@@ -95,6 +95,7 @@ fun TerminalGridPreview(grid: TerminalGrid, version: Int, modifier: Modifier = M
     val cellWidth = remember { ceil(paint.measureText("M")) }
     val cellHeight = remember { ceil(paint.fontMetrics.bottom - paint.fontMetrics.top) }
     val baseline = remember { -paint.fontMetrics.top }
+    val spriteFont = remember { spriteFont(paint, baseline) }
     // Reused by every draw: the preview redraws several times a second per terminal.
     val fill = remember { Paint() }
     val run = remember { StringBuilder() }
@@ -130,6 +131,17 @@ fun TerminalGridPreview(grid: TerminalGrid, version: Int, modifier: Modifier = M
                     if (cell.width == CellWidth.SPACER_TAIL) { column++; continue }
                     paint.color = cell.style.foreground.toInt() or (0xff shl 24)
                     paint.alpha = if (cell.style.faint) 128 else 255
+                    val sprite = spriteOf(cell.text)
+                    if (sprite >= 0) {
+                        val cells = if (cell.width == CellWidth.WIDE) 2 else 1
+                        canvas.save()
+                        canvas.translate(column * cellWidth, y)
+                        canvas.clipRect(0f, 0f, cells * cellWidth, cellHeight)
+                        drawSprite(canvas, sprite, (cells * cellWidth).toInt(), cellHeight.toInt(), spriteFont, paint)
+                        canvas.restore()
+                        column += cells
+                        continue
+                    }
                     if (cell.width == CellWidth.WIDE) {
                         if (cell.text.isNotBlank()) canvas.drawText(cell.text, column * cellWidth, y + baseline, paint)
                         column += 2
@@ -139,7 +151,8 @@ fun TerminalGridPreview(grid: TerminalGrid, version: Int, modifier: Modifier = M
                     run.setLength(0)
                     while (end < row.cells.size) {
                         val next = row.cells[end]
-                        if (next.width != CellWidth.NARROW || next.style.foreground != cell.style.foreground) break
+                        if (next.width != CellWidth.NARROW || next.style.foreground != cell.style.foreground ||
+                            spriteOf(next.text) >= 0) break
                         run.append(next.text.ifEmpty { " " })
                         end++
                     }
