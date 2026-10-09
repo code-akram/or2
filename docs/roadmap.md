@@ -19,24 +19,27 @@ a herdr agent inbox, composer/quick replies, multi-address hosts, compact UI, an
 
 ## Ideas worth taking, by priority
 
-**Next (small, high value):**
-- **Scan for SSH servers** in "Add host": mDNS (`_ssh._tcp`) and the current subnet's port 22,
-  through `Transport`, with a short time limit; it fills the manual form.
-- **Recent directories / one-tap shells:** v0.1.5 (2026-10-04, FFI API 22): the picker's **Dirs** tab merges
-  current live herdr agent/pane cwd ahead of bounded Claude Code/Codex histories, no daemon or extra watch query;
-  opens a new shell there in one tap. Reviewed; 1,067 Rust, 661 JVM and 169 device tests pass; signed APK installed
-  in place on the owner's phone. Real-project manual QA is not established by these suites; a tmux-in-directory
-  option is later.
-- **Gestures:** swipe for the next tmux window or herdr tab, two-finger swipe for panes,
-  two-finger vertical swipe for sessions/workspaces; pinch already zooms.
-- **Hardware keyboard shortcuts:** show shortcuts, switch session 1–9, close session, paste,
-  open composer.
-- **Remote clipboard:** honour OSC 52 from the host into the Android clipboard (with a per-host
-  opt-in), so copying inside tmux/herdr reaches the phone.
-- **App lock on resume** (optional biometric when returning to or2), separate from key unlock.
+**Shipped from this list:**
+- **Gestures** (v0.1.1): one-finger swipe for the next/previous tmux window or herdr tab, two fingers sideways
+  for panes and vertically for sessions/workspaces; pinch zooms.
+- **Hardware keyboard shortcuts** (v0.1.1): Ctrl+Shift+1..9 switch terminals, W closes, V pastes, C copies,
+  Enter opens the composer, / shows the Gestures & shortcuts sheet.
+- **Remote clipboard** (v0.1.1): OSC 52 (and OSC 1337 Copy) writes reach the Android clipboard, on by default
+  with a Settings switch, size-capped and rate-limited; nothing is ever read back.
+- **Recent directories / one-tap shells** (v0.1.5, FFI API 22): the picker's **Dirs** tab merges the live herdr
+  agent/pane cwd ahead of bounded Claude Code/Codex histories and opens a new shell there in one tap. A
+  tmux-in-directory option is later.
 
-**M4 (already planned, refined):** local agent notifications from herdr events; image paste via
-SFTP; voice dictation with an on-device or bring-your-own-key engine (no Google services);
+**Deferred by the owner (2026-10-09):**
+- **Scan for SSH servers** in "Add host": mDNS (`_ssh._tcp`) and the current subnet's port 22, through
+  `Transport`, with a short time limit; it fills the manual form. Local network only (not ZeroTier or remote
+  hosts), so it mostly helps with a Mac on the LAN. Small to medium.
+- **App lock on resume:** an optional biometric prompt when returning to or2, separate from key unlock (which
+  asks only when a key is decrypted to connect). Off by default, with a short grace period for quick app
+  switches. Small.
+
+**M4 (already planned, refined):** local agent notifications from herdr events (shipped v0.1.1) and image
+paste via SFTP (shipped v0.1.2); still open: voice dictation with an on-device or bring-your-own-key engine (no Google services);
 Wake-on-LAN, TCP wake probe and keep-screen-on (see design M4 backlog).
 
 **M5 candidates (bigger):**
@@ -62,19 +65,20 @@ keeps paying (half of its connection items are fixes), Chat View is its biggest 
 multiplexer navigation is second. or2 should support few agents well and never add a cloud.
 
 **Next (small, after M3 lands):**
-1. Local notifications from herdr events: exactly one per Blocked/Done edge
+1. Shipped v0.1.1: local notifications from herdr events: exactly one per Blocked/Done edge
    (`state_change_seq`), none when the pane is on screen, opt-in per host, tap opens the pane.
-2. Wheel-aware scrolling: a swipe in tmux (mouse on) or herdr scrolls the pane, not shell
+2. Shipped v0.1.1: wheel-aware scrolling: a swipe in tmux (mouse on) or herdr scrolls the pane, not shell
    history; a scroll-to-bottom button; tap links (including wrapped URLs).
-3. Project herdr's `agent_session` into the inbox model (unlocks Chat View and precise tap
-   routing).
-4. From the reference-app pass: scan for SSH servers, recent directories / one-tap shells,
-   gestures, hardware shortcuts, OSC 52 clipboard, optional app lock.
+3. Shipped for Reply (v0.1.2, v0.1.3): herdr's `agent_session` ties a notification's Reply and the inbox's
+   Enable Reply to the exact agent; Chat View will build on it.
+4. From the reference-app pass: recent directories / one-tap shells (v0.1.5), gestures, hardware shortcuts
+   and the OSC 52 clipboard (v0.1.1) shipped; scan for SSH servers and the optional app lock are deferred
+   by the owner (2026-10-09).
 
-**M4:** image paste over SFTP (`russh-sftp`, Apache-2.0, OpenSSH-compatible: it reads SFTP handles as UTF-8, so a
+**M4:** image paste over SFTP (shipped v0.1.2; `russh-sftp`, Apache-2.0, OpenSSH-compatible: it reads SFTP handles as UTF-8, so a
 server with binary handles fails the upload; EXIF-stripped, downscaled, uploaded to
 a private cache dir, path inserted without Enter); notification actions (reply through
-`submit_text`, approve/deny with confirmation) and an Android 16 Live Update summary; a history
+`submit_text` shipped v0.1.2; approve/deny with confirmation still open) and an Android 16 Live Update summary; a history
 sheet that pages tmux/herdr history under mosh; an ntfy hook snippet as opt-in remote push
 (metadata-only payload by default); bring-your-own-key dictation; Wake-on-LAN, TCP wake probe,
 keep-screen-on.

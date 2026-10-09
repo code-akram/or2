@@ -387,8 +387,8 @@ until the caller acknowledges, as a real host does.
 1. **The deferred M3 acceptance**, deferred by the owner (2026-10-03) until they clear it: mobile data, the Wi-Fi to mobile handover, and
    unplugged (Doze) background runs. This is v0 acceptance step 3, still never tested.
 2. **The rest of the roadmap.**
-   - Next items: scanning for SSH servers, app lock. Recent directories is implemented, reviewed and installed
-     on the phone and publicly released as v0.1.5 below; the owner confirmed it works after publication.
+   - Scanning for SSH servers and the app lock are **deferred by the owner (2026-10-09)**; gestures, hardware
+     shortcuts, the OSC 52 clipboard (v0.1.1) and recent directories (v0.1.5) have shipped (roadmap.md).
    - M4: history sheet, ntfy, dictation, Wake-on-LAN.
    - M5: Chat View, diff viewer, web preview.
 
