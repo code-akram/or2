@@ -21,3 +21,6 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 uniffi = { workspace = true, features = ["tokio"] }
 zeroize.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }

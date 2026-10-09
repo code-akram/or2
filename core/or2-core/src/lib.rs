@@ -18,3 +18,4 @@ pub mod terminal;
 pub mod tmux;
 pub mod transport;
 pub mod trust;
+pub mod wake;
