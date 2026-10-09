@@ -8,6 +8,33 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-10-10
+
+M4: the history sheet, Wake-on-LAN, answering Claude Code's permission prompts from the notification, and the
+agent summary as a Live Update (versionCode 19, FFI API 24, Room schema 5). See [the release
+notes](docs/releases/v0.1.10.md).
+
+### Added
+
+- **History sheet:** Terminals → History on a tmux or herdr terminal shows the target's last 2,000 lines, read from
+  the host as plain text (tmux `capture-pane`, herdr `pane.read`), selectable, with Copy all; the pane itself is not
+  moved. Under mosh, which keeps no local history, a History chip offers it after a swipe up past the top.
+- **Wake:** an optional MAC address and a "Wake probe" switch per host. **Wake** in a host's options sends the
+  Wake-on-LAN magic packet on the local network, knocks on SSH (which wakes a Mac through Bonjour Sleep Proxy) and
+  retries the connection for 30 s; with the probe on, every connect of that host knocks first.
+- **Approve and Deny** on a Claude Code permission prompt's notification, with the phone unlocked. or2 re-checks
+  that the same prompt is still showing with "1. Yes" highlighted and the agent in the foreground, then presses
+  Enter or Esc; otherwise it says "The prompt changed. Open the pane."
+- **Agent summary** in the connection notification ("1 needs input · 2 working"), shown as an Android 16 Live
+  Update while an agent needs input.
+- Settings: **Keep screen on** (off by default) and **Reopen the last terminal on launch** (on by default).
+
+### Fixed
+
+- Two intermittent device tests: the composer toggle test now waits for the keyboard to stop moving the toolbar,
+  and the terminal visual tests read the app's own window (`PixelCopy`) rather than a screenshot that a heads-up
+  notification could cover.
+
 ## [0.1.9] - 2026-10-09
 
 The terminal's own font: bundled JetBrains Mono, with DejaVu Sans Mono for agent symbols (versionCode 17, FFI API
@@ -349,7 +376,8 @@ The first release: the Android app (a signed APK) and the `or2-pair` host CLI fo
 - Optional local release signing for the APK (`~/.config/or2/signing.properties`); without it the release
   build stays unsigned for F-Droid.
 
-[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/code-akram/or2/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/code-akram/or2/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/code-akram/or2/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/code-akram/or2/compare/v0.1.6...v0.1.7

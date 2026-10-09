@@ -6,6 +6,15 @@ Updated 2026-10-09.
 
 ## Where it stands
 
+### Release v0.1.10 (2026-10-10)
+
+- Owner approved the M4 candidate ("looks good") and said proceed: `m4` merged, **v0.1.10 / versionCode 19 / FFI API
+  24 / Room 5**. [Release notes](releases/v0.1.10.md).
+- Gates: **1,131 Rust**, formatting, Clippy, both generators, `demo-gif --check`; **736 JVM**, all builds incl. the
+  signed release (same certificate), both lints, 183 tasks rerun; Linux `dist --expect-version 0.1.10`; **device
+  suite `OK (192 tests)`**. Signed APK SHA-256 `d9e272dd93c5fb34be5b89cfff1702bec20f9977f73e9718cf18c7a450cf07ea`
+  (40,042,383 bytes); evidence in `/tmp/or2-release-v0.1.10/`. Daily app stayed on the code-18 candidate.
+
 ### M4: history, wake and permission answers (2026-10-09, branch `m4`, unreleased)
 
 - Owner asked for M4 items 1 to 3 and deferred dictation, Chat View and the diff viewer; push through a self-hosted

@@ -35,7 +35,7 @@ class NativeDeviceTest {
     fun loadsPackagedArm64LibraryAndRoundTripsThroughUniFfi() {
         val info = buildInfo()
         assertEquals(24u, info.apiVersion)
-        assertEquals("0.1.9", info.version)
+        assertEquals("0.1.10", info.version)
     }
 
     @Test
