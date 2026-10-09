@@ -23,7 +23,8 @@ import java.util.UUID
  * Posts agent alerts ([AgentAlertSink]) on the `agents` channel: one notification per pane (tag [AgentPaneKey.tag],
  * id [NOTIFICATION_ID]), whose tap opens [MainActivity] with the pane ([openIntent]) and whose Reply action sends
  * text to the agent ([replyIntent], [AgentReplies]); an agent without Reply whose herdr integration is missing gets
- * **Enable Reply** instead, which opens the app to its confirmation ([enableReplyIntent]). Nothing is posted without
+ * **Enable Reply** instead, which opens the app to its confirmation ([enableReplyIntent]). One whose agent waits at a
+ * permission prompt also has **Approve** and **Deny** ([answerIntent], [AgentAnswers]). Nothing is posted without
  * `POST_NOTIFICATIONS`.
  */
 class AgentNotifications(private val context: Context, private val store: PrefStore) : AgentAlertSink {
