@@ -23,6 +23,10 @@ Updated 2026-10-09.
   at the cell's advance; italic may add one hinted pixel from DejaVu's synthesized slant, fitted to the cell). The
   sprite capture was reviewed on the phone. APK +736 KB (39,419,771 bytes). Daily app unchanged (0.1.8, code 15);
   test apps removed.
+- **Signed candidate installed in place** (owner's request) at 21:43 phone-local time: **0.1.8 / versionCode 16**, SHA-256
+  `4e3ac74883cdd99402df65ae51a0c25bf79dc559112dc80e3339caf7d4a37f55`; replaced APK matched public v0.1.8 (kept in
+  `/tmp/or2-candidate-16/`), same certificate, first-install time unchanged, cold launch ok, no crash. Awaiting
+  the owner's look at a live Claude Code pane.
 
 ### Flaky composer device test fixed (2026-10-09, after v0.1.8; test-only)
 
