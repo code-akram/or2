@@ -123,4 +123,29 @@ class HostRecordsTest {
         assertFalse(renamed.sleeps)
         assertEquals("Renamed", renamed.label)
     }
+
+    // --- M4: waking a sleeping host ---------------------------------------------------------------
+
+    @Test
+    fun theMacAddressAndWakeProbeAreSavedAndEditedWithoutTouchingTrust() = runBlocking<Unit> {
+        val dao = FakeDao()
+        dao.saveHost(testHost(id = 0, addresses = twoAddresses), null)
+        var host = dao.host(1)!!
+        assertNull(host.macAddress)
+        assertFalse(host.wakeProbe)
+        dao.replaceTrust(host, first)
+
+        dao.saveHost(host.copy(record = host.record.copy(macAddress = "aa:bb:cc:dd:ee:ff", wakeProbe = true)), host)
+        host = dao.host(1)!!
+        assertEquals("aa:bb:cc:dd:ee:ff", host.macAddress)
+        assertTrue(host.wakeProbe)
+        // Neither names a destination: the host key stays trusted.
+        assertEquals(listOf(first.openssh), dao.trustedKeys(1))
+
+        dao.saveHost(host.copy(record = host.record.copy(macAddress = null, wakeProbe = false)), host)
+        host = dao.host(1)!!
+        assertNull(host.macAddress)
+        assertFalse(host.wakeProbe)
+        assertEquals(listOf(first.openssh), dao.trustedKeys(1))
+    }
 }

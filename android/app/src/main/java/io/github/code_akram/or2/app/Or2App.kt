@@ -36,6 +36,7 @@ import io.github.code_akram.or2.about.AboutRoute
 import io.github.code_akram.or2.about.LicensesRoute
 import io.github.code_akram.or2.connection.ActiveHost
 import io.github.code_akram.or2.connection.HostConnections
+import io.github.code_akram.or2.connection.WakeStatus
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.ffi.HostState
@@ -67,6 +68,8 @@ import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Theme
 import io.github.code_akram.or2.ui.TopBar
 import io.github.code_akram.or2.ui.or2Background
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 
 /** What the screens can ask for; the activity implements them (biometrics, storage, ...). */
 class AppActions(
@@ -121,6 +124,16 @@ class AppActions(
     val onScreen: (OnScreen?) -> Unit = {},
     /** Images shared from another app: the user picks the open terminal each goes to. */
     val imageShares: ImageShares = ImageShares(),
+    /**
+     * Home's Wake for a host (the packet and the probe, one unlock, then connect retries; see [Waker]), what each host
+     * card shows of it ([wakeStatus]), and forgetting a given-up Wake when the host is connected anew ([clearWake]).
+     */
+    val wake: (Host) -> Unit = {},
+    val wakeStatus: StateFlow<Map<Long, WakeStatus>> = MutableStateFlow(emptyMap()),
+    val clearWake: (Long) -> Unit = {},
+    /** Settings, "Terminal": the screen stays on while a terminal is shown; the launch reopens the last terminal. */
+    val keepScreenOn: StateFlow<Boolean> = MutableStateFlow(false),
+    val reopenLastTerminal: () -> Boolean = { true },
 )
 
 /**
@@ -183,6 +196,7 @@ fun Or2App(
     LaunchedEffect(busy) { if (!busy) unlocking = emptySet() }
     fun connect(list: List<Host>) {
         unlocking = list.map { it.id }.toSet()
+        list.forEach { actions.clearWake(it.id) }
         actions.connect(list)
     }
 
@@ -285,11 +299,15 @@ fun Or2App(
                     waiting = keepAliveStep == KeepAliveStep.WAIT,
                     allow = { actions.answerKeepAlive(true) }, notNow = { actions.answerKeepAlive(false) },
                 )
-                is Destination.Terminal -> SessionScreen(
-                    connections, currentTerminal, terminals,
-                    minimise = { navigate(nav.top(Destination.Home)) },
-                    select = { show(it.id, replace = true) },
-                )
+                is Destination.Terminal -> {
+                    val keepScreenOn by actions.keepScreenOn.collectAsStateWithLifecycle()
+                    KeepScreenOn(keepScreenOn)
+                    SessionScreen(
+                        connections, currentTerminal, terminals,
+                        minimise = { navigate(nav.top(Destination.Home)) },
+                        select = { show(it.id, replace = true) },
+                    )
+                }
             }
             // One overlay, one order: at the top of a full-screen terminal (it has no notice area), else above the
             // bottom (and above Home's FAB).

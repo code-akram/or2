@@ -1,6 +1,8 @@
 package io.github.code_akram.or2.home
 
 import io.github.code_akram.or2.data.Host
+import io.github.code_akram.or2.connection.CANT_WAKE_MESSAGE
+import io.github.code_akram.or2.connection.WakeStatus
 import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HostState
@@ -37,14 +39,20 @@ data class HostCard(
 /**
  * The card status for a connection [state] (null: no connection). [unlocking] is true between
  * the tap and the key being unlocked (the biometric prompt); [blockedAgents] makes a connected
- * host's dot an attention dot.
+ * host's dot an attention dot. A Wake ([wake]) shows "Waking…" in place until the host answers (it connects,
+ * authenticates or asks about its key), through every retry; one that gave up says so ([CANT_WAKE_MESSAGE]) until the
+ * host is connected anew.
  */
 fun hostCardStatus(
     state: HostState?, unlocking: Boolean, blockedAgents: Int, sleeps: Boolean = false, addresses: List<HostEndpoint> = emptyList(),
+    wake: WakeStatus? = null,
 ): HostCardStatus {
     val link = linkStatus(state, sleeps)
     val detail = hostFailureDetail(state, addresses)
+    val answered = link == LinkStatus.CONNECTED || link == LinkStatus.NEEDS_HOST_KEY || state == HostState.Authenticating
     return when {
+        wake == WakeStatus.WAKING && !answered -> HostCardStatus("Waking…", null, HostDot.CONNECTING)
+        wake == WakeStatus.CANT_WAKE && link.canConnect -> HostCardStatus(null, CANT_WAKE_MESSAGE, HostDot.FAILED, detail = detail)
         unlocking && link.canConnect ->
             HostCardStatus("Unlocking key…", null, HostDot.CONNECTING)
         state == HostState.Connecting -> HostCardStatus("Checking server…", null, HostDot.CONNECTING)

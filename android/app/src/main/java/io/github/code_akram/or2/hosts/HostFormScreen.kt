@@ -88,6 +88,8 @@ fun HostFormScreen(
     var showInInbox by rememberSaveable(identity) { mutableStateOf(previous?.showInInbox ?: true) }
     var transport by rememberSaveable(identity) { mutableStateOf(previous?.transport ?: TransportPref.AUTO) }
     var sleeps by rememberSaveable(identity) { mutableStateOf(previous?.sleeps ?: false) }
+    var macAddress by rememberSaveable(identity) { mutableStateOf(previous?.macAddress ?: "") }
+    var wakeProbe by rememberSaveable(identity) { mutableStateOf(previous?.wakeProbe ?: false) }
     // Making the new key: its biometric prompt is up. Not saved: a recreated screen's prompt is gone with the old one.
     var working by remember { mutableStateOf(false) }
     var keyError by rememberSaveable(identity) { mutableStateOf<String?>(null) }
@@ -96,7 +98,8 @@ fun HostFormScreen(
     var madeKey by remember { mutableStateOf<KeyRecord?>(null) }
     val scope = rememberCoroutineScope()
     val usernameError = if (username.isEmpty()) null else hostFieldError(username)
-    val valid = validHost(label, addresses, username) && (newKey || keys.any { it.id == keyId })
+    val macAddressError = macError(macAddress)
+    val valid = validHost(label, addresses, username) && macAddressError == null && (newKey || keys.any { it.id == keyId })
 
     installKeyId?.let { id ->
         val key = keys.find { it.id == id } ?: madeKey?.takeIf { it.id == id }
@@ -107,7 +110,10 @@ fun HostFormScreen(
     }
 
     fun host(key: String?) = Host(
-        HostRecord(previous?.id ?: 0, label.trim(), username, key, showInInbox, transport, sleeps),
+        HostRecord(
+            previous?.id ?: 0, label.trim(), username, key, showInInbox, transport, sleeps,
+            macAddress = normalizedMac(macAddress), wakeProbe = wakeProbe,
+        ),
         addresses.map { HostEndpoint(it.hostname, it.port.toInt()) },
     )
     fun submit() {
@@ -206,6 +212,21 @@ fun HostFormScreen(
                 )
             }
             Text(SLEEPS_EXPLANATION, style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.testTag("host-sleeps-note"))
+            GroupCard {
+                ListRow(
+                    "Wake probe", onClick = { wakeProbe = !wakeProbe },
+                    trailing = { Or2Toggle(wakeProbe, { wakeProbe = it }, Modifier.testTag("host-wake-probe")) },
+                )
+            }
+            Text(WAKE_PROBE_EXPLANATION, style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.testTag("host-wake-probe-note"))
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Or2Field(
+                    macAddress, { macAddress = it }, label = "MAC address", placeholder = "aa:bb:cc:dd:ee:ff",
+                    errorText = macAddressError, tag = "host-mac",
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
+                )
+                Text(MAC_ADDRESS_HINT, style = Or2Type.Secondary, color = Or2Colors.TextMuted, modifier = Modifier.testTag("host-mac-hint"))
+            }
             if (previous != null) {
                 Text("Changing any address or port clears previous host-key trust.", style = Or2Type.Secondary, color = Or2Colors.TextMuted)
             }

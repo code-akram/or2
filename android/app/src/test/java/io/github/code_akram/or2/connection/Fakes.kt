@@ -20,7 +20,8 @@ fun testHost(
     id: Long = 7, label: String = "Fixture", keyId: String? = "ephemeral",
     addresses: List<HostEndpoint> = listOf(HostEndpoint("fixture.invalid", 2222)), showInInbox: Boolean = true,
     transport: TransportPref = TransportPref.AUTO, sleeps: Boolean = false,
-) = Host(HostRecord(id, label, "fixture", keyId, showInInbox, transport, sleeps), addresses)
+    macAddress: String? = null, wakeProbe: Boolean = false,
+) = Host(HostRecord(id, label, "fixture", keyId, showInInbox, transport, sleeps, macAddress = macAddress, wakeProbe = wakeProbe), addresses)
 
 /** Whether any terminal has not closed and was not dismissed. */
 fun HostConnections.hasOpenSession(): Boolean = terminals.value.any { !it.retired && it.state.value !is SessionState.Closed }
@@ -361,10 +362,18 @@ class FakeDao : AppDao() {
     }
     override suspend fun insertAddresses(addresses: List<HostAddressRecord>) { this.addresses.value += addresses }
     override suspend fun deleteAddresses(hostId: Long) { addresses.value = addresses.value.filterNot { it.hostId == hostId } }
-    override suspend fun updateHost(id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean, transport: TransportPref, sleeps: Boolean) {
+    override suspend fun updateHost(
+        id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean, transport: TransportPref, sleeps: Boolean,
+        macAddress: String?, wakeProbe: Boolean,
+    ) {
         if (failSave) error("storage failure")
         records.value = records.value.map {
-            if (it.id == id) it.copy(label = label, username = username, keyId = keyId, showInInbox = showInInbox, transport = transport, sleeps = sleeps) else it
+            if (it.id == id) {
+                it.copy(
+                    label = label, username = username, keyId = keyId, showInInbox = showInInbox, transport = transport, sleeps = sleeps,
+                    macAddress = macAddress, wakeProbe = wakeProbe,
+                )
+            } else it
         }
     }
     override suspend fun deleteHost(id: Long) {

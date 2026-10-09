@@ -10,6 +10,7 @@ pub mod keys;
 pub mod pair;
 pub mod probe;
 pub mod session;
+pub mod wake;
 
 #[derive(Debug, uniffi::Record)]
 pub struct BuildInfo {

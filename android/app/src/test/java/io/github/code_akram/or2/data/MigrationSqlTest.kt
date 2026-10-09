@@ -340,4 +340,89 @@ class MigrationSqlTest {
             assertEquals(0, connection.rows("SELECT * FROM trusted_host_keys WHERE hostId = 1").size)
         }
     }
+
+    // --- v4 -> v5: hosts.mac_address and hosts.wake_probe -----------------------------------
+
+    private fun populatedV4(): Connection {
+        val connection = database(4)
+        connection.exec("INSERT INTO keys VALUES ('key-1', 'Phone key', 'ssh-ed25519', 'ssh-ed25519 AAAA', 'SHA256:fp', 'c', x'0a0b0c', x'0102')")
+        connection.exec("INSERT INTO hosts (id, label, username, keyId, showInInbox, transport, sleeps) VALUES (1, 'Alpha', 'u1', 'key-1', 1, 'MOSH', 1)")
+        connection.exec("INSERT INTO hosts (id, label, username, keyId, showInInbox, transport, sleeps) VALUES (5, 'Beta', 'u2', NULL, 0, 'SSH', 0)")
+        connection.exec("INSERT INTO host_addresses VALUES (1, 0, 'alpha.invalid', 22)")
+        connection.exec("INSERT INTO host_addresses VALUES (5, 0, 'beta.invalid', 22)")
+        connection.exec("INSERT INTO trusted_host_keys VALUES (1, 'ssh-ed25519 H1', 'SHA256:h1', 'ssh-ed25519')")
+        return connection
+    }
+
+    @Test
+    fun theVersion5SchemaIsCheckedInWithBothWakeColumns() {
+        assertEquals(5, exportedVersion(5))
+        val hosts = createStatements(5).first { it.startsWith("CREATE TABLE") && "`label`" in it }
+        assertTrue(hosts, "`mac_address` TEXT," in hosts || "`mac_address` TEXT)" in hosts)
+        assertTrue(hosts, "`wake_probe` INTEGER NOT NULL DEFAULT 0" in hosts)
+        assertEquals(4, createStatements(5).count { it.startsWith("CREATE TABLE") })
+    }
+
+    @Test
+    fun existingHostsGetNoMacAndNoProbeAndNothingElseChanges() {
+        populatedV4().use { connection ->
+            val columns = "id, label, username, keyId, showInInbox, transport, sleeps, mosh_failed_until"
+            val before = connection.rows("SELECT $columns FROM hosts ORDER BY id")
+            migrate(connection, MIGRATION_4_5_STATEMENTS)
+            assertEquals(
+                listOf("id", "label", "username", "keyId", "showInInbox", "transport", "sleeps", "mosh_failed_until", "mac_address", "wake_probe"),
+                connection.rows("PRAGMA table_info(hosts)").map { it[1] },
+            )
+            assertEquals(listOf(listOf(1, null, 0), listOf(5, null, 0)),
+                connection.rows("SELECT id, mac_address, wake_probe FROM hosts ORDER BY id").map { row -> row.map { (it as? Number)?.toInt() ?: it } })
+            assertEquals(before, connection.rows("SELECT $columns FROM hosts ORDER BY id"))
+            assertEquals(2, connection.rows("SELECT * FROM host_addresses").size)
+            assertEquals(1, connection.rows("SELECT * FROM trusted_host_keys").size)
+            val key = connection.rows("SELECT id, ciphertext, iv FROM keys")
+            assertArrayEquals(byteArrayOf(0x0a, 0x0b, 0x0c), key[0][1] as ByteArray)
+            assertArrayEquals(byteArrayOf(1, 2), key[0][2] as ByteArray)
+            assertEquals(emptyList<List<Any?>>(), connection.rows("PRAGMA foreign_key_check"))
+        }
+    }
+
+    @Test
+    fun theMigratedSchemaEqualsAFreshVersion5Database() {
+        populatedV4().use { migrated ->
+            migrate(migrated, MIGRATION_4_5_STATEMENTS)
+            database(5).use { fresh -> assertEquals(fresh.shape(), migrated.shape()) }
+        }
+    }
+
+    @Test
+    fun aVersion1DatabaseReachesVersion5ThroughEveryMigration() {
+        populatedV1().use { connection ->
+            migrate(connection)
+            migrate(connection, MIGRATION_2_3_STATEMENTS)
+            migrate(connection, MIGRATION_3_4_STATEMENTS)
+            migrate(connection, MIGRATION_4_5_STATEMENTS)
+            database(5).use { fresh -> assertEquals(fresh.shape(), connection.shape()) }
+            assertEquals(listOf(0, 0, 0), connection.rows("SELECT wake_probe FROM hosts ORDER BY id").map { (it[0] as Number).toInt() })
+            assertEquals(3, connection.rows("SELECT * FROM trusted_host_keys").size)
+        }
+    }
+
+    @Test
+    fun theWakeColumnsTakeValuesTheProbeRefusesNullAndRowsKeepCascading() {
+        populatedV4().use { connection ->
+            migrate(connection, MIGRATION_4_5_STATEMENTS)
+            assertTrue(MIGRATION_4_5_STATEMENTS.none { Regex("\\b(DROP|DELETE|TRUNCATE)\\b", RegexOption.IGNORE_CASE).containsMatchIn(it) })
+            connection.exec("UPDATE hosts SET mac_address = 'aa:bb:cc:dd:ee:ff', wake_probe = 1 WHERE id = 1")
+            val row = connection.rows("SELECT mac_address, wake_probe FROM hosts WHERE id = 1")[0]
+            assertEquals("aa:bb:cc:dd:ee:ff", row[0])
+            assertEquals(1, (row[1] as Number).toInt())
+            connection.exec("UPDATE hosts SET mac_address = NULL WHERE id = 1")
+            assertNull(connection.rows("SELECT mac_address FROM hosts WHERE id = 1")[0][0])
+            connection.exec("INSERT INTO hosts (id, label, username, keyId) VALUES (9, 'New', 'u', NULL)")
+            assertEquals(listOf(null, 0), connection.rows("SELECT mac_address, wake_probe FROM hosts WHERE id = 9")[0].map { (it as? Number)?.toInt() ?: it })
+            assertThrows(java.sql.SQLException::class.java) { connection.exec("UPDATE hosts SET wake_probe = NULL WHERE id = 1") }
+            connection.exec("DELETE FROM hosts WHERE id = 1")
+            assertEquals(0, connection.rows("SELECT * FROM host_addresses WHERE hostId = 1").size)
+            assertEquals(0, connection.rows("SELECT * FROM trusted_host_keys WHERE hostId = 1").size)
+        }
+    }
 }
