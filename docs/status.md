@@ -14,6 +14,10 @@ Updated 2026-10-09.
   signed release (same certificate), both lints, 183 tasks rerun; Linux `dist --expect-version 0.1.10`; **device
   suite `OK (192 tests)`**. Signed APK SHA-256 `d9e272dd93c5fb34be5b89cfff1702bec20f9977f73e9718cf18c7a450cf07ea`
   (40,042,383 bytes); evidence in `/tmp/or2-release-v0.1.10/`. Daily app stayed on the code-18 candidate.
+- **Published and verified:** [run 37989148510](https://github.com/code-akram/or2/actions/runs/37989148510) built and
+  published; the signed APK was uploaded. All six public assets downloaded and checked (checksums, formats, APK hash
+  and certificate, APK identical to the local build); public `or2-pair 0.1.10` runs, and the installer from `main`
+  installs it into a temporary directory with a matching checksum. Latest release is v0.1.10.
 
 ### M4: history, wake and permission answers (2026-10-09, branch `m4`, unreleased)
 
