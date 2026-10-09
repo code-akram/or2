@@ -6,7 +6,20 @@ Updated 2026-10-09.
 
 ## Where it stands
 
-### Terminal sprites: candidate for owner QA (2026-10-09, branch `terminal-sprites`)
+### Release v0.1.8 (2026-10-09)
+
+- Owner approved the sprites candidate ("beautiful work") and asked for merge, push and a release:
+  **v0.1.8 / versionCode 15 / FFI API 23**, the terminal sprites below. [Release notes](releases/v0.1.8.md).
+- Gates: **1,087 Rust** (sshd/tmux/mosh/herdr required), formatting, Clippy, both generators, `demo-gif --check`;
+  **683 JVM**, all builds incl. the signed release (same certificate), both lints, 183 tasks rerun; Linux
+  `dist --expect-version 0.1.8`. Signed APK SHA-256 `87bf7708aa4323113ba2a0e6eda1ef1cd358c4296c03473cac8537cecf40b6e3`;
+  evidence in `/tmp/or2-release-v0.1.8/`.
+- Device suite (separate app): 182 cases, 1 failure: `TerminalChromeDeviceTest.closingTheComposerGivesTheKeysBackToTheTerminal`
+  (composer still shown after toggling twice). It then failed 1 of 9 runs alone and passed its class twice; the
+  composer and its test are unchanged since v0.1.7. **Known intermittent test, worth fixing:** the second toggle
+  click probably lands while the IME animates the toolbar. Daily app stayed on the code-14 candidate during the tests.
+
+### Terminal sprites: candidate for owner QA (2026-10-09, merged for v0.1.8)
 
 - Owner report with a phone screenshot: Claude Code's mascot showed seams between cells and its permission-mode
   arrows `⏵⏵` were two hollow boxes. Diagnosis from all 224 phone fonts: U+23F5 and Powerline exist in none;

@@ -8,6 +8,11 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-10-09
+
+Terminal glyphs drawn by the terminal itself: block art, boxes, Claude Code's status arrows and Powerline
+(versionCode 15, FFI API 23). See [the release notes](docs/releases/v0.1.8.md).
+
 ### Fixed
 
 - Box drawing, block elements, `⏴⏵⏶⏷⏸⏹⏺` and Powerline separators are drawn by the terminal itself,
@@ -329,7 +334,8 @@ The first release: the Android app (a signed APK) and the `or2-pair` host CLI fo
 - Optional local release signing for the APK (`~/.config/or2/signing.properties`); without it the release
   build stays unsigned for F-Droid.
 
-[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/code-akram/or2/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/code-akram/or2/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/code-akram/or2/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/code-akram/or2/compare/v0.1.4...v0.1.5
