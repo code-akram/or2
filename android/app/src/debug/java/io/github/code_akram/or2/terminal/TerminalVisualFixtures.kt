@@ -63,3 +63,39 @@ fun terminalStressFrame(columns: UShort, rows: UShort, sequence: ULong): Termina
         })
     }, null, 0x1a1b26u, Scrollback(rows.toULong(), 0u), TerminalModes(false, false))
 }
+
+/** Claude Code's mascot and status line, boxes, blocks and Powerline: the characters drawn as sprites. */
+fun terminalSpriteFrame(columns: UShort, rows: UShort): TerminalFrame {
+    val plain = CellStyle(0xc0caf5u, 0x1a1b26u, null, Underline.NONE, false, false, false, false, false)
+    val styles = listOf(plain, plain.copy(foreground = 0xd77757u), plain.copy(foreground = 0xe0af68u),
+        plain.copy(foreground = 0x1a1b26u, background = 0x7aa2f7u), plain.copy(foreground = 0x7aa2f7u),
+        plain.copy(faint = true))
+    val lines = listOf(
+        listOf("Sprites (debug fixture)" to 0u),
+        listOf(" ▐▛███▜▌" to 1u, "   Claude Code" to 0u),
+        listOf("▝▜█████▛▘" to 1u, "  Opus" to 0u),
+        listOf("  ▘▘ ▝▝" to 1u, "    ~/code/or2" to 0u),
+        listOf("╭──────────────╮" to 4u),
+        listOf("│" to 4u, " ⏺ Bash(ls)" to 0u, "   │" to 4u),
+        listOf("│" to 4u, " ⎿  done" to 5u, "      │" to 4u),
+        listOf("╰──────────────╯" to 4u),
+        listOf("⏵⏵ auto mode on" to 2u, " (shift+tab)" to 0u),
+        listOf("┌─┬─┐ ┏━┳━┓ ╔═╦═╗ ░▒▓█ ▁▂▃▄▅▆▇█" to 0u),
+        listOf("├─┼─┤ ┣━╋━┫ ╠═╬═╣ ▏▎▍▌▋▊▉ ▔▕▀▐" to 0u),
+        listOf("└─┴─┘ ┗━┻━┛ ╚═╩═╝ ┄┈╌┆┊╎ ╱╲╳" to 0u),
+        listOf("⏴⏶⏷⏸⏹ ▖▗▘▙▚▛▜▝▞▟ ╓╥╖╒╤╕╞╪╡" to 0u),
+        listOf(" main " to 3u, "\uE0B0" to 4u, "\uE0B1" to 4u, " ~/or2 " to 0u, "\uE0B3" to 4u, "\uE0B6" to 4u, " ok " to 3u, "\uE0B4" to 4u, "\uE0B5\uE0B7\uE0B2" to 4u),
+    )
+    val changed = List(rows.toInt()) { row ->
+        val cells = MutableList(columns.toInt()) { TerminalCell("", CellWidth.NARROW, 0u) }
+        var column = 0
+        lines.getOrNull(row)?.forEach { (text, style) ->
+            text.forEach { char ->
+                if (column < cells.size) cells[column++] = TerminalCell(if (char == ' ') "" else char.toString(), CellWidth.NARROW, style)
+            }
+        }
+        TerminalRow(row.toUShort(), false, cells)
+    }
+    return TerminalFrame(1u, columns, rows, true, styles, changed, null,
+        0x1a1b26u, Scrollback(rows.toULong(), 0u), TerminalModes(false, false))
+}

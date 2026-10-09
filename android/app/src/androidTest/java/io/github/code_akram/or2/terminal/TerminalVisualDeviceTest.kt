@@ -109,6 +109,66 @@ class TerminalVisualDeviceTest {
         }
     }
 
+    @Test fun spritesFillTheirCellsWithoutSeamsAndDrawArrowsNoFontHas() {
+        instrumentation.runOnMainSync {
+            val view = TerminalView(instrumentation.targetContext)
+            val columns = 40
+            val rows = 14
+            val width = (view.horizontalInset * 2 + columns * view.cellWidth).toInt()
+            val height = (rows * view.cellHeight).toInt()
+            view.layout(0, 0, width, height)
+            view.grid.apply(terminalSpriteFrame(columns.toUShort(), rows.toUShort()))
+            assertEquals("▛", view.grid.rows[1].cells[2].text)
+            assertFalse("Sprites never join a glyph batch", view.canBatchGlyph(view.grid.rows[1].cells[2]))
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            try {
+                view.draw(Canvas(bitmap))
+                val cell = view.cellWidth
+                val rowHeight = view.cellHeight.toInt()
+                fun left(column: Int) = view.horizontalInset + column * cell
+                val orange = 0xffd77757.toInt()
+                // ▐▛███▜▌: the upper half is one bar from ▐'s middle to ▌'s, with no seam between cells.
+                val y = rowHeight + (rowHeight - (rowHeight * 4 + 4) / 8) - 1
+                val half = ((cell.toInt() * 4 + 4) / 8).toFloat()
+                for (x in (left(1) + half).toInt() + 1 until (left(7) + half).toInt() - 1) {
+                    assertEquals("Seam in the mascot at x=$x", orange, bitmap.getPixel(x, y))
+                }
+                // The body's middle column runs unbroken through both rows of █.
+                val middle = (left(4) + cell / 2).toInt()
+                for (row in rowHeight + 1 until 3 * rowHeight - 1) {
+                    assertEquals("Seam between the mascot's rows at y=$row", orange, bitmap.getPixel(middle, row))
+                }
+                // ⏵⏵, which no phone font has: ink in the text colour, heavier on the left (it points right).
+                val yellow = 0xffe0af68.toInt()
+                for (column in 0..1) {
+                    val x0 = left(column).toInt()
+                    val y0 = 8 * rowHeight
+                    var leftInk = 0
+                    var rightInk = 0
+                    for (dy in 0 until rowHeight) for (dx in 0 until cell.toInt()) {
+                        if (bitmap.getPixel(x0 + dx, y0 + dy) != yellow) continue
+                        if (dx < cell / 2) leftInk++ else rightInk++
+                    }
+                    assertTrue("⏵ at column $column drew no ink", leftInk + rightInk > cell.toInt())
+                    assertTrue("⏵ at column $column must point right ($leftInk left, $rightInk right)", leftInk > rightInk)
+                }
+            } finally {
+                bitmap.recycle()
+            }
+        }
+    }
+
+    @Test fun capturesSprites() {
+        ActivityScenario.launch(TerminalProbeActivity::class.java).use { scenario ->
+            await(scenario) { _, view -> view.grid.hasGrid && view.grid.rows.size > 14 }
+            scenario.onActivity { activity ->
+                val view = activity.terminalView()!!
+                activity.display(terminalSpriteFrame(view.grid.columns.toUShort(), view.grid.rows.size.toUShort()))
+            }
+            capture(scenario, "sprites")
+        }
+    }
+
     private fun raster(scenario: ActivityScenario<TerminalProbeActivity>, change: (TerminalView) -> Unit): Bitmap {
         var draws = 0
         var bounds = Rect()

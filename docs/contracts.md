@@ -4005,6 +4005,17 @@ once, in order. In `TargetScroller`:
   exception cache preserves synthetic italic/weight and cluster rendering. Faint remains alpha 128.
   A block cursor still redraws the clipped cell in its background colour; frozen selection rows,
   link feedback, IME composition and the scroll indicator retain their overlay order.
+- **Sprites** (`TerminalSprites.kt`): a cell holding exactly one box-drawing (U+2500–257F), block-element
+  (U+2580–259F), media (`⏴⏵⏶⏷⏸⏹⏺`, U+23F4–23FA) or Powerline (U+E0B0–E0B7) character is drawn as
+  shapes, never a font glyph, and never batched; it uses the per-cell Picture cache like any other
+  exception. The phone's fonts lack `⏵` and Powerline (tofu) and draw blocks with glyphs that do not
+  fill the cell (seams through Claude Code's mascot); `⏺` exists only as a colour emoji. Lines and blocks
+  are whole-pixel rectangles without antialiasing; any line leaves a cell exactly where `─━═`/`│┃║`
+  do, so neighbours join. Light lines take the font's underline thickness (heavy 2x, double two light
+  strokes a light line apart); halves and quadrants split at the same pixel everywhere; shades are
+  alpha 64/128/192. Arcs, diagonals, media and Powerline are antialiased paths; media symbols are text
+  sized and centred on a capital letter. Bold and italic do not change a sprite; faint keeps alpha
+  128. A cell with a variation selector (`⏺️`) is not a sprite. The Home thumbnail draws the same sprites.
 - Single/double underline, strike and overline merge identical decoration/colour/faint runs.
   Curly/dotted/dashed retain per-cell phase. Hard background edges and continuous straight
   decoration edges may differ in antialiasing at shared cell boundaries; grid metrics, colours,

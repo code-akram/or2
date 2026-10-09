@@ -8,6 +8,14 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Box drawing, block elements, `⏴⏵⏶⏷⏸⏹⏺` and Powerline separators are drawn by the terminal itself,
+  pixel-exact on the cell grid, instead of through the phone's fonts: Claude Code's mascot no longer
+  shows seams between cells, its permission-mode arrows `⏵⏵` are no longer two hollow boxes, and its
+  `⏺` is a bullet in the text colour rather than a colour emoji. Boxes, borders and prompts join
+  without gaps. The Home thumbnails draw them the same way.
+
 ## [0.1.7] - 2026-10-08
 
 A demo of the app in the README, and the tooling that makes it (versionCode 13, FFI API 23; the app is
