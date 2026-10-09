@@ -6,6 +6,8 @@ import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
+import io.github.code_akram.or2.ffi.PermissionAnswer
+import io.github.code_akram.or2.ffi.PermissionPrompt
 import io.github.code_akram.or2.ffi.ReplyRoute
 import io.github.code_akram.or2.ffi.SessionFailure
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -73,5 +75,35 @@ class HostConnectionsReplyTest {
         assertEquals(2, ports.single().replies.size)
         // Nothing a reply says reaches the timing log.
         assertTrue(lines.none { "secret" in it })
+    }
+
+    @Test
+    fun aPermissionPromptIsAskedAndAnsweredOverTheLiveConnectionOnly() = runTest {
+        val holder = holder()
+        val agent = AgentIdentity("term_7", "claude", null, AgentSession("id", "sess_7"))
+        val ask = suspend { holder.permissionPrompt(host.id, "work", "w1:p2", agent) }
+        val answer = suspend { holder.answerPermission(host.id, "work", "w1:p2", agent, 4u, PermissionAnswer.DENY) }
+        assertTrue(failure { ask() } is HostException.NotConnected)
+        assertTrue(failure { answer() } is HostException.NotConnected)
+        assertTrue(ports.isEmpty())
+
+        holder.connect(host, byteArrayOf(1))
+        advanceUntilIdle()
+        ports.single().nativeState = HostState.Connected(0u)
+        listeners.single().onHostStateChanged(HostState.Connected(0u))
+        advanceUntilIdle()
+        ports.single().permission = PermissionPrompt(4u)
+        assertEquals(PermissionPrompt(4u), ask())
+        assertEquals(listOf("w1:p2" to agent), ports.single().prompts)
+        answer()
+        assertEquals(listOf(Triple("w1:p2", 4uL, PermissionAnswer.DENY)), ports.single().answers)
+        ports.single().answerFailure = HostException.PromptChanged()
+        assertTrue(failure { answer() } is HostException.PromptChanged)
+
+        listeners.single().onHostStateChanged(HostState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("reset"))))
+        advanceUntilIdle()
+        assertTrue(failure { ask() } is HostException.NotConnected)
+        assertTrue(failure { answer() } is HostException.NotConnected)
+        assertEquals(1, ports.size)
     }
 }

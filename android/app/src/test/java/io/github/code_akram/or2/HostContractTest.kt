@@ -16,6 +16,8 @@ import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.NavDirection
+import io.github.code_akram.or2.ffi.PermissionAnswer
+import io.github.code_akram.or2.ffi.PermissionPrompt
 import io.github.code_akram.or2.ffi.ReplyRoute
 import io.github.code_akram.or2.ffi.Session
 import io.github.code_akram.or2.ffi.SessionException
@@ -570,6 +572,39 @@ class HostContractTest {
             val refused = assertThrows(HostException.CommandFailed::class.java) { runBlocking { host.replyToPane(null, "w2:p1", unknown, "hello") } }
             assertEquals("open the pane to reply", refused.reason)
         }
+        assertEquals(HostState.Connected(0u), host.state())
+        host.disconnect()
+        host.close()
+    }
+
+    @Test
+    fun aPermissionPromptAndItsAnswerCrossTheFfi() {
+        val host = connectedHost()
+        runBlocking {
+            // The probe's blocked Claude Code waits at a permission prompt at its view's seq; the others at none.
+            assertEquals(PermissionPrompt(4u), host.permissionPrompt(null, "w1:p1", PROBE_CLAUDE))
+            assertNull(host.permissionPrompt("work", "w1:p2", PROBE_CODEX))
+            host.answerPermission(null, "w1:p1", PROBE_CLAUDE, 4u, PermissionAnswer.APPROVE)
+            host.answerPermission(null, "w1:p1", PROBE_CLAUDE, 4u, PermissionAnswer.DENY)
+        }
+        // Another seq is another prompt; another instance finds none; the names are checked as a reply's.
+        assertThrows(HostException.PromptChanged::class.java) {
+            runBlocking { host.answerPermission(null, "w1:p1", PROBE_CLAUDE, 5u, PermissionAnswer.APPROVE) }
+        }
+        assertThrows(HostException.PromptChanged::class.java) {
+            runBlocking { host.answerPermission(null, "w1:p2", PROBE_CODEX, 2u, PermissionAnswer.DENY) }
+        }
+        assertThrows(HostException.PaneNotFound::class.java) {
+            runBlocking { host.permissionPrompt(null, "w1:p1", PROBE_CLAUDE.copy(session = AgentSession("id", "sess_next"))) }
+        }
+        assertThrows(HostException.PaneNotFound::class.java) {
+            runBlocking { host.answerPermission(null, "w1:p1", PROBE_CLAUDE.copy(terminalId = "term_w2:p1"), 4u, PermissionAnswer.APPROVE) }
+        }
+        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.permissionPrompt(null, "w1 p1", PROBE_CLAUDE) } }
+        val refused = assertThrows(HostException.CommandFailed::class.java) {
+            runBlocking { host.answerPermission(null, "w1:p1", PROBE_CLAUDE.copy(agent = null), 4u, PermissionAnswer.APPROVE) }
+        }
+        assertEquals("open the pane to reply", refused.reason)
         assertEquals(HostState.Connected(0u), host.state())
         host.disconnect()
         host.close()

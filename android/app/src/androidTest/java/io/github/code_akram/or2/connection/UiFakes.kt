@@ -104,6 +104,10 @@ class UiPort(
     override suspend fun replyToPane(
         session: String?, paneId: String, agent: AgentIdentity, text: String,
     ) = ReplyRoute.PROMPTED
+    override suspend fun permissionPrompt(session: String?, paneId: String, agent: AgentIdentity): PermissionPrompt? = null
+    override suspend fun answerPermission(
+        session: String?, paneId: String, agent: AgentIdentity, seq: ULong, answer: PermissionAnswer,
+    ) = Unit
     override suspend fun uploadImage(bytes: ByteArray, extension: String) = "/home/u/.cache/or2/images/or2-1.$extension"
 
     /** What `herdr_integrations` answers; `install_herdr_integration` ids go to [installs]. */

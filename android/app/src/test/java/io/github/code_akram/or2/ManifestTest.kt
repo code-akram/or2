@@ -22,7 +22,7 @@ class ManifestTest {
         val declared = permissions.toSet()
         for (name in listOf(
             "FOREGROUND_SERVICE", "FOREGROUND_SERVICE_SPECIAL_USE", "POST_NOTIFICATIONS", "ACCESS_NETWORK_STATE",
-            "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS", "INTERNET", "USE_BIOMETRIC", "CAMERA",
+            "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS", "INTERNET", "USE_BIOMETRIC", "CAMERA", "POST_PROMOTED_NOTIFICATIONS",
         )) {
             assertTrue("android.permission.$name is missing", "android.permission.$name" in declared)
         }
@@ -31,7 +31,7 @@ class ManifestTest {
     @Test
     fun noPermissionIsDeclaredTwiceAndNothingBeyondTheKnownListIsAsked() {
         assertEquals(permissions.toSet().size, permissions.size)
-        assertEquals(8, permissions.size) // A new permission is a decision: update this list and the docs.
+        assertEquals(9, permissions.size) // A new permission is a decision: update this list and the docs.
     }
 
     @Test

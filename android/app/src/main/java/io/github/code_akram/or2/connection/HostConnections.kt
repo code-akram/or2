@@ -22,6 +22,8 @@ import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.LinkHealth
+import io.github.code_akram.or2.ffi.PermissionAnswer
+import io.github.code_akram.or2.ffi.PermissionPrompt
 import io.github.code_akram.or2.ffi.ReplyRoute
 import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.SessionInterface
@@ -137,6 +139,21 @@ interface HostPort : AutoCloseable {
     suspend fun replyToPane(session: String?, paneId: String, agent: AgentIdentity, text: String): ReplyRoute
 
     /**
+     * The yes/no permission prompt [agent] waits at in herdr pane [paneId] of [session], or null when it waits at none
+     * that can be answered from a notification (only a blocked Claude Code at a permission rule herdr sees on screen).
+     * Sends nothing to the pane. `PaneNotFound` when the pane, or that agent, is gone.
+     */
+    suspend fun permissionPrompt(session: String?, paneId: String, agent: AgentIdentity): PermissionPrompt?
+
+    /**
+     * Approves (Enter) or denies (Escape) the permission prompt [agent] waits at in herdr pane [paneId] of [session],
+     * the one [permissionPrompt] found at [seq], once every check passed again. `PromptChanged` when the agent is not at
+     * that prompt any more, `PaneNotFound` when the pane or that agent is gone or its shell has the foreground; nothing
+     * is sent then.
+     */
+    suspend fun answerPermission(session: String?, paneId: String, agent: AgentIdentity, seq: ULong, answer: PermissionAnswer)
+
+    /**
      * API 16: writes [bytes] over SFTP to the host's `~/.cache/or2/images` and returns the file's absolute
      * path ([extension]: `png`, `jpg`, ...). `SftpUnavailable` without SFTP, `TooLarge` above 20 MiB.
      * Cancelling stops the upload.
@@ -177,6 +194,10 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
         connection.navigate(target, paneId, nav, clientId)
     override suspend fun replyToPane(session: String?, paneId: String, agent: AgentIdentity, text: String) =
         connection.replyToPane(session, paneId, agent, text)
+    override suspend fun permissionPrompt(session: String?, paneId: String, agent: AgentIdentity) =
+        connection.permissionPrompt(session, paneId, agent)
+    override suspend fun answerPermission(session: String?, paneId: String, agent: AgentIdentity, seq: ULong, answer: PermissionAnswer) =
+        connection.answerPermission(session, paneId, agent, seq, answer)
     override suspend fun uploadImage(bytes: ByteArray, extension: String) = connection.uploadImage(bytes, extension)
     override suspend fun installHerdrIntegration(id: String) = connection.installHerdrIntegration(id)
     override suspend fun herdrIntegrations() = connection.herdrIntegrations()
@@ -958,6 +979,22 @@ class HostConnections(
      */
     suspend fun replyToPane(hostId: Long, session: String?, paneId: String, agent: AgentIdentity, text: String): ReplyRoute =
         currentPort(hostId, requireConnected = true).replyToPane(session, paneId, agent, text)
+
+    /**
+     * Whether [agent] in herdr pane [paneId] of [session] on [hostId] waits at a permission prompt a notification can
+     * answer (`permission_prompt`), over the live connection only, as a reply: throws [HostException.NotConnected]
+     * when the host has none, and the query's own [HostException] otherwise.
+     */
+    suspend fun permissionPrompt(hostId: Long, session: String?, paneId: String, agent: AgentIdentity): PermissionPrompt? =
+        currentPort(hostId, requireConnected = true).permissionPrompt(session, paneId, agent)
+
+    /**
+     * A notification's Approve or Deny (`answer_permission`) for the prompt found at [seq], over the live connection only:
+     * throws [HostException.NotConnected] when the host has none, and the answer's own [HostException] otherwise.
+     */
+    suspend fun answerPermission(
+        hostId: Long, session: String?, paneId: String, agent: AgentIdentity, seq: ULong, answer: PermissionAnswer,
+    ) = currentPort(hostId, requireConnected = true).answerPermission(session, paneId, agent, seq, answer)
 
     /**
      * Reads herdr's integrations on [current] (`herdr_integrations`, one exec) when they are stale and [agents] holds

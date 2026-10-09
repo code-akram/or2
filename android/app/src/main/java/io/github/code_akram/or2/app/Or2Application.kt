@@ -24,6 +24,7 @@ import io.github.code_akram.or2.data.MIGRATION_3_4
 import io.github.code_akram.or2.keys.BiometricVault
 import io.github.code_akram.or2.notify.AgentAlertSettings
 import io.github.code_akram.or2.notify.AgentAlerts
+import io.github.code_akram.or2.notify.AgentAnswers
 import io.github.code_akram.or2.notify.AgentNotifications
 import io.github.code_akram.or2.notify.AgentOpenRequests
 import io.github.code_akram.or2.notify.AgentReplies
@@ -68,6 +69,23 @@ class Or2Application : Application() {
     val agentAlerts by lazy {
         AgentAlerts(AgentNotifications(this, prefs), ReplyNonces(prefs)) { agentAlertSettings.enabled.value }
             .also { alerts -> alerts.enableReply = { hostId, agent -> connections.enableReplyFor(hostId, agent) } }
+            .also { alerts -> alerts.askPermission = { alert -> agentAnswers.check(alert) } }
+    }
+
+    /**
+     * A notification's Approve or Deny of a permission prompt ([AgentReplyReceiver]), and the question behind it: is a
+     * `Needs input` one ([AgentAlerts.askPermission])? Over the host's live connection only, on the application's own
+     * scope and the main dispatcher, as [agentReplies].
+     */
+    val agentAnswers: AgentAnswers by lazy {
+        AgentAnswers(
+            CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+            admit = agentAlerts::admitReply,
+            ask = { key, agent -> connections.permissionPrompt(key.hostId, key.session, key.paneId, agent) },
+            send = { key, agent, seq, answer -> connections.answerPermission(key.hostId, key.session, key.paneId, agent, seq, answer) },
+            found = agentAlerts::permissionFound,
+            post = agentAlerts::replied,
+        )
     }
 
     /** An Enable Reply waiting for its confirmation (an Inbox row's, a notification's), for the dialog. */

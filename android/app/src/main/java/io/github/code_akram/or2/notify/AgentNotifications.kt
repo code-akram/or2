@@ -16,6 +16,7 @@ import android.net.Uri
 import io.github.code_akram.or2.MainActivity
 import io.github.code_akram.or2.R
 import io.github.code_akram.or2.app.PrefStore
+import io.github.code_akram.or2.ffi.PermissionAnswer
 import java.util.UUID
 
 /**
@@ -72,13 +73,20 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
             .setAutoCancel(true)
             .setContentIntent(open)
         // Only an agent instance herdr identifies can be answered from here: any other is opened to reply, and one whose
-        // integration is missing offers to set it up instead (in the app, after a confirmation).
-        if (alert.agent != null) {
-            builder.addAction(replyAction(alert))
-        } else if (alert.enableReplyRequest != null) {
-            builder.addAction(enableReplyAction(alert))
+        // integration is missing offers to set it up instead (in the app, after a confirmation). One at a permission
+        // prompt can be approved or denied too, with the phone unlocked.
+        for (action in alertActions(alert)) {
+            builder.addAction(
+                when (action.kind) {
+                    AlertActionKind.APPROVE -> answerAction(alert, action, PermissionAnswer.APPROVE)
+                    AlertActionKind.DENY -> answerAction(alert, action, PermissionAnswer.DENY)
+                    AlertActionKind.REPLY -> replyAction(alert)
+                    AlertActionKind.ENABLE_REPLY -> enableReplyAction(alert)
+                },
+            )
         }
-        if (alert.outcome != null) builder.setOnlyAlertOnce(true)
+        // An outcome, or the prompt found behind a `Needs input` just posted: the same notification, updated quietly.
+        if (alert.outcome != null || alert.permission != null) builder.setOnlyAlertOnce(true)
         alert.reply?.let { reply ->
             val agent = Person.Builder().setName(alert.title).build()
             builder.setStyle(
@@ -107,6 +115,23 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
         return Notification.Action.Builder(Icon.createWithResource(context, R.drawable.ic_stat_or2), "Reply", reply)
             .addRemoteInput(input)
             .setSemanticAction(Notification.Action.SEMANTIC_ACTION_REPLY)
+            .setAllowGeneratedReplies(false)
+            .build()
+    }
+
+    /**
+     * An **Approve** or **Deny** action ([action], from [alertActions]): a broadcast to [AgentReplyReceiver] (explicit,
+     * not exported) that answers the prompt without opening the app. Immutable and one-shot; its data names the pane
+     * and this post's capability (shared with the Reply action: one use by any of them), its extras the agent instance
+     * and the prompt's seq. The system asks to unlock the phone first ([AlertAction.authenticationRequired]).
+     */
+    private fun answerAction(alert: AgentAlert, action: AlertAction, answer: PermissionAnswer): Notification.Action {
+        val intent = PendingIntent.getBroadcast(
+            context, alert.key.tag.hashCode(), answerIntent(context, alert, answer),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_ONE_SHOT,
+        )
+        return Notification.Action.Builder(Icon.createWithResource(context, R.drawable.ic_stat_or2), action.label, intent)
+            .setAuthenticationRequired(action.authenticationRequired)
             .setAllowGeneratedReplies(false)
             .build()
     }
@@ -183,6 +208,42 @@ class AgentNotifications(private val context: Context, private val store: PrefSt
                 intent.getStringExtra(EXTRA_TERMINAL), intent.getStringExtra(EXTRA_AGENT),
                 intent.getStringExtra(EXTRA_AGENT_NAME), intent.getStringExtra(EXTRA_SESSION_KIND),
                 intent.getStringExtra(EXTRA_SESSION_VALUE), intent.getStringExtra(EXTRA_TITLE), intent.getStringExtra(EXTRA_TEXT), intent.getStringExtra(EXTRA_HOST),
+            )
+        }
+
+        const val ACTION_APPROVE = "io.github.code_akram.or2.action.APPROVE_AGENT"
+        const val ACTION_DENY = "io.github.code_akram.or2.action.DENY_AGENT"
+        private const val ANSWER_SCHEME = "or2-agent-answer"
+        private const val EXTRA_SEQ = "io.github.code_akram.or2.extra.PERMISSION_SEQ"
+
+        /**
+         * An **Approve** or **Deny** action's intent: explicitly [AgentReplyReceiver], its action the answer; its data
+         * the pane's tag with this post's capability as the fragment; the agent instance (as a Reply intent's), the
+         * prompt's seq, and what the notification showed, for the update.
+         */
+        fun answerIntent(context: Context, alert: AgentAlert, answer: PermissionAnswer): Intent =
+            Intent(if (answer == PermissionAnswer.APPROVE) ACTION_APPROVE else ACTION_DENY)
+                .setComponent(ComponentName(context, AgentReplyReceiver::class.java))
+                .setData(Uri.fromParts(ANSWER_SCHEME, alert.key.tag, alert.nonce))
+                .putExtra(EXTRA_TERMINAL, alert.agent?.terminalId)
+                .putExtra(EXTRA_AGENT, alert.agent?.agent)
+                .putExtra(EXTRA_AGENT_NAME, alert.agent?.name)
+                .putExtra(EXTRA_SESSION_KIND, alert.agent?.session?.kind)
+                .putExtra(EXTRA_SESSION_VALUE, alert.agent?.session?.value)
+                .putExtra(EXTRA_SEQ, alert.permission?.toLong() ?: -1L)
+                .putExtra(EXTRA_TITLE, alert.title)
+                .putExtra(EXTRA_TEXT, alert.text)
+                .putExtra(EXTRA_HOST, alert.subText)
+
+        /** The answer an Approve or Deny intent names ([answerIntent]), with its capability, or null for any other intent. */
+        fun answerOf(intent: Intent?): AgentAnswerRequest? {
+            if (intent?.data?.scheme != ANSWER_SCHEME) return null
+            return agentAnswerFrom(
+                intent.action, intent.data?.schemeSpecificPart, intent.data?.fragment,
+                intent.getStringExtra(EXTRA_TERMINAL), intent.getStringExtra(EXTRA_AGENT),
+                intent.getStringExtra(EXTRA_AGENT_NAME), intent.getStringExtra(EXTRA_SESSION_KIND),
+                intent.getStringExtra(EXTRA_SESSION_VALUE), intent.getLongExtra(EXTRA_SEQ, -1L),
+                intent.getStringExtra(EXTRA_TITLE), intent.getStringExtra(EXTRA_TEXT), intent.getStringExtra(EXTRA_HOST),
             )
         }
 
