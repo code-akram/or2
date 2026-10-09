@@ -6108,8 +6108,9 @@ for producer detection, mailbox composition, renderer caching and validation.
 Three lanes, one FFI bump (`API_VERSION` = 24, made by the lead at integration; lanes do not touch it). Each lane
 adds its own exports and keeps every change additive in the shared files (`core/host.rs` `HostCommand`,
 `ssh/connection.rs` `dispatch`, `ffi/probe.rs` `run_host`, `ffi/host.rs`, `HostPort` and its three fakes,
-`Or2Application.kt`). The owner deferred dictation, Chat View and the diff viewer the same day; ntfy waits for
-the owner's answers (server, delivery, payload, setup).
+`Or2Application.kt`). The owner deferred dictation, Chat View and the diff viewer the same day, and push (ntfy
+through UnifiedPush) until the mobile-data and Wi-Fi handover tests show whether or2 stays connected in the
+background: while it does, the in-app agent notifications cover the need.
 
 ## Lane History: the history sheet
 
