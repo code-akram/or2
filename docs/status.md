@@ -18,6 +18,10 @@ Updated 2026-10-09.
   saw the header pixel half as bright (`#19304D` for `#336699`: a passing dim, not a glyph). 10 of 10 alone and its
   class twice then passed; the same check failed once in the v0.1.7 cycle. **Known intermittent test.** The suite on
   the font change itself (before the version bump) passed all 183. Daily app stayed on the code-16 candidate.
+- **Published and verified:** [run 37970443500](https://github.com/code-akram/or2/actions/runs/37970443500) built and
+  published; the signed APK was uploaded. All six public assets downloaded and checked (checksums, formats, APK hash
+  and certificate, APK identical to the local build); public `or2-pair 0.1.9` runs, and the installer from `main`
+  installs it into a temporary directory with a matching checksum. Latest release is v0.1.9.
 
 ### Bundled terminal font (2026-10-09, branch `terminal-font`, unreleased)
 
