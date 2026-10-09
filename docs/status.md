@@ -18,6 +18,10 @@ Updated 2026-10-09.
   (composer still shown after toggling twice). It then failed 1 of 9 runs alone and passed its class twice; the
   composer and its test are unchanged since v0.1.7. **Known intermittent test, worth fixing:** the second toggle
   click probably lands while the IME animates the toolbar. Daily app stayed on the code-14 candidate during the tests.
+- **Published and verified:** [run 37958819166](https://github.com/code-akram/or2/actions/runs/37958819166) built and
+  published; the signed APK was uploaded. All six public assets downloaded and checked (checksums, formats, APK hash
+  and certificate, APK identical to the local build); public `or2-pair 0.1.8` runs, and the installer from `main`
+  installs it into a temporary directory with a matching checksum. Latest release is v0.1.8.
 
 ### Terminal sprites: candidate for owner QA (2026-10-09, merged for v0.1.8)
 
