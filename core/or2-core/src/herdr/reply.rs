@@ -80,7 +80,7 @@ pub const AGENT_NOT_READY: &str = "agent_not_ready";
 pub const AGENT_NOT_FOUND: &str = "agent_not_found";
 
 /// The key a typed reply is submitted with.
-const ENTER: &str = "Enter";
+pub(super) const ENTER: &str = "Enter";
 
 /// Interactive shells by process name: a foreground group led by one of these is a shell prompt
 /// (or a shell running a script), never an agent.
@@ -284,7 +284,7 @@ async fn typed<H: RemoteHost, C: Future<Output = ()>>(
     Ok(ReplyRoute::Typed)
 }
 
-fn agent_get(pane_id: &str) -> RequestBody {
+pub(super) fn agent_get(pane_id: &str) -> RequestBody {
     RequestBody::AgentGet(AgentTarget {
         target: pane_id.to_owned(),
     })
@@ -292,7 +292,7 @@ fn agent_get(pane_id: &str) -> RequestBody {
 
 /// herdr's answer as a reply's error: no agent there (any more), or no such pane, is
 /// [`HerdrError::PaneNotFound`].
-fn gone(error: WireError) -> HerdrError {
+pub(super) fn gone(error: WireError) -> HerdrError {
     match error {
         WireError::Herdr { code, .. } if code == AGENT_NOT_FOUND || code == PANE_NOT_FOUND => {
             HerdrError::PaneNotFound
@@ -304,9 +304,17 @@ fn gone(error: WireError) -> HerdrError {
 /// `agent.get`'s answer names the agent instance the reply is for: the pane, its terminal, its
 /// kind, and its session (the reply names one) or else its name. Nothing absent matches.
 fn same_agent(answer: &Value, reply: &Reply<'_>) -> Result<(), HerdrError> {
+    same_agent_in(answer, reply.pane_id, reply.agent).map(drop)
+}
+
+/// [`same_agent`] for `expected` in `pane_id`; herdr's report of it when it is that instance.
+pub(super) fn same_agent_in(
+    answer: &Value,
+    pane_id: &str,
+    expected: &AgentIdentity,
+) -> Result<AgentInfo, HerdrError> {
     let info: AgentInfo = serde_json::from_value(answer.get("agent").cloned().unwrap_or_default())
         .map_err(|error| HerdrError::Failed(format!("herdr sent an unreadable agent: {error}")))?;
-    let expected = reply.agent;
     let instance = match (&expected.session, &expected.name) {
         (Some(session), _) => info
             .agent_session
@@ -316,12 +324,12 @@ fn same_agent(answer: &Value, reply: &Reply<'_>) -> Result<(), HerdrError> {
         (None, None) => false,
     };
     let same = instance
-        && info.pane_id == reply.pane_id
+        && info.pane_id == pane_id
         && info.terminal_id == expected.terminal_id
         && expected.agent.is_some()
         && info.agent == expected.agent;
     if same {
-        Ok(())
+        Ok(info)
     } else {
         Err(HerdrError::PaneNotFound)
     }
@@ -330,7 +338,7 @@ fn same_agent(answer: &Value, reply: &Reply<'_>) -> Result<(), HerdrError> {
 /// `pane.process_info`'s answer shows a foreground process group that is not the pane's shell:
 /// neither the shell's own group nor one led by a shell. A pane whose foreground herdr cannot
 /// tell is refused too.
-fn agent_has_the_foreground(answer: &Value) -> Result<(), HerdrError> {
+pub(super) fn agent_has_the_foreground(answer: &Value) -> Result<(), HerdrError> {
     let unknown = || HerdrError::Failed("herdr cannot tell what runs in the pane".into());
     let info: PaneProcessInfo =
         serde_json::from_value(answer.get("process_info").cloned().unwrap_or_default())
@@ -355,14 +363,14 @@ fn agent_has_the_foreground(answer: &Value) -> Result<(), HerdrError> {
 }
 
 /// What may still stop a reply: its caller giving up, and the caller's deadline.
-struct Window<C> {
-    cancelled: Pin<Box<C>>,
-    deadline: Instant,
+pub(super) struct Window<C> {
+    pub(super) cancelled: Pin<Box<C>>,
+    pub(super) deadline: Instant,
 }
 
 impl<C: Future<Output = ()>> Window<C> {
     /// `step`, unless the caller gives up first. Only steps that send nothing run under this.
-    async fn check<T>(
+    pub(super) async fn check<T>(
         &mut self,
         step: impl Future<Output = Result<T, HerdrError>>,
     ) -> Result<T, HerdrError> {
@@ -375,7 +383,7 @@ impl<C: Future<Output = ()>> Window<C> {
 
     /// Whether a request that sends may start now: the caller still waits, and the request's
     /// own bound ends before the caller's deadline.
-    async fn may_send(&mut self) -> Result<(), HerdrError> {
+    pub(super) async fn may_send(&mut self) -> Result<(), HerdrError> {
         tokio::select! {
             biased;
             () = self.cancelled.as_mut() => return Err(HerdrError::Failed(CANCELLED.into())),
@@ -388,7 +396,7 @@ impl<C: Future<Output = ()>> Window<C> {
     }
 
     /// The latest moment a request that sends may start: its own bound before the deadline.
-    fn start_by(&self) -> Instant {
+    pub(super) fn start_by(&self) -> Instant {
         self.deadline
             .checked_sub(send_bound())
             .unwrap_or_else(Instant::now)

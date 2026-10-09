@@ -12,6 +12,8 @@ import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.os.Build
+import android.os.Bundle
 import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
@@ -97,8 +99,14 @@ class ConnectionService : Service() {
         val disconnect = PendingIntent.getService(
             this, 1, disconnectAllIntent(this), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val style = Notification.InboxStyle().also { inbox -> content.lines.forEach(inbox::addLine) }
-        return Notification.Builder(this, CHANNEL_ID)
+        // A Live Update (Android 16) may not use InboxStyle: the same lines go in a BigTextStyle then.
+        val promoted = content.promoted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA
+        val style = if (promoted) {
+            Notification.BigTextStyle().bigText((listOf(content.text) + content.lines).joinToString("\n"))
+        } else {
+            Notification.InboxStyle().also { inbox -> content.lines.forEach(inbox::addLine) }
+        }
+        val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_or2)
             .setContentTitle(content.title)
             .setContentText(content.text)
@@ -108,13 +116,22 @@ class ConnectionService : Service() {
             .setCategory(Notification.CATEGORY_SERVICE)
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "Disconnect all", disconnect).build())
-            .build()
+        if (promoted) {
+            // compileSdk 36 has no `setRequestPromotedOngoing` (API 36.1): the request is its extra, as
+            // NotificationCompat writes it. The system promotes it only if the user allows Live Updates for or2.
+            builder.addExtras(Bundle().apply { putBoolean(EXTRA_REQUEST_PROMOTED_ONGOING, true) })
+            content.shortCriticalText?.let(builder::setShortCriticalText)
+        }
+        return builder.build()
     }
 
     companion object {
         const val CHANNEL_ID = "connections"
         const val NOTIFICATION_ID = 1
         const val ACTION_DISCONNECT_ALL = "io.github.code_akram.or2.action.DISCONNECT_ALL"
+
+        /** `Notification.EXTRA_REQUEST_PROMOTED_ONGOING` (API 36.1): asks for a Live Update. */
+        const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
 
         fun startIntent(context: Context) = Intent(context, ConnectionService::class.java)
 

@@ -285,6 +285,28 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         return replyRoute
     }
 
+    /** What `permission_prompt` answers (each call is recorded in [prompts]); [promptFailure] is thrown instead. */
+    var permission: PermissionPrompt? = null
+    var promptFailure: Exception? = null
+    val prompts = mutableListOf<Pair<String, AgentIdentity>>()
+    override suspend fun permissionPrompt(session: String?, paneId: String, agent: AgentIdentity): PermissionPrompt? {
+        events += "permission:$session:$paneId"
+        prompts += paneId to agent
+        promptFailure?.let { throw it }
+        return permission
+    }
+
+    /** `answer_permission` calls in order: pane, seq and answer; a failure is thrown after the call is recorded. */
+    val answers = mutableListOf<Triple<String, ULong, PermissionAnswer>>()
+    var answerFailure: Exception? = null
+    override suspend fun answerPermission(
+        session: String?, paneId: String, agent: AgentIdentity, seq: ULong, answer: PermissionAnswer,
+    ) {
+        events += "answer:$session:$paneId"
+        answers += Triple(paneId, seq, answer)
+        answerFailure?.let { throw it }
+    }
+
     /** `upload_image` calls in order (the extension and the size); [uploadGate] holds each, [uploadFailure] is thrown after. */
     val uploads = mutableListOf<Pair<String, Int>>()
     var uploadGate: CompletableDeferred<Unit>? = null

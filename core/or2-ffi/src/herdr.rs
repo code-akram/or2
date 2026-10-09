@@ -88,6 +88,41 @@ impl From<core::AgentIdentity> for AgentIdentity {
     }
 }
 
+/// A yes/no permission prompt an agent waits at (`HostConnection.permission_prompt`): what an
+/// answer to it names (`HostConnection.answer_permission`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct PermissionPrompt {
+    /// herdr's `state_change_seq` of the agent when it was found at the prompt: an answer is sent
+    /// only while it is unchanged.
+    pub state_change_seq: u64,
+}
+
+impl From<core::PermissionPrompt> for PermissionPrompt {
+    fn from(prompt: core::PermissionPrompt) -> Self {
+        Self {
+            state_change_seq: prompt.state_change_seq,
+        }
+    }
+}
+
+/// What a permission prompt is answered with (`HostConnection.answer_permission`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum PermissionAnswer {
+    /// The highlighted first option, "Yes" (Enter).
+    Approve,
+    /// "No, and tell Claude what to do differently" (Escape).
+    Deny,
+}
+
+impl From<PermissionAnswer> for core::PermissionAnswer {
+    fn from(answer: PermissionAnswer) -> Self {
+        match answer {
+            PermissionAnswer::Approve => Self::Approve,
+            PermissionAnswer::Deny => Self::Deny,
+        }
+    }
+}
+
 /// A pane running an agent.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct HerdrAgent {

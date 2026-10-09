@@ -63,6 +63,15 @@ pub(super) enum Served {
         pane_id: String,
         params: Value,
     },
+    /// `agent.explain` of `target`.
+    Explain {
+        target: String,
+    },
+    /// `pane.send_keys` of `keys` to `pane_id`.
+    SendKeys {
+        pane_id: String,
+        keys: Vec<String>,
+    },
     Other(String),
 }
 
@@ -79,14 +88,41 @@ pub(super) struct FakeAgent {
     pub foreground_group: Option<u32>,
     /// The foreground group's processes, as `(pid, name)`.
     pub foreground: Vec<(u32, String)>,
+    /// herdr's `agent_status` of the agent.
+    pub status: String,
+    /// herdr's `state_change_seq` of the agent.
+    pub seq: u64,
+    /// The id of the detection rule `agent.explain` names as matched; `None`: none matched.
+    pub rule: Option<String>,
+    /// `agent.explain`'s `visible_blocker`.
+    pub visible_blocker: bool,
+    /// What `pane.read` of the visible screen answers.
+    pub screen: String,
 }
+
+/// Claude Code's permission dialog as its pane shows it, the first option highlighted.
+pub(super) const PERMISSION_DIALOG: &str = "\
+────────────────────────────────────────
+ Bash command
+
+   rm -rf build
+   Remove the build directory
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for rm commands in /tmp
+   3. No, and tell Claude what to do differently (esc)
+
+ Esc to cancel · Tab to add additional instructions
+";
 
 impl FakeAgent {
     /// The shell's pid, and its own process group.
     pub const SHELL: u32 = 100;
 
     /// A `claude` agent in the foreground, on terminal `term_<pane>`, with the session
-    /// `sess_<pane>` (its hooks reported it, as Claude Code's do).
+    /// `sess_<pane>` (its hooks reported it, as Claude Code's do), blocked at its permission
+    /// dialog ([`PERMISSION_DIALOG`], herdr's `generic_permission_prompt`) since seq 1.
     pub fn default_for(pane: &str) -> Self {
         Self {
             session: Some(("id".to_owned(), format!("sess_{pane}"))),
@@ -104,6 +140,11 @@ impl FakeAgent {
             shell_pid: Some(Self::SHELL),
             foreground_group: Some(200),
             foreground: vec![(200, process.to_owned())],
+            status: "blocked".to_owned(),
+            seq: 1,
+            rule: Some("generic_permission_prompt".to_owned()),
+            visible_blocker: true,
+            screen: PERMISSION_DIALOG.to_owned(),
         }
     }
 
@@ -120,8 +161,8 @@ impl FakeAgent {
     fn info(&self, pane: &str) -> Value {
         let (terminal, kind) = self.agent.clone().unwrap_or_default();
         let mut info = serde_json::json!({
-            "agent": kind, "agent_status": "blocked", "focused": false, "pane_id": pane,
-            "revision": 0, "state_change_seq": 1, "tab_id": "w1:t1", "terminal_id": terminal,
+            "agent": kind, "agent_status": self.status, "focused": false, "pane_id": pane,
+            "revision": 0, "state_change_seq": self.seq, "tab_id": "w1:t1", "terminal_id": terminal,
             "workspace_id": "w1",
         });
         // Shaped like herdr 0.9.3's (an isolated session, a hook's report).
@@ -137,6 +178,24 @@ impl FakeAgent {
             info["interactive_ready"] = true.into();
         }
         info
+    }
+
+    /// `agent.explain`'s `explain`, shaped like herdr 0.9.3's (captured from an isolated session
+    /// showing [`PERMISSION_DIALOG`]), without its evaluated rules and manifest details.
+    fn explain(&self) -> Value {
+        let (_, kind) = self.agent.clone().unwrap_or_default();
+        let matched = self.rule.as_ref().map(|id| {
+            serde_json::json!({
+                "id": id, "priority": 840, "region": "after_last_horizontal_rule",
+                "state": "blocked",
+            })
+        });
+        serde_json::json!({
+            "agent": kind, "evaluated_rules": [], "fallback_reason": null, "matched_rule": matched,
+            "screen_detection_skipped": false, "skip_state_update": false, "state": self.status,
+            "visible_blocker": self.visible_blocker, "visible_idle": false,
+            "visible_working": false, "warning": null,
+        })
     }
 
     fn process_info(&self, pane: &str) -> Value {
@@ -638,14 +697,26 @@ async fn serve(state: Arc<Mutex<State>>, stream: DuplexStream) {
             let _ = conn.send(reply.as_bytes()).await;
         }
         // Shaped like herdr 0.9.3's answers (captured from an isolated session): `agent.prompt`
-        // with `agent_prompted`, `agent.get` with `agent_info`, `pane.process_info` with
-        // `pane_process_info`, `pane.send_input` with `ok`. A pane without an agent is
-        // `agent_not_found` to the agent requests, as in herdr.
-        "agent.prompt" | "agent.get" | "pane.process_info" | "pane.send_input" => {
+        // with `agent_prompted`, `agent.get` with `agent_info`, `agent.explain` with
+        // `agent_explain`, `pane.process_info` with `pane_process_info`, `pane.read` with
+        // `pane_read`, `pane.send_input` and `pane.send_keys` with `ok`. A pane without an agent
+        // is `agent_not_found` to the agent requests, as in herdr.
+        "agent.prompt" | "agent.get" | "agent.explain" | "pane.process_info"
+        | "pane.send_input" | "pane.read" | "pane.send_keys" => {
             let params = &request["params"];
             let string = |name: &str| params[name].as_str().unwrap_or("").to_owned();
+            let keys = || -> Vec<String> {
+                params["keys"]
+                    .as_array()
+                    .map(|keys| {
+                        keys.iter()
+                            .map(|key| key.as_str().expect("a key name").to_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
             let pane = match method.as_str() {
-                "agent.prompt" | "agent.get" => string("target"),
+                "agent.prompt" | "agent.get" | "agent.explain" => string("target"),
                 _ => string("pane_id"),
             };
             let (reply, gate) = {
@@ -681,6 +752,13 @@ async fn serve(state: Arc<Mutex<State>>, stream: DuplexStream) {
                         fake.agent.is_none().then(no_agent).flatten(),
                         serde_json::json!({"type": "agent_info", "agent": fake.info(&pane)}),
                     ),
+                    "agent.explain" => (
+                        Served::Explain {
+                            target: pane.clone(),
+                        },
+                        fake.agent.is_none().then(no_agent).flatten(),
+                        serde_json::json!({"type": "agent_explain", "explain": fake.explain()}),
+                    ),
                     "pane.process_info" => (
                         Served::ProcessInfo {
                             pane_id: pane.clone(),
@@ -689,18 +767,55 @@ async fn serve(state: Arc<Mutex<State>>, stream: DuplexStream) {
                         serde_json::json!({"type": "pane_process_info",
                             "process_info": fake.process_info(&pane)}),
                     ),
+                    // `recent` reads a pane's given history (a pane without one is not found, as in
+                    // herdr); `visible` reads the agent's screen, as the other agent requests see it.
+                    "pane.read" => {
+                        let served = Served::Read {
+                            pane_id: pane.clone(),
+                            params: params.clone(),
+                        };
+                        match state.histories.get(&pane) {
+                            Some((text, truncated)) => (
+                                served,
+                                None,
+                                serde_json::json!({"type": "pane_read", "read": {
+                                    "format": "text", "pane_id": pane, "revision": 1,
+                                    "source": "recent", "tab_id": "w1:t1", "text": text,
+                                    "truncated": truncated, "workspace_id": "w1",
+                                }}),
+                            ),
+                            None if params["source"] == "visible" => (
+                                served,
+                                None,
+                                serde_json::json!({"type": "pane_read", "read": {
+                                    "format": "text", "pane_id": pane, "revision": 0,
+                                    "source": "visible", "tab_id": "w1:t1", "text": fake.screen,
+                                    "truncated": false, "workspace_id": "w1",
+                                }}),
+                            ),
+                            None => (
+                                served,
+                                Some((
+                                    "pane_not_found".to_owned(),
+                                    format!("pane {pane} not found"),
+                                )),
+                                serde_json::Value::Null,
+                            ),
+                        }
+                    }
+                    "pane.send_keys" => (
+                        Served::SendKeys {
+                            pane_id: pane.clone(),
+                            keys: keys(),
+                        },
+                        None,
+                        serde_json::json!({"type": "ok"}),
+                    ),
                     _ => (
                         Served::SendInput {
                             pane_id: pane.clone(),
                             text: params["text"].as_str().map(str::to_owned),
-                            keys: params["keys"]
-                                .as_array()
-                                .map(|keys| {
-                                    keys.iter()
-                                        .map(|key| key.as_str().expect("a key name").to_owned())
-                                        .collect()
-                                })
-                                .unwrap_or_default(),
+                            keys: keys(),
                             at: Instant::now(),
                         },
                         state.send_input_error.clone(),
@@ -728,32 +843,6 @@ async fn serve(state: Arc<Mutex<State>>, stream: DuplexStream) {
                 entered.notify_one();
                 release.notified().await;
             }
-            let _ = conn.send(reply.as_bytes()).await;
-        }
-        // A `pane_read` answer shaped like the schema's `PaneReadResult`.
-        "pane.read" => {
-            let params = request["params"].clone();
-            let pane = params["pane_id"].as_str().unwrap_or("").to_owned();
-            let reply = {
-                let mut state = lock(&state);
-                state.served.push(Served::Read {
-                    pane_id: pane.clone(),
-                    params: params.clone(),
-                });
-                match state.histories.get(&pane) {
-                    Some((text, truncated)) => {
-                        serde_json::json!({"id": id, "result": {
-                        "type": "pane_read", "read": {
-                            "format": "text", "pane_id": pane, "revision": 1,
-                            "source": "recent", "tab_id": "w1:t1", "text": text,
-                            "truncated": truncated, "workspace_id": "w1",
-                        }}})
-                        .to_string()
-                            + "\n"
-                    }
-                    None => error("pane_not_found", &format!("pane {pane} not found")),
-                }
-            };
             let _ = conn.send(reply.as_bytes()).await;
         }
         other => {

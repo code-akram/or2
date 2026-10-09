@@ -105,12 +105,20 @@ data class AgentAlert(
      * **Enable Reply**, which opens the app to its confirmation ([EnableReplyRequest]). Null: nothing new.
      */
     val enableReply: String? = null,
+    /** The task the agent is on (`HerdrAgent.title`), as [text] shows it after the edge; null when it has none. */
+    val task: String? = null,
+    /**
+     * The permission prompt the agent waits at, by herdr's `state_change_seq` when it was found there
+     * (`permission_prompt`): the notification then says `Needs permission` and carries **Approve** and **Deny**
+     * ([AgentAnswers]), which answer only that prompt. Null: no such prompt (or it was answered).
+     */
+    val permission: ULong? = null,
 ) {
     /** Never the reply's text, nor the Reply capability: nothing a reply says is logged. */
     override fun toString() =
         "AgentAlert(key=$key, title=$title, text=$text, subText=$subText, outcome=$outcome, " +
             "reply=${if (reply == null) "null" else "…"}, agent=$agent, nonce=${if (nonce == null) "null" else "…"}, " +
-            "enableReply=$enableReply)"
+            "enableReply=$enableReply, task=$task, permission=$permission)"
 
     /** What the notification's **Enable Reply** asks to confirm, or null when it has none (it has Reply, or nothing). */
     val enableReplyRequest: EnableReplyRequest?
@@ -227,6 +235,9 @@ class AgentAlerts(
     private val posted: MutableSet<AgentPaneKey> = sink.shown().toMutableSet()
     /** The agent each notification this process posted is about. */
     private val agents = mutableMapOf<AgentPaneKey, AgentIdentity>()
+
+    /** What each notification this process posted says now, with its capability. */
+    private val current = mutableMapOf<AgentPaneKey, AgentAlert>()
     private var screen: OnScreen? = null
 
     /** The panes with a notification up, for tests and diagnostics. */
@@ -237,6 +248,13 @@ class AgentAlerts(
      * its notification then carries **Enable Reply** instead. Nothing by default.
      */
     var enableReply: (hostId: Long, agent: HerdrAgent) -> String? = { _, _ -> null }
+
+    /**
+     * Called with each `Needs input` alert just posted for an agent whose permission prompts can be answered (Claude
+     * Code with a Reply identity): `AgentAnswers.check`, which asks the host and, for a permission prompt, calls
+     * [permissionFound]. Nothing by default.
+     */
+    var askPermission: (AgentAlert) -> Unit = {}
 
     override fun herdrStateChanged(host: Host, watch: HerdrSessionWatch, state: HerdrState) =
         viewChanged(watch, host.id, host.label, watch.session, (state as? HerdrState.Live)?.view)
@@ -272,12 +290,17 @@ class AgentAlerts(
             val text = alertLine(alertText(agent.status, before.worked) ?: continue, agent.title)
             when {
                 isOnScreen(key) -> cancel(key)
-                enabled() -> post(
-                    AgentAlert(
-                        key, agentName(agent), text, hostLabel, agent = agent.replyIdentity,
-                        enableReply = if (agent.replyIdentity == null) enableReply(hostId, agent) else null,
-                    ),
-                )
+                enabled() -> {
+                    val alert = post(
+                        AgentAlert(
+                            key, agentName(agent), text, hostLabel, agent = agent.replyIdentity,
+                            enableReply = if (agent.replyIdentity == null) enableReply(hostId, agent) else null,
+                            task = agent.title?.trim()?.takeIf { it.isNotEmpty() },
+                        ),
+                    )
+                    // Needs input from an agent whose permission prompts can be answered: ask whether it is one.
+                    if (agent.status == AgentStatus.BLOCKED && alert.agent?.agent in PERMISSION_AGENTS) askPermission(alert)
+                }
             }
         }
         // Gone from the session: nothing left to open.
@@ -337,12 +360,28 @@ class AgentAlerts(
         }
         posted.clear()
         agents.clear()
+        current.clear()
     }
 
-    private fun post(alert: AgentAlert) {
+    /**
+     * [alert]'s agent waits at the permission prompt herdr found at [seq] ([AgentAnswers.ask]): the pane's notification
+     * says so and gains **Approve** and **Deny**, without alerting again. Only while [alert] (that very post, by its
+     * capability) is still the pane's notification: a newer edge, a reply's outcome or a cancel since leaves it alone.
+     */
+    fun permissionFound(alert: AgentAlert, seq: ULong) {
+        val current = current[alert.key] ?: return
+        if (alert.nonce == null || current.nonce != alert.nonce || alert.key !in sink.shown()) return
+        post(current.copy(text = alertLine(NEEDS_PERMISSION, current.task), permission = seq))
+    }
+
+    /** Posts [alert] with a new Reply capability; returns what was posted. */
+    private fun post(alert: AgentAlert): AgentAlert {
         posted += alert.key
         alert.agent?.let { agents[alert.key] = it }
-        sink.post(alert.copy(nonce = nonces.issue(alert.key)))
+        return alert.copy(nonce = nonces.issue(alert.key)).also {
+            current[alert.key] = it
+            sink.post(it)
+        }
     }
 
     /** What a watch saw of a pane: its sequence number, and whether it was `Working` since it last settled. */
@@ -377,7 +416,16 @@ class AgentAlerts(
     private fun forget(key: AgentPaneKey) {
         posted -= key
         agents -= key
+        current -= key
         nonces.revoke(key)
+    }
+
+    companion object {
+        /** A notification's text when its agent waits at a permission prompt ([permissionFound]). */
+        const val NEEDS_PERMISSION = "Needs permission"
+
+        /** The agent kinds whose permission prompts a notification can answer (contracts.md: Claude Code only). */
+        val PERMISSION_AGENTS = setOf("claude")
     }
 }
 
