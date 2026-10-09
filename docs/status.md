@@ -25,6 +25,10 @@ Updated 2026-10-09.
   real: Wake against the sleeping Mac, a real Claude Code permission prompt answered from the notification (the
   device test app has no notification permission, so the notification tests skip), and the Live Update on
   OxygenOS 16. Daily app unchanged (0.1.9, code 17); test apps removed.
+- **Signed M4 candidate installed in place** (owner's request) at 00:22 phone-local time (2026-10-10): **0.1.9 /
+  versionCode 18 / FFI API 24**, SHA-256 `8e87b1ddf3cc50cde9517b12dcb3a72ee9894dd99aae774faaabccd054d86ec7`. The
+  replaced APK matched public v0.1.9 (kept in `/tmp/or2-candidate-18/`), same certificate, first-install time
+  unchanged (Room migrates to v5 on first open), cold launch ok, no crash. Awaiting the owner's QA.
 
 ### Flaky header pixel device test fixed (2026-10-09, after v0.1.9; test-only)
 
