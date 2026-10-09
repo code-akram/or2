@@ -6102,3 +6102,107 @@ unique and disjoint from `changed_rows`. Moved rows retain their resolved styles
 only cell payloads use this frame's style table. No Session method or protocol export changes.
 Frames without moves remain valid. See [Render performance](#render-performance-scrolling-and-drawing)
 for producer detection, mailbox composition, renderer caching and validation.
+
+# M4: history, wake and permission answers (FFI API 24, owner request 2026-10-09)
+
+Three lanes, one FFI bump (`API_VERSION` = 24, made by the lead at integration; lanes do not touch it). Each lane
+adds its own exports and keeps every change additive in the shared files (`core/host.rs` `HostCommand`,
+`ssh/connection.rs` `dispatch`, `ffi/probe.rs` `run_host`, `ffi/host.rs`, `HostPort` and its three fakes,
+`Or2Application.kt`). The owner deferred dictation, Chat View and the diff viewer the same day; ntfy waits for
+the owner's answers (server, delivery, payload, setup).
+
+## Lane History: the history sheet
+
+A plain-text view of a tmux or herdr target's history, read from the host, for reading, selecting and copying
+what scrolled away. It never moves the pane (no copy mode, no herdr scroll), so the host's own view is unchanged.
+
+- **FFI** `HostConnection.read_history(target: TerminalTarget, pane_id: Option<String>, client_id: Option<String>,
+  lines: u32) async -> Result<HistoryText, HostError>`, `HistoryText { text: String, truncated: bool }`.
+  `lines` is clamped to 1..=5000 (default the app asks: 2000).
+  - **tmux:** one exec, `tmux capture-pane -p -J -S -<lines> -t <pane>`, where the pane is the one the terminal's
+    own client shows (found through `client_id` as `scroll_target` does; without one, the session's active pane).
+    No `-e`: text only. Names quoted as the existing tmux execs quote them.
+  - **herdr:** `pane.read { pane_id, source: recent, lines, format: text, strip_ansi: true }` on the terminal's
+    focused pane (`pane_id`, as `scroll_target` receives it). `truncated` is herdr's.
+  - **Shell** targets: `HostError` (unsupported), never an exec of the shell's history.
+  - Output is capped at 1 MiB (tmux exec cap and herdr response alike); past it the oldest lines are dropped and
+    `truncated` is true. Errors map like `scroll_target`'s.
+- **App:** the Terminals sheet gets **History** (tag `terminals-history`) for tmux and herdr terminals, on SSH and
+  mosh alike; not for a plain shell. It opens a full-height sheet: monospace text (the terminal font), newest at
+  the bottom and scrolled there, selectable, with **Copy all** and a line count; loading and failure states inline.
+  Control characters other than tab are removed before display. Under mosh, scrolling up past the top of the
+  local screen (which mosh does not keep) offers a small "History" chip that opens the same sheet.
+- **Tests:** Rust unit tests of the capture command line and the clamp/cap, a live tmux test and a live isolated
+  herdr test that read back lines written earlier; JVM tests of the sheet model (sanitising, truncation note,
+  Copy all) and the Terminals sheet item's visibility; the FFI probe answers `ReadHistory`.
+
+## Lane Wake: Wake-on-LAN, the TCP wake probe and device settings
+
+As in design.md's M4 backlog, items 1 to 3.
+
+- **Room v5** (`MIGRATION_4_5`, additive): `hosts.mac_address TEXT` (null when unset) and `hosts.wake_probe
+  INTEGER NOT NULL DEFAULT 0`. Schema `5.json` checked in. `updateHost`'s column list grows; changing either does
+  not clear host-key trust.
+- **Host form:** an optional MAC address field (accepts `aa:bb:cc:dd:ee:ff` or `-` separators, any case; stored
+  lowercase with `:`; inline error otherwise) and a "Wake probe" switch (tag `host-wake-probe`) with one line of
+  help, next to "Host sleeps when idle".
+- **Rust:** a broadcast datagram capability in `transport.rs` (a `DatagramBroadcast` trait with a `DirectBroadcast`
+  implementation that sets `SO_BROADCAST`; the only socket of its kind), and in a new `core/wake.rs`:
+  - `magic_packet(mac: [u8; 6]) -> [u8; 102]` (6 × `0xFF`, then the MAC 16 times);
+  - `wake_on_lan(mac, broadcasts: &[Ipv4Addr])` sends the packet to UDP port 9 of `255.255.255.255` and each given
+    subnet-directed broadcast address, three times 100 ms apart;
+  - `wake_probe(addresses: &[Endpoint], timeout)` makes one TCP connection attempt to each address through
+    `Transport` (`DirectTcp`), in parallel, bounded by `timeout` (default 1.5 s), and drops any connection it
+    gets; it reports nothing but completion.
+- **FFI** free functions: `wake_on_lan(mac: String, broadcasts: Vec<String>) async -> Result<(), WakeError>`
+  (`WakeError::{InvalidMac, InvalidAddress, Network}`), `wake_probe(addresses: Vec<HostEndpoint>) async`.
+- **App:**
+  - The subnet-directed broadcast comes from the current network's `LinkProperties` (each IPv4 link address and
+    its prefix length); none on a network without one (mobile data).
+  - Home's host options sheet gets **Wake** (tag `host-wake:<id>`) for a host shown `Asleep` or not connected that
+    has a MAC address or the probe on. Wake sends the packet (with a MAC), runs the probe (with it on), then
+    connects, retrying for up to 30 s with in-place progress on the host card ("Waking…"). After 30 s on a host
+    marked "sleeps" it shows: "Can't wake: it may be asleep with the lid closed or on battery" and stops.
+  - With "Wake probe" on, every connect of that host (including a reconnect and the mosh restore) runs the probe
+    first and then connects as before.
+  - Settings, "Terminal": **Keep screen on** (off by default; the window's keep-screen-on flag only while a
+    terminal is visible) and **Reopen the last terminal on launch** (on by default; off skips the existing
+    reattach/resume to the last terminal on launch, nothing else).
+- **Tests:** Rust tests of the magic packet, MAC parsing, a loopback broadcast receive (or a recorded fake
+  `DatagramBroadcast`), and the probe's bound and parallelism against a closed and an open port; Room migration
+  tests (JVM SQL and the device test) for v4 to v5; JVM tests of MAC validation, broadcast address computation,
+  the Wake flow (fakes: packet, probe, connect retries, the 30 s give-up text) and both settings.
+
+## Lane Answer: approve or deny a permission prompt, and the agent summary as a Live Update
+
+- **Scope v1:** Claude Code (`agent` kind `claude`) only. herdr's detection names the rule that matched; only
+  `bash_permission_prompt` and `generic_permission_prompt` count as a yes/no permission prompt. (Codex's blocked
+  rules mix permission prompts with question forms, so no rule id can say "approve" there yet.)
+- **Rust** (`core/herdr/answer.rs`, the guard after `reply.rs`):
+  - `permission_prompt(session, pane_id, agent: AgentIdentity) -> Option<PermissionPrompt { state_change_seq }>`:
+    `agent.get` (same agent instance as Reply's `same_agent`, status `Blocked`), then `agent.explain` on the agent;
+    `Some` only when its kind is `claude`, `matched_rule.id` is one of the two rules and `visible_blocker` is true.
+  - `answer_permission(session, pane_id, agent, seq: u64, answer: Approve | Deny)`: re-runs the whole check and
+    also requires `state_change_seq == seq` (the prompt is the one notified); reads the visible screen
+    (`pane.read`, `visible`, text) and for **Approve** requires a line whose trimmed text starts with `❯ 1. Yes`
+    (the highlighted option is the first "Yes"); requires the agent to hold the foreground (Reply's
+    `agent_has_the_foreground`); then one `pane.send_keys` with `["Enter"]` (Approve) or `["esc"]` (Deny). Any
+    failed check is a typed error and nothing is sent. Same cancellation and deadline window as Reply.
+  - Accepted residual race, as with Reply: a prompt replaced within one round trip after the last check.
+- **FFI:** `HostConnection.permission_prompt(session: Option<String>, pane_id: String, agent: AgentIdentity) async
+  -> Result<Option<PermissionPrompt>, HostError>` and `HostConnection.answer_permission(session: Option<String>,
+  pane_id: String, agent: AgentIdentity, seq: u64, answer: PermissionAnswer) async -> Result<(), HostError>`.
+- **App:**
+  - When AgentAlerts posts **Needs input** for an agent with a reply identity, it asks `permission_prompt` (only
+    while the host is connected); with `Some`, the notification is re-posted with **Approve** and **Deny** actions
+    (text "Needs permission · <task>"), each `setAuthenticationRequired(true)` (the phone must be unlocked), with
+    a one-shot nonce as Reply's, carrying the seq. A tap answers through `answer_permission` without opening the
+    app and re-posts the outcome ("Approved" / "Denied", or why not, e.g. "The prompt changed. Open the pane.").
+  - The connection notification adds an agent summary across hosts ("1 needs input · 2 working"), from the watches
+    the app already has. While at least one agent needs input it asks to be a **Live Update** (Android 16:
+    `setRequestPromotedOngoing(true)`, a short critical text such as "1 input", BigTextStyle instead of InboxStyle;
+    `POST_PROMOTED_NOTIFICATIONS` in the manifest); otherwise it is the ordinary ongoing notification.
+- **Tests:** Rust tests on the fake herdr host (`herdr/testing.rs`) for every guard: wrong kind, other rule,
+  `visible_blocker` false, seq changed, another agent instance, highlighted option not "1. Yes", shell in the
+  foreground, cancellation, and the exact keys sent; JVM tests of the notification actions (nonce, seq, auth
+  flag), the outcome texts, the summary text and the promote/demote rule.
