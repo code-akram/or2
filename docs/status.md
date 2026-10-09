@@ -6,6 +6,24 @@ Updated 2026-10-09.
 
 ## Where it stands
 
+### Bundled terminal font (2026-10-09, branch `terminal-font`, unreleased)
+
+- Owner asked for the deferred font step. Coverage was checked first: JetBrains Mono 2.304 alone lacks `⎿`, Claude
+  Code's `✻✢✽✳` spinner, `✔✘`, `↳` and `☐☑`. DejaVu Sans Mono 2.37 (monospace, Menlo's ancestor) has all of them but
+  `⎿`, which no free monospace font has; it became a sprite (`⎾⎿`). The terminal now uses JetBrains Mono (four real
+  faces), then DejaVu Sans Mono, then the system fallbacks (contracts, "Terminal font"). Cells follow the font's line
+  spacing (1.32 em, as Ghostty), not its tallest glyph (+14% rows); the probe grid stays 56 x 47.
+- Licences: JetBrains Mono OFL-1.1, DejaVu Bitstream Vera (+ Arev; DejaVu changes public domain). Files vendored
+  unmodified from pinned release tags with SHA-256 in THIRD_PARTY_NOTICES.md ("Fonts"); their licence files ship
+  beside them and the About screen's Vendored list shows them (parser reads `assets/` paths named in the notices).
+  **Owner note:** the FSF lists OFL-1.1 as free for fonts; it has no entry for the Bitstream Vera licence, which has
+  the same shape (rename modified fonts, do not sell alone) and is in Debian main. Both are data files, not linked code.
+- Checks: **684 JVM** (new: asset licence texts, font entries), all builds incl. signed release, both lints,
+  `gen-licenses --check`; **full device suite `OK (183 tests)`** (new: every style draws `✻✢✽✳✶✔✘✓✗❯●…⚠↳☐☑·→λ`
+  at the cell's advance; italic may add one hinted pixel from DejaVu's synthesized slant, fitted to the cell). The
+  sprite capture was reviewed on the phone. APK +736 KB (39,419,771 bytes). Daily app unchanged (0.1.8, code 15);
+  test apps removed.
+
 ### Flaky composer device test fixed (2026-10-09, after v0.1.8; test-only)
 
 - Cause, from per-frame traces of the toggle's position, the IME inset and the composer state: the keyboard asked

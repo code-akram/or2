@@ -4006,7 +4006,7 @@ once, in order. In `TargetScroller`:
   A block cursor still redraws the clipped cell in its background colour; frozen selection rows,
   link feedback, IME composition and the scroll indicator retain their overlay order.
 - **Sprites** (`TerminalSprites.kt`): a cell holding exactly one box-drawing (U+2500–257F), block-element
-  (U+2580–259F), media (`⏴⏵⏶⏷⏸⏹⏺`, U+23F4–23FA) or Powerline (U+E0B0–E0B7) character is drawn as
+  (U+2580–259F), media (`⏴⏵⏶⏷⏸⏹⏺`, U+23F4–23FA), elbow (`⎾⎿`, U+23BE–23BF) or Powerline (U+E0B0–E0B7) character is drawn as
   shapes, never a font glyph, and never batched; it uses the per-cell Picture cache like any other
   exception. The phone's fonts lack `⏵` and Powerline (tofu) and draw blocks with glyphs that do not
   fill the cell (seams through Claude Code's mascot); `⏺` exists only as a colour emoji. Lines and blocks
@@ -4014,8 +4014,19 @@ once, in order. In `TargetScroller`:
   do, so neighbours join. Light lines take the font's underline thickness (heavy 2x, double two light
   strokes a light line apart); halves and quadrants split at the same pixel everywhere; shades are
   alpha 64/128/192. Arcs, diagonals, media and Powerline are antialiased paths; media symbols are text
-  sized and centred on a capital letter. Bold and italic do not change a sprite; faint keeps alpha
+  sized and centred on a capital letter. `⎿` (Claude Code's tool-output bracket, in no monospace font) is a
+  light vertical from a capital's top to the baseline, centred like `│`, and a light stroke along the baseline
+  to the right edge (`⎾` along the top), whole pixels. Bold and italic do not change a sprite; faint keeps alpha
   128. A cell with a variation selector (`⏺️`) is not a sprite. The Home thumbnail draws the same sprites.
+- **Terminal font** (`TerminalText.kt`, `terminalTypefaces`): the bundled JetBrains Mono 2.304 in four real
+  faces (`assets/fonts/`, THIRD_PARTY_NOTICES.md), then DejaVu Sans Mono 2.37 for the symbols it lacks
+  (`✻✢✽✳✔✘↳☐☑` at the same 0.6 em advance), then the system `monospace` fallbacks (emoji, CJK, braille),
+  through `Typeface.CustomFallbackBuilder`, built once per process. Bold is the real face, so it batches
+  without fake bold; italic cells keep the Picture path (DejaVu's synthesized slant may add a hinted pixel,
+  fitted to the cell). A cell is the font's line spacing high (`descent - ascent`, ceil; 1.32 em for JetBrains
+  Mono, as Ghostty uses), not the tallest glyph's bounds (`bottom - top`), which would make rows about 14%
+  taller; the baseline is the ascent below the cell's top. The phone's native probe grid stays 56 x 47, as with DroidSansMono.
+  If the assets cannot be read, the validated system `DroidSansMono` with synthetic bold is used as before.
 - Single/double underline, strike and overline merge identical decoration/colour/faint runs.
   Curly/dotted/dashed retain per-cell phase. Hard background edges and continuous straight
   decoration edges may differ in antialiasing at shared cell boundaries; grid metrics, colours,

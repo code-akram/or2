@@ -20,6 +20,8 @@ them were checked for GPL-3.0-or-later compatibility (see the README).
 | [Catppuccin Mocha](https://github.com/catppuccin/catppuccin) palette (colour values only: the UI tokens in `android/app/src/main/java/io/github/code_akram/or2/ui/Theme.kt`; no files copied) | n/a (values read from the palette's documentation) | `android/app/src/main/java/io/github/code_akram/or2/ui/Theme.kt` | MIT | © 2021 Catppuccin |
 | [Tokyo Night](https://github.com/folke/tokyonight.nvim) terminal palette (colour values only: the default foreground, background and 16 ANSI colours of `extras/ghostty/tokyonight_night`, used as the terminal defaults; no files copied) | `917273735e400d477e6bcfd25131e1b08b168640` | `core/or2-core/src/terminal.rs`, the terminal background in `android/app/src/main/java/io/github/code_akram/or2/ui/Theme.kt` | Apache-2.0 | Folke Lemaitre and tokyonight.nvim contributors (the LICENSE file names no holder) |
 | [mosh-rs](https://github.com/wilsonglasser/mosh-rs) (library only; no CLI, platform terminal code, vt100 screen or prediction engine) | `90b37125f5e4a598be91dec37d23921b6865276e` | `core/or2-core/src/mosh/ssp/` (`crypto.rs`, `error.rs`, `key.rs`, `packet.rs`, `sender.rs`, `statesync.rs`, `transport.rs` with module paths and key zeroizing changed; `screen.rs`, `session.rs`, `terminal.rs` derived and reworked as described in each file header) | GPL-3.0-or-later (compatible with or2's; full text in `LICENSE`) | Wilson Glasser (mosh-rs author; upstream carries no per-file notices, only its `LICENSE` and the Cargo manifest licence); the protocol follows mosh, copyright 2012 Keith Winstein and contributors |
+| [JetBrains Mono 2.304](https://github.com/JetBrains/JetBrainsMono/tree/v2.304) (the terminal's font; the release's `fonts/ttf/` files, unmodified) | `cd5227bd1f61dff3bbd6c814ceaf7ffd95e947d9` (tag `v2.304`) | `android/app/src/main/assets/fonts/JetBrainsMono-Regular.ttf`, `-Bold.ttf`, `-Italic.ttf`, `-BoldItalic.ttf` | OFL-1.1; full text in `android/app/src/main/assets/fonts/OFL-JetBrainsMono.txt` | © 2020 The JetBrains Mono Project Authors |
+| [DejaVu Sans Mono 2.37](https://github.com/dejavu-fonts/dejavu-fonts/tree/version_2_37) (the terminal's fallback for symbols JetBrains Mono lacks; the release's `ttf/DejaVuSansMono.ttf`, unmodified) | `0eda8a319c08835009849583cd090bb5b141ce25` (tag `version_2_37`) | `android/app/src/main/assets/fonts/DejaVuSansMono.ttf` | Bitstream-Vera (with the Arev fonts licence; DejaVu's changes are in the public domain); full text in `android/app/src/main/assets/fonts/LICENSE-DejaVu.txt` | © 2003 Bitstream, Inc.; © 2006 Tavmjong Bah (Arev glyphs) |
 
 ## Built from source outside Cargo
 
@@ -37,10 +39,25 @@ and the licence texts in `core/xtask/licenses/ghostty/` cannot go stale unnotice
 | [Bjoern Hoehrmann's UTF-8 decoder](http://bjoern.hoehrmann.de/utf-8/decoder/dfa) | n/a (Ghostty `src/terminal/UTF8Decoder.zig` is based on it) | in the static archive | MIT | © 2008-2009 Bjoern Hoehrmann |
 | [Zig](https://github.com/ziglang/zig) compiler runtime | Zig 0.16.0 | `compiler_rt` in the static archive | MIT | © Zig contributors |
 
+## Fonts
+
+The terminal draws with the two fonts in the table above, shipped unmodified as separate files in the APK's
+`assets/fonts/` beside their licences, and shown with them under About or2, Open source licenses, Vendored.
+They are data the app loads, not code linked into it. The FSF lists the SIL Open Font License 1.1 as a free
+licence for fonts; the Bitstream Vera licence of DejaVu has the same shape (use, modify and redistribute,
+rename modified fonts, do not sell a font alone). The UI keeps the device's system fonts (`docs/ui.md`).
+SHA-256 of the files as downloaded from each release:
+
+```text
+a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f  JetBrainsMono-Regular.ttf
+5590990c82e097397517f275f430af4546e1c45cff408bde4255dad142479dcb  JetBrainsMono-Bold.ttf
+9d0a1f7a708e6af183f1193b7e81d40da294f5c67682c085d8401c60aac8ded4  JetBrainsMono-Italic.ttf
+4039d5ce0ed225bf9c8b2c8c6436290ae2f356b7e90d70fa666227238324aa3b  JetBrainsMono-BoldItalic.ttf
+b4a6c3e4faab8773f4ff761d56451646409f29abedd68f05d38c2df667d3c582  DejaVuSansMono.ttf
+```
+
 ## Not shipped
 
-- Fonts: none are bundled. The terminal and the UI use the device's system fonts (the validated
-  system monospace, see `docs/ui.md`); JetBrains Mono is not included.
 - Icons: the UI's icons are path data in `ui/Icons.kt` and a status-bar glyph in
   `res/drawable/ic_stat_or2.xml`; no icon set is bundled.
 - CameraX (`androidx.camera`, Apache-2.0) and ZXing core (`com.google.zxing:core`, Apache-2.0),

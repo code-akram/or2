@@ -79,9 +79,12 @@ screen with no colour change. Nothing holds it on screen past the first frame.
 
 - UI sans: the system sans (Roboto/OxygenOS) in **light/regular** weights. Large titles are
   light, never bold; emphasis comes from colour and size, not weight.
-- Monospace: the validated system monospace file (`DroidSansMono`, checked for fixed advances at
-  startup, because some OEMs remap the generic `monospace` alias to a proportional face);
-  JetBrains Mono is not bundled. It is used for addresses (`user@host:port`), fingerprints, paths, session/pane ids, status lines such as
+- Terminal: the bundled **JetBrains Mono** 2.304 (regular, bold, italic, bold italic), DejaVu Sans Mono 2.37 for
+  the symbols it lacks (Claude Code's `✻✢✽✳` spinner, `✔✘`, `☐☑`), then the system's fallbacks (emoji, CJK,
+  braille); rows are the font's line spacing (ascent to descent, 1.32 em), as in Ghostty. Box drawing, blocks,
+  `⏴⏵⏶⏷⏸⏹⏺`, `⎾⎿` and Powerline are drawn, not typeset (contracts, "Sprites"). `terminal/TerminalText.kt` owns it.
+- UI monospace: the validated system monospace file (`DroidSansMono`, checked for fixed advances at
+  startup, because some OEMs remap the generic `monospace` alias to a proportional face). It is used for addresses (`user@host:port`), fingerprints, paths, session/pane ids, status lines such as
   `Checking server...`, kicker lines such as `~3 min · needs hostname + key`. `ui/MonoFont.kt`
   owns the choice.
 - Scale (sp, compact): screen/sheet title 20 light; **top-bar title of a pushed screen 16 light**

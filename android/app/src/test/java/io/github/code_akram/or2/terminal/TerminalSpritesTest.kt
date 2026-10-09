@@ -47,6 +47,7 @@ class TerminalSpritesTest {
         assertEquals(0x259B, spriteOf("▛"))
         assertEquals(0x23F5, spriteOf("⏵"))
         assertEquals(0x23FA, spriteOf("⏺"))
+        assertEquals(0x23BF, spriteOf("⎿"))
         assertEquals(0xE0B0, spriteOf(""))
         assertEquals(-1, spriteOf(""))
         assertEquals(-1, spriteOf("a"))
@@ -61,6 +62,7 @@ class TerminalSpritesTest {
     @Test fun pathSpritesHaveNoRectangles() {
         (0x256D..0x2573).forEach { assertNull(spriteRects(it, 25, 50, 2)) }
         (0x23F4..0x23FA).forEach { assertNull(spriteRects(it, 25, 50, 2)) }
+        (0x23BE..0x23BF).forEach { assertNull(spriteRects(it, 25, 50, 2)) }
         (0xE0B0..0xE0B7).forEach { assertNull(spriteRects(it, 25, 50, 2)) }
     }
 

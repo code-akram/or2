@@ -33,7 +33,7 @@ class TerminalVisualDeviceTest {
         compareLegacyAscii(false)
     }
 
-    @Test fun batchedSyntheticBoldKeepsTheLegacyFakeBoldRaster() {
+    @Test fun batchedBoldKeepsTheLegacyRaster() {
         compareLegacyAscii(true)
     }
 
@@ -70,16 +70,11 @@ class TerminalVisualDeviceTest {
                 canvas.drawColor(DefaultBackground.toInt() or (0xff shl 24))
                 val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                     textSize = view.fontSizeSp * view.resources.displayMetrics.density
-                    typeface = terminalTypeface(this)
-                    if (bold) {
-                        if (typeface == android.graphics.Typeface.MONOSPACE) {
-                            typeface = android.graphics.Typeface.create(typeface, android.graphics.Typeface.BOLD)
-                        }
-                        isFakeBoldText = !typeface.isBold
-                    }
+                    typeface = terminalTypefaces(view.context)[if (bold) Typeface.BOLD else Typeface.NORMAL]
+                    isFakeBoldText = bold && !typeface.isBold
                 }
                 val background = Paint()
-                val baseline = -text.fontMetrics.top
+                val baseline = text.cellBaseline()
                 canvas.translate(view.horizontalInset, 0f)
                 frame.changedRows.forEach { row ->
                     row.cells.forEachIndexed { column, cell ->
@@ -158,6 +153,24 @@ class TerminalVisualDeviceTest {
         }
     }
 
+    @Test fun bundledFontsDrawAgentSymbolsAtTheCellsAdvance() {
+        val context = instrumentation.targetContext
+        for (style in listOf(Typeface.NORMAL, Typeface.BOLD, Typeface.ITALIC, Typeface.BOLD_ITALIC)) {
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 42f; typeface = terminalTypefaces(context)[style] }
+            val cell = paint.measureText("M")
+            assertEquals("JetBrains Mono's advance is 0.6 em (hinted to whole pixels)", 0.6f * 42f, cell, 0.5f)
+            // Claude Code's and Codex's symbols: JetBrains Mono or DejaVu Sans Mono, never a proportional system
+            // fallback that would have to be squeezed into the cell.
+            for (symbol in listOf("✻", "✢", "✽", "✳", "✶", "✔", "✘", "✓", "✗", "❯", "●", "…", "⚠", "↳", "☐", "☑", "·", "→", "λ")) {
+                // DejaVu has no italic face: Android slants it, which can add a hinted pixel. Italic cells are drawn
+                // one by one and fitted to their cell anyway.
+                val slack = if (style and Typeface.ITALIC != 0) 1f else cell * 0.005f
+                assertEquals("$symbol in style $style", cell, paint.measureText(symbol), slack)
+            }
+        }
+        assertTrue("Every style has a real face", terminalTypefaces(context).all { it != Typeface.MONOSPACE })
+    }
+
     @Test fun capturesSprites() {
         ActivityScenario.launch(TerminalProbeActivity::class.java).use { scenario ->
             await(scenario) { _, view -> view.grid.hasGrid && view.grid.rows.size > 14 }
@@ -192,7 +205,7 @@ class TerminalVisualDeviceTest {
         }
     }
 
-    @Test fun hardwareSyntheticBoldAndCachedDuplicateRowsKeepTheLegacyRaster() {
+    @Test fun hardwareBoldAndCachedDuplicateRowsKeepTheLegacyRaster() {
         ActivityScenario.launch(TerminalProbeActivity::class.java).use { scenario ->
             await(scenario) { _, view -> view.grid.hasGrid }
             // Fractional text sizes and both alpha levels; every row is duplicated on screen.
@@ -216,7 +229,7 @@ class TerminalVisualDeviceTest {
                 val batch = raster(scenario) { it.batchGlyphs = true }
                 val cached = raster(scenario) { it.cacheRows = true; it.resetRowCacheCounters() }
                 try {
-                    assertTrue("HWUI synthetic bold changed pixels at size $size", legacy.sameAs(batch))
+                    assertTrue("HWUI bold changed pixels at size $size", legacy.sameAs(batch))
                     assertTrue("Duplicate RenderNode placement changed pixels at size $size", batch.sameAs(cached))
                     scenario.onActivity { activity ->
                         val view = activity.terminalView()!!
@@ -361,15 +374,9 @@ class TerminalVisualDeviceTest {
         ActivityScenario.launch(TerminalProbeActivity::class.java).use { scenario ->
             await(scenario) { _, view -> view.grid.hasGrid && view.grid.rows.size > 12 }
             scenario.onActivity { activity ->
-                val file = File("/system/fonts/DroidSansMono.ttf")
-                if (file.isFile) {
-                    val probe = Paint().apply { textSize = 30f; typeface = Typeface.Builder(file).build() }
-                    if (probe.hasMonospacedAdvances()) {
-                        val view = activity.terminalView()!!
-                        assertTrue("Validated system font must be used", view.fontHasMonospacedAdvances)
-                        assertTrue("DroidSansMono needs synthetic bold", view.boldUsesFake)
-                    }
-                }
+                val view = activity.terminalView()!!
+                assertTrue("The bundled JetBrains Mono must be monospaced", view.fontHasMonospacedAdvances)
+                assertFalse("JetBrains Mono has a real bold face", view.boldUsesFake)
                 assertEquals(0, compositionCells(""))
                 assertEquals(1, compositionCells("e\u0301"))
                 assertEquals(5, compositionCells("e\u0301界😀"))
