@@ -89,7 +89,7 @@ outputs, not checked-in copies.
 
 The shared M1 contracts (transport, key material, host-key trust, session lifecycle and
 callbacks, changed-row frames, input) are defined in [contracts](contracts.md), which also
-separates what is implemented from lane work. FFI API version 23 exports `build_info`, key
+separates what is implemented from lane work. FFI API version 24 exports `build_info`, key
 generation and import, `connect_host` with the `HostConnection`, `Session` and `HerdrWatch`
 objects and their listeners, pairing, and two test fixtures (`contract_probe_session`,
 `contract_probe_host`) that drive the real objects without a network. There is no export that
@@ -98,7 +98,9 @@ history read and `TerminalTarget.ShellIn` for one-tap project shells (v0.1.5). A
 merging/validation so Dirs includes the live herdr agent/pane cwd already watched by the picker, ahead of history,
 without another query. API 23 (v0.1.6) adds coalescing-safe moved-row references to terminal
 frames; Android reuses resolved rows, retains their drawing commands, and pulls/decodes frames
-off main before applying at vsync. See [contracts: Frames](contracts.md#frames) and the
+off main before applying at vsync. API 24 (M4) adds `HostConnection.read_history` (the history sheet),
+`permission_prompt`/`answer_permission` (Claude Code permission prompts from a notification) and the free
+functions `wake_on_lan`/`wake_probe`. See [contracts: Frames](contracts.md#frames) and the
 [build instructions](build.md) for the shared toolchain and verification commands.
 
 ### Transport

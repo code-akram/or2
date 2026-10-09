@@ -260,7 +260,8 @@ screen with no colour change. Nothing holds it on screen past the first frame.
   "Settings", then grouped cards of switch rows under section headers (`ListRow` with an `Or2Toggle` trailing and a
   muted subtitle; tapping the row flips it). NOTIFICATIONS holds `Agent notifications` (on by default: one
   notification when an agent needs input or finishes, on every host shown in the inbox, none for the pane on
-  screen); TERMINAL holds `Copy from the host` (on by default). Every default is the zero-configuration choice;
+  screen); TERMINAL holds `Copy from the host` (on by default), `Keep screen on` (off by default; only while a
+  terminal is visible) and `Reopen the last terminal on launch` (on by default). Every default is the zero-configuration choice;
   a switch is only the off-ramp, never a setup step.
 - **About or2:** pushed from Home's last trailing icon (`Info`, "About or2"). A `TopBar` titled
   "About or2", the name in `ScreenTitle` with a muted `Secondary` line, then grouped cards in the
@@ -329,7 +330,10 @@ screen with no colour change. Nothing holds it on screen past the first frame.
 - **Asleep:** a host flagged as sleeping whose connection went quiet is not a failure: Home's card shows
   `Asleep` in `textMuted` `Secondary` (no `danger` line, no dot; the card's state description reads
   `Asleep`), the inbox row's message is `Asleep` in `textMuted` with the usual `Connect` pill (tapping still
-  connects), and the session picker's gate says `Asleep` in muted text with **Retry**. A rejected key or host key
+  connects), and the session picker's gate says `Asleep` in muted text with **Retry**. A host with a MAC address or
+  the wake probe on gets **Wake** (sun icon) in its options sheet: the card reads `Waking…` while it sends the
+  magic packet, knocks and retries for up to 30 s, then, for a sleeping host that never answered, `Can't wake: it
+  may be asleep with the lid closed or on battery`. A rejected key or host key
   stays a `danger` failure.
 - **UDP blocked (session picker):** while a connected host's UDP verdict is `BLOCKED` (and its probe did not
   say mosh-server is missing), one muted `Secondary` line sits in the picker under its tabs: `Mosh can't reach
@@ -456,7 +460,10 @@ screen with no colour change. Nothing holds it on screen past the first frame.
   Home's rules (a tmux or herdr terminal in one tap, an open shell after **Close shell?**); closing the terminal on
   screen returns to Home, the calm place to land, closing another leaves you where you are. Then one more card:
   **Copy screen** (copy icon: the visible screen's text to the clipboard; Android shows its own copied
-  confirmation) and **Gestures & shortcuts** (keyboard icon: the shortcuts sheet). There is no separate
+  confirmation), **History** (history icon; tmux and herdr terminals only: a full-height sheet of the target's last
+  2,000 lines read from the host as plain text in the terminal font, opened at the bottom, selectable, with **Copy
+  all** and a line count; under mosh a small `History` chip also offers it after a swipe up past the local top) and
+  **Gestures & shortcuts** (keyboard icon: the shortcuts sheet). There is no separate
   "Close session" row or pill: Ctrl+Shift+W closes through the same close, and the closed strip's **Close**
   remains for a session that closed by itself (a lost connection, a remote exit), whose final frame stays
   readable until then. A terminal that never connected shows the same grouped list, each row with its `×`.

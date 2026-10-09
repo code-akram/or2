@@ -6207,3 +6207,39 @@ As in design.md's M4 backlog, items 1 to 3.
   `visible_blocker` false, seq changed, another agent instance, highlighted option not "1. Yes", shell in the
   foreground, cancellation, and the exact keys sent; JVM tests of the notification actions (nonce, seq, auth
   flag), the outcome texts, the summary text and the promote/demote rule.
+
+## M4 as implemented (merged on `m4`, FFI API 24)
+
+Deviations from the lane contracts above, all reviewed by the lead:
+
+- **History.** The tmux read is one exec of `sh -c 'out=$("$1" -u capture-pane -p -J -S "$2" -t "$3") || exit;
+  printf %s "$out" | tail -c 1048576'` with the tmux path, `-<lines>` and `=<session>:` as quoted positional
+  arguments: an exec whose output passes 1 MiB fails outright, so the cap has to be cut on the host; tmux's status
+  and stderr are kept (output of exactly 1 MiB counts as cut). A shell target is `HostError::CommandFailed` ("only
+  tmux and herdr terminals have a history to read"); no new error variant. Without a `pane_id`, herdr is asked for
+  its focused pane (`pane.current`) as scroll does. Trailing blanks are trimmed in the app only. The mosh chip
+  (`history-chip`) shows after a swipe up while the local scrollback is at its top, for mosh tmux/herdr terminals,
+  until the terminal is back at the bottom.
+- **Wake.** `wake_probe` takes the existing FFI `HostAddress` records; core `wake_on_lan`/`wake_probe` take their
+  transport first (as `pair_enroll`), the FFI passing `DirectBroadcast` and `DirectTcp`; `WakeError::Network`
+  carries a `reason`. `wake_on_lan` fails only when no copy at all was sent. The Wake flow sends the packet and runs
+  the probe before the biometric prompt, unlocks once, and retries the connect 2 s apart only while nobody answers
+  (the packet re-sent each time); no attempt starts after 30 s, and the one running then may finish (cancelling it
+  would be a user disconnect, which forgets the last terminal), so the give-up text can come up to one connect
+  attempt later. A host not marked "sleeps" shows its own failure instead. During a Wake the decrypted key is held
+  for up to about 30 s; each attempt gets a copy, wiped after it. Broadcast addresses come from the active network's
+  `LinkProperties` (IPv4, /1 to /30), and from the Wi-Fi and Ethernet networks when a VPN is active. The probe runs
+  in `HostConnections.connectOne`, so Connect, the reconnect chip and Resume all have it. "Reopen the last terminal
+  on launch" off skips only the automatic resume; the Resume card stays.
+- **Answer.** Approve requires the **last** screen line starting with `❯` to start with `❯ 1. Yes` (a stale
+  dialog above cannot satisfy it), and explain's own `agent` must be `claude` too. A changed prompt is the new
+  `HostError::PromptChanged` at every layer ("The prompt changed. Open the pane."); another agent instance or a
+  shell in the foreground is `PaneNotFound`, as for Reply. compileSdk 36's `android.jar` has no
+  `setRequestPromotedOngoing` (API 36.1): the connection notification sets the extra
+  `android.requestPromotedOngoing` itself, as NotificationCompat does, with `setShortCriticalText` ("N input"),
+  both from API 36 on. The app asks `permission_prompt` only for kind `claude`; Rust checks again.
+- **Manifest.** `POST_PROMOTED_NOTIFICATIONS` is new: nine permissions in all (`INTERNET`, `USE_BIOMETRIC`,
+  `ACCESS_NETWORK_STATE`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`, `POST_NOTIFICATIONS`,
+  `POST_PROMOTED_NOTIFICATIONS`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, `CAMERA`), pinned by `ManifestTest`.
+- **Integration.** The fake herdr host had `pane.read` twice; one handler serves both lanes: `recent` reads a given
+  history (a pane without one is not found), `visible` the agent's screen. Room is at schema 5.
