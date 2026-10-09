@@ -433,3 +433,84 @@ async fn tmux_scroll_enters_copy_mode_scrolls_by_lines_and_returns_to_the_bottom
         "{error:?}"
     );
 }
+
+#[tokio::test]
+async fn a_tmux_history_past_a_mebibyte_keeps_its_newest_whole_lines() {
+    use or2_core::history::MAX_HISTORY_BYTES;
+    let Some(real) = tmux_binary() else {
+        assert!(
+            std::env::var_os("OR2_REQUIRE_TMUX").is_none(),
+            "OR2_REQUIRE_TMUX is set but tmux is absent"
+        );
+        eprintln!("SKIP: tmux is absent");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (wrapper, _sockets) = private_tmux(dir.path(), &real);
+    let tmux_path = wrapper.to_str().unwrap();
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = Command::new(&self.0)
+                .arg("kill-server")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+    let _cleanup = Cleanup(wrapper.clone());
+    // 4000 numbered lines of 400 columns, about 1.6 MB: more than the cap, within 5000 rows.
+    // The history limit applies to panes made after it is set: set first, in the same command.
+    let status = Command::new(&wrapper)
+        .args([
+            "-u",
+            "start-server",
+            ";",
+            "set-option",
+            "-g",
+            "history-limit",
+            "10000",
+            ";",
+            "new-session",
+            "-d",
+            "-x",
+            "420",
+            "-y",
+            "10",
+            "-s",
+            "wide",
+        ])
+        .args([
+            "sh",
+            "-c",
+            "seq -f '%04g' 1 4000 | while read n; do printf '%s %0395d\\n' \"$n\" 0; done; \
+             echo done; sleep 300",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let host = LocalHost::new();
+    let clients = tmux::NavClients::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let read = loop {
+        let read = tmux::read_history(&host, tmux_path, &clients, "wide", None, 5000)
+            .await
+            .unwrap();
+        if read.text.lines().any(|line| line == "done") {
+            break read;
+        }
+        assert!(std::time::Instant::now() < deadline, "no history yet");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert!(read.truncated);
+    assert!(read.text.len() <= MAX_HISTORY_BYTES);
+    let numbered: Vec<&str> = read.text.lines().filter(|line| line.len() == 400).collect();
+    // Whole lines only, consecutive, ending with the last one written.
+    assert!(read.text.lines().next().unwrap().len() == 400);
+    assert!(numbered.len() > 2000, "{}", numbered.len());
+    assert!(numbered.last().unwrap().starts_with("4000 "));
+    let first: u32 = numbered[0][..4].parse().unwrap();
+    for (index, line) in numbered.iter().enumerate() {
+        assert_eq!(line[..4].parse::<u32>().unwrap(), first + index as u32);
+    }
+}

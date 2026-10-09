@@ -1393,6 +1393,96 @@ fn scroll_target_scrolls_a_tmux_session_over_the_connection_and_a_shell_does_not
 }
 
 #[test]
+fn read_history_reads_a_tmux_panes_history_without_moving_it() {
+    use or2_core::history::NO_SHELL_HISTORY;
+    require_sshd!();
+    require_tmux!();
+    let live = Live::new();
+    // Lines that scroll far past the 10-row screen, then a long one that wraps at 40 columns.
+    let status = live
+        .sshd
+        .tmux()
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            "or2-history",
+            "-x",
+            "40",
+            "-y",
+            "10",
+        ])
+        .args([
+            "sh",
+            "-c",
+            "seq -f 'history %g' 1 300; printf '%080d\\n' 7; sleep 300",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let tmux = TerminalTarget::Tmux {
+        session_name: "or2-history".into(),
+    };
+    let read =
+        |target: TerminalTarget, lines| block_on(live.host.read_history(target, None, None, lines));
+    let wide = "0".repeat(79) + "7";
+    let deadline = Instant::now() + WAIT;
+    let history = loop {
+        let history = read(tmux.clone(), 2000).unwrap();
+        if history.text.contains(&wide) {
+            break history;
+        }
+        assert!(Instant::now() < deadline, "no history: {history:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let lines: Vec<&str> = history.text.lines().collect();
+    // Every line written earlier, in order, the wrapped one joined back into one line.
+    assert_eq!(lines[0], "history 1");
+    assert_eq!(lines[299], "history 300");
+    assert_eq!(lines[300], wide);
+    assert!(!history.truncated);
+    assert!(!history.text.contains('\u{1b}'), "no escape sequences");
+
+    // Fewer lines: the newest ones (`-S -5` is five history lines above the screen).
+    let short = read(tmux.clone(), 5).unwrap();
+    let short: Vec<&str> = short.text.lines().collect();
+    assert!(short.len() < 20, "{short:?}");
+    assert_eq!(short.last(), Some(&wide.as_str()));
+    assert!(!short.contains(&"history 1"));
+
+    // Reading never entered copy mode.
+    let mode = live
+        .sshd
+        .tmux()
+        .args(["display-message", "-p", "-t", "=or2-history:"])
+        .arg("#{pane_in_mode}")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&mode.stdout).trim(), "0");
+
+    // A shell has no history to read; bad names are refused before anything runs; a session
+    // tmux does not have is tmux's own failure.
+    assert_eq!(
+        read(TerminalTarget::Shell, 10),
+        Err(HostError::CommandFailed {
+            message: NO_SHELL_HISTORY.into()
+        })
+    );
+    let bad = TerminalTarget::Tmux {
+        session_name: "a:b".into(),
+    };
+    assert_eq!(read(bad, 10), Err(HostError::InvalidName));
+    let gone = TerminalTarget::Tmux {
+        session_name: "or2-gone".into(),
+    };
+    assert!(matches!(
+        read(gone, 10),
+        Err(HostError::CommandFailed { .. })
+    ));
+    live.host.disconnect();
+}
+
+#[test]
 fn herdr_terminals_run_the_probed_herdr_with_the_session_and_report_a_failed_focus() {
     require_sshd!();
     let live = Live::new();

@@ -365,6 +365,25 @@ impl From<core::TmuxSession> for TmuxSession {
     }
 }
 
+/// A tmux or herdr target's history as plain text (API 24, `read_history`): oldest line first,
+/// without escape sequences (control characters may remain: strip them before display).
+/// `truncated`: older lines exist that are not here (herdr said so, or the text passed 1 MiB and
+/// its oldest lines were dropped).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct HistoryText {
+    pub text: String,
+    pub truncated: bool,
+}
+
+impl From<or2_core::history::HistoryText> for HistoryText {
+    fn from(history: or2_core::history::HistoryText) -> Self {
+        Self {
+            text: history.text,
+            truncated: history.truncated,
+        }
+    }
+}
+
 /// Implemented in Kotlin. Same threading rules as `SessionListener`: a Rust-owned thread, never
 /// concurrent for one connection, in order; exceptions are ignored; released right after
 /// `Closed`.
@@ -567,6 +586,33 @@ impl HostConnection {
             .handle
             .scroll_target(target.into(), pane_id, scroll.into(), client_id)
             .await?)
+    }
+
+    /// Reads the history `target` shows as plain text, for the history sheet (API 24): what
+    /// scrolled away, to read, select and copy. It never moves the pane (no copy mode, no herdr
+    /// scroll), so the host's own view is unchanged. tmux: one exec of `capture-pane -p -J -S
+    /// -<lines>` of the pane the terminal's client shows (`client_id`, as for `scroll_target`;
+    /// `None`: the session's active pane), text only. herdr: one `pane.read` of `pane_id`
+    /// (`None`: the session's focused pane), recent output as text with ANSI stripped. `lines`
+    /// is clamped to 1..=5000. At most 1 MiB of text comes back: past it the oldest lines are
+    /// dropped and `truncated` is set (as it is when herdr says older lines exist).
+    ///
+    /// A `Shell` target has no history the host can read: `CommandFailed`, nothing runs.
+    /// `InvalidName` for a malformed name, pane or client id, `NotInstalled` without the
+    /// program, `PaneNotFound` for a vanished herdr pane, `CommandFailed` otherwise. Cancelling
+    /// the coroutine drops the reply only.
+    pub async fn read_history(
+        &self,
+        target: TerminalTarget,
+        pane_id: Option<String>,
+        client_id: Option<String>,
+        lines: u32,
+    ) -> Result<HistoryText, HostError> {
+        Ok(self
+            .handle
+            .read_history(target.into(), pane_id, client_id, lines)
+            .await?
+            .into())
     }
 
     /// Moves what a terminal on `target` shows (API 14), for the swipe gestures: tmux over exec

@@ -33,6 +33,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use crate::herdr::{self, HerdrObserver, HerdrWatchDriver, HerdrWatchHandle};
+use crate::history::{self, HistoryText, NO_SHELL_HISTORY};
 use crate::keys::{ClientKey, KeyError};
 use crate::remote::RemoteError;
 use crate::session::{
@@ -535,6 +536,20 @@ pub enum HostCommand {
         scroll: TargetScroll,
         reply: oneshot::Sender<Result<(), HostError>>,
     },
+    /// Read the history `target` shows as plain text ([`HostHandle::read_history`]): tmux with
+    /// one `capture-pane` exec ([`crate::tmux::read_history`]), herdr with one `pane.read`
+    /// ([`herdr::read_history_in`]), each with the probed path; nothing moves the pane.
+    /// `target` is a validated tmux or herdr target (never `Shell`, which the handle answers
+    /// itself), `pane_id` and `client_id` as for [`HostCommand::ScrollTarget`], `lines` already
+    /// clamped. Reply `NotInstalled` without the program, `PaneNotFound` for a vanished herdr
+    /// pane, `CommandFailed` for other failures.
+    ReadHistory {
+        target: TerminalTarget,
+        pane_id: Option<String>,
+        client_id: Option<String>,
+        lines: u32,
+        reply: oneshot::Sender<Result<HistoryText, HostError>>,
+    },
     /// Move the multiplexer `target` shows ([`HostHandle::navigate`]): tmux through exec with the
     /// probed tmux path, herdr through its API with the probed herdr path. `target` is never
     /// `Shell` (the handle answers that itself) and its names are validated. Reply
@@ -869,6 +884,54 @@ impl HostHandle {
             pane_id,
             client_id,
             scroll,
+            reply,
+        })
+        .await
+    }
+
+    /// Reads the history of what `target` shows as plain text, for reading and copying what
+    /// scrolled away, without moving it (no copy mode, no herdr scroll): the host's own view is
+    /// unchanged. tmux: one `capture-pane -p -J -S -<lines>` exec of the pane the terminal's
+    /// client shows (`client_id`, as for [`HostHandle::scroll_target`]; without one the
+    /// target session's active pane), without escape sequences. herdr: one `pane.read` of
+    /// `pane_id` (`None`: the session's focused pane), recent output as text with ANSI
+    /// stripped. `lines` is clamped to 1..=[`history::MAX_HISTORY_LINES`]; the text is kept
+    /// within [`history::MAX_HISTORY_BYTES`], the oldest lines dropped past it
+    /// ([`HistoryText::truncated`]).
+    ///
+    /// A `Shell` target keeps no history the host can read: `CommandFailed`, nothing runs (the
+    /// shell's own history file is never read). Names are validated like [`TerminalTarget`]'s
+    /// (`InvalidName`); a host without the program is `NotInstalled`, a vanished herdr pane
+    /// `PaneNotFound`. Bounded by [`QUERY_TIMEOUT`].
+    pub async fn read_history(
+        &self,
+        target: TerminalTarget,
+        pane_id: Option<String>,
+        client_id: Option<String>,
+        lines: u32,
+    ) -> Result<HistoryText, HostError> {
+        target.validate()?;
+        if !pane_id.as_deref().is_none_or(is_valid_herdr_pane_id)
+            || !client_id
+                .as_deref()
+                .is_none_or(crate::tmux::is_valid_client_id)
+        {
+            return Err(HostError::InvalidName);
+        }
+        if matches!(
+            target,
+            TerminalTarget::Shell | TerminalTarget::ShellIn { .. }
+        ) {
+            return Err(HostError::CommandFailed {
+                message: NO_SHELL_HISTORY.into(),
+            });
+        }
+        let lines = history::history_lines(lines);
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::ReadHistory {
+            target,
+            pane_id,
+            client_id,
+            lines,
             reply,
         })
         .await
