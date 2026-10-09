@@ -6,6 +6,22 @@ Updated 2026-10-09.
 
 ## Where it stands
 
+### Flaky header pixel device test fixed (2026-10-09, after v0.1.9; test-only)
+
+- `TerminalVisualDeviceTest.terminalCannotPaintOverComposeHeaderOrOutsideItsSideMargins` failed once in the v0.1.9 and
+  once in the v0.1.7 full suites, never alone (0 of 10) or in 14 class runs: the header pixel 92 dp from the top read
+  `#19304D` for `#336699`. Ruled out: the activity's enter animation (finished before `ActivityScenario.launch`
+  returns, and at every replayed screenshot); our own tests (the classes before it post nothing).
+- Cause: the test screenshot the **whole screen** (`UiAutomation`), so any system overlay passing over the header (a
+  heads-up notification from another app on the owner's phone, the shade, a scrim) changed its pixels. Shown on the
+  phone: with the shade over the fixture the screen read `#3D5D82` while a `PixelCopy` of the app's window still
+  held `#336699`. (A heads-up could not be posted to reproduce it exactly: OxygenOS refuses `pm grant` from the shell.)
+- Fix: `windowPixels()` copies the probe's own window (`PixelCopy`) for the bounds test, `raster()` (the
+  pixel-for-pixel comparisons) and `capture()`; the terminal and the Compose header share that window, so the check
+  is unchanged. The README demo still films the screen on purpose. Checks: the bounds test 5 of 5 with the shade
+  toggled over it every 400 ms; the visual class 3 of 3; **full device suite `OK (183 tests)`**; device-test build
+  and lint. Daily app unchanged (0.1.9, code 17); test apps removed.
+
 ### Release v0.1.9 (2026-10-09)
 
 - Owner approved the font candidate ("polished and beautiful") and said proceed: merged, **v0.1.9 / versionCode 17 /
@@ -16,7 +32,7 @@ Updated 2026-10-09.
   `/tmp/or2-release-v0.1.9/`.
 - Device suite (separate app): 183 cases, 1 failure: `TerminalVisualDeviceTest.terminalCannotPaintOverComposeHeaderOrOutsideItsSideMargins`
   saw the header pixel half as bright (`#19304D` for `#336699`: a passing dim, not a glyph). 10 of 10 alone and its
-  class twice then passed; the same check failed once in the v0.1.7 cycle. **Known intermittent test.** The suite on
+  class twice then passed; the same check failed once in the v0.1.7 cycle. **Since fixed (test only), above.** The suite on
   the font change itself (before the version bump) passed all 183. Daily app stayed on the code-16 candidate.
 - **Published and verified:** [run 37970443500](https://github.com/code-akram/or2/actions/runs/37970443500) built and
   published; the signed APK was uploaded. All six public assets downloaded and checked (checksums, formats, APK hash
