@@ -148,6 +148,22 @@ fun shouldAutoResumeOnLaunch(diedWithSessions: Boolean, last: LastTerminal?, hos
     diedWithSessions && shouldAutoResume(last, hosts, connectedHosts)
 
 /**
+ * Whether the launch's recovery resumes the remembered terminal at once: the setting "Reopen the last terminal on
+ * launch" ([reopenOnLaunch]) is on, no agent notification's tap started the app ([tapped]: the user asked for that
+ * pane), and either the restored screen was a terminal that is gone ([deadTerminalScreen], the recents path:
+ * [shouldAutoResume]) or this is a cold start after a process that died with sessions open ([diedWithSessions]:
+ * [shouldAutoResumeOnLaunch]). With the setting off the app stays on Home, where the Resume card offers the same.
+ */
+fun resumesOnLaunch(
+    reopenOnLaunch: Boolean, tapped: Boolean, deadTerminalScreen: Boolean, diedWithSessions: Boolean,
+    last: LastTerminal?, hosts: List<Host>, connectedHosts: Set<Long>,
+): Boolean = reopenOnLaunch && !tapped && if (deadTerminalScreen) {
+    shouldAutoResume(last, hosts, connectedHosts)
+} else {
+    shouldAutoResumeOnLaunch(diedWithSessions, last, hosts, connectedHosts)
+}
+
+/**
  * A "sessions open" marker in app-private preferences, written while any terminal is open and
  * cleared the moment none is (an orderly end: Disconnect all, the last close, a remote exit).
  * A process that is killed leaves it set, so the next process finds [diedWithSessions] true.

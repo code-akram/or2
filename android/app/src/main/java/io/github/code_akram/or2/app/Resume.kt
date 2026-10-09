@@ -145,7 +145,8 @@ internal fun rememberResume(
     // and the remembered target reopens, with no further tap. A cold start from the launcher has no
     // saved destination (OxygenOS drops a killed app from recents, so this is the usual way back): it
     // resumes the same way when the previous process died with sessions open (`SessionMarker`, one-shot
-    // per process), and Home's Resume card is what remains when the fingerprint is cancelled.
+    // per process), and Home's Resume card is what remains when the fingerprint is cancelled. With "Reopen the last
+    // terminal on launch" off, neither path resumes: the app starts on Home, Resume card and all.
     var recovered by remember { mutableStateOf(false) }
     LaunchedEffect(loaded) {
         if (!loaded || recovered) return@LaunchedEffect
@@ -155,12 +156,13 @@ internal fun rememberResume(
         // handled once this has run, so a dead terminal screen is left first).
         val tapped = actions.agentOpens.request.value != null
         val top = navigation.stack().current
-        if (top is Destination.Terminal && connections.terminal(top.terminalId) == null) {
-            navigation.navigate(NavStack())
-            if (!tapped && shouldAutoResume(actions.reattach.last.value, hostsNow.value, connectedHosts)) resumeLast()
-        } else if (!tapped && shouldAutoResumeOnLaunch(coldStart, actions.reattach.last.value, hostsNow.value, connectedHosts)) {
-            resumeLast()
-        }
+        val deadTerminalScreen = top is Destination.Terminal && connections.terminal(top.terminalId) == null
+        if (deadTerminalScreen) navigation.navigate(NavStack())
+        val resumes = resumesOnLaunch(
+            actions.reopenLastTerminal(), tapped, deadTerminalScreen, coldStart, actions.reattach.last.value, hostsNow.value,
+            connectedHosts,
+        )
+        if (resumes) resumeLast()
     }
 
     // An agent notification's tap opens the pane the way an inbox tap does; a host that is not connected connects first

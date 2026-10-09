@@ -66,3 +66,32 @@ const val ADDRESS_ORDER_HINT =
 /** Under the "Host sleeps when idle" toggle. */
 const val SLEEPS_EXPLANATION =
     "For a laptop that sleeps: when its connection is lost it shows as asleep, and no reconnect is offered."
+
+/** Under the "Wake probe" toggle: one line. */
+const val WAKE_PROBE_EXPLANATION =
+    "Knocks on the SSH port before every connect, so a Bonjour Sleep Proxy (an Apple TV, a HomePod) wakes the host."
+
+/**
+ * Under the MAC address field: what Wake needs, and the limit the app cannot get round (a Mac with its lid closed on
+ * battery turns Wi-Fi off, so no packet or knock reaches it) with the ways out.
+ */
+const val MAC_ADDRESS_HINT =
+    "Optional, for Wake-on-LAN on the same network (the Mac needs \"Wake for network access\"). A closed laptop on " +
+        "battery cannot be woken: keep it awake on power (a keep-awake tool, or pmset disablesleep), or run long agents " +
+        "on an always-on host."
+
+private val MacPattern = Regex("[0-9A-Fa-f]{2}([:-])[0-9A-Fa-f]{2}(\\1[0-9A-Fa-f]{2}){4}")
+
+/**
+ * The MAC address as stored: lowercase with `:`, or null when [text] is blank (no MAC address) or not one. Accepts
+ * `aa:bb:cc:dd:ee:ff` or `-` separators (not mixed), any case, surrounding whitespace ignored.
+ */
+fun normalizedMac(text: String): String? {
+    val trimmed = text.trim()
+    if (!MacPattern.matches(trimmed)) return null
+    return trimmed.lowercase().replace('-', ':')
+}
+
+/** The inline error under the MAC address field; null for an empty field (the address is optional) or a valid one. */
+fun macError(text: String): String? =
+    if (text.isBlank() || normalizedMac(text) != null) null else "Use six hex pairs: aa:bb:cc:dd:ee:ff."

@@ -317,4 +317,36 @@ class HostFormUiDeviceTest {
             assertEquals(false, saved!!.sleeps)
         }
     }
+
+    @Test
+    fun theMacAddressIsOptionalCheckedInlineAndStoredLowercaseWithColons() {
+        var saved: Host? = null
+        show(null, save = { saved = it })
+        fillHostFields()
+        compose.onNodeWithTag("host-mac-hint").performScrollTo().assertTextContains("Wake for network access", substring = true)
+        compose.onNodeWithTag("host-mac").performScrollTo().performTextInput("AA-BB-CC-DD-EE")
+        compose.onNodeWithText("Use six hex pairs: aa:bb:cc:dd:ee:ff.").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("host-form-primary").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithTag("host-mac").performScrollTo().performTextInput("-FF")
+        compose.onNodeWithText("Use six hex pairs: aa:bb:cc:dd:ee:ff.").assertDoesNotExist()
+        compose.onNodeWithTag("host-form-primary").performScrollTo().assertIsEnabled().performClick()
+        compose.runOnIdle {
+            assertEquals("aa:bb:cc:dd:ee:ff", saved!!.macAddress)
+            assertFalse(saved!!.wakeProbe)
+        }
+    }
+
+    @Test
+    fun theWakeProbeIsOffByDefaultExplainedAndSaved() {
+        var saved: Host? = null
+        show(null, save = { saved = it })
+        fillHostFields()
+        compose.onNodeWithTag("host-wake-probe-note").performScrollTo().assertTextContains("Bonjour Sleep Proxy", substring = true)
+        compose.onNodeWithTag("host-wake-probe").performScrollTo().performClick()
+        compose.onNodeWithTag("host-form-primary").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertEquals(true, saved!!.wakeProbe)
+            assertEquals(null, saved!!.macAddress) // An empty field is no MAC address.
+        }
+    }
 }

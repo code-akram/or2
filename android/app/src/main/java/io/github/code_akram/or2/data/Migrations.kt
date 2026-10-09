@@ -62,3 +62,19 @@ val MIGRATION_3_4 = object : Migration(3, 4) {
         MIGRATION_3_4_STATEMENTS.forEach(db::execSQL)
     }
 }
+
+/**
+ * v4 -> v5 (M4, waking a sleeping host): each host gains `mac_address` (for the Wake-on-LAN packet; null, unset) and
+ * `wake_probe` (knock on the SSH port before every connect; default 0, off). Two additive `ALTER TABLE ... ADD COLUMN`s:
+ * nothing is dropped, recreated or rewritten, so keys, trust and addresses are untouched.
+ */
+val MIGRATION_4_5_STATEMENTS = listOf(
+    "ALTER TABLE `hosts` ADD COLUMN `mac_address` TEXT",
+    "ALTER TABLE `hosts` ADD COLUMN `wake_probe` INTEGER NOT NULL DEFAULT 0",
+)
+
+val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        MIGRATION_4_5_STATEMENTS.forEach(db::execSQL)
+    }
+}

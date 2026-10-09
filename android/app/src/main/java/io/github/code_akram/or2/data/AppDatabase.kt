@@ -58,6 +58,16 @@ data class HostRecord(
      * per connection, see `UdpVerdict`); the column stays so the schema needs no migration.
      */
     @ColumnInfo(name = "mosh_failed_until", defaultValue = "0") val moshFailedUntil: Long = 0,
+    /**
+     * The host's MAC address for Wake-on-LAN (`aa:bb:cc:dd:ee:ff`, lowercase), null when unset. Used only in the
+     * magic packet.
+     */
+    @ColumnInfo(name = "mac_address") val macAddress: String? = null,
+    /**
+     * Every connect first knocks on the host's SSH port at each address (the TCP wake probe), so a Bonjour Sleep
+     * Proxy on the network wakes it.
+     */
+    @ColumnInfo(name = "wake_probe", defaultValue = "0") val wakeProbe: Boolean = false,
 )
 
 /** One of a host's addresses, tried in `position` order (0 is preferred). */
@@ -96,6 +106,8 @@ data class Host(val record: HostRecord, val addresses: List<HostEndpoint>) {
     val showInInbox get() = record.showInInbox
     val transport get() = record.transport
     val sleeps get() = record.sleeps
+    val macAddress get() = record.macAddress
+    val wakeProbe get() = record.wakeProbe
 
     /** `host:port` summaries for lists and dialogs. */
     val addressSummary get() = addresses.joinToString(", ") { "${it.hostname}:${it.port}" }
@@ -163,8 +175,11 @@ abstract class AppDao : TrustStore {
     abstract suspend fun deleteAddresses(hostId: Long)
 
     // The unused `mosh_failed_until` is not written.
-    @Query("UPDATE hosts SET label = :label, username = :username, keyId = :keyId, showInInbox = :showInInbox, transport = :transport, sleeps = :sleeps WHERE id = :id")
-    abstract suspend fun updateHost(id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean, transport: TransportPref, sleeps: Boolean)
+    @Query("UPDATE hosts SET label = :label, username = :username, keyId = :keyId, showInInbox = :showInInbox, transport = :transport, sleeps = :sleeps, mac_address = :macAddress, wake_probe = :wakeProbe WHERE id = :id")
+    abstract suspend fun updateHost(
+        id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean, transport: TransportPref, sleeps: Boolean,
+        macAddress: String?, wakeProbe: Boolean,
+    )
 
     @Query("DELETE FROM hosts WHERE id = :id")
     abstract suspend fun deleteHost(id: Long)
@@ -199,7 +214,9 @@ abstract class AppDao : TrustStore {
         } else {
             val stored = host(host.id) ?: error("Host was deleted.")
             if (host.addresses != stored.addresses) clearTrust(host.id)
-            updateHost(host.id, host.label, host.username, host.keyId, host.showInInbox, host.transport, host.sleeps)
+            updateHost(
+                host.id, host.label, host.username, host.keyId, host.showInInbox, host.transport, host.sleeps, host.macAddress, host.wakeProbe,
+            )
             deleteAddresses(host.id)
             insertAddresses(addressRows(host.id, host.addresses))
         }
@@ -225,7 +242,7 @@ abstract class AppDao : TrustStore {
 
 @Database(
     entities = [HostRecord::class, HostAddressRecord::class, KeyRecord::class, TrustedHostKey::class],
-    version = 4, exportSchema = true,
+    version = 5, exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dao(): AppDao

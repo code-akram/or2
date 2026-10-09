@@ -2,6 +2,7 @@ package io.github.code_akram.or2.connection
 
 import io.github.code_akram.or2.app.TerminalActivations
 import io.github.code_akram.or2.data.Host
+import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.data.TrustStore
 import io.github.code_akram.or2.ffi.AgentIdentity
@@ -457,6 +458,12 @@ class HostConnections(
     private val moshServers: MoshServerLedger? = null,
     /** Debug timing markers (logcat tag `or2.timing`); the default records nothing. */
     val timing: Timing = Timing(),
+    /**
+     * The TCP wake probe (`wake_probe`), run before every connect of a host whose "Wake probe" is on, a reconnect and a
+     * Resume included: one knock on each address, bounded at 1.5 s, so a Bonjour Sleep Proxy wakes the host before the
+     * real connection tries. The default knocks on nothing.
+     */
+    private val wakeProbe: suspend (List<HostEndpoint>) -> Unit = {},
 ) {
     private val scope = CoroutineScope(SupervisorJob() + main)
 
@@ -581,6 +588,10 @@ class HostConnections(
                         if (state is HostState.Closed) releaseWatches(current)
                     }
                 }
+            }
+            if (host.wakeProbe) {
+                wakeProbe(host.addresses)
+                timing.mark(span, "wake-probe")
             }
             val request = HostConnectRequest(
                 host.addresses.map { HostAddress(it.hostname, it.port.toUShort()) }, host.username, privateKey, keys,

@@ -94,15 +94,17 @@ class MigrationDeviceTest {
             db.execSQL("INSERT INTO hosts (id, label, hostname, port, username, keyId) VALUES (1, 'Alpha', 'alpha.invalid', 22, 'u1', NULL)")
         }
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val database = androidx.room.Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
+        val database = androidx.room.Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build()
         try {
             kotlinx.coroutines.runBlocking {
                 val host = database.dao().host(1)!!
                 assertEquals(listOf(HostEndpoint("alpha.invalid", 22)), host.addresses)
                 assertTrue(host.showInInbox)
-                assertEquals(TransportPref.AUTO, host.transport) // v1 -> v2 -> v3 -> v4 in one open.
+                assertEquals(TransportPref.AUTO, host.transport) // v1 -> v2 -> v3 -> v4 -> v5 in one open.
                 assertFalse(host.sleeps)
                 assertEquals(0L, host.record.moshFailedUntil)
+                assertNull(host.macAddress)
+                assertFalse(host.wakeProbe)
             }
         } finally {
             database.close()
@@ -188,7 +190,7 @@ class MigrationDeviceTest {
         }
         helper.runMigrationsAndValidate(name, 4, true, MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).close()
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val database = androidx.room.Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
+        val database = androidx.room.Room.databaseBuilder(context, AppDatabase::class.java, name).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build()
         try {
             kotlinx.coroutines.runBlocking {
                 val dao = database.dao()
@@ -203,6 +205,74 @@ class MigrationDeviceTest {
                 dao.saveHost(migrated.copy(record = migrated.record.copy(transport = TransportPref.MOSH, sleeps = true)), dao.host(1)!!)
                 assertTrue(dao.host(1)!!.sleeps)
                 assertEquals(0L, dao.host(1)!!.record.moshFailedUntil)
+            }
+        } finally {
+            database.close()
+            context.deleteDatabase(name)
+        }
+    }
+
+    /** v4 -> v5: Room validates the result against 5.json; hosts keep everything and get no MAC address and no probe. */
+    @Test
+    fun populatedVersion4MigratesToVersion5WithTheWakeColumnsAtTheirDefaults() {
+        helper.createDatabase(name, 4).use { db ->
+            db.execSQL("INSERT INTO keys VALUES ('key-1', 'Phone key', 'ssh-ed25519', 'ssh-ed25519 AAAA', 'SHA256:fp', 'c', x'0a0b0c', x'0102')")
+            db.execSQL("INSERT INTO hosts (id, label, username, keyId, showInInbox, transport, sleeps) VALUES (1, 'Alpha', 'u1', 'key-1', 1, 'MOSH', 1)")
+            db.execSQL("INSERT INTO hosts (id, label, username, keyId, showInInbox, transport, sleeps) VALUES (5, 'Beta', 'u2', NULL, 0, 'SSH', 0)")
+            db.execSQL("INSERT INTO host_addresses VALUES (1, 0, 'alpha.invalid', 22)")
+            db.execSQL("INSERT INTO host_addresses VALUES (5, 0, 'beta.invalid', 22)")
+            db.execSQL("INSERT INTO trusted_host_keys VALUES (1, 'ssh-ed25519 H1', 'SHA256:h1', 'ssh-ed25519')")
+        }
+        helper.runMigrationsAndValidate(name, 5, true, MIGRATION_4_5).use { db ->
+            db.query("SELECT id, label, keyId, transport, sleeps, mac_address, wake_probe FROM hosts ORDER BY id").use { cursor ->
+                assertEquals(2, cursor.count)
+                cursor.moveToFirst()
+                assertEquals("Alpha", cursor.getString(1))
+                assertEquals("key-1", cursor.getString(2))
+                assertEquals("MOSH", cursor.getString(3))
+                assertEquals(1, cursor.getInt(4)) // The sleeps flag survives.
+                assertTrue(cursor.isNull(5))
+                assertEquals(0, cursor.getInt(6))
+                cursor.moveToLast()
+                assertTrue(cursor.isNull(2))
+                assertEquals("SSH", cursor.getString(3))
+                assertTrue(cursor.isNull(5))
+            }
+            db.query("SELECT * FROM host_addresses").use { assertEquals(2, it.count) }
+            db.query("SELECT * FROM trusted_host_keys").use { assertEquals(1, it.count) }
+            db.query("SELECT ciphertext, iv FROM keys").use { cursor ->
+                cursor.moveToFirst()
+                assertArrayEquals(byteArrayOf(0x0a, 0x0b, 0x0c), cursor.getBlob(0))
+                assertArrayEquals(byteArrayOf(1, 2), cursor.getBlob(1))
+            }
+        }
+    }
+
+    /** The full chain to v5, then the real DAO writes the wake columns, and an edit of them keeps the host key trusted. */
+    @Test
+    fun aVersion1DatabaseReachesVersion5AndTheDaoPersistsTheWakeColumns() {
+        helper.createDatabase(name, 1).use { db ->
+            db.execSQL("INSERT INTO hosts (id, label, hostname, port, username, keyId) VALUES (1, 'Alpha', 'alpha.invalid', 22, 'u1', NULL)")
+            db.execSQL("INSERT INTO trusted_host_keys VALUES (1, 'ssh-ed25519 H1', 'SHA256:h1', 'ssh-ed25519')")
+        }
+        helper.runMigrationsAndValidate(name, 5, true, MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).close()
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val database = androidx.room.Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build()
+        try {
+            kotlinx.coroutines.runBlocking {
+                val dao = database.dao()
+                val migrated = dao.host(1)!!
+                assertNull(migrated.macAddress)
+                assertFalse(migrated.wakeProbe)
+                dao.saveHost(migrated.copy(record = migrated.record.copy(macAddress = "aa:bb:cc:dd:ee:ff", wakeProbe = true)), migrated)
+                val edited = dao.host(1)!!
+                assertEquals("aa:bb:cc:dd:ee:ff", edited.macAddress)
+                assertTrue(edited.wakeProbe)
+                assertEquals(listOf("ssh-ed25519 H1"), dao.trustedKeys(1))
+                dao.saveHost(edited.copy(record = edited.record.copy(macAddress = null, wakeProbe = false)), edited)
+                assertNull(dao.host(1)!!.macAddress)
+                assertFalse(dao.host(1)!!.wakeProbe)
             }
         } finally {
             database.close()

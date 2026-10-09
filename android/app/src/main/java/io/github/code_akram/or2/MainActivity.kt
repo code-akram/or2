@@ -29,6 +29,7 @@ import io.github.code_akram.or2.app.Or2Application
 import io.github.code_akram.or2.connection.KeyUnlocker
 import io.github.code_akram.or2.connection.MissingKeyException
 import io.github.code_akram.or2.connection.connectGrouped
+import io.github.code_akram.or2.connection.wakeAttempt
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.KeyRecord
 import io.github.code_akram.or2.ffi.ClientKeyMaterial
@@ -144,6 +145,11 @@ class MainActivity : FragmentActivity() {
             enableReply = ::runEnableReply,
             onScreen = app.agentAlerts::screenChanged,
             imageShares = imageShares,
+            wake = ::wake,
+            wakeStatus = app.wake.status,
+            clearWake = app.wake::clear,
+            keepScreenOn = app.settings.keepScreenOn,
+            reopenLastTerminal = { app.settings.reopenLastTerminal.value },
         )
         setContent {
             val hosts by model.hosts.collectAsStateWithLifecycle()
@@ -288,6 +294,18 @@ class MainActivity : FragmentActivity() {
      * permission is offered in context).
      */
     private fun connect(hosts: List<Host>) = operation { connectGrouped(hosts, app.connections, biometricUnlocker) }
+
+    /**
+     * Home's Wake ([io.github.code_akram.or2.connection.Waker]): the packet and the probe go out at once, then one unlock
+     * of the host's key serves every connect attempt of the next 30 s (each gets its own copy; the key is wiped when the
+     * Wake ends).
+     */
+    private fun wake(host: Host) = operation {
+        val keyId = host.keyId ?: throw MissingKeyException(listOf(host))
+        app.wake.wake(host) { attempts ->
+            biometricUnlocker.withKey(keyId) { key -> attempts { app.connections.wakeAttempt(host, key) } }
+        }
+    }
 
     /**
      * The battery step was answered. "Allow" opens the system's request (the step waits for its result); a device with

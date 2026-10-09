@@ -17,6 +17,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import io.github.code_akram.or2.ui.BottomInsetSpacer
 import io.github.code_akram.or2.ui.GroupCard
+import io.github.code_akram.or2.ui.GroupDivider
 import io.github.code_akram.or2.ui.ListRow
 import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Toggle
@@ -34,9 +35,13 @@ fun SettingsRoute(agentAlerts: Boolean, setAgentAlerts: (Boolean) -> Unit, back:
     val context = LocalContext.current
     val settings = remember { (context.applicationContext as? Or2Application)?.settings ?: AppSettings(MemoryPrefStore()) }
     val copyFromHost by settings.copyFromHost.collectAsState()
+    val keepScreenOn by settings.keepScreenOn.collectAsState()
+    val reopenLastTerminal by settings.reopenLastTerminal.collectAsState()
     SettingsScreen(
         agentAlerts = agentAlerts, setAgentAlerts = setAgentAlerts,
         copyFromHost = copyFromHost, setCopyFromHost = settings::setCopyFromHost, back = back,
+        keepScreenOn = keepScreenOn, setKeepScreenOn = settings::setKeepScreenOn,
+        reopenLastTerminal = reopenLastTerminal, setReopenLastTerminal = settings::setReopenLastTerminal,
     )
 }
 
@@ -52,6 +57,10 @@ fun SettingsScreen(
     setCopyFromHost: (Boolean) -> Unit,
     back: () -> Unit,
     modifier: Modifier = Modifier,
+    keepScreenOn: Boolean = false,
+    setKeepScreenOn: (Boolean) -> Unit = {},
+    reopenLastTerminal: Boolean = true,
+    setReopenLastTerminal: (Boolean) -> Unit = {},
 ) {
     val scroll = rememberScrollState()
     Column(modifier.fillMaxSize()) {
@@ -70,6 +79,18 @@ fun SettingsScreen(
                     "Copy from the host", subtitle = "Programs on a host can copy text to this phone's clipboard (OSC 52).",
                     modifier = Modifier.testTag("settings-copy-from-host"), onClick = { setCopyFromHost(!copyFromHost) },
                     trailing = { Or2Toggle(copyFromHost, setCopyFromHost, Modifier.testTag("settings-copy-from-host-switch")) },
+                )
+                GroupDivider(inset = Or2Dimens.Gutter)
+                ListRow(
+                    "Keep screen on", subtitle = "While a terminal is on screen.",
+                    modifier = Modifier.testTag("settings-keep-screen-on"), onClick = { setKeepScreenOn(!keepScreenOn) },
+                    trailing = { Or2Toggle(keepScreenOn, setKeepScreenOn, Modifier.testTag("settings-keep-screen-on-switch")) },
+                )
+                GroupDivider(inset = Or2Dimens.Gutter)
+                ListRow(
+                    "Reopen the last terminal on launch", subtitle = "After the app was closed with a terminal open.",
+                    modifier = Modifier.testTag("settings-reopen-last"), onClick = { setReopenLastTerminal(!reopenLastTerminal) },
+                    trailing = { Or2Toggle(reopenLastTerminal, setReopenLastTerminal, Modifier.testTag("settings-reopen-last-switch")) },
                 )
             }
             Spacer(Modifier.height(24.dp))
