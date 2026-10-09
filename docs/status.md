@@ -2,9 +2,26 @@
 
 Read this first when picking the work up. The details are in [design](design.md) (checklists),
 [contracts](contracts.md) (what the code must do), [roadmap](roadmap.md) and [build](build.md).
-Updated 2026-10-08.
+Updated 2026-10-09.
 
 ## Where it stands
+
+### Terminal sprites: candidate for owner QA (2026-10-09, branch `terminal-sprites`)
+
+- Owner report with a phone screenshot: Claude Code's mascot showed seams between cells and its permission-mode
+  arrows `⏵⏵` were two hollow boxes. Diagnosis from all 224 phone fonts: U+23F5 and Powerline exist in none;
+  block elements only in fallback Symbols/CJK fonts whose glyphs do not fill a cell; `⏺` only as a colour emoji.
+- Owner chose "draw it ourselves first" over bundling a font: box drawing, block elements, `⏴⏵⏶⏷⏸⏹⏺` and
+  Powerline are now sprites (contracts, "Sprites"). `⎿ ✻ ✔` still come from mismatched fallback fonts; a
+  bundled terminal font (JetBrains Mono) is the deferred second step.
+- Checks: **683 JVM** (8 new sprite geometry tests), debug/device-test lints, and on the phone the **48 terminal
+  device tests** (2 new: seam-free mascot and `⏵⏵` pixel checks, a hardware capture reviewed zoomed in).
+  Frame timings unchanged. Rust/FFI unchanged, so no Rust gate was rerun. Separate test apps removed afterwards.
+- **Signed candidate installed in place** at 19:57 phone-local time: **0.1.7 / versionCode 14 / FFI API 23**,
+  SHA-256 `96561ce7850b3f8cd0bc4dde337c37a19cdc319f220f0c1e84daa4fbed09bbbb`. The replaced APK matched public
+  v0.1.7 and is kept with the candidate in `/tmp/or2-candidate-14/`; same certificate (`1418c4aa…cbe1a2a2`),
+  first-install time unchanged, cold launch `Status: ok`, no crash. No tag or release. Awaiting the owner's
+  look at a live Claude Code pane.
 
 ### Release v0.1.7 (2026-10-08)
 
