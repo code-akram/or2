@@ -20,7 +20,8 @@ fun testHost(
     id: Long = 7, label: String = "Fixture", keyId: String? = "ephemeral",
     addresses: List<HostEndpoint> = listOf(HostEndpoint("fixture.invalid", 2222)), showInInbox: Boolean = true,
     transport: TransportPref = TransportPref.AUTO, sleeps: Boolean = false,
-) = Host(HostRecord(id, label, "fixture", keyId, showInInbox, transport, sleeps), addresses)
+    macAddress: String? = null, wakeProbe: Boolean = false,
+) = Host(HostRecord(id, label, "fixture", keyId, showInInbox, transport, sleeps, macAddress = macAddress, wakeProbe = wakeProbe), addresses)
 
 /** Whether any terminal has not closed and was not dismissed. */
 fun HostConnections.hasOpenSession(): Boolean = terminals.value.any { !it.retired && it.state.value !is SessionState.Closed }
@@ -112,6 +113,9 @@ class FakeWatch(val events: MutableList<String> = mutableListOf()) : HerdrWatchI
 }
 
 /** One scripted host connection: records what the holder asks and lets tests drive callbacks. */
+/** One `read_history` call as [FakePort] received it. */
+data class HistoryRead(val target: TerminalTarget, val paneId: String?, val clientId: String?, val lines: UInt)
+
 class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     var nativeState: HostState = HostState.Connecting
     var approved: String? = null
@@ -237,6 +241,19 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         scrollFailure?.let { throw it }
     }
 
+    /** `read_history` calls in order: the target, the herdr pane, the client id and the line count. */
+    val historyReads = mutableListOf<HistoryRead>()
+    /** What `read_history` answers; [historyFailure] is thrown instead (after the call is recorded) while set. */
+    var history = HistoryText("", false)
+    var historyFailure: Exception? = null
+    var historyGate: CompletableDeferred<Unit>? = null
+    override suspend fun readHistory(target: TerminalTarget, paneId: String?, clientId: String?, lines: UInt): HistoryText {
+        historyReads += HistoryRead(target, paneId, clientId, lines)
+        historyGate?.await()
+        historyFailure?.let { throw it }
+        return history
+    }
+
     /** `navigate` calls in order; a failure is thrown after the call is recorded. */
     val navigations = mutableListOf<Triple<TerminalTarget, String?, TargetNav>>()
 
@@ -266,6 +283,28 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         replyGate?.await()
         replyFailure?.let { throw it }
         return replyRoute
+    }
+
+    /** What `permission_prompt` answers (each call is recorded in [prompts]); [promptFailure] is thrown instead. */
+    var permission: PermissionPrompt? = null
+    var promptFailure: Exception? = null
+    val prompts = mutableListOf<Pair<String, AgentIdentity>>()
+    override suspend fun permissionPrompt(session: String?, paneId: String, agent: AgentIdentity): PermissionPrompt? {
+        events += "permission:$session:$paneId"
+        prompts += paneId to agent
+        promptFailure?.let { throw it }
+        return permission
+    }
+
+    /** `answer_permission` calls in order: pane, seq and answer; a failure is thrown after the call is recorded. */
+    val answers = mutableListOf<Triple<String, ULong, PermissionAnswer>>()
+    var answerFailure: Exception? = null
+    override suspend fun answerPermission(
+        session: String?, paneId: String, agent: AgentIdentity, seq: ULong, answer: PermissionAnswer,
+    ) {
+        events += "answer:$session:$paneId"
+        answers += Triple(paneId, seq, answer)
+        answerFailure?.let { throw it }
     }
 
     /** `upload_image` calls in order (the extension and the size); [uploadGate] holds each, [uploadFailure] is thrown after. */
@@ -345,10 +384,18 @@ class FakeDao : AppDao() {
     }
     override suspend fun insertAddresses(addresses: List<HostAddressRecord>) { this.addresses.value += addresses }
     override suspend fun deleteAddresses(hostId: Long) { addresses.value = addresses.value.filterNot { it.hostId == hostId } }
-    override suspend fun updateHost(id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean, transport: TransportPref, sleeps: Boolean) {
+    override suspend fun updateHost(
+        id: Long, label: String, username: String, keyId: String?, showInInbox: Boolean, transport: TransportPref, sleeps: Boolean,
+        macAddress: String?, wakeProbe: Boolean,
+    ) {
         if (failSave) error("storage failure")
         records.value = records.value.map {
-            if (it.id == id) it.copy(label = label, username = username, keyId = keyId, showInInbox = showInInbox, transport = transport, sleeps = sleeps) else it
+            if (it.id == id) {
+                it.copy(
+                    label = label, username = username, keyId = keyId, showInInbox = showInInbox, transport = transport, sleeps = sleeps,
+                    macAddress = macAddress, wakeProbe = wakeProbe,
+                )
+            } else it
         }
     }
     override suspend fun deleteHost(id: Long) {

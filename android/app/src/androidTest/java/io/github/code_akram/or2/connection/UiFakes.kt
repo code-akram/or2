@@ -100,10 +100,18 @@ class UiPort(
     override suspend fun focusHerdrTab(session: String?, tabId: String) { focusedTabs += session to tabId }
     override suspend fun stopMoshServer(pid: UInt) = Unit
     override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll, clientId: String?) = Unit
+
+    /** What `read_history` answers. */
+    var history = HistoryText("", false)
+    override suspend fun readHistory(target: TerminalTarget, paneId: String?, clientId: String?, lines: UInt) = history
     override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) = Unit
     override suspend fun replyToPane(
         session: String?, paneId: String, agent: AgentIdentity, text: String,
     ) = ReplyRoute.PROMPTED
+    override suspend fun permissionPrompt(session: String?, paneId: String, agent: AgentIdentity): PermissionPrompt? = null
+    override suspend fun answerPermission(
+        session: String?, paneId: String, agent: AgentIdentity, seq: ULong, answer: PermissionAnswer,
+    ) = Unit
     override suspend fun uploadImage(bytes: ByteArray, extension: String) = "/home/u/.cache/or2/images/or2-1.$extension"
 
     /** What `herdr_integrations` answers; `install_herdr_integration` ids go to [installs]. */

@@ -18,11 +18,14 @@ import io.github.code_akram.or2.ffi.HerdrTab
 import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HerdrWatchInterface
 import io.github.code_akram.or2.ffi.HerdrWorkspace
+import io.github.code_akram.or2.ffi.HistoryText
 import io.github.code_akram.or2.ffi.HostCapabilities
 import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.KeyInput
+import io.github.code_akram.or2.ffi.PermissionAnswer
+import io.github.code_akram.or2.ffi.PermissionPrompt
 import io.github.code_akram.or2.ffi.ReplyRoute
 import io.github.code_akram.or2.ffi.SessionInterface
 import io.github.code_akram.or2.ffi.SessionListener
@@ -264,8 +267,13 @@ internal class DemoWorld {
 
         override suspend fun stopMoshServer(pid: UInt) = Unit
         override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll, clientId: String?) = Unit
+        override suspend fun readHistory(target: TerminalTarget, paneId: String?, clientId: String?, lines: UInt) = HistoryText("", false)
         override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) = Unit
         override suspend fun replyToPane(session: String?, paneId: String, agent: AgentIdentity, text: String) = ReplyRoute.PROMPTED
+        override suspend fun permissionPrompt(session: String?, paneId: String, agent: AgentIdentity): PermissionPrompt? = null
+        override suspend fun answerPermission(
+            session: String?, paneId: String, agent: AgentIdentity, seq: ULong, answer: PermissionAnswer,
+        ) = Unit
         override suspend fun uploadImage(bytes: ByteArray, extension: String) = "/home/dev/.cache/or2/images/or2-1.$extension"
         override suspend fun installHerdrIntegration(id: String) = Unit
         override suspend fun herdrIntegrations() =

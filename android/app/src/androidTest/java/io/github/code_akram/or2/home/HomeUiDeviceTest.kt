@@ -34,6 +34,8 @@ import io.github.code_akram.or2.ffi.CloseReason
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.TerminalTarget
+import io.github.code_akram.or2.connection.CANT_WAKE_MESSAGE
+import io.github.code_akram.or2.connection.WakeStatus
 import io.github.code_akram.or2.inbox.linkStatus
 import io.github.code_akram.or2.pair.AddHostOptions
 import io.github.code_akram.or2.pair.AddHostRoute
@@ -77,6 +79,7 @@ class HomeUiDeviceTest {
                     batteryCard = batteryCard, allowBattery = { calls += "allow-battery" }, dismissBattery = { calls += "dismiss-battery" },
                     notificationCard = notificationCard, allowNotifications = { calls += "allow-notifications" },
                     dismissNotifications = { calls += "dismiss-notifications" },
+                    wakeHost = { calls += "wake:${it.id}" },
                 )
             }
         }
@@ -363,5 +366,50 @@ class HomeUiDeviceTest {
         // A tap still connects it (the user knows it woke up), like any unconnected host.
         compose.onNodeWithTag("host:6").performTouchInput { longClick() }
         compose.onNodeWithTag("option-connect").assertIsDisplayed()
+    }
+
+    // --- M4: Wake ---------------------------------------------------------------------------------
+
+    private fun Host.wakeable(mac: String? = "aa:bb:cc:dd:ee:ff", probe: Boolean = false) =
+        copy(record = record.copy(macAddress = mac, wakeProbe = probe))
+
+    @Test
+    fun aHostThatCanBeWokenOffersWakeInItsMenuAndOthersDoNot() {
+        val lost = HostState.Closed(CloseReason.Failed(SessionFailure.ConnectionLost("reset")))
+        show(listOf(
+            card(uiHost(6, "MacBook", sleeps = true).wakeable(), lost),
+            card(uiHost(7, "Server"), lost),
+            card(uiHost(8, "Probed").wakeable(mac = null, probe = true), HostState.Connected(0u)),
+            card(uiHost(9, "Mini").wakeable(mac = null, probe = true), null),
+        ))
+        compose.onNodeWithTag("host-menu:6").performClick()
+        compose.onNodeWithTag("host-wake:6").assertIsDisplayed().performClick()
+        // Neither a MAC address nor the probe: nothing to wake it with.
+        compose.onNodeWithTag("host-menu:7").performClick()
+        compose.onNodeWithTag("host-wake:7").assertDoesNotExist()
+        compose.onNodeWithTag("option-edit").performClick()
+        // Connected: nothing to wake.
+        compose.onNodeWithTag("host-menu:8").performScrollTo().performClick()
+        compose.onNodeWithTag("host-wake:8").assertDoesNotExist()
+        compose.onNodeWithTag("option-edit").performClick()
+        // Not connected, with the probe on.
+        compose.onNodeWithTag("host-menu:9").performScrollTo().performClick()
+        compose.onNodeWithTag("host-wake:9").assertIsDisplayed().performClick()
+        compose.runOnIdle { assertEquals(listOf("wake:6", "edit:7", "edit:8", "wake:9"), calls) }
+    }
+
+    @Test
+    fun aWakeShowsWakingInPlaceAndSaysWhyItGaveUp() {
+        val lost = HostState.Closed(CloseReason.Failed(SessionFailure.TimedOut))
+        val laptop = uiHost(6, "MacBook", sleeps = true).wakeable()
+        val closed = uiHost(7, "Air", sleeps = true).wakeable()
+        show(listOf(
+            HostCard(laptop, hostCardStatus(lost, false, 0, true, laptop.addresses, WakeStatus.WAKING), linkStatus(lost, true)),
+            HostCard(closed, hostCardStatus(lost, false, 0, true, closed.addresses, WakeStatus.CANT_WAKE), linkStatus(lost, true)),
+        ))
+        compose.onNodeWithTag("host-progress:6", useUnmergedTree = true).assertTextEquals("Waking…")
+        compose.onNodeWithTag("host-spinner:6", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag("host-failure:7", useUnmergedTree = true).assertTextEquals(CANT_WAKE_MESSAGE)
+        compose.onNodeWithTag("host-asleep:7", useUnmergedTree = true).assertDoesNotExist()
     }
 }

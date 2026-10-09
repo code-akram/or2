@@ -9,13 +9,17 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -67,6 +71,7 @@ import io.github.code_akram.or2.ui.Or2Dialog
 import io.github.code_akram.or2.ui.Or2Dimens
 import io.github.code_akram.or2.ui.Or2Icons
 import io.github.code_akram.or2.ui.Or2Shapes
+import io.github.code_akram.or2.ui.Or2Type
 import io.github.code_akram.or2.ui.TextAction
 import io.github.code_akram.or2.ui.clipboardText
 import kotlinx.coroutines.flow.Flow
@@ -129,6 +134,11 @@ fun TerminalScreen(
      * (contracts.md, "Image paste"). Null takes no images.
      */
     imagePaste: ImagePaste? = null,
+    /**
+     * Opens the history sheet. Given for a tmux or herdr terminal over mosh, which keeps nothing above the screen here:
+     * a swipe up past the top of the local screen then shows a small **History** chip while the terminal is scrolled up.
+     */
+    openHistory: (() -> Unit)? = null,
 ) {
     key(session) {
         val context = LocalContext.current
@@ -249,6 +259,14 @@ fun TerminalScreen(
                 TerminalShortcut.Help -> shortcutsOpen = true
             }
         }
+        // The History chip: offered by a swipe up past the top of the local screen, shown while scrolled up, gone at the bottom.
+        var historyOffered by remember { mutableStateOf(false) }
+        val offersHistory = openHistory != null
+        DisposableEffect(view, offersHistory) {
+            view.onScrolledPastTop = if (offersHistory) ({ historyOffered = true }) else ({})
+            onDispose { view.onScrolledPastTop = {} }
+        }
+        LaunchedEffect(scrolledAway, offersHistory) { if (!scrolledAway || !offersHistory) historyOffered = false }
         val swiped by rememberUpdatedState(onSwipe)
         val swipes = onSwipe != null
         DisposableEffect(view, swipes) {
@@ -264,6 +282,9 @@ fun TerminalScreen(
                 AndroidView(factory = { view }, modifier = Modifier.fillMaxSize().clipToBounds())
                 if (scrolledAway) {
                     ScrollToBottomButton({ view.jumpToBottom() }, Modifier.align(Alignment.BottomEnd).padding(end = 4.dp, bottom = 4.dp))
+                }
+                if (historyOffered && scrolledAway && openHistory != null) {
+                    HistoryChip({ historyOffered = false; openHistory() }, Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp))
                 }
                 if (chrome.padOpen) {
                     ArrowPad(
@@ -346,6 +367,23 @@ private fun ScrollToBottomButton(onClick: () -> Unit, modifier: Modifier = Modif
         ) {
             Icon(Or2Icons.ArrowDown, null, Modifier.size(Or2Dimens.ScrollButtonGlyph), tint = Or2Colors.Accent)
         }
+    }
+}
+
+/**
+ * The mosh terminal's **History** chip: a 28 dp pill in the scroll button's fill, over the terminal's top-right
+ * corner, opening the history sheet (mosh keeps nothing above the screen on the phone; the host does).
+ */
+@Composable
+private fun HistoryChip(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier.heightIn(min = Or2Dimens.Chip).clip(Or2Shapes.Pill).background(Or2Colors.ToolbarPill)
+            .clickable(role = Role.Button, onClick = onClick).padding(start = 8.dp, end = 12.dp).testTag("history-chip"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Or2Icons.History, null, Modifier.size(16.dp), tint = Or2Colors.Accent)
+        Spacer(Modifier.width(6.dp))
+        Text("History", style = Or2Type.Chip, color = Or2Colors.Text, maxLines = 1)
     }
 }
 

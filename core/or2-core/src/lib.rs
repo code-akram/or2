@@ -3,6 +3,7 @@
 pub mod directories;
 pub mod frame;
 pub mod herdr;
+pub mod history;
 pub mod host;
 pub mod input;
 pub mod keys;
@@ -18,3 +19,4 @@ pub mod terminal;
 pub mod tmux;
 pub mod transport;
 pub mod trust;
+pub mod wake;

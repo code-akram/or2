@@ -18,8 +18,13 @@ import io.github.code_akram.or2.app.Or2Application
  */
 class AgentReplyReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val alert = AgentNotifications.replyOf(intent) ?: return
         val app = context.applicationContext as? Or2Application ?: return
+        // An Approve or Deny ([AgentNotifications.answerIntent]) goes the same way, to [AgentAnswers].
+        AgentNotifications.answerOf(intent)?.let { request ->
+            app.agentAnswers.launch(request.alert, request.answer)
+            return
+        }
+        val alert = AgentNotifications.replyOf(intent) ?: return
         app.agentReplies.launch(alert, AgentNotifications.replyTextOf(intent))
     }
 }

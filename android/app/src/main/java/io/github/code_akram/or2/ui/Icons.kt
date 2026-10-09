@@ -78,9 +78,17 @@ object Or2Icons {
     val Pencil = icon("pencil", "M4 20h4L19 9l-4-4L4 16z", "M13 7l4 4")
     val Power = icon("power", "M12 3.5v8", "M7 6.8a7.5 7.5 0 1 0 10 0")
 
+    /** A sun: Wake, for a host asleep. */
+    val Wake = icon(
+        "wake", "M12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8z", "M12 2.5v2", "M12 19.5v2", "M2.5 12h2", "M19.5 12h2",
+        "M5.3 5.3l1.4 1.4", "M17.3 17.3l1.4 1.4", "M5.3 18.7l1.4-1.4", "M17.3 6.7l1.4-1.4",
+    )
+
     /** `⋯`: a host card's menu. */
     val More = icon("more", "M5.5 12h.01", "M12 12h.01", "M18.5 12h.01", stroke = 3f)
     val Refresh = icon("refresh", "M20 12a8 8 0 1 1-2.4-5.7", "M20 4.5V9h-4.5")
+    /** A clock turning back: the Terminals sheet's "History". */
+    val History = icon("history", "M4 12a8 8 0 1 0 2.4-5.7", "M4 4.5V9h4.5", "M12 8v4.5l3 2")
     /** A shell prompt, `>_`: the picker's "Shell" pill and the Resume card. */
     val Terminal = icon("terminal", "M5 7.5l4.5 4.5L5 16.5", "M12.5 17h6.5")
     val Layers = icon("layers", "M12 3.5l9 5-9 5-9-5z", "M3 12.5l9 5 9-5", "M3 16.5l9 5 9-5")

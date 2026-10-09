@@ -82,4 +82,36 @@ class HostFormTest {
         val previous = testHost()
         assertFalse(connectionAffectedBy(previous, previous.copy(record = previous.record.copy(sleeps = true))))
     }
+
+    // --- M4: the MAC address for Wake-on-LAN ------------------------------------------------------
+
+    @Test
+    fun macAddressesAcceptColonsOrDashesInAnyCaseAndAreStoredLowercaseWithColons() {
+        for (text in listOf("aa:bb:cc:dd:ee:ff", "AA:BB:CC:DD:EE:FF", "aa-bb-cc-dd-ee-ff", "Aa-Bb-cC-dD-eE-Ff", " aa:bb:cc:dd:ee:ff ")) {
+            assertEquals(text, "aa:bb:cc:dd:ee:ff", normalizedMac(text))
+            assertNull(text, macError(text))
+        }
+        assertEquals("01:23:45:67:89:ab", normalizedMac("01-23-45-67-89-AB"))
+    }
+
+    @Test
+    fun anEmptyMacAddressIsNoneAndAnythingElseIsAnInlineError() {
+        assertNull(macError(""))
+        assertNull(macError("  "))
+        assertNull(normalizedMac(""))
+        for (text in listOf(
+            "aa:bb:cc:dd:ee", "aa:bb:cc:dd:ee:ff:00", "aa:bb-cc:dd:ee:ff", "aabbccddeeff", "aa:bb:cc:dd:ee:fg",
+            "a:bb:cc:dd:ee:fff", "aa.bb.cc.dd.ee.ff", "aa:bb:cc:dd:ee:f", "aa bb cc dd ee ff",
+        )) {
+            assertNull(text, normalizedMac(text))
+            assertEquals(text, "Use six hex pairs: aa:bb:cc:dd:ee:ff.", macError(text))
+        }
+    }
+
+    @Test
+    fun wakeSettingsAreNoConnectionChange() {
+        val previous = testHost()
+        val woken = previous.copy(record = previous.record.copy(macAddress = "aa:bb:cc:dd:ee:ff", wakeProbe = true))
+        assertFalse(connectionAffectedBy(previous, woken))
+    }
 }

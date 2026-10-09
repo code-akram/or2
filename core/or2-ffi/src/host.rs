@@ -173,6 +173,11 @@ pub enum HostError {
     /// `upload_image`: more than 20 MiB); nothing was sent.
     #[error("too large to send")]
     TooLarge,
+    /// `answer_permission`: the agent no longer waits at the permission prompt it was notified
+    /// of (another `state_change_seq`, no permission prompt, or another option highlighted);
+    /// nothing was sent.
+    #[error("the permission prompt changed")]
+    PromptChanged,
 }
 
 impl From<core::HostError> for HostError {
@@ -188,6 +193,7 @@ impl From<core::HostError> for HostError {
             core::HostError::CommandFailed { message } => Self::CommandFailed { reason: message },
             core::HostError::SftpUnavailable => Self::SftpUnavailable,
             core::HostError::TooLarge => Self::TooLarge,
+            core::HostError::PromptChanged => Self::PromptChanged,
         }
     }
 }
@@ -361,6 +367,25 @@ impl From<core::TmuxSession> for TmuxSession {
             name: session.name,
             windows: session.windows,
             attached_clients: session.attached_clients,
+        }
+    }
+}
+
+/// A tmux or herdr target's history as plain text (API 24, `read_history`): oldest line first,
+/// without escape sequences (control characters may remain: strip them before display).
+/// `truncated`: older lines exist that are not here (herdr said so, or the text passed 1 MiB and
+/// its oldest lines were dropped).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct HistoryText {
+    pub text: String,
+    pub truncated: bool,
+}
+
+impl From<or2_core::history::HistoryText> for HistoryText {
+    fn from(history: or2_core::history::HistoryText) -> Self {
+        Self {
+            text: history.text,
+            truncated: history.truncated,
         }
     }
 }
@@ -569,6 +594,33 @@ impl HostConnection {
             .await?)
     }
 
+    /// Reads the history `target` shows as plain text, for the history sheet (API 24): what
+    /// scrolled away, to read, select and copy. It never moves the pane (no copy mode, no herdr
+    /// scroll), so the host's own view is unchanged. tmux: one exec of `capture-pane -p -J -S
+    /// -<lines>` of the pane the terminal's client shows (`client_id`, as for `scroll_target`;
+    /// `None`: the session's active pane), text only. herdr: one `pane.read` of `pane_id`
+    /// (`None`: the session's focused pane), recent output as text with ANSI stripped. `lines`
+    /// is clamped to 1..=5000. At most 1 MiB of text comes back: past it the oldest lines are
+    /// dropped and `truncated` is set (as it is when herdr says older lines exist).
+    ///
+    /// A `Shell` target has no history the host can read: `CommandFailed`, nothing runs.
+    /// `InvalidName` for a malformed name, pane or client id, `NotInstalled` without the
+    /// program, `PaneNotFound` for a vanished herdr pane, `CommandFailed` otherwise. Cancelling
+    /// the coroutine drops the reply only.
+    pub async fn read_history(
+        &self,
+        target: TerminalTarget,
+        pane_id: Option<String>,
+        client_id: Option<String>,
+        lines: u32,
+    ) -> Result<HistoryText, HostError> {
+        Ok(self
+            .handle
+            .read_history(target.into(), pane_id, client_id, lines)
+            .await?
+            .into())
+    }
+
     /// Moves what a terminal on `target` shows (API 14), for the swipe gestures: tmux over exec
     /// (`next-window`, `previous-window`, `select-pane -L/-R/-U/-D`, and `switch-client -n/-p`
     /// of the terminal's own tmux client, found with `list-clients`), herdr through its API (the
@@ -628,6 +680,52 @@ impl HostConnection {
             .reply_to_pane(session, pane_id, agent.into(), text)
             .await?
             .into())
+    }
+
+    /// The yes/no permission prompt `agent` waits at in herdr pane `pane_id` of `session`
+    /// (`None` is the default session), or `None` when it waits at none that can be answered from
+    /// a notification (contracts.md, "Answer: approve or deny a permission prompt"): only a
+    /// blocked Claude Code (kind `claude`) whose matched herdr rule is `bash_permission_prompt`
+    /// or `generic_permission_prompt` and which herdr sees on screen (`agent.get`, then
+    /// `agent.explain`). Sends nothing to the pane. Validation is `reply_to_pane`'s
+    /// (`InvalidName`, `CommandFailed` "open the pane to reply"); `NotInstalled` without herdr,
+    /// `PaneNotFound` when the pane, or that agent instance, is gone, `NotConnected` / `Closed`
+    /// without a live connection, `CommandFailed` otherwise. Bounded by the query timeout.
+    pub async fn permission_prompt(
+        &self,
+        session: Option<String>,
+        pane_id: String,
+        agent: AgentIdentity,
+    ) -> Result<Option<crate::herdr::PermissionPrompt>, HostError> {
+        Ok(self
+            .handle
+            .permission_prompt(session, pane_id, agent.into())
+            .await?
+            .map(Into::into))
+    }
+
+    /// Approves (Enter on the highlighted first "Yes") or denies (Escape) the permission prompt
+    /// `agent` waits at in herdr pane `pane_id` of `session`, the one `permission_prompt` found
+    /// at `seq`, with no terminal open. Immediately before the one `pane.send_keys`, every check
+    /// runs again, and any that fails sends nothing: `PromptChanged` when the agent is no longer
+    /// at that prompt (another `state_change_seq`, no permission prompt, or, to approve, the
+    /// screen does not show `❯ 1. Yes` highlighted), `PaneNotFound` when the pane or that agent
+    /// instance is gone or the pane's shell has the foreground. Otherwise as
+    /// `permission_prompt`. Cancelling the coroutine (or the timeout) stops the answer before
+    /// its key is sent; the send itself is never cut short, and starts only while it can end
+    /// before the timeout.
+    pub async fn answer_permission(
+        &self,
+        session: Option<String>,
+        pane_id: String,
+        agent: AgentIdentity,
+        seq: u64,
+        answer: crate::herdr::PermissionAnswer,
+    ) -> Result<(), HostError> {
+        Ok(self
+            .handle
+            .answer_permission(session, pane_id, agent.into(), seq, answer.into())
+            .await?)
     }
 
     /// Installs herdr's integration `id` on the host (API 19; contracts.md, "v0.1.3: zero-config
@@ -817,6 +915,10 @@ mod tests {
         assert_eq!(
             HostError::from(core::HostError::TooLarge),
             HostError::TooLarge
+        );
+        assert_eq!(
+            HostError::from(core::HostError::PromptChanged),
+            HostError::PromptChanged
         );
         assert_eq!(
             ReplyRoute::from(or2_core::herdr::ReplyRoute::Prompted),

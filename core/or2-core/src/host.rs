@@ -33,6 +33,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use crate::herdr::{self, HerdrObserver, HerdrWatchDriver, HerdrWatchHandle};
+use crate::history::{self, HistoryText, NO_SHELL_HISTORY};
 use crate::keys::{ClientKey, KeyError};
 use crate::remote::RemoteError;
 use crate::session::{
@@ -246,6 +247,33 @@ fn is_valid_agent_session(value: &str) -> bool {
     (1..=4096).contains(&value.len()) && !value.chars().any(char::is_control)
 }
 
+/// The herdr session, pane and agent instance a permission answer names, validated as a reply's
+/// ([`HostHandle::reply_to_pane`]): `InvalidName` for a malformed one, `CommandFailed` with
+/// [`herdr::OPEN_THE_PANE`] for an agent that names no instance.
+fn validate_agent_target(
+    session: Option<&str>,
+    pane_id: &str,
+    agent: &herdr::AgentIdentity,
+) -> Result<(), HostError> {
+    if !session.is_none_or(is_valid_herdr_session_name)
+        || !is_valid_herdr_pane_id(pane_id)
+        || !is_valid_herdr_pane_id(&agent.terminal_id)
+        || !agent.agent.as_deref().is_none_or(is_valid_agent_kind)
+        || !agent.name.as_deref().is_none_or(is_valid_agent_kind)
+        || !agent.session.as_ref().is_none_or(|session| {
+            is_valid_agent_kind(&session.kind) && is_valid_agent_session(&session.value)
+        })
+    {
+        return Err(HostError::InvalidName);
+    }
+    if !agent.is_instance() {
+        return Err(HostError::CommandFailed {
+            message: herdr::OPEN_THE_PANE.into(),
+        });
+    }
+    Ok(())
+}
+
 impl TerminalTarget {
     pub fn validate(&self) -> Result<(), HostError> {
         let valid = match self {
@@ -356,6 +384,10 @@ pub enum HostError {
     /// [`herdr::MAX_REPLY_BYTES`]; `upload_image`: more than [`MAX_IMAGE_BYTES`]); nothing was sent.
     #[error("too large to send")]
     TooLarge,
+    /// `answer_permission`: the agent no longer waits at the permission prompt it was notified
+    /// of ([`herdr::HerdrError::PromptChanged`]); nothing was sent.
+    #[error("the permission prompt changed")]
+    PromptChanged,
 }
 
 /// A failure to reach the host: `Closed` once the connection is gone, else a failed command.
@@ -383,6 +415,7 @@ impl From<herdr::HerdrError> for HostError {
     fn from(error: herdr::HerdrError) -> Self {
         match error {
             herdr::HerdrError::PaneNotFound => Self::PaneNotFound,
+            herdr::HerdrError::PromptChanged => Self::PromptChanged,
             herdr::HerdrError::Remote(error) => error.into(),
             error @ herdr::HerdrError::Failed(_) => Self::CommandFailed {
                 message: error.to_string(),
@@ -535,6 +568,20 @@ pub enum HostCommand {
         scroll: TargetScroll,
         reply: oneshot::Sender<Result<(), HostError>>,
     },
+    /// Read the history `target` shows as plain text ([`HostHandle::read_history`]): tmux with
+    /// one `capture-pane` exec ([`crate::tmux::read_history`]), herdr with one `pane.read`
+    /// ([`herdr::read_history_in`]), each with the probed path; nothing moves the pane.
+    /// `target` is a validated tmux or herdr target (never `Shell`, which the handle answers
+    /// itself), `pane_id` and `client_id` as for [`HostCommand::ScrollTarget`], `lines` already
+    /// clamped. Reply `NotInstalled` without the program, `PaneNotFound` for a vanished herdr
+    /// pane, `CommandFailed` for other failures.
+    ReadHistory {
+        target: TerminalTarget,
+        pane_id: Option<String>,
+        client_id: Option<String>,
+        lines: u32,
+        reply: oneshot::Sender<Result<HistoryText, HostError>>,
+    },
     /// Move the multiplexer `target` shows ([`HostHandle::navigate`]): tmux through exec with the
     /// probed tmux path, herdr through its API with the probed herdr path. `target` is never
     /// `Shell` (the handle answers that itself) and its names are validated. Reply
@@ -562,6 +609,33 @@ pub enum HostCommand {
         text: String,
         deadline: tokio::time::Instant,
         reply: oneshot::Sender<Result<herdr::ReplyRoute, HostError>>,
+    },
+    /// The permission prompt `agent` waits at in herdr pane `pane_id` of `session`
+    /// ([`HostHandle::permission_prompt`], [`herdr::permission_prompt_in`]) with the probed herdr
+    /// path; `None` when it waits at none that can be answered. Names are validated. Reply
+    /// `NotInstalled` without herdr, `PaneNotFound` when the pane or that agent is gone,
+    /// `CommandFailed` for other failures. Sends nothing to the pane.
+    PermissionPrompt {
+        session: Option<String>,
+        pane_id: String,
+        agent: herdr::AgentIdentity,
+        reply: oneshot::Sender<Result<Option<herdr::PermissionPrompt>, HostError>>,
+    },
+    /// Approve or deny the permission prompt `agent` waits at in herdr pane `pane_id` of
+    /// `session`, the one notified at `seq` ([`HostHandle::answer_permission`],
+    /// [`herdr::answer_permission_in`]) with the probed herdr path. Names are validated. Reply
+    /// `NotInstalled` without herdr, `PaneNotFound` when the pane or that agent is gone or its
+    /// shell has the foreground, `PromptChanged` when it is not at that prompt any more,
+    /// `CommandFailed` for other failures. The caller stops waiting at `deadline`, or earlier by
+    /// dropping `reply`, as for [`HostCommand::ReplyToPane`].
+    AnswerPermission {
+        session: Option<String>,
+        pane_id: String,
+        agent: herdr::AgentIdentity,
+        seq: u64,
+        answer: herdr::PermissionAnswer,
+        deadline: tokio::time::Instant,
+        reply: oneshot::Sender<Result<(), HostError>>,
     },
     /// Write `bytes` over SFTP to the host's image directory (contracts.md, "Image paste"):
     /// `~/.cache/or2/images` (created `0700`), a temporary name renamed to
@@ -874,6 +948,54 @@ impl HostHandle {
         .await
     }
 
+    /// Reads the history of what `target` shows as plain text, for reading and copying what
+    /// scrolled away, without moving it (no copy mode, no herdr scroll): the host's own view is
+    /// unchanged. tmux: one `capture-pane -p -J -S -<lines>` exec of the pane the terminal's
+    /// client shows (`client_id`, as for [`HostHandle::scroll_target`]; without one the
+    /// target session's active pane), without escape sequences. herdr: one `pane.read` of
+    /// `pane_id` (`None`: the session's focused pane), recent output as text with ANSI
+    /// stripped. `lines` is clamped to 1..=[`history::MAX_HISTORY_LINES`]; the text is kept
+    /// within [`history::MAX_HISTORY_BYTES`], the oldest lines dropped past it
+    /// ([`HistoryText::truncated`]).
+    ///
+    /// A `Shell` target keeps no history the host can read: `CommandFailed`, nothing runs (the
+    /// shell's own history file is never read). Names are validated like [`TerminalTarget`]'s
+    /// (`InvalidName`); a host without the program is `NotInstalled`, a vanished herdr pane
+    /// `PaneNotFound`. Bounded by [`QUERY_TIMEOUT`].
+    pub async fn read_history(
+        &self,
+        target: TerminalTarget,
+        pane_id: Option<String>,
+        client_id: Option<String>,
+        lines: u32,
+    ) -> Result<HistoryText, HostError> {
+        target.validate()?;
+        if !pane_id.as_deref().is_none_or(is_valid_herdr_pane_id)
+            || !client_id
+                .as_deref()
+                .is_none_or(crate::tmux::is_valid_client_id)
+        {
+            return Err(HostError::InvalidName);
+        }
+        if matches!(
+            target,
+            TerminalTarget::Shell | TerminalTarget::ShellIn { .. }
+        ) {
+            return Err(HostError::CommandFailed {
+                message: NO_SHELL_HISTORY.into(),
+            });
+        }
+        let lines = history::history_lines(lines);
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::ReadHistory {
+            target,
+            pane_id,
+            client_id,
+            lines,
+            reply,
+        })
+        .await
+    }
+
     /// Moves what a terminal on `target` shows (a gesture or a shortcut): for tmux the window,
     /// the pane or (switching the terminal's tmux client) the session; for herdr the tab of the
     /// focused workspace, the pane, or the workspace. `pane_id` is herdr's pane to move from
@@ -970,6 +1092,59 @@ impl HostHandle {
             pane_id,
             agent,
             text,
+            deadline: tokio::time::Instant::now() + QUERY_TIMEOUT,
+            reply,
+        })
+        .await
+    }
+
+    /// The yes/no permission prompt `agent` waits at in herdr pane `pane_id` of `session`
+    /// (`None` is the default session), or `None` when it waits at none that can be answered
+    /// from a notification (contracts.md, "Answer: approve or deny a permission prompt"): only a
+    /// blocked Claude Code whose matched herdr rule is a permission prompt it shows on screen.
+    /// Names are validated as for [`Self::reply_to_pane`] (`InvalidName`), and an agent that
+    /// names no instance is `CommandFailed` with [`herdr::OPEN_THE_PANE`]. A host without herdr
+    /// is `NotInstalled`; a pane that is gone or holds another agent instance `PaneNotFound`.
+    /// Sends nothing to the pane. Bounded by [`QUERY_TIMEOUT`].
+    pub async fn permission_prompt(
+        &self,
+        session: Option<String>,
+        pane_id: String,
+        agent: herdr::AgentIdentity,
+    ) -> Result<Option<herdr::PermissionPrompt>, HostError> {
+        validate_agent_target(session.as_deref(), &pane_id, &agent)?;
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::PermissionPrompt {
+            session,
+            pane_id,
+            agent,
+            reply,
+        })
+        .await
+    }
+
+    /// Approves (Enter on its highlighted first "Yes") or denies (Escape) the permission prompt
+    /// `agent` waits at in herdr pane `pane_id` of `session`, the one [`Self::permission_prompt`]
+    /// found at `seq`, with no terminal open. Every check runs again first, and any that fails
+    /// sends nothing: `PromptChanged` when the agent is not at that prompt any more (another
+    /// `seq`, no permission prompt, or, to approve, another option highlighted), `PaneNotFound`
+    /// when the pane or that agent is gone or its shell has the foreground. Validation is
+    /// [`Self::permission_prompt`]'s. Bounded by [`QUERY_TIMEOUT`]; dropping the future, or that
+    /// timeout, stops the answer before its key is sent, as for [`Self::reply_to_pane`].
+    pub async fn answer_permission(
+        &self,
+        session: Option<String>,
+        pane_id: String,
+        agent: herdr::AgentIdentity,
+        seq: u64,
+        answer: herdr::PermissionAnswer,
+    ) -> Result<(), HostError> {
+        validate_agent_target(session.as_deref(), &pane_id, &agent)?;
+        self.query(QUERY_TIMEOUT, |reply| HostCommand::AnswerPermission {
+            session,
+            pane_id,
+            agent,
+            seq,
+            answer,
             deadline: tokio::time::Instant::now() + QUERY_TIMEOUT,
             reply,
         })
@@ -1991,6 +2166,152 @@ mod tests {
         assert_eq!(send().await, Ok(herdr::ReplyRoute::Prompted));
         assert_eq!(send().await, Ok(herdr::ReplyRoute::Typed));
         assert_eq!(send().await, Err(HostError::PaneNotFound));
+        drop(answers.join().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_permission_prompt_and_its_answer_are_validated_and_answered_through_their_reply() {
+        let (_recorder, handle, mut driver) = setup(false);
+        let agent = || claude("term_1");
+        // Refused before anything is sent, connected or not, as a reply is.
+        for (session, pane, bad) in [
+            (Some("a b"), "w1:p1", agent()),
+            (None, "w1 p1", agent()),
+            (None, "w1:p1", claude("term 1")),
+            (
+                None,
+                "w1:p1",
+                herdr::AgentIdentity {
+                    agent: Some("claude\n".into()),
+                    ..agent()
+                },
+            ),
+        ] {
+            let session = session.map(str::to_owned);
+            assert_eq!(
+                handle
+                    .permission_prompt(session.clone(), pane.into(), bad.clone())
+                    .await,
+                Err(HostError::InvalidName)
+            );
+            assert_eq!(
+                handle
+                    .answer_permission(
+                        session,
+                        pane.into(),
+                        bad,
+                        1,
+                        herdr::PermissionAnswer::Approve
+                    )
+                    .await,
+                Err(HostError::InvalidName)
+            );
+        }
+        let unknown = herdr::AgentIdentity {
+            session: None,
+            name: None,
+            ..agent()
+        };
+        let open_the_pane = Err(HostError::CommandFailed {
+            message: herdr::OPEN_THE_PANE.into(),
+        });
+        assert_eq!(
+            handle
+                .permission_prompt(None, "w1:p1".into(), unknown.clone())
+                .await,
+            open_the_pane
+        );
+        assert_eq!(
+            handle
+                .answer_permission(
+                    None,
+                    "w1:p1".into(),
+                    unknown,
+                    1,
+                    herdr::PermissionAnswer::Deny
+                )
+                .await,
+            open_the_pane.map(drop)
+        );
+        assert_eq!(
+            handle
+                .permission_prompt(None, "w1:p1".into(), agent())
+                .await,
+            Err(HostError::NotConnected)
+        );
+        connect(&mut driver);
+        let answers = std::thread::spawn(move || {
+            let HostCommand::PermissionPrompt {
+                session,
+                pane_id,
+                agent,
+                reply,
+            } = driver.blocking_next_command()
+            else {
+                panic!("unexpected command")
+            };
+            assert_eq!(
+                (session.as_deref(), pane_id.as_str(), agent),
+                (Some("work"), "w1:p2", claude("term_1"))
+            );
+            reply
+                .send(Ok(Some(herdr::PermissionPrompt {
+                    state_change_seq: 9,
+                })))
+                .unwrap();
+            for result in [Ok(()), Err(HostError::PromptChanged)] {
+                let HostCommand::AnswerPermission {
+                    session,
+                    pane_id,
+                    agent,
+                    seq,
+                    answer,
+                    deadline,
+                    reply,
+                } = driver.blocking_next_command()
+                else {
+                    panic!("unexpected command")
+                };
+                assert_eq!(
+                    (session.as_deref(), pane_id.as_str(), agent, seq, answer),
+                    (
+                        Some("work"),
+                        "w1:p2",
+                        claude("term_1"),
+                        9,
+                        herdr::PermissionAnswer::Approve
+                    )
+                );
+                // The worker learns when its caller stops waiting.
+                let left = deadline - tokio::time::Instant::now();
+                assert!(
+                    left <= QUERY_TIMEOUT
+                        && left > QUERY_TIMEOUT - std::time::Duration::from_secs(5),
+                    "{left:?}"
+                );
+                reply.send(result).unwrap();
+            }
+            driver
+        });
+        assert_eq!(
+            handle
+                .permission_prompt(Some("work".into()), "w1:p2".into(), agent())
+                .await,
+            Ok(Some(herdr::PermissionPrompt {
+                state_change_seq: 9
+            }))
+        );
+        let approve = || {
+            handle.answer_permission(
+                Some("work".into()),
+                "w1:p2".into(),
+                agent(),
+                9,
+                herdr::PermissionAnswer::Approve,
+            )
+        };
+        assert_eq!(approve().await, Ok(()));
+        assert_eq!(approve().await, Err(HostError::PromptChanged));
         drop(answers.join().unwrap());
     }
 

@@ -51,6 +51,7 @@ fun hostErrorMessage(error: HostException): String = when (error) {
     is HostException.CommandFailed -> "A command on the host failed. Retry, or reconnect."
     is HostException.TooLarge -> "Too large to send (a reply up to 4 KiB, an image up to 20 MiB)."
     is HostException.SftpUnavailable -> "SFTP is not available on this host."
+    is HostException.PromptChanged -> "The prompt changed. Open the pane."
 }
 
 /** A closed connection explains itself with the same words as a closed session. */

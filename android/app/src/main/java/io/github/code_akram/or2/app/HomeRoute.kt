@@ -45,6 +45,7 @@ internal fun HomeRoute(
     val closedStates by remember(connections) { connections.terminalClosedStates() }.collectAsStateWithLifecycle(emptyMap())
     val batteryCard by actions.battery.card.collectAsStateWithLifecycle()
     val notificationOffer by actions.notifications.visible.collectAsStateWithLifecycle()
+    val wakes by actions.wakeStatus.collectAsStateWithLifecycle()
     val blocked = inbox.groups.filter { it.status == AgentStatus.BLOCKED }.flatMap { it.items }
     val blockedByHost = blocked.groupingBy { it.hostId }.eachCount()
     val sessions = remember(terminals, herdrViews, connections, transports, closedStates) {
@@ -64,7 +65,7 @@ internal fun HomeRoute(
     val cards = hosts.map { host ->
         val state = states[host.id]
         HostCard(
-            host, hostCardStatus(state, host.id in unlocking, blockedByHost[host.id] ?: 0, host.sleeps, host.addresses),
+            host, hostCardStatus(state, host.id in unlocking, blockedByHost[host.id] ?: 0, host.sleeps, host.addresses, wakes[host.id]),
             linkStatus(state, host.sleeps), hostAddressLine(host, state), sessions[host.id].orEmpty(),
         )
     }
@@ -96,6 +97,7 @@ internal fun HomeRoute(
         // In context: offered only while a host is connected, which is when the notification would show.
         notificationCard = notificationOffer && connectedHosts.isNotEmpty(),
         allowNotifications = actions.allowNotifications, dismissNotifications = actions.notifications::dismiss,
+        wakeHost = actions.wake,
     )
     val pickerHost = picker?.let { id -> hosts.find { it.id == id } }
     if (pickerHost != null) {

@@ -388,6 +388,17 @@ mod scroll_tests {
         assert!(full.frame.is_full());
         assert!(full.frame.row_moves().is_empty());
     }
+
+    #[test]
+    fn a_probe_history_is_the_newest_lines_asked_for() {
+        let read = probe_history("main", 2);
+        assert_eq!(read.text, "main line 39\nmain line 40");
+        assert!(read.truncated);
+        let all = probe_history("w1:p2", 2000);
+        assert_eq!(all.text.lines().count(), 40);
+        assert!(all.text.starts_with("w1:p2 line 1\n"));
+        assert!(!all.truncated);
+    }
 }
 
 fn publish(driver: &mut SessionDriver, frame: Frame) {
@@ -420,14 +431,23 @@ fn publish(driver: &mut SessionDriver, frame: Frame) {
 /// `pane_id` the probe view does not have (`PaneNotFound`). `reply_to_pane` (API 16) is `Typed`
 /// for the blocked agent's pane `w1:p1`, `Prompted` for `w1:p2` and `w2:p1`, and `PaneNotFound`
 /// for any other pane; the validation (`InvalidName`, `TooLarge` above 4 KiB) is the real one.
+/// `read_history` (API 24) answers the newest `lines` (the handle clamps them) of
+/// [`PROBE_HISTORY_LINES`] lines `<name> line <n>`, newest last, `<name>` being the tmux session
+/// or the herdr pane read (without a `pane_id`, the focused one), and `truncated` when fewer than
+/// all were asked for; a herdr `pane_id` the probe view does not have is `PaneNotFound`, and a
+/// shell is the handle's own `CommandFailed`.
 /// `upload_image` (API 16) returns [`PROBE_IMAGE_DIR`]`/or2-19700101-000000-000000.<extension>`
 /// (after the handle's own checks), except for a `gif`, which is `SftpUnavailable`.
 /// `herdr_integrations` (API 19) starts as `pi` not installed, `claude` and `codex` current,
 /// `opencode` outdated and `droid` not installed; `install_herdr_integration` (after the handle's
 /// allowlist) makes an integration current, except `droid`
 /// ([`PROBE_FAILING_INTEGRATION`]), which is `CommandFailed` with
-/// `error: cannot write the hook: permission denied`. Closing the host closes its terminals and
-/// watches first.
+/// `error: cannot write the hook: permission denied`. `permission_prompt` finds the blocked
+/// Claude Code of `w1:p1` at a permission prompt at its view's seq (4) and no prompt for the
+/// others' agents; `answer_permission` answers only that prompt (`w1:p1` at seq 4), else
+/// `PromptChanged`; both are `PaneNotFound` for an agent instance other than the view's
+/// `reply_identity`, and validate for real. Closing the host closes its terminals and watches
+/// first.
 #[uniffi::export]
 pub fn contract_probe_host(
     request: HostConnectRequest,
@@ -644,6 +664,27 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
             HostCommand::ScrollTarget { reply, .. } => {
                 let _ = reply.send(Ok(()));
             }
+            HostCommand::ReadHistory {
+                target,
+                pane_id,
+                lines,
+                reply,
+                ..
+            } => {
+                // The newest lines of a fixed history named after what was read.
+                let name = match target {
+                    core_host::TerminalTarget::Tmux { session_name } => Some(session_name),
+                    core_host::TerminalTarget::Herdr { .. } => {
+                        Some(pane_id.unwrap_or_else(|| focused.lock().unwrap().clone()))
+                            .filter(|pane| PROBE_PANES.contains(&pane.as_str()))
+                    }
+                    _ => None,
+                };
+                let _ = reply.send(match name {
+                    Some(name) => Ok(probe_history(&name, lines)),
+                    None => Err(core_host::HostError::PaneNotFound),
+                });
+            }
             HostCommand::Navigate { pane_id, reply, .. } => {
                 // Every move succeeds, except one from a herdr pane the probe does not have.
                 let _ = reply.send(match pane_id {
@@ -673,6 +714,37 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                     PROBE_BLOCKED_PANE => Ok(ReplyRoute::Typed),
                     pane if PROBE_PANES.contains(&pane) => Ok(ReplyRoute::Prompted),
                     _ => Err(core_host::HostError::PaneNotFound),
+                });
+            }
+            HostCommand::PermissionPrompt {
+                pane_id,
+                agent,
+                reply,
+                ..
+            } => {
+                // As herdr would: the blocked Claude Code waits at a permission prompt, at its
+                // view's seq; the other agents at none. Another instance is not found.
+                let _ = reply.send(match probe_agent(&pane_id, &agent) {
+                    None => Err(core_host::HostError::PaneNotFound),
+                    Some(seq) => Ok((pane_id == PROBE_BLOCKED_PANE).then_some(
+                        or2_core::herdr::PermissionPrompt {
+                            state_change_seq: seq,
+                        },
+                    )),
+                });
+            }
+            HostCommand::AnswerPermission {
+                pane_id,
+                agent,
+                seq,
+                reply,
+                ..
+            } => {
+                // Only the prompt notified (the blocked agent, at its seq) is answered.
+                let _ = reply.send(match probe_agent(&pane_id, &agent) {
+                    None => Err(core_host::HostError::PaneNotFound),
+                    Some(now) if pane_id == PROBE_BLOCKED_PANE && now == seq => Ok(()),
+                    Some(_) => Err(core_host::HostError::PromptChanged),
                 });
             }
             HostCommand::InstallHerdrIntegration { id, reply } => {
@@ -745,6 +817,22 @@ async fn run_herdr_watch(
     driver.close();
 }
 
+/// How many lines a probe history has ([`probe_history`]).
+pub const PROBE_HISTORY_LINES: u32 = 40;
+
+/// The newest `lines` (at most [`PROBE_HISTORY_LINES`]) of the history `<name> line 1` to
+/// `<name> line 40`, newest last; `truncated` when older lines were left out.
+fn probe_history(name: &str, lines: u32) -> or2_core::history::HistoryText {
+    let first = PROBE_HISTORY_LINES.saturating_sub(lines) + 1;
+    or2_core::history::HistoryText {
+        text: (first..=PROBE_HISTORY_LINES)
+            .map(|n| format!("{name} line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        truncated: first > 1,
+    }
+}
+
 /// The `mosh-server` pid every probe mosh terminal reports (`Session.server_pid`).
 pub const PROBE_SERVER_PID: u32 = 4242;
 /// A pid whose `stop_mosh_server` fails on a probe host, whatever else is true.
@@ -755,6 +843,17 @@ pub const PROBE_IMAGE_DIR: &str = "/home/probe/.cache/or2/images";
 const PROBE_PANES: [&str; 3] = ["w1:p1", "w1:p2", "w2:p1"];
 /// The probe view's blocked agent (until its second view resolves it): a reply to it is typed.
 const PROBE_BLOCKED_PANE: &str = "w1:p1";
+
+/// The `state_change_seq` of the agent of [`probe_view`] in `pane_id` when it is the instance
+/// `agent` names (its `reply_identity`), else `None`.
+fn probe_agent(pane_id: &str, agent: &AgentIdentity) -> Option<u64> {
+    probe_view("", 1, false, PROBE_PANES[0])
+        .agents
+        .into_iter()
+        .find(|probed| probed.pane_id == pane_id)
+        .filter(|probed| AgentIdentity::of(probed).is_some_and(|probed| probed == *agent))
+        .map(|probed| probed.state_change_seq)
+}
 
 /// One blocked, one working and one idle agent; `resolved` turns the blocked one into working;
 /// `focus` is the focused pane.

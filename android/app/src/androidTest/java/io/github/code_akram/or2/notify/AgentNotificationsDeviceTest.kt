@@ -115,6 +115,37 @@ class AgentNotificationsDeviceTest {
 
     /** Built, not posted: needs no `POST_NOTIFICATIONS`. */
     @Test
+    fun aPermissionPromptsNotificationHasApproveAndDenyThatNeedTheUnlockedPhone() {
+        val notifications = AgentNotifications(context, MemoryPrefStore())
+        val alert = AgentAlert(key, "Claude Code", "Needs permission", "Device fixture", agent = CLAUDE, nonce = "n1", permission = 4u)
+        val built = notifications.build(alert)
+        val actions = built.actions.orEmpty()
+        assertEquals(listOf("Approve", "Deny", "Reply"), actions.map { it.title.toString() })
+        for (answer in actions.take(2)) {
+            assertTrue(answer.isAuthenticationRequired)
+            assertTrue(answer.remoteInputs.isNullOrEmpty())
+            // A broadcast to the app's own receiver, immutable: nothing in it can be filled in.
+            assertTrue(answer.actionIntent.isBroadcast)
+            assertTrue(answer.actionIntent.isImmutable)
+            assertEquals(context.packageName, answer.actionIntent.creatorPackage)
+        }
+        assertFalse(actions[2].isAuthenticationRequired)
+        // Found behind a `Needs input` already shown: it does not alert again.
+        assertTrue(built.flags and Notification.FLAG_ONLY_ALERT_ONCE != 0)
+        // The intents name the answer, the pane, the capability and the seq, and are honoured; a Reply's is not one.
+        for (answer in listOf(io.github.code_akram.or2.ffi.PermissionAnswer.APPROVE, io.github.code_akram.or2.ffi.PermissionAnswer.DENY)) {
+            val intent = AgentNotifications.answerIntent(context, alert, answer)
+            assertEquals(AgentReplyReceiver::class.java.name, intent.component?.className)
+            assertEquals(AgentAnswerRequest(alert, answer), AgentNotifications.answerOf(intent))
+            assertNull(AgentNotifications.replyOf(intent))
+        }
+        assertNull(AgentNotifications.answerOf(AgentNotifications.replyIntent(context, alert)))
+        // Without a prompt, Reply alone.
+        assertEquals(listOf("Reply"), notifications.build(alert.copy(permission = null)).actions.orEmpty().map { it.title.toString() })
+    }
+
+    /** Built, not posted: needs no `POST_NOTIFICATIONS`. */
+    @Test
     fun anAgentWithoutReplyWhoseIntegrationIsMissingOffersEnableReplyThatOpensTheApp() {
         val store = MemoryPrefStore()
         val notifications = AgentNotifications(context, store)

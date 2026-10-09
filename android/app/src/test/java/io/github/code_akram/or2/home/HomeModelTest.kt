@@ -1,5 +1,6 @@
 package io.github.code_akram.or2.home
 
+import io.github.code_akram.or2.connection.WakeStatus
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.HostRecord
@@ -176,5 +177,36 @@ class HomeModelTest {
         assertFalse(tapConnects(keyed, LinkStatus.NEEDS_HOST_KEY, busy = false))
         assertFalse(tapConnects(keyed, LinkStatus.NOT_CONNECTED, busy = true)) // Another unlock is running.
         assertFalse(tapConnects(keyless, LinkStatus.NOT_CONNECTED, busy = false))
+    }
+
+    // --- M4: Wake ---------------------------------------------------------------------------------
+
+    @Test
+    fun aWakeShowsWakingInPlaceUntilTheHostAnswers() {
+        val lost = HostState.Closed(CloseReason.Failed(SessionFailure.Unreachable("no route")))
+        for (state in listOf(null, HostState.Connecting, lost)) {
+            val status = hostCardStatus(state, unlocking = false, blockedAgents = 0, sleeps = true, wake = WakeStatus.WAKING)
+            assertEquals("$state", "Waking…", status.progress)
+            assertTrue(status.spinning)
+            assertNull(status.failure)
+            assertFalse(status.asleep)
+        }
+        // The host answered: authenticating, a host-key decision or connected speak for themselves.
+        assertEquals("Authenticating…", hostCardStatus(HostState.Authenticating, false, 0, wake = WakeStatus.WAKING).progress)
+        assertEquals(HostDot.CONNECTED, hostCardStatus(HostState.Connected(0u), false, 0, wake = WakeStatus.WAKING).dot)
+        val prompt = HostState.AwaitingHostKeyDecision(PublicKeyInfo("ssh-ed25519", "k", "SHA256:x", ""), emptyList())
+        assertEquals(HostDot.ATTENTION, hostCardStatus(prompt, false, 0, wake = WakeStatus.WAKING).dot)
+    }
+
+    @Test
+    fun aWakeThatGaveUpSaysWhyUntilTheHostConnectsAgain() {
+        val lost = HostState.Closed(CloseReason.Failed(SessionFailure.TimedOut))
+        val status = hostCardStatus(lost, unlocking = false, blockedAgents = 0, sleeps = true, wake = WakeStatus.CANT_WAKE)
+        assertEquals("Can't wake: it may be asleep with the lid closed or on battery", status.failure)
+        assertEquals(HostDot.FAILED, status.dot)
+        assertNull(status.progress)
+        // A new connect in progress (or done) replaces it.
+        assertEquals("Checking server…", hostCardStatus(HostState.Connecting, false, 0, sleeps = true, wake = WakeStatus.CANT_WAKE).progress)
+        assertNull(hostCardStatus(HostState.Connected(0u), false, 0, sleeps = true, wake = WakeStatus.CANT_WAKE).failure)
     }
 }

@@ -17,19 +17,27 @@ import io.github.code_akram.or2.connection.HostConnector
 import io.github.code_akram.or2.connection.MoshServerLedger
 import io.github.code_akram.or2.connection.TIMING_TAG
 import io.github.code_akram.or2.connection.Timing
+import io.github.code_akram.or2.connection.Waker
+import io.github.code_akram.or2.connection.currentBroadcasts
 import io.github.code_akram.or2.data.AppDatabase
 import io.github.code_akram.or2.data.MIGRATION_1_2
 import io.github.code_akram.or2.data.MIGRATION_2_3
 import io.github.code_akram.or2.data.MIGRATION_3_4
+import io.github.code_akram.or2.data.MIGRATION_4_5
+import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.keys.BiometricVault
 import io.github.code_akram.or2.notify.AgentAlertSettings
 import io.github.code_akram.or2.notify.AgentAlerts
+import io.github.code_akram.or2.notify.AgentAnswers
 import io.github.code_akram.or2.notify.AgentNotifications
 import io.github.code_akram.or2.notify.AgentOpenRequests
 import io.github.code_akram.or2.notify.AgentReplies
 import io.github.code_akram.or2.notify.EnableReplyRequests
 import io.github.code_akram.or2.notify.ReplyNonces
 import io.github.code_akram.or2.ffi.networkChanged
+import io.github.code_akram.or2.ffi.HostAddress
+import io.github.code_akram.or2.ffi.wakeOnLan
+import io.github.code_akram.or2.ffi.wakeProbe
 import io.github.code_akram.or2.service.ConnectionService
 import io.github.code_akram.or2.service.NetworkChanges
 import io.github.code_akram.or2.service.ServiceSnapshot
@@ -47,7 +55,7 @@ import kotlinx.coroutines.launch
 class Or2Application : Application() {
     val database by lazy { Room.databaseBuilder(this, AppDatabase::class.java, "or2.db")
         // Never destructive: key records are bound to Keystore entries that cannot be recreated.
-        .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build() }
+        .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build() }
     val vault by lazy { BiometricVault(this) }
 
     /** App-private settings: the one-time prompts and the last terminal. */
@@ -68,6 +76,23 @@ class Or2Application : Application() {
     val agentAlerts by lazy {
         AgentAlerts(AgentNotifications(this, prefs), ReplyNonces(prefs)) { agentAlertSettings.enabled.value }
             .also { alerts -> alerts.enableReply = { hostId, agent -> connections.enableReplyFor(hostId, agent) } }
+            .also { alerts -> alerts.askPermission = { alert -> agentAnswers.check(alert) } }
+    }
+
+    /**
+     * A notification's Approve or Deny of a permission prompt ([AgentReplyReceiver]), and the question behind it: is a
+     * `Needs input` one ([AgentAlerts.askPermission])? Over the host's live connection only, on the application's own
+     * scope and the main dispatcher, as [agentReplies].
+     */
+    val agentAnswers: AgentAnswers by lazy {
+        AgentAnswers(
+            CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+            admit = agentAlerts::admitReply,
+            ask = { key, agent -> connections.permissionPrompt(key.hostId, key.session, key.paneId, agent) },
+            send = { key, agent, seq, answer -> connections.answerPermission(key.hostId, key.session, key.paneId, agent, seq, answer) },
+            found = agentAlerts::permissionFound,
+            post = agentAlerts::replied,
+        )
     }
 
     /** An Enable Reply waiting for its confirmation (an Inbox row's, a notification's), for the dialog. */
@@ -111,7 +136,7 @@ class Or2Application : Application() {
     /** The process's one set of connections; [ConnectionService] keeps the process alive while any is open. */
     val connections: HostConnections by lazy {
         HostConnections({ request, listener -> (connectorOverride ?: HostConnector.Native).connect(request, listener) }, database.dao(),
-            moshServers = moshServers, timing = timing)
+            moshServers = moshServers, timing = timing, wakeProbe = ::knock)
             .also {
                 it.userClose = reattach
                 it.herdrObserver = agentAlerts
@@ -121,6 +146,19 @@ class Or2Application : Application() {
 
     /** The user's settings (the Settings screen). */
     val settings by lazy { AppSettings(prefs) }
+
+    /** Home's Wake: the magic packet to the current network's broadcasts, the wake probe, then the connect retries. */
+    val wake by lazy {
+        Waker(
+            sendPacket = { mac, broadcasts -> wakeOnLan(mac, broadcasts) },
+            probe = ::knock,
+            broadcasts = { currentBroadcasts(this) },
+        )
+    }
+
+    /** The TCP wake probe over the native transport: one knock on each address, 1.5 s at most. */
+    private suspend fun knock(addresses: List<HostEndpoint>) =
+        wakeProbe(addresses.map { HostAddress(it.hostname, it.port.toUShort()) })
 
     /** Clipboard writes from hosts (OSC 52) into the Android clipboard, labelled `or2`. */
     val hostClipboard by lazy {

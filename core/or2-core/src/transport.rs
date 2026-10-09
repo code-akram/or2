@@ -11,11 +11,14 @@
 //! mosh needs datagrams, and needs to open a new socket to the same endpoint whenever the
 //! network changes (that is its roaming), so a [`DatagramTransport`] opens one socket per
 //! `bind` and the mosh code never creates a socket itself. [`DirectUdp`] uses OS sockets.
+//!
+//! Wake-on-LAN broadcasts one datagram and hears nothing back, through [`DatagramBroadcast`]
+//! ([`DirectBroadcast`]), the only socket allowed to send to a broadcast address.
 
 use std::fmt;
 use std::future::Future;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::num::NonZeroU16;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -501,9 +504,97 @@ impl DatagramTransport for DirectUdp {
     }
 }
 
+/// Sends datagrams to broadcast addresses (Wake-on-LAN's magic packet, see [`crate::wake`]). Kept
+/// apart from [`DatagramTransport`]: a mosh socket is connected to one peer and must never be able
+/// to broadcast, while this one only ever sends and never hears an answer.
+pub trait DatagramBroadcast: Send + Sync + 'static {
+    /// Sends `datagram` once to each of `targets`, from one fresh socket. One target that cannot be
+    /// reached (no route to a subnet that is gone) does not keep the datagram from the others: the
+    /// first error is returned only when no target took it.
+    fn send_all(
+        &self,
+        datagram: &[u8],
+        targets: &[SocketAddrV4],
+    ) -> impl Future<Output = io::Result<()>> + Send;
+}
+
+/// OS UDP sockets with `SO_BROADCAST` set: the app's only socket that may send to a broadcast
+/// address. It goes out on whichever interface the OS routes each target through (a VPN app such as
+/// ZeroTier included), like [`DirectUdp`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DirectBroadcast;
+
+impl DirectBroadcast {
+    async fn open(&self) -> io::Result<UdpSocket> {
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+        socket.set_broadcast(true)?;
+        Ok(socket)
+    }
+}
+
+impl DatagramBroadcast for DirectBroadcast {
+    async fn send_all(&self, datagram: &[u8], targets: &[SocketAddrV4]) -> io::Result<()> {
+        let socket = self.open().await?;
+        let mut first_error = None;
+        let mut sent = false;
+        for target in targets {
+            match socket.send_to(datagram, target).await {
+                Ok(_) => sent = true,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) if !sent => Err(error),
+            _ => Ok(()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn direct_broadcast_sockets_may_broadcast_and_deliver_to_every_target() {
+        assert!(DirectBroadcast.open().await.unwrap().broadcast().unwrap());
+
+        // Loopback receivers only: a test never puts a broadcast on a real network.
+        let first = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let second = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = |socket: &UdpSocket| match socket.local_addr().unwrap() {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!(),
+        };
+        DirectBroadcast
+            .send_all(b"wake", &[target(&first), target(&second)])
+            .await
+            .unwrap();
+        for socket in [&first, &second] {
+            let mut buf = [0u8; 16];
+            let n = socket.recv(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"wake");
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_broadcast_fails_only_when_no_target_took_the_datagram() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let SocketAddr::V4(reachable) = receiver.local_addr().unwrap() else {
+            unreachable!()
+        };
+        // Port 0 is not a destination: the OS refuses the send at once.
+        let refused = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0);
+        assert!(DirectBroadcast.send_all(b"x", &[refused]).await.is_err());
+        DirectBroadcast
+            .send_all(b"y", &[refused, reachable])
+            .await
+            .unwrap();
+        let mut buf = [0u8; 4];
+        let n = receiver.recv(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"y");
+    }
 
     #[tokio::test]
     async fn direct_udp_sockets_exchange_datagrams_with_their_peer_only() {

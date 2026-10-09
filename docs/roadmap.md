@@ -39,8 +39,11 @@ a herdr agent inbox, composer/quick replies, multi-address hosts, compact UI, an
   switches. Small.
 
 **M4 (already planned, refined):** local agent notifications from herdr events (shipped v0.1.1) and image
-paste via SFTP (shipped v0.1.2); still open: voice dictation with an on-device or bring-your-own-key engine (no Google services);
-Wake-on-LAN, TCP wake probe and keep-screen-on (see design M4 backlog).
+paste via SFTP (shipped v0.1.2). Built 2026-10-09 (FFI API 24, contracts "M4"): the history sheet, Wake-on-LAN with
+the TCP wake probe, keep-screen-on and reopen-last-terminal settings, Approve/Deny of Claude Code permission prompts
+from the notification, and the agent summary as a Live Update. **Deferred by the owner (2026-10-09):** voice
+dictation, Chat View, the diff viewer, and push through a self-hosted ntfy (UnifiedPush) until the mobile-data and
+Wi-Fi handover tests show whether or2 stays connected in the background.
 
 **M5 candidates (bigger):**
 - **Chat view** of an agent pane: render the agent's conversation natively from herdr's

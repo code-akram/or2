@@ -9,6 +9,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- Its ongoing notification (Android 13+; the service runs without it, asked once). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Android 16 Live Update: the ongoing notification is promoted while an agent needs input (not a runtime ask). -->
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
     <!-- One-time, explained request so sessions are not killed in the background. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Easy pair: reading the host's QR code. Asked only when the user starts scanning; pasting the code needs no camera. -->

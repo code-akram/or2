@@ -2,6 +2,7 @@ package io.github.code_akram.or2.connection
 
 import io.github.code_akram.or2.app.TerminalActivations
 import io.github.code_akram.or2.data.Host
+import io.github.code_akram.or2.data.HostEndpoint
 import io.github.code_akram.or2.data.TransportPref
 import io.github.code_akram.or2.data.TrustStore
 import io.github.code_akram.or2.ffi.AgentIdentity
@@ -14,6 +15,7 @@ import io.github.code_akram.or2.ffi.HerdrState
 import io.github.code_akram.or2.ffi.HerdrUnavailable
 import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HerdrWatchInterface
+import io.github.code_akram.or2.ffi.HistoryText
 import io.github.code_akram.or2.ffi.HostAddress
 import io.github.code_akram.or2.ffi.HostCapabilities
 import io.github.code_akram.or2.ffi.HostConnectRequest
@@ -22,6 +24,8 @@ import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.LinkHealth
+import io.github.code_akram.or2.ffi.PermissionAnswer
+import io.github.code_akram.or2.ffi.PermissionPrompt
 import io.github.code_akram.or2.ffi.ReplyRoute
 import io.github.code_akram.or2.ffi.SessionFailure
 import io.github.code_akram.or2.ffi.SessionInterface
@@ -38,6 +42,7 @@ import io.github.code_akram.or2.hosts.connectionAffectedBy
 import io.github.code_akram.or2.notify.HerdrIntegrations
 import io.github.code_akram.or2.notify.enableReplyFor
 import io.github.code_akram.or2.paste.ImagePaste
+import io.github.code_akram.or2.session.HISTORY_LINES
 import io.github.code_akram.or2.session.hostErrorMessage
 import io.github.code_akram.or2.terminal.SessionRoute
 import io.github.code_akram.or2.terminal.TargetScroller
@@ -121,6 +126,13 @@ interface HostPort : AutoCloseable {
     suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll, clientId: String?)
 
     /**
+     * API 24: up to [lines] (clamped to 1..5000) of the history a tmux or herdr [target] shows, as plain text, newest
+     * last, without moving it (tmux `capture-pane`, herdr `pane.read`). [paneId] and [clientId] as for [scrollTarget].
+     * At most 1 MiB: past it the oldest lines are dropped and `truncated` is set. A shell target is `CommandFailed`.
+     */
+    suspend fun readHistory(target: TerminalTarget, paneId: String?, clientId: String?, lines: UInt): HistoryText
+
+    /**
      * API 14: moves what a terminal on [target] shows (tmux window, pane or session; herdr tab, pane or
      * workspace). [paneId] is the herdr pane to move from, null for the focused one. [clientId] is the
      * moving terminal's shown session's `clientId()`: a tmux move then acts on exactly that terminal's
@@ -135,6 +147,21 @@ interface HostPort : AutoCloseable {
      * above 4 KiB. The text is never logged.
      */
     suspend fun replyToPane(session: String?, paneId: String, agent: AgentIdentity, text: String): ReplyRoute
+
+    /**
+     * The yes/no permission prompt [agent] waits at in herdr pane [paneId] of [session], or null when it waits at none
+     * that can be answered from a notification (only a blocked Claude Code at a permission rule herdr sees on screen).
+     * Sends nothing to the pane. `PaneNotFound` when the pane, or that agent, is gone.
+     */
+    suspend fun permissionPrompt(session: String?, paneId: String, agent: AgentIdentity): PermissionPrompt?
+
+    /**
+     * Approves (Enter) or denies (Escape) the permission prompt [agent] waits at in herdr pane [paneId] of [session],
+     * the one [permissionPrompt] found at [seq], once every check passed again. `PromptChanged` when the agent is not at
+     * that prompt any more, `PaneNotFound` when the pane or that agent is gone or its shell has the foreground; nothing
+     * is sent then.
+     */
+    suspend fun answerPermission(session: String?, paneId: String, agent: AgentIdentity, seq: ULong, answer: PermissionAnswer)
 
     /**
      * API 16: writes [bytes] over SFTP to the host's `~/.cache/or2/images` and returns the file's absolute
@@ -173,10 +200,16 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
     override suspend fun stopMoshServer(pid: UInt) = connection.stopMoshServer(pid)
     override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll, clientId: String?) =
         connection.scrollTarget(target, paneId, scroll, clientId)
+    override suspend fun readHistory(target: TerminalTarget, paneId: String?, clientId: String?, lines: UInt) =
+        connection.readHistory(target, paneId, clientId, lines)
     override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) =
         connection.navigate(target, paneId, nav, clientId)
     override suspend fun replyToPane(session: String?, paneId: String, agent: AgentIdentity, text: String) =
         connection.replyToPane(session, paneId, agent, text)
+    override suspend fun permissionPrompt(session: String?, paneId: String, agent: AgentIdentity) =
+        connection.permissionPrompt(session, paneId, agent)
+    override suspend fun answerPermission(session: String?, paneId: String, agent: AgentIdentity, seq: ULong, answer: PermissionAnswer) =
+        connection.answerPermission(session, paneId, agent, seq, answer)
     override suspend fun uploadImage(bytes: ByteArray, extension: String) = connection.uploadImage(bytes, extension)
     override suspend fun installHerdrIntegration(id: String) = connection.installHerdrIntegration(id)
     override suspend fun herdrIntegrations() = connection.herdrIntegrations()
@@ -457,6 +490,12 @@ class HostConnections(
     private val moshServers: MoshServerLedger? = null,
     /** Debug timing markers (logcat tag `or2.timing`); the default records nothing. */
     val timing: Timing = Timing(),
+    /**
+     * The TCP wake probe (`wake_probe`), run before every connect of a host whose "Wake probe" is on, a reconnect and a
+     * Resume included: one knock on each address, bounded at 1.5 s, so a Bonjour Sleep Proxy wakes the host before the
+     * real connection tries. The default knocks on nothing.
+     */
+    private val wakeProbe: suspend (List<HostEndpoint>) -> Unit = {},
 ) {
     private val scope = CoroutineScope(SupervisorJob() + main)
 
@@ -581,6 +620,10 @@ class HostConnections(
                         if (state is HostState.Closed) releaseWatches(current)
                     }
                 }
+            }
+            if (host.wakeProbe) {
+                wakeProbe(host.addresses)
+                timing.mark(span, "wake-probe")
             }
             val request = HostConnectRequest(
                 host.addresses.map { HostAddress(it.hostname, it.port.toUShort()) }, host.username, privateKey, keys,
@@ -960,6 +1003,22 @@ class HostConnections(
         currentPort(hostId, requireConnected = true).replyToPane(session, paneId, agent, text)
 
     /**
+     * Whether [agent] in herdr pane [paneId] of [session] on [hostId] waits at a permission prompt a notification can
+     * answer (`permission_prompt`), over the live connection only, as a reply: throws [HostException.NotConnected]
+     * when the host has none, and the query's own [HostException] otherwise.
+     */
+    suspend fun permissionPrompt(hostId: Long, session: String?, paneId: String, agent: AgentIdentity): PermissionPrompt? =
+        currentPort(hostId, requireConnected = true).permissionPrompt(session, paneId, agent)
+
+    /**
+     * A notification's Approve or Deny (`answer_permission`) for the prompt found at [seq], over the live connection only:
+     * throws [HostException.NotConnected] when the host has none, and the answer's own [HostException] otherwise.
+     */
+    suspend fun answerPermission(
+        hostId: Long, session: String?, paneId: String, agent: AgentIdentity, seq: ULong, answer: PermissionAnswer,
+    ) = currentPort(hostId, requireConnected = true).answerPermission(session, paneId, agent, seq, answer)
+
+    /**
      * Reads herdr's integrations on [current] (`herdr_integrations`, one exec) when they are stale and [agents] holds
      * one that could use one (no session, a kind with an integration): at most once per connection and [refresh], not
      * again after a failure until then; a failed read forgets what was known, so nothing is offered. Nothing for a host
@@ -1015,6 +1074,17 @@ class HostConnections(
     suspend fun scrollTarget(terminal: ActiveTerminal, scroll: TargetScroll) {
         val port = currentPort(terminal.host.id, requireConnected = false)
         port.scrollTarget(terminal.target, focusedHerdrPane(terminal.host.id, terminal.target), scroll, terminal.mutableHandle.value?.clientId())
+    }
+
+    /**
+     * Reads [lines] of [terminal]'s tmux or herdr history as plain text (`read_history`, the history sheet) over its
+     * host's current connection, from the same pane a scroll would move ([scrollTarget]: herdr's focused pane, the
+     * session tmux's client shows now). Nothing moves on the host. Throws [HostException] when there is no connection
+     * or the read failed (a shell is `CommandFailed`).
+     */
+    suspend fun readHistory(terminal: ActiveTerminal, lines: UInt = HISTORY_LINES): HistoryText {
+        val port = currentPort(terminal.host.id, requireConnected = false)
+        return port.readHistory(terminal.target, focusedHerdrPane(terminal.host.id, terminal.target), terminal.mutableHandle.value?.clientId(), lines)
     }
 
     /**

@@ -170,4 +170,22 @@ class ReattachTest {
         assertEquals(Reattach.Resume(last), decideReattach(last, emptyList(), emptySet(), setOf(7)))
         assertTrue(shouldAutoResume(last, hosts, emptySet()))
     }
+
+    // --- Settings: "Reopen the last terminal on launch" ---------------------------------------------
+
+    @Test
+    fun theLaunchResumesOnlyWhileReopenOnLaunchIsOn() {
+        val hosts = listOf(host(7))
+        // Both launch paths: the recents path (a dead terminal screen) and the cold launcher start.
+        assertTrue(resumesOnLaunch(true, false, deadTerminalScreen = true, diedWithSessions = false, last, hosts, emptySet()))
+        assertTrue(resumesOnLaunch(true, false, deadTerminalScreen = false, diedWithSessions = true, last, hosts, emptySet()))
+        // Off: neither resumes; the decision that offers Home's Resume card is untouched.
+        assertFalse(resumesOnLaunch(false, false, deadTerminalScreen = true, diedWithSessions = false, last, hosts, emptySet()))
+        assertFalse(resumesOnLaunch(false, false, deadTerminalScreen = false, diedWithSessions = true, last, hosts, emptySet()))
+        assertEquals(Reattach.Resume(last), decideReattach(last, emptyList(), emptySet(), setOf(7)))
+        // An agent notification's tap, an orderly end or nothing to resume: never, whatever the setting.
+        assertFalse(resumesOnLaunch(true, true, deadTerminalScreen = true, diedWithSessions = true, last, hosts, emptySet()))
+        assertFalse(resumesOnLaunch(true, false, deadTerminalScreen = false, diedWithSessions = false, last, hosts, emptySet()))
+        assertFalse(resumesOnLaunch(true, false, deadTerminalScreen = true, diedWithSessions = true, null, hosts, emptySet()))
+    }
 }

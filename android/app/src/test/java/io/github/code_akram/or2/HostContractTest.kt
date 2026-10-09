@@ -8,6 +8,7 @@ import io.github.code_akram.or2.ffi.HerdrIntegrationState
 import io.github.code_akram.or2.ffi.HerdrListener
 import io.github.code_akram.or2.ffi.HerdrState
 import io.github.code_akram.or2.ffi.HerdrView
+import io.github.code_akram.or2.ffi.HistoryText
 import io.github.code_akram.or2.ffi.HostAddress
 import io.github.code_akram.or2.ffi.HostConnectException
 import io.github.code_akram.or2.ffi.HostConnectRequest
@@ -16,6 +17,8 @@ import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.NavDirection
+import io.github.code_akram.or2.ffi.PermissionAnswer
+import io.github.code_akram.or2.ffi.PermissionPrompt
 import io.github.code_akram.or2.ffi.ReplyRoute
 import io.github.code_akram.or2.ffi.Session
 import io.github.code_akram.or2.ffi.SessionException
@@ -535,6 +538,34 @@ class HostContractTest {
     }
 
     @Test
+    fun aHistoryReadCrossesTheFfiClampsItsLinesAndRefusesAShell() {
+        val host = connectedHost()
+        val tmux = TerminalTarget.Tmux("main")
+        runBlocking {
+            // The probe's history is 40 lines; fewer asked for are the newest, and the rest are marked left out.
+            assertEquals(HistoryText("main line 39\nmain line 40", true), host.readHistory(tmux, null, null, 2u))
+            val all = host.readHistory(tmux, null, null, 2000u)
+            assertEquals(40, all.text.lines().size)
+            assertFalse(all.truncated)
+            // Zero is clamped up to one line, not refused.
+            assertEquals(HistoryText("main line 40", true), host.readHistory(tmux, null, null, 0u))
+            // herdr: the pane asked for, else the focused one.
+            assertEquals("w1:p2 line 40", host.readHistory(TerminalTarget.Herdr(null, null), "w1:p2", null, 1u).text)
+            assertEquals("w1:p1 line 40", host.readHistory(TerminalTarget.Herdr(null, null), null, null, 1u).text)
+        }
+        assertThrows(HostException.PaneNotFound::class.java) {
+            runBlocking { host.readHistory(TerminalTarget.Herdr(null, null), "w9:p9", null, 10u) }
+        }
+        // A shell has no history the host can read; names and ids are validated like terminal targets.
+        assertThrows(HostException.CommandFailed::class.java) { runBlocking { host.readHistory(TerminalTarget.Shell, null, null, 10u) } }
+        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.readHistory(TerminalTarget.Tmux("a:b"), null, null, 10u) } }
+        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.readHistory(tmux, null, "not-an-id", 10u) } }
+        host.disconnect()
+        assertThrows(HostException.Closed::class.java) { runBlocking { host.readHistory(tmux, null, null, 10u) } }
+        host.close()
+    }
+
+    @Test
     fun aReplyToAPaneCrossesTheFfiWithItsRouteAndItsLimits() {
         val host = connectedHost()
         runBlocking {
@@ -570,6 +601,39 @@ class HostContractTest {
             val refused = assertThrows(HostException.CommandFailed::class.java) { runBlocking { host.replyToPane(null, "w2:p1", unknown, "hello") } }
             assertEquals("open the pane to reply", refused.reason)
         }
+        assertEquals(HostState.Connected(0u), host.state())
+        host.disconnect()
+        host.close()
+    }
+
+    @Test
+    fun aPermissionPromptAndItsAnswerCrossTheFfi() {
+        val host = connectedHost()
+        runBlocking {
+            // The probe's blocked Claude Code waits at a permission prompt at its view's seq; the others at none.
+            assertEquals(PermissionPrompt(4u), host.permissionPrompt(null, "w1:p1", PROBE_CLAUDE))
+            assertNull(host.permissionPrompt("work", "w1:p2", PROBE_CODEX))
+            host.answerPermission(null, "w1:p1", PROBE_CLAUDE, 4u, PermissionAnswer.APPROVE)
+            host.answerPermission(null, "w1:p1", PROBE_CLAUDE, 4u, PermissionAnswer.DENY)
+        }
+        // Another seq is another prompt; another instance finds none; the names are checked as a reply's.
+        assertThrows(HostException.PromptChanged::class.java) {
+            runBlocking { host.answerPermission(null, "w1:p1", PROBE_CLAUDE, 5u, PermissionAnswer.APPROVE) }
+        }
+        assertThrows(HostException.PromptChanged::class.java) {
+            runBlocking { host.answerPermission(null, "w1:p2", PROBE_CODEX, 2u, PermissionAnswer.DENY) }
+        }
+        assertThrows(HostException.PaneNotFound::class.java) {
+            runBlocking { host.permissionPrompt(null, "w1:p1", PROBE_CLAUDE.copy(session = AgentSession("id", "sess_next"))) }
+        }
+        assertThrows(HostException.PaneNotFound::class.java) {
+            runBlocking { host.answerPermission(null, "w1:p1", PROBE_CLAUDE.copy(terminalId = "term_w2:p1"), 4u, PermissionAnswer.APPROVE) }
+        }
+        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.permissionPrompt(null, "w1 p1", PROBE_CLAUDE) } }
+        val refused = assertThrows(HostException.CommandFailed::class.java) {
+            runBlocking { host.answerPermission(null, "w1:p1", PROBE_CLAUDE.copy(agent = null), 4u, PermissionAnswer.APPROVE) }
+        }
+        assertEquals("open the pane to reply", refused.reason)
         assertEquals(HostState.Connected(0u), host.state())
         host.disconnect()
         host.close()

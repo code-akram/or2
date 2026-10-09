@@ -42,6 +42,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import io.github.code_akram.or2.connection.canWake
 import io.github.code_akram.or2.data.Host
 import io.github.code_akram.or2.pair.AddHostChooser
 import io.github.code_akram.or2.session.CloseShellDialog
@@ -133,6 +134,8 @@ fun HomeScreen(
     notificationCard: Boolean = false,
     allowNotifications: () -> Unit = {},
     dismissNotifications: () -> Unit = {},
+    /** Wake, from the host menu of a host that can be woken ([canWake]): the packet and the probe, then connect. */
+    wakeHost: (Host) -> Unit = {},
 ) {
     var options by remember { mutableStateOf<HostCard?>(null) }
     var deleting by remember { mutableStateOf<Host?>(null) }
@@ -213,7 +216,7 @@ fun HomeScreen(
         HostOptionsSheet(
             card, busy, connect = { options = null; connectHost(card.host) }, edit = { options = null; editHost(card.host) },
             disconnect = { options = null; disconnectHost(card.host) }, delete = { options = null; deleting = card.host },
-            dismiss = { options = null },
+            dismiss = { options = null }, wake = { options = null; wakeHost(card.host) },
         )
     }
     deleting?.let { host ->
@@ -237,10 +240,14 @@ fun DeleteHostDialog(host: Host, delete: () -> Unit, dismiss: () -> Unit) {
     ) { Text("Delete ${host.label} and its trusted host keys? This does not delete your SSH key.") }
 }
 
-/** A host card's menu (its `⋯`, or a long press): Connect or Disconnect, Edit and Delete, under the host's name. */
+/**
+ * A host card's menu (its `⋯`, or a long press): Connect or Disconnect, Wake (for a host asleep or not connected that
+ * has a MAC address or the wake probe, [canWake]), Edit and Delete, under the host's name.
+ */
 @Composable
 fun HostOptionsSheet(
     card: HostCard, busy: Boolean, connect: () -> Unit, edit: () -> Unit, disconnect: () -> Unit, delete: () -> Unit, dismiss: () -> Unit,
+    wake: () -> Unit = {},
 ) {
     val host = card.host
     Or2Sheet(dismiss, title = host.label, done = "Done", modifier = Modifier.testTag("host-options-sheet")) {
@@ -251,6 +258,12 @@ fun HostOptionsSheet(
                     ListRow("Connect", icon = Or2Icons.Power, enabled = !busy && host.keyId != null,
                         subtitle = if (host.keyId == null) "Select a key first" else null,
                         modifier = Modifier.testTag("option-connect"), onClick = connect)
+                    GroupDivider(inset = 44.dp)
+                }
+                if (canWake(host, card.link)) {
+                    ListRow("Wake", icon = Or2Icons.Wake, enabled = !busy && host.keyId != null,
+                        subtitle = if (host.keyId == null) "Select a key first" else "Wakes the host, then connects",
+                        modifier = Modifier.testTag("host-wake:${host.id}"), onClick = wake)
                     GroupDivider(inset = 44.dp)
                 }
                 ListRow("Edit", icon = Or2Icons.Pencil, modifier = Modifier.testTag("option-edit"), onClick = edit)

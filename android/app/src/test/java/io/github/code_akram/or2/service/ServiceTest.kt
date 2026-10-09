@@ -6,7 +6,12 @@ import io.github.code_akram.or2.connection.FakePort
 import io.github.code_akram.or2.connection.FakeTrust
 import io.github.code_akram.or2.connection.HostConnections
 import io.github.code_akram.or2.connection.testHost
+import io.github.code_akram.or2.ffi.AgentStatus
 import io.github.code_akram.or2.ffi.CloseReason
+import io.github.code_akram.or2.ffi.HerdrAgent
+import io.github.code_akram.or2.ffi.HerdrState
+import io.github.code_akram.or2.ffi.HerdrUnavailable
+import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HostListener
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.SessionState
@@ -65,6 +70,74 @@ class ServiceTest {
         assertEquals("2 open sessions", many.text)
         assertEquals(listOf("Alpha · 2 sessions", "Beta"), many.lines)
         assertEquals("No open sessions", notificationContent(ServiceSnapshot(listOf(HostEntry(1, "Alpha", 0)))).text)
+    }
+
+    private fun agent(pane: String, status: AgentStatus) =
+        HerdrAgent(pane, "w1:t1", "w1", null, "claude", null, status, null, 1u, "term_$pane", null)
+
+    private fun herdrView(vararg agents: HerdrAgent) = HerdrView(1uL, null, emptyList(), emptyList(), emptyList(), agents.toList())
+
+    @Test
+    fun theNotificationSummarisesTheAgentsAcrossHosts() {
+        val summary = agentSummary(
+            listOf(
+                herdrView(agent("w1:p1", AgentStatus.BLOCKED), agent("w1:p2", AgentStatus.WORKING)),
+                herdrView(agent("w1:p1", AgentStatus.WORKING), agent("w1:p2", AgentStatus.DONE), agent("w1:p3", AgentStatus.IDLE)),
+            ),
+        )
+        assertEquals(AgentSummary(needsInput = 1, working = 2), summary)
+        assertEquals("1 needs input · 2 working", summary.text)
+        assertEquals("3 needs input", AgentSummary(needsInput = 3).text)
+        assertEquals("1 working", AgentSummary(working = 1).text)
+        assertNull(AgentSummary().text)
+        assertNull(agentSummary(listOf(herdrView(agent("w1:p1", AgentStatus.DONE)))).text)
+        val content = notificationContent(ServiceSnapshot(listOf(HostEntry(1, "Alpha", 1)), summary))
+        assertEquals("1 needs input · 2 working · 1 open session", content.text)
+        assertEquals(listOf("Alpha · 1 session"), content.lines)
+    }
+
+    /** While an agent needs input the notification asks to be a Live Update, with a short critical text; else not. */
+    @Test
+    fun anAgentThatNeedsInputPromotesTheNotificationAndNoneDemotesIt() {
+        val hosts = listOf(HostEntry(1, "Alpha", 1))
+        val promoted = notificationContent(ServiceSnapshot(hosts, AgentSummary(needsInput = 2, working = 1)))
+        assertTrue(promoted.promoted)
+        assertEquals("2 input", promoted.shortCriticalText)
+        assertEquals("Connected to Alpha", promoted.title)
+        for (summary in listOf(AgentSummary(working = 3), AgentSummary())) {
+            val ordinary = notificationContent(ServiceSnapshot(hosts, summary))
+            assertFalse(ordinary.promoted)
+            assertNull(ordinary.shortCriticalText)
+        }
+        // Nothing open: nothing to promote, whatever was counted.
+        assertFalse(notificationContent(ServiceSnapshot(emptyList(), AgentSummary(needsInput = 1))).promoted)
+    }
+
+    @Test
+    fun theSnapshotsCountTheAgentsOfTheLiveWatches() = runTest {
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+        val ports = mutableListOf<FakePort>()
+        val listeners = mutableListOf<HostListener>()
+        val holder = HostConnections({ _, listener -> listeners += listener; FakePort().also { ports += it } }, FakeTrust(), dispatcher, dispatcher)
+        val snapshots = mutableListOf<ServiceSnapshot>()
+        val job = launch(dispatcher) { holder.serviceSnapshots().collect { snapshots += it } }
+        holder.connect(testHost(1, "Alpha"), byteArrayOf(1))
+        listeners.last().onHostStateChanged(HostState.Connected(0u))
+        runCurrent()
+        val watch = ports.last().watches.single().second
+        watch.onHerdrStateChanged(HerdrState.Live(herdrView(agent("w1:p1", AgentStatus.BLOCKED), agent("w1:p2", AgentStatus.WORKING))))
+        runCurrent()
+        assertEquals(AgentSummary(1, 1), snapshots.last().agents)
+        assertTrue(notificationContent(snapshots.last()).promoted)
+        watch.onHerdrStateChanged(HerdrState.Live(herdrView(agent("w1:p1", AgentStatus.WORKING), agent("w1:p2", AgentStatus.WORKING))))
+        runCurrent()
+        assertEquals(AgentSummary(0, 2), snapshots.last().agents)
+        assertFalse(notificationContent(snapshots.last()).promoted)
+        // herdr went away: nothing is counted.
+        watch.onHerdrStateChanged(HerdrState.Unavailable(HerdrUnavailable.NotRunning, ""))
+        runCurrent()
+        assertEquals(AgentSummary(), snapshots.last().agents)
+        job.cancel()
     }
 
     private class RecordingHost : ServiceHost {

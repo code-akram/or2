@@ -202,6 +202,9 @@ class TerminalView(context: Context) : View(context) {
 
     /** Called with whether the scroll-to-bottom button should show, when that changes. */
     var onScrolledAwayChanged: (Boolean) -> Unit = {}
+
+    /** A swipe up began at the top of the local scrollback (nothing above it here, whatever the route scrolls). */
+    var onScrolledPastTop: () -> Unit = {}
     private var reportedAway = false
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean {
@@ -647,6 +650,8 @@ class TerminalView(context: Context) : View(context) {
      */
     private fun scrollRows(rows: Int) {
         val targets = targetScroller
+        // Up with nothing above the local screen (mosh keeps no scrollback): the screen may offer the host's history.
+        if (rows < 0 && grid.scrollback.offset == 0uL) onScrolledPastTop()
         when (scrollRoute(grid.modes, target)) {
             ScrollRoute.WHEEL -> {
                 sessionCall { scroll(ViewportScroll.Wheel(rows, scrollCell.column.toUShort(), scrollCell.row.toUShort())) }

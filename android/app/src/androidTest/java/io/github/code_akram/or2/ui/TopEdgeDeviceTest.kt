@@ -149,7 +149,7 @@ class TopEdgeDeviceTest {
 
     @Test
     fun aFullHeightSheetStopsBelowTheStatusBar() {
-        listOf("picker-many", "home-picker-many").forEach { name ->
+        listOf("picker-many", "home-picker-many", "history").forEach { name ->
             gallery(name) { screen ->
                 val handle = awaitStill("sheet-handle")
                 val gap = Or2Dimens.SheetTopGap.value * screen.density
