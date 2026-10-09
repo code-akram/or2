@@ -100,6 +100,10 @@ class UiPort(
     override suspend fun focusHerdrTab(session: String?, tabId: String) { focusedTabs += session to tabId }
     override suspend fun stopMoshServer(pid: UInt) = Unit
     override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll, clientId: String?) = Unit
+
+    /** What `read_history` answers. */
+    var history = HistoryText("", false)
+    override suspend fun readHistory(target: TerminalTarget, paneId: String?, clientId: String?, lines: UInt) = history
     override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) = Unit
     override suspend fun replyToPane(
         session: String?, paneId: String, agent: AgentIdentity, text: String,

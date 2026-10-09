@@ -81,6 +81,8 @@ object Or2Icons {
     /** `⋯`: a host card's menu. */
     val More = icon("more", "M5.5 12h.01", "M12 12h.01", "M18.5 12h.01", stroke = 3f)
     val Refresh = icon("refresh", "M20 12a8 8 0 1 1-2.4-5.7", "M20 4.5V9h-4.5")
+    /** A clock turning back: the Terminals sheet's "History". */
+    val History = icon("history", "M4 12a8 8 0 1 0 2.4-5.7", "M4 4.5V9h4.5", "M12 8v4.5l3 2")
     /** A shell prompt, `>_`: the picker's "Shell" pill and the Resume card. */
     val Terminal = icon("terminal", "M5 7.5l4.5 4.5L5 16.5", "M12.5 17h6.5")
     val Layers = icon("layers", "M12 3.5l9 5-9 5-9-5z", "M3 12.5l9 5 9-5", "M3 16.5l9 5 9-5")

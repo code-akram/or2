@@ -11,6 +11,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -307,6 +308,36 @@ class EntryUiDeviceTest {
         compose.onNodeWithTag("terminal-panes").performClick()
         compose.onNodeWithTag("terminals-shortcuts").performClick()
         compose.onNodeWithTag("shortcuts-sheet").assertIsDisplayed()
+    }
+
+    @Test
+    fun historyReadsTheTargetsTextIntoAFullHeightSheetAndCopiesItAll() {
+        val port = UiPort { UiSession() }
+        port.history = HistoryText((1..120).joinToString("\n") { "history line $it" } + "\n\u001b[0m\n", true)
+        val holder = terminalHolder(port)
+        showTerminals(holder, TerminalTarget.Tmux("work"))
+        compose.onNodeWithTag("terminals-history").performClick()
+        compose.onNodeWithTag("terminals-sheet").assertDoesNotExist()
+        compose.waitUntil(5_000) { compose.onAllNodesWithTag("history-text").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("history-sheet").assertIsDisplayed()
+        compose.onNodeWithTag("history-count").assertTextEquals("121 lines · older lines not shown")
+        // Opened at the bottom: the newest line shows.
+        compose.onNodeWithText("history line 120", substring = true).assertIsDisplayed()
+        compose.onNodeWithTag("history-copy-all").performClick()
+        compose.runOnIdle {
+            val clip = compose.activity.getSystemService(ClipboardManager::class.java).primaryClip
+            val text = clip?.getItemAt(0)?.text?.toString()
+            assertEquals("history line 1", text?.lines()?.first())
+            assertEquals("[0m", text?.lines()?.last()) // The escape itself was removed.
+        }
+    }
+
+    @Test
+    fun aShellOffersNoHistory() {
+        val holder = terminalHolder(UiPort { UiSession() })
+        showTerminals(holder, TerminalTarget.Shell)
+        compose.onNodeWithTag("terminals-copy-screen").assertIsDisplayed()
+        compose.onNodeWithTag("terminals-history").assertDoesNotExist()
     }
 }
 

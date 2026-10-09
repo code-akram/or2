@@ -14,6 +14,7 @@ import io.github.code_akram.or2.ffi.HerdrState
 import io.github.code_akram.or2.ffi.HerdrUnavailable
 import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HerdrWatchInterface
+import io.github.code_akram.or2.ffi.HistoryText
 import io.github.code_akram.or2.ffi.HostAddress
 import io.github.code_akram.or2.ffi.HostCapabilities
 import io.github.code_akram.or2.ffi.HostConnectRequest
@@ -38,6 +39,7 @@ import io.github.code_akram.or2.hosts.connectionAffectedBy
 import io.github.code_akram.or2.notify.HerdrIntegrations
 import io.github.code_akram.or2.notify.enableReplyFor
 import io.github.code_akram.or2.paste.ImagePaste
+import io.github.code_akram.or2.session.HISTORY_LINES
 import io.github.code_akram.or2.session.hostErrorMessage
 import io.github.code_akram.or2.terminal.SessionRoute
 import io.github.code_akram.or2.terminal.TargetScroller
@@ -121,6 +123,13 @@ interface HostPort : AutoCloseable {
     suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll, clientId: String?)
 
     /**
+     * API 24: up to [lines] (clamped to 1..5000) of the history a tmux or herdr [target] shows, as plain text, newest
+     * last, without moving it (tmux `capture-pane`, herdr `pane.read`). [paneId] and [clientId] as for [scrollTarget].
+     * At most 1 MiB: past it the oldest lines are dropped and `truncated` is set. A shell target is `CommandFailed`.
+     */
+    suspend fun readHistory(target: TerminalTarget, paneId: String?, clientId: String?, lines: UInt): HistoryText
+
+    /**
      * API 14: moves what a terminal on [target] shows (tmux window, pane or session; herdr tab, pane or
      * workspace). [paneId] is the herdr pane to move from, null for the focused one. [clientId] is the
      * moving terminal's shown session's `clientId()`: a tmux move then acts on exactly that terminal's
@@ -173,6 +182,8 @@ class NativeHostPort(private val connection: HostConnection) : HostPort {
     override suspend fun stopMoshServer(pid: UInt) = connection.stopMoshServer(pid)
     override suspend fun scrollTarget(target: TerminalTarget, paneId: String?, scroll: TargetScroll, clientId: String?) =
         connection.scrollTarget(target, paneId, scroll, clientId)
+    override suspend fun readHistory(target: TerminalTarget, paneId: String?, clientId: String?, lines: UInt) =
+        connection.readHistory(target, paneId, clientId, lines)
     override suspend fun navigate(target: TerminalTarget, paneId: String?, nav: TargetNav, clientId: String?) =
         connection.navigate(target, paneId, nav, clientId)
     override suspend fun replyToPane(session: String?, paneId: String, agent: AgentIdentity, text: String) =
@@ -1015,6 +1026,17 @@ class HostConnections(
     suspend fun scrollTarget(terminal: ActiveTerminal, scroll: TargetScroll) {
         val port = currentPort(terminal.host.id, requireConnected = false)
         port.scrollTarget(terminal.target, focusedHerdrPane(terminal.host.id, terminal.target), scroll, terminal.mutableHandle.value?.clientId())
+    }
+
+    /**
+     * Reads [lines] of [terminal]'s tmux or herdr history as plain text (`read_history`, the history sheet) over its
+     * host's current connection, from the same pane a scroll would move ([scrollTarget]: herdr's focused pane, the
+     * session tmux's client shows now). Nothing moves on the host. Throws [HostException] when there is no connection
+     * or the read failed (a shell is `CommandFailed`).
+     */
+    suspend fun readHistory(terminal: ActiveTerminal, lines: UInt = HISTORY_LINES): HistoryText {
+        val port = currentPort(terminal.host.id, requireConnected = false)
+        return port.readHistory(terminal.target, focusedHerdrPane(terminal.host.id, terminal.target), terminal.mutableHandle.value?.clientId(), lines)
     }
 
     /**

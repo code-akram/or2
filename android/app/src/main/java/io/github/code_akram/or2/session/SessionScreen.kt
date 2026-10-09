@@ -34,7 +34,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -58,6 +60,8 @@ import io.github.code_akram.or2.connection.linkStaleLabel
 import io.github.code_akram.or2.ffi.LinkHealth
 import io.github.code_akram.or2.ffi.SessionState
 import io.github.code_akram.or2.ffi.TerminalTarget
+import io.github.code_akram.or2.ffi.TerminalTransport
+import io.github.code_akram.or2.ffi.HostException
 import io.github.code_akram.or2.paste.NO_UPLOAD
 import io.github.code_akram.or2.paste.uploadNotice
 import io.github.code_akram.or2.paste.uploading
@@ -136,6 +140,16 @@ fun SessionScreen(
         // The Terminals sheet (the green disc), and the shortcuts sheet it opens.
         var switcher by remember { mutableStateOf(false) }
         var shortcuts by remember { mutableStateOf(false) }
+        // The history sheet (the Terminals sheet's History, or the mosh chip), what its read answered, and a count that
+        // starts a read each time it changes.
+        var historyOpen by remember { mutableStateOf(false) }
+        var historyLoad by remember { mutableStateOf<HistoryLoad>(HistoryLoad.Loading) }
+        var historyRead by remember { mutableIntStateOf(0) }
+        fun openHistory() {
+            historyLoad = HistoryLoad.Loading
+            historyRead++
+            historyOpen = true
+        }
         val chrome = remember { TerminalChromeState() }
         val context = LocalContext.current
         val scope = rememberCoroutineScope()
@@ -171,7 +185,9 @@ fun SessionScreen(
                         scope.launch { holder.navigate(terminal, swipeNav(swipe)) }
                     },
                     switchTo = { index -> open.getOrNull(index)?.let { if (it !== terminal) select(it) } },
-                    closeTerminal = { requestClose(terminal) }, imagePaste = paste) }
+                    closeTerminal = { requestClose(terminal) }, imagePaste = paste,
+                    // Mosh keeps no history on the phone: scrolling up past the top offers the host's.
+                    openHistory = if (transport == TerminalTransport.MOSH && hasHistory(terminal.target)) ::openHistory else null) }
             }
         } else {
             PendingTerminal(terminal, state, minimise, open, select, ::requestClose)
@@ -188,6 +204,23 @@ fun SessionScreen(
                 },
                 shortcuts = { switcher = false; shortcuts = true },
                 dismiss = { switcher = false },
+                history = if (hasHistory(terminal.target)) ({ switcher = false; openHistory() }) else null,
+            )
+        }
+        if (historyOpen) {
+            // Read while the sheet is up (again on Retry); dismissing it cancels a read in flight.
+            LaunchedEffect(historyRead) {
+                historyLoad = try {
+                    historyLoaded(holder.readHistory(terminal))
+                } catch (error: HostException) {
+                    HistoryLoad.Failed(historyErrorMessage(error))
+                }
+            }
+            HistorySheet(
+                terminal.title, historyLoad,
+                copyAll = { text -> copyText(context, "Terminal history", text) },
+                retry = { historyLoad = HistoryLoad.Loading; historyRead++ },
+                dismiss = { historyOpen = false },
             )
         }
         if (spaces && herdr != null) {
@@ -324,18 +357,22 @@ private fun terminalItems(open: List<ActiveTerminal>): List<TerminalItem> = open
 /**
  * The Terminals sheet (the terminal header's green disc): every open terminal grouped by host, the one on screen
  * ([currentId]) marked `● Current`, a tap switching to another ([select]) and each row's `×` closing it ([close]: the
- * same rules as Home's). Then **Copy screen** (the visible screen's text to the clipboard) and **Gestures &
- * shortcuts** (the shortcuts sheet).
+ * same rules as Home's). Then **History** ([history], only for a terminal with one: [hasHistory]), **Copy screen**
+ * (the visible screen's text to the clipboard) and **Gestures & shortcuts** (the shortcuts sheet).
  */
 @Composable
 fun TerminalsSheet(
     items: List<TerminalItem>, currentId: Long, select: (Long) -> Unit, close: (Long) -> Unit, copyScreen: () -> Unit,
-    shortcuts: () -> Unit, dismiss: () -> Unit,
+    shortcuts: () -> Unit, dismiss: () -> Unit, history: (() -> Unit)? = null,
 ) {
     Or2Sheet(dismiss, title = "Terminals", modifier = Modifier.testTag("terminals-sheet")) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             TerminalGroups(items, currentId, select, close)
             GroupCard {
+                if (history != null) {
+                    ListRow("History", icon = Or2Icons.History, modifier = Modifier.testTag("terminals-history"), onClick = history)
+                    GroupDivider(inset = 44.dp)
+                }
                 ListRow("Copy screen", icon = Or2Icons.Copy, modifier = Modifier.testTag("terminals-copy-screen"), onClick = copyScreen)
                 GroupDivider(inset = 44.dp)
                 ListRow("Gestures & shortcuts", icon = Or2Icons.Keyboard, modifier = Modifier.testTag("terminals-shortcuts"), onClick = shortcuts)

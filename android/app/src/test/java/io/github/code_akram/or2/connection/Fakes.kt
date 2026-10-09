@@ -112,6 +112,9 @@ class FakeWatch(val events: MutableList<String> = mutableListOf()) : HerdrWatchI
 }
 
 /** One scripted host connection: records what the holder asks and lets tests drive callbacks. */
+/** One `read_history` call as [FakePort] received it. */
+data class HistoryRead(val target: TerminalTarget, val paneId: String?, val clientId: String?, val lines: UInt)
+
 class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
     var nativeState: HostState = HostState.Connecting
     var approved: String? = null
@@ -235,6 +238,19 @@ class FakePort(val events: MutableList<String> = mutableListOf()) : HostPort {
         scrollClients += clientId
         scrollGate?.await()
         scrollFailure?.let { throw it }
+    }
+
+    /** `read_history` calls in order: the target, the herdr pane, the client id and the line count. */
+    val historyReads = mutableListOf<HistoryRead>()
+    /** What `read_history` answers; [historyFailure] is thrown instead (after the call is recorded) while set. */
+    var history = HistoryText("", false)
+    var historyFailure: Exception? = null
+    var historyGate: CompletableDeferred<Unit>? = null
+    override suspend fun readHistory(target: TerminalTarget, paneId: String?, clientId: String?, lines: UInt): HistoryText {
+        historyReads += HistoryRead(target, paneId, clientId, lines)
+        historyGate?.await()
+        historyFailure?.let { throw it }
+        return history
     }
 
     /** `navigate` calls in order; a failure is thrown after the call is recorded. */
