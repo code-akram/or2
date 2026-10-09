@@ -7,7 +7,11 @@ import android.graphics.Point
 import android.graphics.Rect
 import android.graphics.Typeface
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
+import android.view.PixelCopy
+import android.view.Window
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -19,6 +23,8 @@ import io.github.code_akram.or2.ffi.TerminalCell
 import io.github.code_akram.or2.ffi.TerminalRow
 import io.github.code_akram.or2.ffi.Underline
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import io.github.code_akram.or2.ui.Or2Dimens
 import org.junit.Assert.*
 import org.junit.Test
@@ -182,6 +188,30 @@ class TerminalVisualDeviceTest {
         }
     }
 
+    /**
+     * The probe's window as the app drew it, in window coordinates: a `PixelCopy`, not a screenshot of the screen, so a
+     * heads-up notification, the shade or another system overlay passing over the phone cannot change a pixel the
+     * tests compare. (A full-screen screenshot once caught the header at half brightness; with the shade pulled
+     * over it, the screen read `#3D5D82` where the window still held `#336699`.)
+     */
+    private fun windowPixels(scenario: ActivityScenario<TerminalProbeActivity>): Bitmap {
+        lateinit var window: Window
+        var width = 0
+        var height = 0
+        scenario.onActivity { activity ->
+            window = activity.window
+            width = window.decorView.width
+            height = window.decorView.height
+        }
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val copied = CountDownLatch(1)
+        var result = PixelCopy.ERROR_UNKNOWN
+        PixelCopy.request(window, bitmap, { result = it; copied.countDown() }, Handler(Looper.getMainLooper()))
+        assertTrue("PixelCopy did not finish", copied.await(5, TimeUnit.SECONDS))
+        assertEquals("PixelCopy failed", PixelCopy.SUCCESS, result)
+        return bitmap
+    }
+
     private fun raster(scenario: ActivityScenario<TerminalProbeActivity>, change: (TerminalView) -> Unit): Bitmap {
         var draws = 0
         var bounds = Rect()
@@ -190,18 +220,18 @@ class TerminalVisualDeviceTest {
             draws = view.drawTimings.count
             change(view)
             val position = IntArray(2)
-            view.getLocationOnScreen(position)
+            view.getLocationInWindow(position)
             bounds = Rect(position[0], position[1], position[0] + view.width, position[1] + view.height)
             view.invalidate()
         }
         await(scenario) { _, view -> view.drawTimings.count > draws }
         instrumentation.waitForIdleSync()
         SystemClock.sleep(100)
-        val screenshot = instrumentation.uiAutomation.takeScreenshot()!!
+        val window = windowPixels(scenario)
         return try {
-            Bitmap.createBitmap(screenshot, bounds.left, bounds.top, bounds.width(), bounds.height())
+            Bitmap.createBitmap(window, bounds.left, bounds.top, bounds.width(), bounds.height())
         } finally {
-            screenshot.recycle()
+            window.recycle()
         }
     }
 
@@ -338,17 +368,20 @@ class TerminalVisualDeviceTest {
     }
 
     private fun capture(scenario: ActivityScenario<TerminalProbeActivity>, name: String) {
-        // Settle Compose key state and hardware render submission before asking SurfaceFlinger.
+        // Settle Compose key state and hardware render submission before copying the window.
         instrumentation.waitForIdleSync()
         SystemClock.sleep(100)
         val bounds = Rect()
         var compositionEdge: Point? = null
         scenario.onActivity { activity ->
             activity.window.decorView.getWindowVisibleDisplayFrame(bounds)
+            val decor = IntArray(2)
+            activity.window.decorView.getLocationOnScreen(decor)
+            bounds.offset(-decor[0], -decor[1]) // The frame is on screen; the copy is the window.
             val view = activity.terminalView()!!
             assertToolbarKeysFitWithoutScrolling(view) // Direct layout reads stay on the UI thread.
             val position = IntArray(2)
-            view.getLocationOnScreen(position)
+            view.getLocationInWindow(position)
             bounds.top = position[1] // Exclude system status and debug toolbar; retain terminal + keys.
             if (name == "composition-armed-keys") {
                 val cursor = view.grid.cursor!!
@@ -357,9 +390,8 @@ class TerminalVisualDeviceTest {
                     ((cursor.row.toInt() + 1) * view.cellHeight).toInt() - 1)
             }
         }
-        val screenshot = instrumentation.uiAutomation.takeScreenshot()
-        assertNotNull("Hardware screenshot unavailable", screenshot)
-        val cropped = Bitmap.createBitmap(screenshot!!, bounds.left, bounds.top,
+        val screenshot = windowPixels(scenario)
+        val cropped = Bitmap.createBitmap(screenshot, bounds.left, bounds.top,
             bounds.width().coerceAtMost(screenshot.width - bounds.left), bounds.height().coerceAtMost(screenshot.height - bounds.top))
         val directory = File(instrumentation.targetContext.filesDir, "terminal-review").apply { mkdirs() }
         File(directory, "$name.png").outputStream().use { assertTrue(cropped.compress(Bitmap.CompressFormat.PNG, 100, it)) }
@@ -446,7 +478,7 @@ class TerminalVisualDeviceTest {
                         view.input.compose("界😀".repeat(20)) // Must not escape past the right edge.
                     }
                     val position = IntArray(2)
-                    view.getLocationOnScreen(position)
+                    view.getLocationInWindow(position)
                     val inset = (8 * view.resources.displayMetrics.density).toInt()
                     val y = position[1] + (view.cellHeight * 1.5f).toInt()
                     outside += Point(position[0] + view.width / 2, position[1] - inset) // Compose header.
@@ -457,20 +489,19 @@ class TerminalVisualDeviceTest {
                 await(scenario) { _, view -> view.drawTimings.count > oldDraws }
                 instrumentation.waitForIdleSync()
                 SystemClock.sleep(100)
-                val screenshot = instrumentation.uiAutomation.takeScreenshot()
-                assertNotNull(screenshot)
+                val screenshot = windowPixels(scenario)
                 val directory = File(instrumentation.targetContext.filesDir, "terminal-review").apply { mkdirs() }
                 val name = if (selecting) "bounds-selection" else "bounds-composition"
                 File(directory, "$name.png").outputStream().use {
-                    assertTrue(screenshot!!.compress(Bitmap.CompressFormat.PNG, 100, it))
+                    assertTrue(screenshot.compress(Bitmap.CompressFormat.PNG, 100, it))
                 }
                 try {
                     outside.forEach { point ->
-                        assertEquals("$name painted outside terminal at $point", 0xff336699.toInt(), screenshot!!.getPixel(point.x, point.y))
+                        assertEquals("$name painted outside terminal at $point", 0xff336699.toInt(), screenshot.getPixel(point.x, point.y))
                     }
-                    assertNotEquals("Terminal itself must still be drawn", 0xff336699.toInt(), screenshot!!.getPixel(inside.x, inside.y))
+                    assertNotEquals("Terminal itself must still be drawn", 0xff336699.toInt(), screenshot.getPixel(inside.x, inside.y))
                 } finally {
-                    screenshot!!.recycle()
+                    screenshot.recycle()
                 }
             }
         }
