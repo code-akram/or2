@@ -6,6 +6,19 @@ Updated 2026-10-09.
 
 ## Where it stands
 
+### Flaky composer device test fixed (2026-10-09, after v0.1.8; test-only)
+
+- Cause, from per-frame traces of the toggle's position, the IME inset and the composer state: the keyboard asked
+  for by opening the composer arrives about 330 ms later and slides the toolbar (y 2999 to 1774 px) over some 20
+  frames. Compose's test idling does not follow that animation, so a `performClick` between two of its frames pressed
+  a key that moved before the release and the tap was lost: `open` lost, then `toggle` opened the composer.
+- Fix: `toolbarAtRest()` (the class's bounded `settledBounds` wait: no movement for 400 ms) before toolbar or composer
+  taps that follow a composer open/close, in that test and in two others with the same race
+  (`thePadAndTheComposerAreNeverOpenTogether`, `theComposerSubmitsTheTextAndTheSendButtonWaitsForText`). No app change.
+- Before: 1 failure in the v0.1.8 suite and 1 in 9 runs alone. After: **40 of 40** alone and the class (27 tests)
+  3 of 3 on the phone, on the separate device-test app (removed afterwards); daily app unchanged (0.1.8, code 15).
+  A person tapping the toolbar during that slide could lose a tap too; judged not worth pinning the toolbar.
+
 ### Release v0.1.8 (2026-10-09)
 
 - Owner approved the sprites candidate ("beautiful work") and asked for merge, push and a release:
@@ -16,8 +29,8 @@ Updated 2026-10-09.
   evidence in `/tmp/or2-release-v0.1.8/`.
 - Device suite (separate app): 182 cases, 1 failure: `TerminalChromeDeviceTest.closingTheComposerGivesTheKeysBackToTheTerminal`
   (composer still shown after toggling twice). It then failed 1 of 9 runs alone and passed its class twice; the
-  composer and its test are unchanged since v0.1.7. **Known intermittent test, worth fixing:** the second toggle
-  click probably lands while the IME animates the toolbar. Daily app stayed on the code-14 candidate during the tests.
+  composer and its test are unchanged since v0.1.7. Daily app stayed on the code-14 candidate during the tests.
+  **Since fixed (test only), below.**
 - **Published and verified:** [run 37958819166](https://github.com/code-akram/or2/actions/runs/37958819166) built and
   published; the signed APK was uploaded. All six public assets downloaded and checked (checksums, formats, APK hash
   and certificate, APK identical to the local build); public `or2-pair 0.1.8` runs, and the installer from `main`

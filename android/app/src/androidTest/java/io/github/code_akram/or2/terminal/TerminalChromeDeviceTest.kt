@@ -402,7 +402,9 @@ class TerminalChromeDeviceTest {
         compose.onNodeWithTag("composer-close").performClick()
         compose.runOnIdle { assertTrue("the terminal has the keys again", terminalView().hasFocus()) }
         // The toolbar toggle closes it the same way.
+        toolbarAtRest()
         compose.onNodeWithTag("key:Composer").performClick()
+        toolbarAtRest()
         compose.onNodeWithTag("key:Composer").performClick()
         compose.onNodeWithTag("composer-input").assertDoesNotExist()
         compose.runOnIdle { assertTrue(terminalView().hasFocus()) }
@@ -412,10 +414,12 @@ class TerminalChromeDeviceTest {
     fun thePadAndTheComposerAreNeverOpenTogether() {
         show()
         compose.onNodeWithTag("key:Composer").performClick()
+        toolbarAtRest()
         compose.onNodeWithTag("key:Arrows").performClick() // Opening the pad closes the composer ...
         compose.onNodeWithTag("arrow-pad").assertIsDisplayed()
         compose.onNodeWithTag("composer").assertDoesNotExist()
         compose.runOnIdle { assertTrue(terminalView().hasFocus()) }
+        toolbarAtRest()
         compose.onNodeWithTag("key:Composer").performClick() // ... and opening the composer closes the pad.
         compose.onNodeWithTag("composer").assertIsDisplayed()
         compose.onNodeWithTag("arrow-pad").assertDoesNotExist()
@@ -443,6 +447,7 @@ class TerminalChromeDeviceTest {
         show()
         compose.onNodeWithTag("key:Composer").performClick()
         compose.onNodeWithTag("composer-input").assertIsDisplayed()
+        toolbarAtRest()
         compose.onNodeWithTag("composer-send").assertIsNotEnabled()
         compose.onNodeWithTag("composer-input").performTextInput("yes, go ahead")
         compose.onNodeWithTag("composer-send").assertIsEnabled().performClick()
@@ -638,6 +643,16 @@ class TerminalChromeDeviceTest {
             }
         }
         return checkNotNull(last)
+    }
+
+    /**
+     * Waits until the soft keyboard has finished sliding the toolbar (and the composer above it). The keyboard asked
+     * for by opening the composer arrives about 330 ms later and moves them over some 20 frames; Compose's test
+     * idling does not follow that animation, so a click between two of its frames presses a key that has moved
+     * before the release, and the tap is lost (seen: `open` lost, then `toggle` opening the composer).
+     */
+    private fun toolbarAtRest() {
+        settledBounds("key:Composer")
     }
 
     @Test
