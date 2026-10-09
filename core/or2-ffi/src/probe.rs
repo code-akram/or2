@@ -388,6 +388,17 @@ mod scroll_tests {
         assert!(full.frame.is_full());
         assert!(full.frame.row_moves().is_empty());
     }
+
+    #[test]
+    fn a_probe_history_is_the_newest_lines_asked_for() {
+        let read = probe_history("main", 2);
+        assert_eq!(read.text, "main line 39\nmain line 40");
+        assert!(read.truncated);
+        let all = probe_history("w1:p2", 2000);
+        assert_eq!(all.text.lines().count(), 40);
+        assert!(all.text.starts_with("w1:p2 line 1\n"));
+        assert!(!all.truncated);
+    }
 }
 
 fn publish(driver: &mut SessionDriver, frame: Frame) {
@@ -420,6 +431,11 @@ fn publish(driver: &mut SessionDriver, frame: Frame) {
 /// `pane_id` the probe view does not have (`PaneNotFound`). `reply_to_pane` (API 16) is `Typed`
 /// for the blocked agent's pane `w1:p1`, `Prompted` for `w1:p2` and `w2:p1`, and `PaneNotFound`
 /// for any other pane; the validation (`InvalidName`, `TooLarge` above 4 KiB) is the real one.
+/// `read_history` (API 24) answers the newest `lines` (the handle clamps them) of
+/// [`PROBE_HISTORY_LINES`] lines `<name> line <n>`, newest last, `<name>` being the tmux session
+/// or the herdr pane read (without a `pane_id`, the focused one), and `truncated` when fewer than
+/// all were asked for; a herdr `pane_id` the probe view does not have is `PaneNotFound`, and a
+/// shell is the handle's own `CommandFailed`.
 /// `upload_image` (API 16) returns [`PROBE_IMAGE_DIR`]`/or2-19700101-000000-000000.<extension>`
 /// (after the handle's own checks), except for a `gif`, which is `SftpUnavailable`.
 /// `herdr_integrations` (API 19) starts as `pi` not installed, `claude` and `codex` current,
@@ -644,6 +660,27 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
             HostCommand::ScrollTarget { reply, .. } => {
                 let _ = reply.send(Ok(()));
             }
+            HostCommand::ReadHistory {
+                target,
+                pane_id,
+                lines,
+                reply,
+                ..
+            } => {
+                // The newest lines of a fixed history named after what was read.
+                let name = match target {
+                    core_host::TerminalTarget::Tmux { session_name } => Some(session_name),
+                    core_host::TerminalTarget::Herdr { .. } => {
+                        Some(pane_id.unwrap_or_else(|| focused.lock().unwrap().clone()))
+                            .filter(|pane| PROBE_PANES.contains(&pane.as_str()))
+                    }
+                    _ => None,
+                };
+                let _ = reply.send(match name {
+                    Some(name) => Ok(probe_history(&name, lines)),
+                    None => Err(core_host::HostError::PaneNotFound),
+                });
+            }
             HostCommand::Navigate { pane_id, reply, .. } => {
                 // Every move succeeds, except one from a herdr pane the probe does not have.
                 let _ = reply.send(match pane_id {
@@ -743,6 +780,22 @@ async fn run_herdr_watch(
         _ = stop.changed() => {}
     }
     driver.close();
+}
+
+/// How many lines a probe history has ([`probe_history`]).
+pub const PROBE_HISTORY_LINES: u32 = 40;
+
+/// The newest `lines` (at most [`PROBE_HISTORY_LINES`]) of the history `<name> line 1` to
+/// `<name> line 40`, newest last; `truncated` when older lines were left out.
+fn probe_history(name: &str, lines: u32) -> or2_core::history::HistoryText {
+    let first = PROBE_HISTORY_LINES.saturating_sub(lines) + 1;
+    or2_core::history::HistoryText {
+        text: (first..=PROBE_HISTORY_LINES)
+            .map(|n| format!("{name} line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        truncated: first > 1,
+    }
 }
 
 /// The `mosh-server` pid every probe mosh terminal reports (`Session.server_pid`).

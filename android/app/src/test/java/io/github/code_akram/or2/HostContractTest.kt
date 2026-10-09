@@ -8,6 +8,7 @@ import io.github.code_akram.or2.ffi.HerdrIntegrationState
 import io.github.code_akram.or2.ffi.HerdrListener
 import io.github.code_akram.or2.ffi.HerdrState
 import io.github.code_akram.or2.ffi.HerdrView
+import io.github.code_akram.or2.ffi.HistoryText
 import io.github.code_akram.or2.ffi.HostAddress
 import io.github.code_akram.or2.ffi.HostConnectException
 import io.github.code_akram.or2.ffi.HostConnectRequest
@@ -531,6 +532,34 @@ class HostContractTest {
         assertEquals(HostState.Connected(0u), host.state())
         listOf(terminal, other, shell).forEach { it.disconnect(); it.close() }
         host.disconnect()
+        host.close()
+    }
+
+    @Test
+    fun aHistoryReadCrossesTheFfiClampsItsLinesAndRefusesAShell() {
+        val host = connectedHost()
+        val tmux = TerminalTarget.Tmux("main")
+        runBlocking {
+            // The probe's history is 40 lines; fewer asked for are the newest, and the rest are marked left out.
+            assertEquals(HistoryText("main line 39\nmain line 40", true), host.readHistory(tmux, null, null, 2u))
+            val all = host.readHistory(tmux, null, null, 2000u)
+            assertEquals(40, all.text.lines().size)
+            assertFalse(all.truncated)
+            // Zero is clamped up to one line, not refused.
+            assertEquals(HistoryText("main line 40", true), host.readHistory(tmux, null, null, 0u))
+            // herdr: the pane asked for, else the focused one.
+            assertEquals("w1:p2 line 40", host.readHistory(TerminalTarget.Herdr(null, null), "w1:p2", null, 1u).text)
+            assertEquals("w1:p1 line 40", host.readHistory(TerminalTarget.Herdr(null, null), null, null, 1u).text)
+        }
+        assertThrows(HostException.PaneNotFound::class.java) {
+            runBlocking { host.readHistory(TerminalTarget.Herdr(null, null), "w9:p9", null, 10u) }
+        }
+        // A shell has no history the host can read; names and ids are validated like terminal targets.
+        assertThrows(HostException.CommandFailed::class.java) { runBlocking { host.readHistory(TerminalTarget.Shell, null, null, 10u) } }
+        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.readHistory(TerminalTarget.Tmux("a:b"), null, null, 10u) } }
+        assertThrows(HostException.InvalidName::class.java) { runBlocking { host.readHistory(tmux, null, "not-an-id", 10u) } }
+        host.disconnect()
+        assertThrows(HostException.Closed::class.java) { runBlocking { host.readHistory(tmux, null, null, 10u) } }
         host.close()
     }
 

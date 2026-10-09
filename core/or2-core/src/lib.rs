@@ -3,6 +3,7 @@
 pub mod directories;
 pub mod frame;
 pub mod herdr;
+pub mod history;
 pub mod host;
 pub mod input;
 pub mod keys;

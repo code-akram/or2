@@ -45,6 +45,7 @@ import io.github.code_akram.or2.ffi.HerdrSessionInfo
 import io.github.code_akram.or2.ffi.HerdrTab
 import io.github.code_akram.or2.ffi.HerdrView
 import io.github.code_akram.or2.ffi.HerdrWorkspace
+import io.github.code_akram.or2.ffi.HistoryText
 import io.github.code_akram.or2.ffi.HostCapabilities
 import io.github.code_akram.or2.ffi.HostState
 import io.github.code_akram.or2.ffi.LinkHealth
@@ -94,7 +95,9 @@ import io.github.code_akram.or2.inbox.buildInbox
 import io.github.code_akram.or2.inbox.linkStatus
 import io.github.code_akram.or2.keys.KeysScreen
 import io.github.code_akram.or2.session.CloseShellDialog
+import io.github.code_akram.or2.session.HistorySheet
 import io.github.code_akram.or2.session.HostTrustDialog
+import io.github.code_akram.or2.session.historyLoaded
 import io.github.code_akram.or2.session.TerminalCard
 import io.github.code_akram.or2.session.TerminalItem
 import io.github.code_akram.or2.session.TerminalsSheet
@@ -218,7 +221,14 @@ class UiGalleryActivity : ComponentActivity() {
                         TerminalItem(2, 1, "workstation", "shell", closed = true),
                         TerminalItem(3, 2, "build-box", "herdr personal", closed = false),
                     ),
-                    currentId = 1, select = {}, close = {}, copyScreen = {}, shortcuts = {}, dismiss = {},
+                    currentId = 1, select = {}, close = {}, copyScreen = {}, shortcuts = {}, dismiss = {}, history = {},
+                )
+            }
+            "history" -> Box(Modifier.fillMaxSize()) {
+                Terminal(target = "tmux main", transport = Transport.MOSH)
+                HistorySheet(
+                    "tmux main", historyLoaded(HistoryText((1..400).joinToString("\n") { "cargo test step $it ... ok" }, true)),
+                    copyAll = {}, retry = {}, dismiss = {},
                 )
             }
             "settings" -> SettingsScreen(agentAlerts = true, setAgentAlerts = {}, copyFromHost = true, setCopyFromHost = {}, back = {})
@@ -592,7 +602,7 @@ class UiGalleryActivity : ComponentActivity() {
             "pair-progress", "pair-install", "keepalive", "keepalive-waiting",
             "terminal", "terminal-tmux", "terminal-long", "terminal-stale", "terminal-closed",
             "terminal-arrowpad", "terminal-arrowpad-text", "terminal-herdr-wheel", "terminal-composer",
-            "terminal-attach", "terminal-uploading", "terminal-upload-failed", "share-picker", "terminals", "spaces",
+            "terminal-attach", "terminal-uploading", "terminal-upload-failed", "share-picker", "terminals", "spaces", "history",
         )
     }
 }

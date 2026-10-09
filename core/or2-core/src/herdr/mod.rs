@@ -21,6 +21,7 @@ pub mod wire;
 
 mod discovery;
 mod focus;
+mod history;
 mod integration;
 mod navigate;
 mod project;
@@ -41,6 +42,7 @@ use crate::remote::RemoteError;
 pub(crate) use discovery::parse_listing;
 pub use discovery::{Directory, DiscoveryError, SessionEntry, list_sessions};
 pub use focus::{FocusGate, focus_pane_in};
+pub use history::read_history_in;
 pub use integration::{
     INTEGRATIONS, Integration, IntegrationState, install_integration, integration_states,
     is_integration,

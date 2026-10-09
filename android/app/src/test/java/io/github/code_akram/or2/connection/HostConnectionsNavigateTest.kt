@@ -65,6 +65,35 @@ class HostConnectionsNavigateTest {
     }
 
     /**
+     * The history sheet's read (`HostConnections.readHistory`) asks for 2000 lines of the pane a scroll would move:
+     * the terminal's own tmux client, herdr's focused pane. A failure reaches the caller.
+     */
+    @Test
+    fun aHistoryReadAsksForTheTerminalsOwnPaneAndClient() = runTest {
+        val port = FakePort()
+        port.history = HistoryText("one\ntwo", true)
+        val holder = connectedHolder(port)
+        val active = holder.host(host.id)!!
+        val tmux = holder.openTerminal(active, TerminalTarget.Tmux("work"))
+        val herdr = holder.openTerminal(active, TerminalTarget.Herdr("work", "w1:p2"))
+
+        assertEquals(HistoryText("one\ntwo", true), holder.readHistory(tmux))
+        holder.readHistory(herdr)
+        assertEquals(
+            listOf(
+                HistoryRead(TerminalTarget.Tmux("work"), null, tmux.handle.value!!.clientId(), 2000u),
+                HistoryRead(TerminalTarget.Herdr("work", "w1:p2"), null, null, 2000u),
+            ),
+            port.historyReads,
+        )
+
+        port.historyFailure = HostException.PaneNotFound()
+        val failed = runCatching { holder.readHistory(herdr) }.exceptionOrNull()
+        assertTrue("$failed", failed is HostException.PaneNotFound)
+        holder.dismissHost(host.id)
+    }
+
+    /**
      * Two terminals on one tmux session: each gesture carries the client id of the terminal it was
      * made on, so Rust moves that terminal's tmux client and never the other's. herdr and shells carry
      * none.

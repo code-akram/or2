@@ -58,6 +58,11 @@ pub(super) enum Served {
         keys: Vec<String>,
         at: Instant,
     },
+    /// `pane.read` of `pane_id`, with its parameters as sent.
+    Read {
+        pane_id: String,
+        params: Value,
+    },
     Other(String),
 }
 
@@ -212,6 +217,9 @@ struct State {
     hold: Option<(String, Arc<Notify>, Arc<Notify>)>,
     streams: Vec<mpsc::UnboundedSender<Command>>,
     served: Vec<Served>,
+    /// What `pane.read` answers per pane: its text and herdr's `truncated`. A pane not here is
+    /// `pane_not_found`.
+    histories: HashMap<String, (String, bool)>,
 }
 
 /// A [`RemoteHost`] whose `exec` returns scripted output and whose sockets are served by a fake
@@ -251,6 +259,7 @@ impl FakeHost {
                 hold: None,
                 streams: Vec::new(),
                 served: Vec::new(),
+                histories: HashMap::new(),
             })),
         }
     }
@@ -379,6 +388,13 @@ impl FakeHost {
         lock(&self.state)
             .pane_offsets
             .insert(pane_id.to_owned(), offset);
+    }
+
+    /// `pane.read` of `pane_id` answers `text`, with herdr's `truncated`.
+    pub fn set_history(&self, pane_id: &str, text: &str, truncated: bool) {
+        lock(&self.state)
+            .histories
+            .insert(pane_id.to_owned(), (text.to_owned(), truncated));
     }
 
     /// `pane.current` names `pane_id`, scrolled `offset` rows above its bottom.
@@ -712,6 +728,32 @@ async fn serve(state: Arc<Mutex<State>>, stream: DuplexStream) {
                 entered.notify_one();
                 release.notified().await;
             }
+            let _ = conn.send(reply.as_bytes()).await;
+        }
+        // A `pane_read` answer shaped like the schema's `PaneReadResult`.
+        "pane.read" => {
+            let params = request["params"].clone();
+            let pane = params["pane_id"].as_str().unwrap_or("").to_owned();
+            let reply = {
+                let mut state = lock(&state);
+                state.served.push(Served::Read {
+                    pane_id: pane.clone(),
+                    params: params.clone(),
+                });
+                match state.histories.get(&pane) {
+                    Some((text, truncated)) => {
+                        serde_json::json!({"id": id, "result": {
+                        "type": "pane_read", "read": {
+                            "format": "text", "pane_id": pane, "revision": 1,
+                            "source": "recent", "tab_id": "w1:t1", "text": text,
+                            "truncated": truncated, "workspace_id": "w1",
+                        }}})
+                        .to_string()
+                            + "\n"
+                    }
+                    None => error("pane_not_found", &format!("pane {pane} not found")),
+                }
+            };
             let _ = conn.send(reply.as_bytes()).await;
         }
         other => {

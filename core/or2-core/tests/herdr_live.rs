@@ -812,6 +812,66 @@ async fn scroll_pane_moves_a_panes_history_by_lines_and_back_to_the_bottom() {
         Err(HerdrError::PaneNotFound)
     );
 }
+#[tokio::test]
+async fn read_history_reads_back_a_panes_earlier_lines_without_scrolling_it() {
+    use or2_core::herdr::read_history_in;
+    let Some(mut herdr) = Isolated::new() else {
+        return;
+    };
+    herdr.start();
+    let created = herdr
+        .call(RequestBody::WorkspaceCreate(WorkspaceCreateParams {
+            cwd: Some("/tmp".into()),
+            label: Some("or2-history".into()),
+            focus: true,
+            ..WorkspaceCreateParams::default()
+        }))
+        .await;
+    let pane = str_at(&created, "/root_pane/pane_id").to_owned();
+    herdr
+        .call(RequestBody::PaneSendText(PaneSendTextParams {
+            pane_id: pane.clone(),
+            text: "seq -f 'or2 history %g' 1 300\n".into(),
+        }))
+        .await;
+    let (host, directory) = (LocalHost::new(), Directory::new());
+    let session = Some(herdr.name.as_str());
+    let read = async |pane_id: Option<&str>, lines| {
+        read_history_in(&host, herdr.herdr(), &directory, session, pane_id, lines).await
+    };
+    // The lines written earlier, read back once the last one is there.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let history = loop {
+        let history = read(Some(&pane), 2000).await.unwrap();
+        if history.text.lines().any(|line| line == "or2 history 300") {
+            break history;
+        }
+        assert!(Instant::now() < deadline, "no history: {history:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let numbered: Vec<&str> = history
+        .text
+        .lines()
+        .filter(|line| line.starts_with("or2 history "))
+        .collect();
+    let expected: Vec<String> = (1..=300).map(|n| format!("or2 history {n}")).collect();
+    assert_eq!(numbered, expected, "every line, in order");
+    assert!(!history.text.contains('\u{1b}'), "no escape sequences");
+    // Without a pane: the focused one, this workspace's root pane.
+    let focused = read(None, 2000).await.unwrap();
+    assert!(focused.text.lines().any(|line| line == "or2 history 300"));
+    // Fewer lines: the oldest are left out.
+    let short = read(Some(&pane), 5).await.unwrap();
+    assert!(
+        !short.text.lines().any(|line| line == "or2 history 1"),
+        "{short:?}"
+    );
+    // Reading never scrolled the pane.
+    assert_eq!(offset_from_bottom(&herdr, &pane).await, 0);
+    // A pane that does not exist.
+    assert_eq!(read(Some("w9:p9"), 10).await, Err(HerdrError::PaneNotFound));
+}
+
 /// The focused workspace, its active tab and the focused pane, from a snapshot.
 async fn focus_of(herdr: &Isolated) -> (String, String, String) {
     let snapshot = herdr

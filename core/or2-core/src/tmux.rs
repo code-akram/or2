@@ -1,4 +1,5 @@
-//! tmux on a host: listing sessions, the command that attaches to one, and the navigation moves.
+//! tmux on a host: listing sessions, the command that attaches to one, the navigation moves, and
+//! reading a pane's history.
 //!
 //! Everything goes through a [`RemoteHost`] and the absolute tmux path from the capability
 //! probe. tmux uses its default socket; tests isolate it with `TMUX_TMPDIR` in the
@@ -7,6 +8,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use crate::history::{HistoryText, MAX_HISTORY_BYTES, history_lines, newest_lines};
 use crate::host::{NavDirection, TargetNav, TargetScroll, TmuxSession};
 use crate::remote::{ExecOutput, RemoteCommand, RemoteError, RemoteHost};
 
@@ -121,6 +123,54 @@ pub async fn scroll<H: RemoteHost>(
         return Ok(());
     }
     Err(failure(&output))
+}
+
+/// The command that reads the history of the active pane of session `name` as plain text:
+/// `<tmux> -u capture-pane -p -J -S -<lines> -t =<name>:` (`-J` joins wrapped lines, no `-e`
+/// so no escape sequences, `=<name>:` the exact session), run by `sh -c` so that only the newest
+/// [`MAX_HISTORY_BYTES`] of its output come back (`tail -c`): an exec fails outright past its
+/// output cap, and the oldest lines are the ones to drop. tmux's own failure (its status and
+/// stderr) is kept. The tmux path, line count and target are `sh`'s positional arguments, each
+/// quoted like any other argument, never part of the script. `name` must already be valid and
+/// `lines` clamped ([`crate::history::history_lines`]). Copy mode is never entered: the pane
+/// does not move.
+pub(crate) fn capture_command(tmux: &str, name: &str, lines: u32) -> RemoteCommand {
+    let script = format!(
+        "out=$(\"$1\" -u capture-pane -p -J -S \"$2\" -t \"$3\") || exit; \
+         printf %s \"$out\" | tail -c {MAX_HISTORY_BYTES}"
+    );
+    RemoteCommand::new("sh").args([
+        "-c".to_owned(),
+        script,
+        "sh".to_owned(),
+        tmux.to_owned(),
+        format!("-{lines}"),
+        format!("={name}:"),
+    ])
+}
+
+/// Reads up to `lines` lines of the history of the pane a terminal attached to `target` shows
+/// ([`shown_session`]: `target`, or the session a session move switched its client to; its
+/// active pane), as plain text, newest last ([`capture_command`]). Output that reached
+/// [`MAX_HISTORY_BYTES`] was cut on the host: its partial oldest line is dropped and the result
+/// is `truncated` ([`newest_lines`]).
+pub async fn read_history<H: RemoteHost>(
+    host: &H,
+    tmux: &str,
+    clients: &NavClients,
+    target: &str,
+    client: Option<&str>,
+    lines: u32,
+) -> Result<HistoryText, TmuxError> {
+    let session = shown_session(host, tmux, clients, target, client).await?;
+    let output = host
+        .exec(&capture_command(tmux, &session, history_lines(lines)))
+        .await?;
+    if !output.success() {
+        return Err(failure(&output));
+    }
+    let cut = output.stdout.len() >= MAX_HISTORY_BYTES;
+    Ok(newest_lines(&String::from_utf8_lossy(&output.stdout), cut))
 }
 
 /// Sessions, most recently active first (ties by name). No server, or a server without
@@ -1234,5 +1284,119 @@ mod tests {
         );
         assert_eq!(clients.get(a), None);
         assert_eq!(clients.get(b).as_deref(), Some("/dev/pts/2"));
+    }
+
+    /// The history read's command line for `lines` of session `name` with tmux at `/t`.
+    fn capture_line(name: &str, lines: u32) -> String {
+        format!(
+            "'sh' '-c' 'out=$(\"$1\" -u capture-pane -p -J -S \"$2\" -t \"$3\") || exit; \
+             printf %s \"$out\" | tail -c 1048576' 'sh' '/t' '-{lines}' '={name}:'"
+        )
+    }
+
+    #[test]
+    fn the_capture_command_reads_plain_text_of_the_exact_session_without_copy_mode() {
+        assert_eq!(
+            capture_command("/t", "work", 2000).render().unwrap(),
+            capture_line("work", 2000)
+        );
+        // The tmux path, the count and the name are arguments of `sh`, quoted like any other.
+        assert_eq!(
+            capture_command("/opt/my tmux", "it's $(x)", 5)
+                .argv()
+                .unwrap()[3..],
+            ["sh", "/opt/my tmux", "-5", "=it's $(x):"]
+        );
+        let line = capture_command("/t", "it's", 1).render().unwrap();
+        assert!(line.ends_with(r#"'sh' '/t' '-1' '=it'\''s:'"#), "{line}");
+        // Text only, and nothing that would move the pane.
+        assert!(!line.contains(" -e "), "{line}");
+        assert!(!line.contains("copy-mode"), "{line}");
+    }
+
+    #[tokio::test]
+    async fn a_history_read_is_one_capture_of_the_session_shown() {
+        let host = Scripted::default();
+        let clients = NavClients::new();
+
+        host.reply(0, "one\ntwo\nthree", "");
+        let read = read_history(&host, "/t", &clients, "main", Some(A), 2000).await;
+        assert_eq!(
+            read,
+            Ok(HistoryText {
+                text: "one\ntwo\nthree".into(),
+                truncated: false,
+            })
+        );
+        assert_eq!(host.take_log(), [capture_line("main", 2000)]);
+
+        // The count is clamped to 1..=5000.
+        host.reply(0, "", "");
+        read_history(&host, "/t", &clients, "main", None, 0)
+            .await
+            .unwrap();
+        host.reply(0, "", "");
+        read_history(&host, "/t", &clients, "main", None, 9000)
+            .await
+            .unwrap();
+        assert_eq!(
+            host.take_log(),
+            [capture_line("main", 1), capture_line("main", 5000)]
+        );
+
+        // After a session move it reads the session the terminal's client shows.
+        host.reply(0, "10:/dev/pts/1:main:/dev/pts/1\n", "");
+        host.reply(0, "", "");
+        navigate(
+            &host,
+            "/t",
+            &clients,
+            "main",
+            Some(A),
+            TargetNav::NextSession,
+        )
+        .await
+        .unwrap();
+        host.take_log();
+        host.reply(0, "20:/dev/pts/1:other:/dev/pts/1\n", "");
+        host.reply(0, "x", "");
+        read_history(&host, "/t", &clients, "main", Some(A), 10)
+            .await
+            .unwrap();
+        assert_eq!(host.take_log()[1], capture_line("other", 10));
+
+        // tmux's failure is reported with what it said.
+        host.reply(1, "", "can't find session: =gone\n");
+        assert_eq!(
+            read_history(&host, "/t", &clients, "gone", None, 10).await,
+            Err(TmuxError::Failed("can't find session: =gone".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn output_cut_at_the_cap_on_the_host_drops_its_partial_oldest_line() {
+        let host = Scripted::default();
+        let clients = NavClients::new();
+        // What `tail -c` leaves of a longer output: exactly the cap, starting mid-line.
+        let mut stdout = "tial line\n".to_owned();
+        while stdout.len() < MAX_HISTORY_BYTES - 6 {
+            stdout.push_str("line\n");
+        }
+        stdout.push_str(&"z".repeat(MAX_HISTORY_BYTES - stdout.len()));
+        assert_eq!(stdout.len(), MAX_HISTORY_BYTES);
+        host.reply(0, &stdout, "");
+        let read = read_history(&host, "/t", &clients, "main", None, 5000)
+            .await
+            .unwrap();
+        assert!(read.truncated);
+        assert!(read.text.starts_with("line\n"), "{:?}", &read.text[..20]);
+        assert!(read.text.ends_with('z'));
+        // Just under the cap is whole.
+        host.reply(0, &stdout[..MAX_HISTORY_BYTES - 1], "");
+        let read = read_history(&host, "/t", &clients, "main", None, 5000)
+            .await
+            .unwrap();
+        assert!(!read.truncated);
+        assert!(read.text.starts_with("tial line\n"));
     }
 }

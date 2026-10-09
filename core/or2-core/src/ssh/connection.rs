@@ -42,6 +42,7 @@ use super::runtime;
 use super::terminal_session;
 use super::upload;
 use crate::herdr::{self, HerdrState, HerdrUnavailable, HerdrWatchDriver};
+use crate::history::{HistoryText, NO_SHELL_HISTORY};
 use crate::host::{
     HostCapabilities, HostCommand, HostConnectRequest, HostDriver, HostError, HostHandle,
     HostObserver, HostState, Program, TargetNav, TargetScroll, TerminalTarget, TerminalTransport,
@@ -1101,6 +1102,15 @@ fn dispatch<D: DatagramTransport>(
         } => spawn_query(closing, tracker, reply, async move {
             scroll_target(&host, target, pane_id, client_id, scroll).await
         }),
+        HostCommand::ReadHistory {
+            target,
+            pane_id,
+            client_id,
+            lines,
+            reply,
+        } => spawn_query(closing, tracker, reply, async move {
+            read_history(&host, target, pane_id, client_id, lines).await
+        }),
         HostCommand::Navigate {
             target,
             pane_id,
@@ -1309,6 +1319,49 @@ async fn scroll_target(
                 session.as_deref(),
                 pane_id.as_deref(),
                 scroll,
+            )
+            .await?)
+        }
+    }
+}
+
+/// `HostHandle::read_history`: tmux through one `capture-pane` exec of the session the
+/// terminal's client shows (as `scroll_target` resolves it), herdr through one `pane.read`, each
+/// with the probed path. The handle never sends a shell target; one is answered like it.
+async fn read_history(
+    host: &Arc<SshHost>,
+    target: TerminalTarget,
+    pane_id: Option<String>,
+    client_id: Option<String>,
+    lines: u32,
+) -> Result<HistoryText, HostError> {
+    let capabilities = host.programs().await?;
+    match target {
+        TerminalTarget::Shell | TerminalTarget::ShellIn { .. } => Err(HostError::CommandFailed {
+            message: NO_SHELL_HISTORY.into(),
+        }),
+        TerminalTarget::Tmux { session_name } => {
+            let path = capabilities.program(Program::Tmux)?;
+            let client_id = client_id.filter(|_| capabilities.tmux_records_clients);
+            Ok(tmux::read_history(
+                &**host,
+                path,
+                &host.tmux_clients,
+                &session_name,
+                client_id.as_deref(),
+                lines,
+            )
+            .await?)
+        }
+        TerminalTarget::Herdr { session, .. } => {
+            let path = capabilities.program(Program::Herdr)?;
+            Ok(herdr::read_history_in(
+                &**host,
+                path,
+                host.sessions.directory(),
+                session.as_deref(),
+                pane_id.as_deref(),
+                lines,
             )
             .await?)
         }
