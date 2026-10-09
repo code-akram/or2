@@ -22,6 +22,10 @@ Updated 2026-10-09.
   published; the signed APK was uploaded. All six public assets downloaded and checked (checksums, formats, APK hash
   and certificate, APK identical to the local build); public `or2-pair 0.1.9` runs, and the installer from `main`
   installs it into a temporary directory with a matching checksum. Latest release is v0.1.9.
+- **Installed in place** (owner's request) at 22:10 phone-local time: 0.1.9 / code 17 from the public download; the
+  replaced code-16 candidate matched its recorded hash (kept in `/tmp/or2-release-v0.1.9/`), installed APK matches
+  the release hash, first-install time unchanged, cold launch ok, no crash in the log. At the owner's request the
+  GitHub release v0.1.8 is now marked pre-release (as v0.1.7); v0.1.9 stays the latest.
 
 ### Bundled terminal font (2026-10-09, branch `terminal-font`, unreleased)
 
