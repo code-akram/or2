@@ -19,6 +19,7 @@ pub mod generated;
 pub mod view;
 pub mod wire;
 
+mod answer;
 mod discovery;
 mod focus;
 mod integration;
@@ -38,6 +39,9 @@ use tokio::sync::mpsc;
 
 use crate::remote::RemoteError;
 
+pub use answer::{
+    Answer, PermissionAnswer, PermissionPrompt, answer_permission_in, permission_prompt_in,
+};
 pub(crate) use discovery::parse_listing;
 pub use discovery::{Directory, DiscoveryError, SessionEntry, list_sessions};
 pub use focus::{FocusGate, focus_pane_in};
@@ -120,6 +124,10 @@ pub enum HerdrError {
     /// herdr is missing, its session is not running, or it answered with an error.
     #[error("herdr failed: {0}")]
     Failed(String),
+    /// [`answer_permission_in`]: the agent no longer shows the permission prompt it was notified
+    /// of (another prompt, another state, or another option highlighted); nothing was sent.
+    #[error("the permission prompt changed")]
+    PromptChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

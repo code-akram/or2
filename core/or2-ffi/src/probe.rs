@@ -426,8 +426,12 @@ fn publish(driver: &mut SessionDriver, frame: Frame) {
 /// `opencode` outdated and `droid` not installed; `install_herdr_integration` (after the handle's
 /// allowlist) makes an integration current, except `droid`
 /// ([`PROBE_FAILING_INTEGRATION`]), which is `CommandFailed` with
-/// `error: cannot write the hook: permission denied`. Closing the host closes its terminals and
-/// watches first.
+/// `error: cannot write the hook: permission denied`. `permission_prompt` finds the blocked
+/// Claude Code of `w1:p1` at a permission prompt at its view's seq (4) and no prompt for the
+/// others' agents; `answer_permission` answers only that prompt (`w1:p1` at seq 4), else
+/// `PromptChanged`; both are `PaneNotFound` for an agent instance other than the view's
+/// `reply_identity`, and validate for real. Closing the host closes its terminals and watches
+/// first.
 #[uniffi::export]
 pub fn contract_probe_host(
     request: HostConnectRequest,
@@ -675,6 +679,37 @@ async fn run_host(trusted: &[HostKey], mut driver: HostDriver) {
                     _ => Err(core_host::HostError::PaneNotFound),
                 });
             }
+            HostCommand::PermissionPrompt {
+                pane_id,
+                agent,
+                reply,
+                ..
+            } => {
+                // As herdr would: the blocked Claude Code waits at a permission prompt, at its
+                // view's seq; the other agents at none. Another instance is not found.
+                let _ = reply.send(match probe_agent(&pane_id, &agent) {
+                    None => Err(core_host::HostError::PaneNotFound),
+                    Some(seq) => Ok((pane_id == PROBE_BLOCKED_PANE).then_some(
+                        or2_core::herdr::PermissionPrompt {
+                            state_change_seq: seq,
+                        },
+                    )),
+                });
+            }
+            HostCommand::AnswerPermission {
+                pane_id,
+                agent,
+                seq,
+                reply,
+                ..
+            } => {
+                // Only the prompt notified (the blocked agent, at its seq) is answered.
+                let _ = reply.send(match probe_agent(&pane_id, &agent) {
+                    None => Err(core_host::HostError::PaneNotFound),
+                    Some(now) if pane_id == PROBE_BLOCKED_PANE && now == seq => Ok(()),
+                    Some(_) => Err(core_host::HostError::PromptChanged),
+                });
+            }
             HostCommand::InstallHerdrIntegration { id, reply } => {
                 // As herdr would: an install makes the integration current, except the one
                 // that fails, for tests of the outcome the app shows.
@@ -755,6 +790,17 @@ pub const PROBE_IMAGE_DIR: &str = "/home/probe/.cache/or2/images";
 const PROBE_PANES: [&str; 3] = ["w1:p1", "w1:p2", "w2:p1"];
 /// The probe view's blocked agent (until its second view resolves it): a reply to it is typed.
 const PROBE_BLOCKED_PANE: &str = "w1:p1";
+
+/// The `state_change_seq` of the agent of [`probe_view`] in `pane_id` when it is the instance
+/// `agent` names (its `reply_identity`), else `None`.
+fn probe_agent(pane_id: &str, agent: &AgentIdentity) -> Option<u64> {
+    probe_view("", 1, false, PROBE_PANES[0])
+        .agents
+        .into_iter()
+        .find(|probed| probed.pane_id == pane_id)
+        .filter(|probed| AgentIdentity::of(probed).is_some_and(|probed| probed == *agent))
+        .map(|probed| probed.state_change_seq)
+}
 
 /// One blocked, one working and one idle agent; `resolved` turns the blocked one into working;
 /// `focus` is the focused pane.

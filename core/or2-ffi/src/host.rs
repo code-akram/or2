@@ -173,6 +173,11 @@ pub enum HostError {
     /// `upload_image`: more than 20 MiB); nothing was sent.
     #[error("too large to send")]
     TooLarge,
+    /// `answer_permission`: the agent no longer waits at the permission prompt it was notified
+    /// of (another `state_change_seq`, no permission prompt, or another option highlighted);
+    /// nothing was sent.
+    #[error("the permission prompt changed")]
+    PromptChanged,
 }
 
 impl From<core::HostError> for HostError {
@@ -188,6 +193,7 @@ impl From<core::HostError> for HostError {
             core::HostError::CommandFailed { message } => Self::CommandFailed { reason: message },
             core::HostError::SftpUnavailable => Self::SftpUnavailable,
             core::HostError::TooLarge => Self::TooLarge,
+            core::HostError::PromptChanged => Self::PromptChanged,
         }
     }
 }
@@ -630,6 +636,52 @@ impl HostConnection {
             .into())
     }
 
+    /// The yes/no permission prompt `agent` waits at in herdr pane `pane_id` of `session`
+    /// (`None` is the default session), or `None` when it waits at none that can be answered from
+    /// a notification (contracts.md, "Answer: approve or deny a permission prompt"): only a
+    /// blocked Claude Code (kind `claude`) whose matched herdr rule is `bash_permission_prompt`
+    /// or `generic_permission_prompt` and which herdr sees on screen (`agent.get`, then
+    /// `agent.explain`). Sends nothing to the pane. Validation is `reply_to_pane`'s
+    /// (`InvalidName`, `CommandFailed` "open the pane to reply"); `NotInstalled` without herdr,
+    /// `PaneNotFound` when the pane, or that agent instance, is gone, `NotConnected` / `Closed`
+    /// without a live connection, `CommandFailed` otherwise. Bounded by the query timeout.
+    pub async fn permission_prompt(
+        &self,
+        session: Option<String>,
+        pane_id: String,
+        agent: AgentIdentity,
+    ) -> Result<Option<crate::herdr::PermissionPrompt>, HostError> {
+        Ok(self
+            .handle
+            .permission_prompt(session, pane_id, agent.into())
+            .await?
+            .map(Into::into))
+    }
+
+    /// Approves (Enter on the highlighted first "Yes") or denies (Escape) the permission prompt
+    /// `agent` waits at in herdr pane `pane_id` of `session`, the one `permission_prompt` found
+    /// at `seq`, with no terminal open. Immediately before the one `pane.send_keys`, every check
+    /// runs again, and any that fails sends nothing: `PromptChanged` when the agent is no longer
+    /// at that prompt (another `state_change_seq`, no permission prompt, or, to approve, the
+    /// screen does not show `❯ 1. Yes` highlighted), `PaneNotFound` when the pane or that agent
+    /// instance is gone or the pane's shell has the foreground. Otherwise as
+    /// `permission_prompt`. Cancelling the coroutine (or the timeout) stops the answer before
+    /// its key is sent; the send itself is never cut short, and starts only while it can end
+    /// before the timeout.
+    pub async fn answer_permission(
+        &self,
+        session: Option<String>,
+        pane_id: String,
+        agent: AgentIdentity,
+        seq: u64,
+        answer: crate::herdr::PermissionAnswer,
+    ) -> Result<(), HostError> {
+        Ok(self
+            .handle
+            .answer_permission(session, pane_id, agent.into(), seq, answer.into())
+            .await?)
+    }
+
     /// Installs herdr's integration `id` on the host (API 19; contracts.md, "v0.1.3: zero-config
     /// Reply", Lane App), so the agent reports its session to herdr and its notifications get
     /// Reply once it restarts. Runs `<herdr> integration install <id>` as one exec on this
@@ -817,6 +869,10 @@ mod tests {
         assert_eq!(
             HostError::from(core::HostError::TooLarge),
             HostError::TooLarge
+        );
+        assert_eq!(
+            HostError::from(core::HostError::PromptChanged),
+            HostError::PromptChanged
         );
         assert_eq!(
             ReplyRoute::from(or2_core::herdr::ReplyRoute::Prompted),

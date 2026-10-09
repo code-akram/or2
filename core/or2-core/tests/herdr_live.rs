@@ -1606,3 +1606,126 @@ async fn a_reply_never_runs_in_the_shell_after_the_agent_exits() {
     }
     panic!("herdr never still reported the exited agent when the reply ran");
 }
+
+/// A permission prompt is found and answered against herdr's own detection: the fake Claude Code
+/// shows Claude Code's Bash permission dialog (printed before it starts, so its `cat` holds the
+/// foreground below it), herdr's screen rules take it for a permission prompt, and its answers
+/// arrive as keys (`cat`'s terminal echoes Escape as `^[`). An answer for another seq, or once
+/// the agent is gone, sends nothing.
+#[tokio::test]
+async fn a_permission_prompt_is_found_and_answered_with_one_key() {
+    use or2_core::herdr::generated::request::PaneSendKeysParams;
+    use or2_core::herdr::{
+        AgentIdentity, AgentSession, Answer, PermissionAnswer, answer_permission_in,
+        permission_prompt_in,
+    };
+    let Some(mut herdr) = Isolated::new() else {
+        return;
+    };
+    herdr.start();
+    let fake = FakeClaude::new();
+    let created = herdr
+        .call(RequestBody::WorkspaceCreate(WorkspaceCreateParams {
+            cwd: Some("/tmp".into()),
+            label: Some("or2-answer".into()),
+            focus: true,
+            ..WorkspaceCreateParams::default()
+        }))
+        .await;
+    let pane = str_at(&created, "/root_pane/pane_id").to_owned();
+    let terminal = str_at(&created, "/root_pane/terminal_id").to_owned();
+    let dialog = fake.dir.join("dialog.txt");
+    std::fs::write(
+        &dialog,
+        format!(
+            "{}\n Bash command\n\n   rm -rf build\n   Remove the build directory\n\n \
+             Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again for rm commands \
+             in /tmp\n   3. No, and tell Claude what to do differently (esc)\n\n Esc to cancel · \
+             Tab to add additional instructions\n",
+            "─".repeat(60)
+        ),
+    )
+    .expect("write the dialog");
+    let dialog = dialog.to_str().expect("a UTF-8 temporary directory");
+    assert!(!dialog.contains('\''));
+    herdr
+        .call(RequestBody::PaneSendText(PaneSendTextParams {
+            pane_id: pane.clone(),
+            text: format!("clear; cat '{dialog}'; {}", fake.command()),
+        }))
+        .await;
+    agent_where(&herdr, &pane, |agent| agent["agent"] == "claude").await;
+    let session = "0b1f6c1e-3333-4a8e-9a55-2a0c6a3b9d03";
+    herdr.call(report_session(&pane, 1, session)).await;
+    let agent = AgentIdentity {
+        terminal_id: terminal,
+        agent: Some("claude".into()),
+        name: None,
+        session: Some(AgentSession {
+            kind: "id".into(),
+            value: session.into(),
+        }),
+    };
+    agent_where(&herdr, &pane, |agent| {
+        agent["agent_status"] == "blocked" && agent["agent_session"]["value"] == session
+    })
+    .await;
+    let directory = Directory::new();
+    let host = LocalHost::new();
+    let name = Some(herdr.name.as_str());
+    let found = permission_prompt_in(&host, herdr.herdr(), &directory, name, &pane, &agent)
+        .await
+        .expect("herdr explains the agent")
+        .expect("a permission prompt");
+    let answer = async |seq, answer| {
+        let answer = Answer {
+            session: name,
+            pane_id: &pane,
+            agent: &agent,
+            seq,
+            answer,
+        };
+        answer_permission_in(
+            &host,
+            herdr.herdr(),
+            &directory,
+            answer,
+            tokio::time::Instant::now() + Duration::from_secs(30),
+            std::future::pending(),
+        )
+        .await
+    };
+    let seq = found.state_change_seq;
+    assert_eq!(
+        answer(seq + 1, PermissionAnswer::Deny).await,
+        Err(HerdrError::PromptChanged)
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!screen_of(&herdr, &pane).await.contains("^["));
+    // Enter: the first option is highlighted. The dialog stays (`cat` only moves its cursor).
+    assert_eq!(answer(seq, PermissionAnswer::Approve).await, Ok(()));
+    let seq = permission_prompt_in(&host, herdr.herdr(), &directory, name, &pane, &agent)
+        .await
+        .expect("herdr explains the agent")
+        .expect("still a permission prompt")
+        .state_change_seq;
+    assert_eq!(answer(seq, PermissionAnswer::Deny).await, Ok(()));
+    shows(&herdr, &pane, "^[", 1).await;
+
+    // The agent exits: nothing more is found or sent.
+    herdr
+        .call(RequestBody::PaneSendKeys(PaneSendKeysParams {
+            keys: vec!["ctrl+c".into()],
+            pane_id: pane.clone(),
+        }))
+        .await;
+    agent_where(&herdr, &pane, Value::is_null).await;
+    assert_eq!(
+        permission_prompt_in(&host, herdr.herdr(), &directory, name, &pane, &agent).await,
+        Err(HerdrError::PaneNotFound)
+    );
+    assert_eq!(
+        answer(seq, PermissionAnswer::Approve).await,
+        Err(HerdrError::PaneNotFound)
+    );
+}

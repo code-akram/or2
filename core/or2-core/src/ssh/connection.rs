@@ -1131,6 +1131,37 @@ fn dispatch<D: DatagramTransport>(
             };
             let _ = reply.send(result);
         }),
+        HostCommand::PermissionPrompt {
+            session,
+            pane_id,
+            agent,
+            reply,
+        } => spawn_query(closing, tracker, reply, async move {
+            permission_prompt(&host, session.as_deref(), &pane_id, &agent).await
+        }),
+        HostCommand::AnswerPermission {
+            session,
+            pane_id,
+            agent,
+            seq,
+            answer,
+            deadline,
+            mut reply,
+        } => spawn_until_closed(closing, tracker, async move {
+            // A caller that stopped waiting closes `reply`: the key is not sent (a request that
+            // sends is never cut short), as for a reply.
+            let result = {
+                let target = herdr::Answer {
+                    session: session.as_deref(),
+                    pane_id: &pane_id,
+                    agent: &agent,
+                    seq,
+                    answer,
+                };
+                answer_permission(&host, target, deadline, reply.closed()).await
+            };
+            let _ = reply.send(result);
+        }),
         HostCommand::UploadImage {
             bytes,
             extension,
@@ -1267,6 +1298,46 @@ async fn reply_to_pane(
         path,
         host.sessions.directory(),
         reply,
+        deadline,
+        cancelled,
+    )
+    .await?)
+}
+
+/// `HostHandle::permission_prompt`: `agent.get` and `agent.explain` through the probed herdr
+/// path. Waits for the program probe only.
+async fn permission_prompt(
+    host: &Arc<SshHost>,
+    session: Option<&str>,
+    pane_id: &str,
+    agent: &herdr::AgentIdentity,
+) -> Result<Option<herdr::PermissionPrompt>, HostError> {
+    let path = host.programs().await?.program(Program::Herdr)?;
+    Ok(herdr::permission_prompt_in(
+        &**host,
+        path,
+        host.sessions.directory(),
+        session,
+        pane_id,
+        agent,
+    )
+    .await?)
+}
+
+/// `HostHandle::answer_permission`: the checks and one `pane.send_keys` through the probed herdr
+/// path. Waits for the program probe only. `cancelled` resolves when the caller stops waiting.
+async fn answer_permission(
+    host: &Arc<SshHost>,
+    answer: herdr::Answer<'_>,
+    deadline: tokio::time::Instant,
+    cancelled: impl std::future::Future<Output = ()>,
+) -> Result<(), HostError> {
+    let path = host.programs().await?.program(Program::Herdr)?;
+    Ok(herdr::answer_permission_in(
+        &**host,
+        path,
+        host.sessions.directory(),
+        answer,
         deadline,
         cancelled,
     )
