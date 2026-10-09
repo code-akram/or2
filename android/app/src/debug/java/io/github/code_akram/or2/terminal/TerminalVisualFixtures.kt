@@ -69,7 +69,7 @@ fun terminalSpriteFrame(columns: UShort, rows: UShort): TerminalFrame {
     val plain = CellStyle(0xc0caf5u, 0x1a1b26u, null, Underline.NONE, false, false, false, false, false)
     val styles = listOf(plain, plain.copy(foreground = 0xd77757u), plain.copy(foreground = 0xe0af68u),
         plain.copy(foreground = 0x1a1b26u, background = 0x7aa2f7u), plain.copy(foreground = 0x7aa2f7u),
-        plain.copy(faint = true))
+        plain.copy(faint = true), plain.copy(bold = true), plain.copy(italic = true))
     val lines = listOf(
         listOf("Sprites (debug fixture)" to 0u),
         listOf(" ▐▛███▜▌" to 1u, "   Claude Code" to 0u),
@@ -85,6 +85,7 @@ fun terminalSpriteFrame(columns: UShort, rows: UShort): TerminalFrame {
         listOf("└─┴─┘ ┗━┻━┛ ╚═╩═╝ ┄┈╌┆┊╎ ╱╲╳" to 0u),
         listOf("⏴⏶⏷⏸⏹ ▖▗▘▙▚▛▜▝▞▟ ╓╥╖╒╤╕╞╪╡" to 0u),
         listOf(" main " to 3u, "\uE0B0" to 4u, "\uE0B1" to 4u, " ~/or2 " to 0u, "\uE0B3" to 4u, "\uE0B6" to 4u, " ok " to 3u, "\uE0B4" to 4u, "\uE0B5\uE0B7\uE0B2" to 4u),
+        listOf("✻" to 1u, " Thinking… ✢✽✳✶ ✔ ✘ ✓ ✗ ↳ ☐ ☑ ❯ ● ⚠ λ → " to 0u, "bold" to 6u, " " to 0u, "italic" to 7u),
     )
     val changed = List(rows.toInt()) { row ->
         val cells = MutableList(columns.toInt()) { TerminalCell("", CellWidth.NARROW, 0u) }

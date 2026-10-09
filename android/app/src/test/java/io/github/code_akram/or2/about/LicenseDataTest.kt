@@ -56,9 +56,22 @@ class LicenseDataTest {
     @Test
     fun theVendoredListComesFromTheNoticesTable() {
         assertEquals(
-            listOf("Gradle 8.13", "herdr 0.9.3 API schema", "Catppuccin Mocha", "Tokyo Night", "mosh-rs"),
+            listOf("Gradle 8.13", "herdr 0.9.3 API schema", "Catppuccin Mocha", "Tokyo Night", "mosh-rs", "JetBrains Mono 2.304",
+                "DejaVu Sans Mono 2.37"),
             data.vendored.map { it.name },
         )
+        // The fonts carry their own licence files, shipped beside them in the assets.
+        val jetbrains = data.vendored.single { it.name == "JetBrains Mono 2.304" }
+        assertEquals("OFL-1.1", jetbrains.license)
+        assertEquals("cd5227b", jetbrains.version)
+        assertEquals("OFL-JetBrainsMono.txt", jetbrains.texts.single().file)
+        assertTrue(jetbrains.texts.single().body.startsWith("Copyright 2020 The JetBrains Mono Project Authors"))
+        assertTrue(jetbrains.texts.single().body.contains("SIL OPEN FONT LICENSE Version 1.1"))
+        val dejavu = data.vendored.single { it.name == "DejaVu Sans Mono 2.37" }
+        assertEquals("Bitstream-Vera", dejavu.license)
+        assertEquals("LICENSE-DejaVu.txt", dejavu.texts.single().file)
+        assertTrue(dejavu.texts.single().body.contains("Copyright (c) 2003 by Bitstream, Inc."))
+        assertTrue(dejavu.texts.single().body.contains("Copyright (c) 2006 by Tavmjong Bah"))
         val mosh = data.vendored.single { it.name == "mosh-rs" }
         assertEquals("GPL-3.0-or-later", mosh.license)
         assertEquals("90b3712", mosh.version)
@@ -128,6 +141,27 @@ class LicenseDataTest {
         assertEquals("", entries[1].version)
         assertEquals("Apache text", entries[1].texts.single().body)
         assertTrue(entries[0].details!!.contains("Source: Thing 1.0 (https://example.invalid/thing) (extra words)"))
+    }
+
+    @Test
+    fun aNoticeLicencePointingIntoTheAssetsGetsThatFile() {
+        val markdown = """
+            | Source | Commit | Path | Licence | Copyright |
+            |---|---|---|---|---|
+            | A font | n/a | `f.ttf` | OFL-1.1; full text in `android/app/src/main/assets/fonts/OFL.txt` | someone |
+            | Gone | n/a | `g.ttf` | OFL-1.1; full text in `android/app/src/main/assets/fonts/missing.txt` | someone |
+            | Elsewhere | n/a | `h` | Apache-2.0; full text in `android/gradle/LICENSE` | someone |
+        """.trimIndent()
+        val read = mutableListOf<String>()
+        val entries = LicenseParser.parseNotices(markdown, mapOf("Apache-2.0" to "Apache text")) { path ->
+            read += path
+            if (path == "fonts/OFL.txt") "the OFL" else null
+        }
+        assertEquals(listOf("fonts/OFL.txt", "fonts/missing.txt"), read) // Only paths under the app's assets.
+        assertEquals(listOf(LicenseText("OFL.txt", "the OFL")), entries[0].texts)
+        assertEquals("OFL-1.1", entries[0].license)
+        assertTrue(entries[1].texts.isEmpty())
+        assertEquals(listOf("Apache text"), entries[2].texts.map { it.body })
     }
 
     @Test

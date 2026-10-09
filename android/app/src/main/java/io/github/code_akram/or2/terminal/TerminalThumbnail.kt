@@ -18,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.code_akram.or2.connection.ActiveTerminal
 import io.github.code_akram.or2.connection.HostConnections
@@ -85,16 +86,16 @@ fun TerminalThumbnail(terminal: ActiveTerminal, holder: HostConnections, modifie
  */
 @Composable
 fun TerminalGridPreview(grid: TerminalGrid, version: Int, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
     val paint = remember {
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            typeface = Typeface.MONOSPACE
+            typeface = terminalTypefaces(context)[Typeface.NORMAL]
             textSize = 24f
-            terminalTypeface(this).also { typeface = it }
         }
     }
     val cellWidth = remember { ceil(paint.measureText("M")) }
-    val cellHeight = remember { ceil(paint.fontMetrics.bottom - paint.fontMetrics.top) }
-    val baseline = remember { -paint.fontMetrics.top }
+    val cellHeight = remember { paint.cellHeight() }
+    val baseline = remember { paint.cellBaseline() }
     val spriteFont = remember { spriteFont(paint, baseline) }
     // Reused by every draw: the preview redraws several times a second per terminal.
     val fill = remember { Paint() }

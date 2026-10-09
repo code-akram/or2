@@ -8,6 +8,16 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+### Changed
+
+- The terminal uses a bundled **JetBrains Mono** (regular, bold, italic, bold italic; OFL-1.1), the font Ghostty
+  uses by default, instead of the phone's DroidSansMono: the same letterforms as a desktop terminal, a real bold
+  and italic. **DejaVu Sans Mono** (Bitstream Vera licence) covers the symbols JetBrains Mono lacks, so Claude
+  Code's `✻✢✽✳` spinner, `✔ ✘`, `↳` and `☐ ☑` fit their cells instead of coming from mismatched system fonts.
+  Rows keep their height: cells follow the font's line spacing, as Ghostty's do. Both fonts and their licences
+  are listed under About or2, Open source licenses. The APK grows by about 0.7 MB.
+- Claude Code's tool-output bracket `⎿` (and `⎾`) is drawn like the other sprites; no monospace font has it.
+
 ## [0.1.8] - 2026-10-09
 
 Terminal glyphs drawn by the terminal itself: block art, boxes, Claude Code's status arrows and Powerline

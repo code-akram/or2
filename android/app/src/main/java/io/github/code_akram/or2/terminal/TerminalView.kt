@@ -85,20 +85,17 @@ class TerminalView(context: Context) : View(context) {
         typeface = Typeface.MONOSPACE
         textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, fontSizeSp, resources.displayMetrics)
     }
-    private val baseTypeface = terminalTypeface(textPaint)
+    /** By `Typeface` style: the bundled JetBrains Mono with its symbol fallbacks ([terminalTypefaces]). */
+    private val typefaces = terminalTypefaces(context)
+    private val baseTypeface = typefaces[Typeface.NORMAL].also { textPaint.typeface = it }
     internal val fontHasMonospacedAdvances = textPaint.hasMonospacedAdvances()
-    private val typefaces = Array(4) { style ->
-        // The single file has no bold face. Request only italic from it and synthesize bold
-        // ourselves; Typeface.create(..., BOLD).isBold can describe a request, not a real face.
-        val resolvedStyle = if (baseTypeface != Typeface.MONOSPACE) style and Typeface.BOLD.inv() else style
-        if (resolvedStyle == Typeface.NORMAL) baseTypeface else Typeface.create(baseTypeface, resolvedStyle)
-    }
+    // Typeface.create(..., BOLD).isBold can describe a request, not a real face; the bundled fonts have one.
     internal val boldUsesFake = !typefaces[Typeface.BOLD].isBold
     var cellWidth = ceil(textPaint.measureText("M"))
         private set
-    var cellHeight = ceil(textPaint.fontMetrics.bottom - textPaint.fontMetrics.top)
+    var cellHeight = textPaint.cellHeight()
         private set
-    private var baseline = -textPaint.fontMetrics.top
+    private var baseline = textPaint.cellBaseline()
     private var spriteFont = spriteFont(textPaint, baseline)
     /** Box drawing, blocks and the other [isSprite] characters: drawn as shapes, not text. */
     private val spritePaint = Paint()
@@ -495,8 +492,8 @@ class TerminalView(context: Context) : View(context) {
         textPaint.isFakeBoldText = false
         textPaint.textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, clamped, resources.displayMetrics)
         cellWidth = ceil(textPaint.measureText("M"))
-        cellHeight = ceil(textPaint.fontMetrics.bottom - textPaint.fontMetrics.top)
-        baseline = -textPaint.fontMetrics.top
+        cellHeight = textPaint.cellHeight()
+        baseline = textPaint.cellBaseline()
         spriteFont = spriteFont(textPaint, baseline)
         glyphs.evictAll()
         shapes.evictAll()

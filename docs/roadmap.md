@@ -50,8 +50,8 @@ Wake-on-LAN, TCP wake probe and keep-screen-on (see design M4 backlog).
   forward to a WebView).
 - **zellij** sessions alongside tmux and herdr; **Eternal Terminal** as a transport (evaluate
   against mosh first).
-- **File browser / sharing** over SFTP; **themes and bundled fonts** (JetBrains Mono under the
-  OFL); **FIDO2/YubiKey** keys.
+- **File browser / sharing** over SFTP; **themes** (the terminal font, JetBrains Mono under the OFL with DejaVu
+  Sans Mono for symbols, is bundled since 2026-10-09); **FIDO2/YubiKey** keys.
 - **Usage view** for agents (limits and context left), from what herdr and the agents' own
   status lines expose.
 

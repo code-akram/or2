@@ -12,9 +12,10 @@ import kotlin.math.roundToInt
 
 /*
  * Characters the terminal draws itself, on the cell's pixel grid, instead of through a font: box drawing
- * (U+2500–257F), block elements (U+2580–259F), the media symbols ⏴⏵⏶⏷⏸⏹⏺ (U+23F4–23FA) and Powerline's
- * separators (U+E0B0–E0B7). The phone's fonts lack some of them (⏵, Powerline) and draw the rest with
- * glyphs that do not fill a cell, which leaves seams through block art such as Claude Code's mascot.
+ * (U+2500–257F), block elements (U+2580–259F), the media symbols ⏴⏵⏶⏷⏸⏹⏺ (U+23F4–23FA), the elbows ⎾⎿
+ * (U+23BE–23BF, Claude Code's tool-output bracket) and Powerline's separators (U+E0B0–E0B7). Neither the
+ * bundled fonts nor the phone's have ⏵, ⏺ (but as an emoji) or ⎿ in a monospace face, and font glyphs for
+ * blocks do not fill a cell, which leaves seams through block art such as Claude Code's mascot.
  * Ghostty, kitty and Alacritty draw the same ranges themselves.
  */
 
@@ -26,7 +27,7 @@ internal fun spriteOf(text: String): Int {
 }
 
 internal fun isSprite(codePoint: Int): Boolean =
-    codePoint in 0x2500..0x259F || codePoint in 0x23F4..0x23FA || codePoint in 0xE0B0..0xE0B7
+    codePoint in 0x2500..0x259F || codePoint in 0x23F4..0x23FA || codePoint in 0x23BE..0x23BF || codePoint in 0xE0B0..0xE0B7
 
 /** A filled rectangle in cell pixels; [alpha] (0–255) scales the cell's own, for the shades ░▒▓. */
 internal data class SpriteRect(val left: Int, val top: Int, val right: Int, val bottom: Int, val alpha: Int = 255)
@@ -255,6 +256,18 @@ private fun drawSpritePath(canvas: Canvas, codePoint: Int, w: Float, h: Float, f
     val t = font.line.toFloat()
     val path = Path()
     when (codePoint) {
+        0x23BE, 0x23BF -> {
+            // ⎾⎿: a light vertical from a capital's top to the baseline, centred like │ (so ⎿ sits under ⏺), and a
+            // light stroke from it to the right edge along the top (⎾) or the baseline (⎿). Whole pixels, no blur.
+            paint.isAntiAlias = false
+            paint.style = Paint.Style.FILL
+            val x = ((w.toInt() - font.line) / 2).toFloat()
+            val top = font.capTop.roundToInt().toFloat()
+            val bottom = font.capBottom.roundToInt().toFloat()
+            canvas.drawRect(x, top, x + t, bottom, paint)
+            val y = if (codePoint == 0x23BE) top else bottom - t
+            canvas.drawRect(x, y, w, y + t, paint)
+        }
         in 0x256D..0x2570 -> {
             // ╭╮╯╰: straight where they leave the cell, so they meet the lines next to them exactly.
             paint.style = Paint.Style.STROKE

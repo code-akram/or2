@@ -107,7 +107,7 @@ android {
         applicationId = "io.github.code_akram.or2"
         minSdk = 34
         targetSdk = 36
-        versionCode = 15
+        versionCode = 16
         versionName = "0.1.8"
         testInstrumentationRunner = "io.github.code_akram.or2.Or2TestRunner"
         manifestPlaceholders["appLabel"] = "or2"

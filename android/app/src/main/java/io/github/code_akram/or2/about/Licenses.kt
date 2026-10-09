@@ -59,7 +59,7 @@ data class LicenseData(
         const val NOTICES = "licenses/notices.md"
         const val COPYING = "licenses/COPYING"
 
-        /** Reads the four assets through [read] (an asset path to its text) and parses them. */
+        /** Reads the assets under `licenses/` (and the fonts' licences) through [read] (an asset path to its text) and parses them. */
         fun load(read: (String) -> String): LicenseData {
             val rust = LicenseParser.parseJson(LicenseGroup.Rust, read(RUST))
             val standard = LicenseParser.standardTexts(read(RUST))
@@ -67,7 +67,7 @@ data class LicenseData(
             return LicenseData(
                 rust = rust,
                 android = LicenseParser.parseJson(LicenseGroup.Android, read(ANDROID)),
-                vendored = LicenseParser.parseNotices(read(NOTICES), standard + ("GPL-3.0" to gpl)),
+                vendored = LicenseParser.parseNotices(read(NOTICES), standard + ("GPL-3.0" to gpl)) { runCatching { read(it) }.getOrNull() },
                 gpl = gpl,
             )
         }
@@ -110,12 +110,15 @@ object LicenseParser {
     private val leadingLicense = Regex("""^[A-Za-z0-9.+-]+(?: (?:OR|AND|WITH) [A-Za-z0-9.+-]+)*""")
     private val commit = Regex("""`([0-9a-f]{7,40})`""")
 
+    private val assetText = Regex("""`android/app/src/main/assets/([^`]+)`""")
+
     /**
      * The vendored entries: the rows of the first table of `THIRD_PARTY_NOTICES.md` (the one headed
      * `Source`). [standard] maps `Apache-2.0`, `MIT` and `GPL-3.0` to their texts, which are attached
-     * to a row whose licence names them (the MIT text takes the row's copyright line).
+     * to a row whose licence names them (the MIT text takes the row's copyright line). A licence that
+     * points at a file under the app's assets (the fonts' own licences) gets that file, read through [asset].
      */
-    fun parseNotices(markdown: String, standard: Map<String, String>): List<LicenseEntry> {
+    fun parseNotices(markdown: String, standard: Map<String, String>, asset: (String) -> String? = { null }): List<LicenseEntry> {
         val rows = markdown.lines().dropWhile { !it.startsWith("| Source |") }.drop(2).takeWhile { it.startsWith("|") }
         return rows.map { line ->
             val cells = line.trim().removePrefix("|").removeSuffix("|").split("|").map { it.trim() }
@@ -133,6 +136,10 @@ object LicenseParser {
                 append("Copyright: ${plain(copyright)}")
             }
             val texts = buildList {
+                for (file in assetText.findAll(licence)) {
+                    val path = file.groupValues[1]
+                    asset(path)?.let { add(LicenseText(path.substringAfterLast('/'), it)) }
+                }
                 if (short.contains("Apache-2.0")) standard["Apache-2.0"]?.let { add(LicenseText("Apache-2.0 (standard text)", it)) }
                 if (short.contains("MIT")) {
                     standard["MIT"]?.let {
