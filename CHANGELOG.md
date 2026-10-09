@@ -8,6 +8,11 @@ Each release's notes are in [docs/releases/](docs/releases/).
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-10-09
+
+The terminal's own font: bundled JetBrains Mono, with DejaVu Sans Mono for agent symbols (versionCode 17, FFI API
+23). See [the release notes](docs/releases/v0.1.9.md).
+
 ### Changed
 
 - The terminal uses a bundled **JetBrains Mono** (regular, bold, italic, bold italic; OFL-1.1), the font Ghostty
@@ -344,7 +349,8 @@ The first release: the Android app (a signed APK) and the `or2-pair` host CLI fo
 - Optional local release signing for the APK (`~/.config/or2/signing.properties`); without it the release
   build stays unsigned for F-Droid.
 
-[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/code-akram/or2/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/code-akram/or2/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/code-akram/or2/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/code-akram/or2/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/code-akram/or2/compare/v0.1.5...v0.1.6

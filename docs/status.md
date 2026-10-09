@@ -6,6 +6,19 @@ Updated 2026-10-09.
 
 ## Where it stands
 
+### Release v0.1.9 (2026-10-09)
+
+- Owner approved the font candidate ("polished and beautiful") and said proceed: merged, **v0.1.9 / versionCode 17 /
+  FFI API 23**, the bundled terminal font below. [Release notes](releases/v0.1.9.md).
+- Gates: **1,087 Rust**, formatting, Clippy, both generators, `demo-gif --check`; **684 JVM**, all builds incl. the
+  signed release (same certificate), both lints, 183 tasks rerun; Linux `dist --expect-version 0.1.9`. Signed APK
+  SHA-256 `8f2ee9ac438249956a9905eb2cd1ad314ded60f1d96c9177c45c2f25a1ab9eb8` (39,419,771 bytes); evidence in
+  `/tmp/or2-release-v0.1.9/`.
+- Device suite (separate app): 183 cases, 1 failure: `TerminalVisualDeviceTest.terminalCannotPaintOverComposeHeaderOrOutsideItsSideMargins`
+  saw the header pixel half as bright (`#19304D` for `#336699`: a passing dim, not a glyph). 10 of 10 alone and its
+  class twice then passed; the same check failed once in the v0.1.7 cycle. **Known intermittent test.** The suite on
+  the font change itself (before the version bump) passed all 183. Daily app stayed on the code-16 candidate.
+
 ### Bundled terminal font (2026-10-09, branch `terminal-font`, unreleased)
 
 - Owner asked for the deferred font step. Coverage was checked first: JetBrains Mono 2.304 alone lacks `⎿`, Claude
