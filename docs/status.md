@@ -22,6 +22,10 @@ Updated 2026-10-09.
   published; the signed APK was uploaded. All six public assets downloaded and checked (checksums, formats, APK hash
   and certificate, APK identical to the local build); public `or2-pair 0.1.8` runs, and the installer from `main`
   installs it into a temporary directory with a matching checksum. Latest release is v0.1.8.
+- **Installed in place** (owner's request) at 20:30 phone-local time: 0.1.8 / code 15 from the public download; the
+  replaced code-14 candidate matched its recorded hash (kept in `/tmp/or2-release-v0.1.8/`), installed APK matches
+  the release hash, first-install time unchanged, cold launch clean. At the owner's request the GitHub release
+  v0.1.7 is now marked pre-release; v0.1.8 stays the latest.
 
 ### Terminal sprites: candidate for owner QA (2026-10-09, merged for v0.1.8)
 
