@@ -6,6 +6,26 @@ Updated 2026-10-09.
 
 ## Where it stands
 
+### M4: history, wake and permission answers (2026-10-09, branch `m4`, unreleased)
+
+- Owner asked for M4 items 1 to 3 and deferred dictation, Chat View and the diff viewer; push through a self-hosted
+  ntfy (UnifiedPush) was designed with the owner (own server, UnifiedPush into or2, metadata plus the last lines,
+  `or2-pair` installing hooks for Claude Code, Codex, pi, opencode v2 and amp) and then **deferred** until the
+  mobile-data and Wi-Fi handover tests: while or2 stays connected, its in-app notifications cover the need. A trial
+  ntfy user service on this box was removed again; nothing of it remains.
+- Built as three lanes in worktrees (contracts, "M4"), merged on `m4` with FFI **API 24**: the history sheet (tmux
+  `capture-pane` / herdr `pane.read`, from the Terminals sheet and a mosh chip); Wake-on-LAN, the TCP wake probe on
+  every connect, Room v5 (MAC address, wake probe), Keep screen on and Reopen the last terminal; Approve/Deny of
+  Claude Code permission prompts from the notification (herdr's detection rule, the seq, "❯ 1. Yes", the foreground
+  agent; phone unlock required) and the agent summary in the connection notification, a Live Update while an agent
+  needs input. One merge conflict (the fake herdr host's two `pane.read` handlers) resolved with both lanes' tests.
+- Checks: **1,131 Rust** (sshd/tmux/mosh/herdr required), formatting, Clippy, both generators, `demo-gif --check`;
+  **736 JVM**, debug/device-test builds, both lints; **full device suite `OK (192 tests)`** on the separate app.
+  Gallery screens reviewed on the phone (History sheet, Terminals sheet, Settings, host form). Not yet tried for
+  real: Wake against the sleeping Mac, a real Claude Code permission prompt answered from the notification (the
+  device test app has no notification permission, so the notification tests skip), and the Live Update on
+  OxygenOS 16. Daily app unchanged (0.1.9, code 17); test apps removed.
+
 ### Flaky header pixel device test fixed (2026-10-09, after v0.1.9; test-only)
 
 - `TerminalVisualDeviceTest.terminalCannotPaintOverComposeHeaderOrOutsideItsSideMargins` failed once in the v0.1.9 and
@@ -389,8 +409,9 @@ until the caller acknowledges, as a real host does.
 2. **The rest of the roadmap.**
    - Scanning for SSH servers and the app lock are **deferred by the owner (2026-10-09)**; gestures, hardware
      shortcuts, the OSC 52 clipboard (v0.1.1) and recent directories (v0.1.5) have shipped (roadmap.md).
-   - M4: history sheet, ntfy, dictation, Wake-on-LAN.
-   - M5: Chat View, diff viewer, web preview.
+   - M4 built on `m4` (history sheet, Wake-on-LAN and wake probe, device settings, Approve/Deny, Live Update
+     summary); deferred by the owner: dictation, push (ntfy) until the connectivity tests.
+   - M5: web preview; Chat View and the diff viewer are deferred by the owner (2026-10-09).
 
 ## Known limits (documented, not bugs)
 
